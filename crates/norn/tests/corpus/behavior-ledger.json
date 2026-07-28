@@ -1,5 +1,5 @@
 {
-  "note": "Behavior rulings recorded from the source file at the pin, their own wording included. Evidence with zero authority: a ruling becomes contract only when the command it attaches to is activated and the ruling is re-judged affirmatively against the re-derived surface. A command the verb charter deletes takes its rulings with it.",
+  "note": "Behavior rulings recorded from the source file at the pin, their own wording included. Evidence with zero authority: a ruling becomes contract only when the command it attaches to is activated and the ruling is re-judged affirmatively against the re-derived surface. A command the verb charter deletes takes its rulings with it. Transcription is deliberately lossy: `source_file` and `source_decision` are paths inside the recording checkout, not this repository, and the source entries' divergence-extent counts and pinned comparison-binary version are dropped — both describe a comparison this line does not make.",
   "ruling_count": 56,
   "rulings": [
     {
