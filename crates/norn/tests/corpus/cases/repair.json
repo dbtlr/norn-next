@@ -1,0 +1,152 @@
+{
+  "case_count": 5,
+  "cases": [
+    {
+      "argv": [
+        "repair",
+        "--plan",
+        "--format",
+        "paths"
+      ],
+      "command": "repair",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "repair-plan-paths-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "notes/gamma.md\nnotes/has-legacy.md\nnotes/missing-kind.md\nstray-task.md\ntasks/stray-task.md\ntasks/task-bad-status.md\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "repair",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "repair",
+        "--plan",
+        "--format",
+        "report"
+      ],
+      "command": "repair",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "repair-plan-report-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Repair plan against <VAULT>…\n\n  5 operations proposed across 6 files\n  Operations by kind\n    add_frontmatter     ·····················································  1\n    move_document       ·····················································  1\n    remove_frontmatter  ·····················································  1\n    rewrite_link        ·····················································  1\n    set_frontmatter     ·····················································  1\n\nFootnotes (1)…\n  alias rewrite (deterministic): \"bee\" → \"beta\" (unique alias of notes/beta.md)\n\n  Skipped (14)\n    ambiguous-target  ambiguous link target                                    ···  1\n    graph-diagnostic  graph diagnostic cannot be repaired deterministically    ···  1\n    link-decision-needed  link repair requires an explicit path/link decision  ···  4\n    missing-default  missing field has no configured deterministic default     ···  3\n    no-rule-matched  no configured deterministic repair rule matched           ···  5\n\n  Top affected files\n    notes/gamma.md         ··················································  1\n    notes/has-legacy.md    ··················································  1\n    notes/missing-kind.md  ··················································  1\n    stray-task.md          ··················································  1\n    tasks/stray-task.md    ··················································  1\n\n  To inspect proposed changes\n    norn repair --plan --confidence high --format json\n    norn repair --plan --format json\n\n  To apply\n    norn repair --plan --confidence high --format json | norn apply -\n\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "repair",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "repair"
+      ],
+      "command": "repair",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "repair-summary-clean",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "0 findings across 82 documents\n\n0 repairable as operations, 0 skipped\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "repair",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "repair",
+        "--format",
+        "json"
+      ],
+      "command": "repair",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "repair-summary-json-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings_by_code\": [\n    [\n      \"document-misrouted\",\n      1\n    ],\n    [\n      \"field-type-invalid\",\n      3\n    ],\n    [\n      \"frontmatter-exceeds-max-length\",\n      1\n    ],\n    [\n      \"frontmatter-forbidden-field\",\n      1\n    ],\n    [\n      \"frontmatter-parse-failed\",\n      1\n    ],\n    [\n      \"frontmatter-reference-type\",\n      1\n    ],\n    [\n      \"frontmatter-required-field-missing\",\n      4\n    ],\n    [\n      \"link-ambiguous\",\n      1\n    ],\n    [\n      \"link-target-missing\",\n      5\n    ],\n    [\n      \"value-not-allowed\",\n      1\n    ]\n  ],\n  \"findings_total\": 19,\n  \"operations\": 5,\n  \"skipped\": 14,\n  \"total_docs\": 35\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "repair",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "repair"
+      ],
+      "command": "repair",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "repair-summary-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "19 findings across 35 documents\n  1  document-misrouted\n  3  field-type-invalid\n  1  frontmatter-exceeds-max-length\n  1  frontmatter-forbidden-field\n  1  frontmatter-parse-failed\n  1  frontmatter-reference-type\n  4  frontmatter-required-field-missing\n  1  link-ambiguous\n  5  link-target-missing\n  1  value-not-allowed\n\n5 repairable as operations, 14 skipped\n\nRun `norn repair --plan` to generate a MigrationPlan.\nPipe it into `norn apply -` to apply.\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "repair",
+      "volatile_masks": []
+    }
+  ],
+  "command": "repair",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

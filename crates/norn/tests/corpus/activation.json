@@ -1,0 +1,44 @@
+{
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  },
+  "note": "The gate. A command's recorded cases run when its name appears in `activated`, and not otherwise; adding a name is an approval act that judges whether the recorded output is good. Every command the binary had at the pin sits in exactly ONE of three disjoint categories: `activatable` has cases and can be approved; `unseeded` carries no behavior at the pin, so there is nothing to approve and no activation path exists; `unrecorded` has behavior but no case exercises it. `activated` is not a fourth category \u2014 it is the subset of `activatable` whose cases run, and it is empty. See docs/decisions/0001-corpus-activation-gate.md.",
+  "activated": [],
+  "activatable": [
+    "apply",
+    "count",
+    "delete",
+    "describe",
+    "edit",
+    "find",
+    "get",
+    "mcp",
+    "move",
+    "new",
+    "repair",
+    "rewrite-wikilink",
+    "set",
+    "top-level",
+    "validate"
+  ],
+  "unseeded": [
+    "audit",
+    "cache",
+    "completions",
+    "config",
+    "init",
+    "manpage",
+    "self-update",
+    "serve",
+    "service"
+  ],
+  "unrecorded": [
+    {
+      "command": "vault",
+      "reason": "the registry namespace is a late addition at the pin; the case catalog covers it only indirectly, through the top-level help page and one behavior ruling, so no invocation of it was recorded"
+    }
+  ],
+  "case_total": 158
+}

@@ -1,0 +1,53 @@
+{
+  "clear_environment": true,
+  "cwd": "the materialized fixture vault (no path flag in argv)",
+  "description": "The environment every recorded case ran under. The caller's environment is cleared and rebuilt from this allowlist so nothing the host carries can reach a case.",
+  "notes": [
+    "`{{VAULT_ROOT}}` in a case's `plan_template` is a third thing, and deliberately spelled unlike the others: it is an INPUT token the recording substituted for the vault path before invoking, where the placeholders above are OUTPUT substitutions applied after.",
+    "The locale is pinned rather than forwarded: glyph selection reads LC_ALL -> LC_CTYPE -> LANG, so a forwarded host locale makes the recorded glyph set a property of the recording machine.",
+    "HOME and the XDG bases point into a scratch tree owned by the run, so any registry, cache, config, socket or log a binary creates for itself is created fresh and discarded with the run.",
+    "XDG_RUNTIME_DIR is a short temp dir: it holds an AF_UNIX socket path, and a long base overruns sun_path.",
+    "A read case shares one materialized vault per fixture; a mutating case gets a fresh vault of its own so its writes reach no other case."
+  ],
+  "passthrough": [
+    "PATH",
+    "TMPDIR"
+  ],
+  "placeholders": {
+    "extraction_masks": {
+      "note": "Applied by the extraction itself, proven necessary by re-running the whole catalog twice and requiring byte equality between the runs. A case declares the ones that fired on it in its `volatile_masks` field. A mask fires only on a NONEMPTY value: an empty field is a fact about the invocation — a write-free path mints no telemetry id and computes no plan hash — so an empty value is recorded verbatim and the case declares no mask.",
+      "values": {
+        "<PLAN_HASH>": "a plan hash computed over the absolute vault root, so it tracks the temporary directory",
+        "<TIMESTAMP>": "a wall-clock stamp",
+        "<TRACE_ID>": "a telemetry id minted per invocation"
+      }
+    },
+    "inherited_normalizations": {
+      "dropped": "Every other harness substitution is a COMPARISON device: it existed to make two binaries' outputs comparable by erasing a value or deleting a line that one side emitted and the other did not. Each destroys information a recording is supposed to carry, so none is applied. Three were dropped: the two that erased a telemetry id and a plan hash (which made a minted-but-volatile value indistinguishable from one that was never minted — the extraction masks above replace them and keep the two apart), and one that deleted the `self-update` row from the top-level command list, a row the binary really emits.",
+      "note": "The recording harness's substitutions. Exactly one is kept, and it is applied to EVERY invocation but declared only on the cases whose bytes it changed — a declaration naming a substitution the reader cannot find in the recording teaches nothing. A case declares it in its `normalizations` field, never in `volatile_masks`.",
+      "values": {
+        "<VAULT>": "written by the `vault-root` normalization: the absolute path of the materialized fixture vault, in every spelling the platform reports. Kept because the path is a property of the temporary directory the run created, so recording it would pin a value that cannot reproduce."
+      }
+    },
+    "note": "Recorded output is verbatim apart from the four placeholders below, and there are no others. They come from two mechanisms, and a case declares each in its own field: never read one as the other."
+  },
+  "removed": [
+    "LANG",
+    "LC_CTYPE",
+    "NORN_ROOT",
+    "NORN_CONFIG_DIR"
+  ],
+  "set": {
+    "HOME": "<scratch>/scratch-home",
+    "LC_ALL": "C.UTF-8",
+    "NORN_EPHEMERAL_TTL_SECS": "5",
+    "XDG_CACHE_HOME": "<scratch>/scratch-cache",
+    "XDG_CONFIG_HOME": "<scratch>/scratch-config",
+    "XDG_RUNTIME_DIR": "<short-temp-dir>"
+  },
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

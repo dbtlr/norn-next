@@ -1,0 +1,175 @@
+{
+  "case_count": 6,
+  "cases": [
+    {
+      "argv": [
+        "describe",
+        "--by",
+        "type,status"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "describe-by-clean",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "folders    23\npath rules 5\ncreatable  0\ninbox      (none)\n\n82 documents\ntype:   (missing) 29 · note 21 · task 18 · phase 14\nstatus: (missing) 50 · active 12 · backlog 11 · done 9\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "describe",
+        "--data"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "describe-data-clean",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "folders    23\npath rules 5\ncreatable  0\ninbox      (none)\n\n82 documents · created 2024-01-01T09:00:00Z → 2025-08-18T18:58:00Z · due 2024-03-01 → 2024-03-01 · modified 2024-02-01 10:30:00 → 2025-08-18 23:34:00 · when 2025-01-15 → 2025-01-15\nkind:   (missing) 61 · note 21\nparent: (missing) 64 · [[phase-one]] 18\nstatus: (missing) 50 · active 12 · backlog 11 · done 9\ntype:   (missing) 29 · note 21 · task 18 · phase 14\n(skipped: internal 1/1, legacy 1/1, project 1/1, related 2/2, summary 1/1, tags 2/2, title 81/81, zip 1/1)\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "describe",
+        "--data"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "describe-data-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "folders    12\npath rules 5\ncreatable  0\ninbox      (none)\n\n35 documents · created 2024-01-01T09:00:00Z → 2024-01-01T09:00:00Z · due 2024-03-01 → 2024-03-01 · modified 2024-02-01 10:30:00 → 2024-02-01 10:30:00 · when 2025-01-15 → 2025-01-15\nkind:   (missing) 25 · note 10\nparent: (missing) 31 · [[phase-one]] 2 · [[alpha]] 1 · [[missing-phase]] 1\nstatus: (missing) 30 · backlog 2 · active 1 · done 1 · legacy 1\ntype:   (missing) 19 · note 11 · task 4 · phase 1\n(skipped: aliases 1/1, internal 1/1, legacy 2/2, project 2/2, related 2/2, summary 1/1, tags 4/4, title 31/31, zip 1/1)\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "describe",
+        "--format",
+        "json"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "describe-json-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"folders\":12,\"path_rules\":5,\"creatable_rules\":0,\"inbox\":null}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "describe",
+        "--stats"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "describe-stats-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "folders    12\npath rules 5\ncreatable  0\ninbox      (none)\n\n35 documents · created 2024-01-01T09:00:00Z → 2024-01-01T09:00:00Z · due 2024-03-01 → 2024-03-01 · modified 2024-02-01 10:30:00 → 2024-02-01 10:30:00 · when 2025-01-15 → 2025-01-15\nkind:   (missing) 25 · note 10\nparent: (missing) 31 · [[phase-one]] 2 · [[alpha]] 1 · [[missing-phase]] 1\nstatus: (missing) 30 · backlog 2 · active 1 · done 1 · legacy 1\ntype:   (missing) 19 · note 11 · task 4 · phase 1\n(skipped: aliases 1/1, internal 1/1, legacy 2/2, project 2/2, related 2/2, summary 1/1, tags 4/4, title 31/31, zip 1/1)\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "describe"
+      ],
+      "command": "describe",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "describe-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "folders    12\npath rules 5\ncreatable  0\ninbox      (none)\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "describe",
+      "volatile_masks": []
+    }
+  ],
+  "command": "describe",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

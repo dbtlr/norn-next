@@ -1,0 +1,219 @@
+{
+  "case_count": 5,
+  "cases": [
+    {
+      "argv": [
+        "rewrite-wikilink",
+        "cycle-b",
+        "cycle-c",
+        "--yes"
+      ],
+      "command": "rewrite-wikilink",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-rewrite-wikilink-apply-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "rewrote [[cycle-b]] → [[cycle-c]] in 1 ops (1 body + 0 frontmatter)\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-c]].\n",
+            "kind": "file",
+            "path": "notes/cycle-a.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "rewrite-wikilink",
+        "a^b",
+        "caret-renamed",
+        "--yes"
+      ],
+      "command": "rewrite-wikilink",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-rewrite-wikilink-caret-stem-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "rewrote [[a^b]] → [[caret-renamed]] in 1 ops (1 body + 0 frontmatter)\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Caret Src\n---\n\nSee [[caret-renamed]] here.\n",
+            "kind": "file",
+            "path": "wl/caret-src.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "wl/caret-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "rewrite-wikilink",
+        "fence-target",
+        "fence-renamed",
+        "--yes"
+      ],
+      "command": "rewrite-wikilink",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-rewrite-wikilink-code-fence-shadow-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "rewrote [[fence-target]] → [[fence-renamed]] in 1 ops (1 body + 0 frontmatter)\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Fence Src\n---\n\n```\n[[fence-target]]\n```\n\nReal prose [[fence-renamed]] link.\n",
+            "kind": "file",
+            "path": "wl/fence-src.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "wl/fence-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "rewrite-wikilink",
+        "padded-target",
+        "padded-renamed",
+        "--yes"
+      ],
+      "command": "rewrite-wikilink",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-rewrite-wikilink-padded-target-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "rewrote [[padded-target]] → [[padded-renamed]] in 1 ops (1 body + 0 frontmatter)\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Padded Src\n---\n\nSee [[padded-renamed]] here.\n",
+            "kind": "file",
+            "path": "wl/padded-src.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "wl/padded-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "rewrite-wikilink",
+        "unrepr-target",
+        "a|b",
+        "--yes"
+      ],
+      "command": "rewrite-wikilink",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-rewrite-wikilink-unrepresentable-refusal",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: cannot rewrite links in wl/unrepr-src.md: target `a|b` is not a valid wikilink target (contains one of `|` `#` `[` `]`)\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "wl/unrepr-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    }
+  ],
+  "command": "rewrite-wikilink",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "case_count": 1,
+  "cases": [
+    {
+      "argv": [
+        "--help"
+      ],
+      "command": "top-level",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 2
+      },
+      "id": "help-bare",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Deterministic Markdown vault graph tools\n\nUSAGE\n    norn [OPTIONS] <COMMAND>\n\nCOMMANDS\n    find              Find documents in the vault — full-text + metadata filters with sort/limit/paging\n    count             Count documents in the vault — grouped or total — with the find filter surface\n    describe          Describe the vault: structure counts, the declared config with --schema, a contents-summary with --data\n    get               Get one or more documents — frontmatter, headings, outgoing/incoming/unresolved links\n    set               Update one document — schema-aware frontmatter mutation + wholesale body replacement\n    edit              Edit one document's body — atomic content-anchored partial edits\n    new               Create a new document — schema-aware frontmatter pre-fill from path rules\n    init              Scaffold .norn/config.yaml\n    move              Move/rename a document with cascading backlink rewrites\n    delete            Delete a document, optionally redirecting incoming links to an alternate target\n    apply             Apply a MigrationPlan — execute move, delete, rewrite, and frontmatter ops from a plan file\n    repair            Surface deterministic-repair findings; --plan emits a MigrationPlan\n    rewrite-wikilink  Rewrite all occurrences of a wikilink target across the vault (body + frontmatter)\n    validate          Validate vault graph facts and configured frontmatter rules\n    completions       Shell completion installation and script emission\n    cache             Manage the SQLite-backed vault graph cache\n    config            Manage the per-vault `.norn/config.yaml`\n    self-update       Update norn to the latest GitHub release\n    mcp               Run norn as a Model Context Protocol (MCP) stdio server over the vault at --cwd\n    serve             Run the warm host daemon: serves MCP for any vault on this host over a Unix socket\n    service           Supervise the warm `norn serve` daemon under launchd (macOS): install/uninstall/start/stop/restart/status\n    audit             Read the vault mutation audit trail (the append-only event stream): recent mutations with status / target / trace, filterable\n    vault             Manage the vault registry — register a vault to unlock durable artifacts (cache, event stream, logs)\n\nEXAMPLES\n    norn find --eq type:note --limit 5\n        # 5 notes by default sort\n\n    norn validate --format json\n        # machine-readable validation findings\n\n    norn repair --plan --out plan.json\n        # generate a MigrationPlan\n\nGLOBAL OPTIONS\n    -C, --cwd <CWD>         Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)\n        --verbose           Include full diagnostic detail in output\n        --no-cache-refresh  Skip the implicit cache refresh before reading the graph\n        --color <COLOR>     Color output. Honors NO_COLOR / CLICOLOR_FORCE.\n        --vault <NAME>      Target the registered vault with this name (see `norn vault register`)\n\nDocumentation: https://github.com/dbtlr/norn\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "help",
+      "volatile_masks": []
+    }
+  ],
+  "command": "top-level",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

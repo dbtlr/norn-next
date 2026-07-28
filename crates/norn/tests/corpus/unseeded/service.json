@@ -1,0 +1,70 @@
+{
+  "case_count": 2,
+  "cases": [
+    {
+      "argv": [
+        "service",
+        "status",
+        "--vault",
+        "no-such-path-nrn417"
+      ],
+      "command": "service",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-service-status-local-vault-flag-deleted-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: `service` is not yet ported in this build (rewrite in progress; see ADR 0018)\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "--vault",
+        "no-such-path-nrn417",
+        "service",
+        "status"
+      ],
+      "command": "service",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-service-vault-global-flag-before-subcommand-zoo",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: `service` is not yet ported in this build (rewrite in progress; see ADR 0018)\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    }
+  ],
+  "command": "service",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

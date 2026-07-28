@@ -1,0 +1,526 @@
+{
+  "case_count": 13,
+  "cases": [
+    {
+      "argv": [
+        "edit",
+        "alpha",
+        "--edits-json",
+        "[{\"op\":\"str_replace\",\"old\":\"An introductory paragraph for the alpha fixture document.\",\"new\":\"Rewritten intro.\"},{\"op\":\"append_to_section\",\"heading\":\"Section One\",\"content\":\"- appended line\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-apply-str-replace-section-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit notes/alpha.md\n  str_replace (old=\"An introductory paragraph for the alpha …\", 1×)\n  append_to_section (heading=\"Section One\")\n  body: 225 → 200 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nRewritten intro.\n\n## Section One\n\nContent belonging to section one.\n- appended line\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+            "kind": "file",
+            "path": "notes/alpha.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "alpha",
+        "--edits-json",
+        "[{\"op\":\"replace_section\",\"heading\":\"## Section One\",\"content\":\"Forgiving anchor landed.\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-atx-prefixed-heading-anchor-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit notes/alpha.md\n  replace_section (heading=\"## Section One\")\n  body: 225 → 214 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\nForgiving anchor landed.\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+            "kind": "file",
+            "path": "notes/alpha.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "alpha",
+        "--edits-json",
+        "[{\"op\":\"str_replace\",\"old\":\"Content belonging to section two.\",\"new\":\"Replaced section two.\"}]",
+        "--dry-run"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-dry-run-forecast-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "dry-run: edit notes/alpha.md\n  str_replace (old=\"Content belonging to section two.\", 1×)\n  body: 225 → 213 bytes\n\nApply with --yes\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "edit",
+        "eof-heading",
+        "--edits-json",
+        "[{\"op\":\"append_to_section\",\"heading\":\"Tail\",\"content\":\"- item\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "section-edge",
+        "seed": 1
+      },
+      "id": "edit-eof-heading-append-to-section-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit shapes/eof-heading.md\n  append_to_section (heading=\"Tail\")\n  body: 8 → 16 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: EOF Heading Doc\n---\n\n## Tail\n- item\n",
+            "kind": "file",
+            "path": "shapes/eof-heading.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/eof-heading.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "eof-heading",
+        "--edits-json",
+        "[{\"op\":\"insert_after_heading\",\"heading\":\"Tail\",\"content\":\"LEAD.\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "section-edge",
+        "seed": 1
+      },
+      "id": "edit-eof-heading-insert-after-heading-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit shapes/eof-heading.md\n  insert_after_heading (heading=\"Tail\")\n  body: 8 → 15 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: EOF Heading Doc\n---\n\n## Tail\nLEAD.\n",
+            "kind": "file",
+            "path": "shapes/eof-heading.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/eof-heading.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "eof-heading",
+        "--edits-json",
+        "[{\"op\":\"replace_section\",\"heading\":\"Tail\",\"content\":\"NEW.\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "section-edge",
+        "seed": 1
+      },
+      "id": "edit-eof-heading-replace-section-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit shapes/eof-heading.md\n  replace_section (heading=\"Tail\")\n  body: 8 → 14 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: EOF Heading Doc\n---\n\n## Tail\nNEW.\n",
+            "kind": "file",
+            "path": "shapes/eof-heading.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/eof-heading.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "alpha",
+        "--edits-json",
+        "[{\"op\":\"delete_section\",\"heading\":\"Section Two\"}]",
+        "--dry-run",
+        "--format",
+        "json"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-json-ops-forecast-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"\",\n  \"operation\": \"edit\",\n  \"target\": \"notes/alpha.md\",\n  \"edits\": [\n    {\n      \"op\": \"delete_section\",\n      \"anchor\": \"heading=\\\"Section Two\\\"\",\n      \"matched\": true,\n      \"applied\": false\n    }\n  ],\n  \"body_changed\": true,\n  \"body_bytes_old\": 225,\n  \"body_bytes_new\": 174,\n  \"applied\": false,\n  \"outcome\": \"forecast\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "edit",
+        "alpha",
+        "--edits-json",
+        "[{\"op\":\"nope\"}]"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-malformed-op-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: invalid edits JSON: unknown variant `nope`, expected one of `str_replace`, `replace_section`, `append_to_section`, `delete_section`, `insert_before_heading`, `insert_after_heading` at line 1 column 13\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "edit",
+        "no-such-doc-xyzzy",
+        "--edits-json",
+        "[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-missing-target-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: no document matched path or stem: no-such-doc-xyzzy\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "edit",
+        "no-such-doc-xyzzy",
+        "--edits-json",
+        "[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]",
+        "--format",
+        "json"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "edit-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"\",\n  \"operation\": \"edit\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"edits\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "edit",
+        "setext",
+        "--edits-json",
+        "[{\"op\":\"insert_after_heading\",\"heading\":\"Alpha\",\"content\":\"LEAD.\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "section-edge",
+        "seed": 1
+      },
+      "id": "edit-setext-insert-after-heading-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit shapes/setext.md\n  insert_after_heading (heading=\"Alpha\")\n  body: 59 → 65 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Setext Doc\n---\n\nAlpha\n-----\nLEAD.\n\nBody under alpha.\n\n## Beta\n\nBody under beta.\n",
+            "kind": "file",
+            "path": "shapes/setext.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/setext.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "setext",
+        "--edits-json",
+        "[{\"op\":\"replace_section\",\"heading\":\"Alpha\",\"content\":\"REPLACED.\"}]",
+        "--yes"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "section-edge",
+        "seed": 1
+      },
+      "id": "edit-setext-replace-section-diverge",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "edit shapes/setext.md\n  replace_section (heading=\"Alpha\")\n  body: 59 → 49 bytes\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Setext Doc\n---\n\nAlpha\n-----\nREPLACED.\n## Beta\n\nBody under beta.\n",
+            "kind": "file",
+            "path": "shapes/setext.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/setext.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "edit",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "edit",
+        "--help"
+      ],
+      "command": "edit",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 2
+      },
+      "id": "help-edit",
+      "mutating": false,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Edit one document's body — atomic content-anchored partial edits\n\nEdit one document's body with atomic, content-anchored partial edits.\n\nThe ops are an ordered array applied all-or-nothing, each against the result of the prior. Any anchor that fails to match refuses the whole batch (exit 2) and writes nothing — a `str_replace` whose `old` is missing, or matches more than once without `--replace-all`; a heading that names two sections, which refuses as ambiguous rather than guessing. Replace a whole body, or change frontmatter, with `norn set` instead.\n\nUSAGE\n    norn edit [OPTIONS]\n\nARGUMENTS\n    <DOC>\n        The doc to edit. Path, stem, or wikilink-shaped (with or without [[]])\n\nOPTIONS\n        --edits-json <JSON>\n        The edits as a JSON array of ops (e.g. `[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]`). Mutually exclusive with stdin; if omitted, the array is read from stdin\n\n        --str-replace <OLD>\n        Sugar: `str_replace` — the OLD anchor. Payload: `--new` (alias `--content`)\n\n        --replace-section <HEADING>\n        Sugar: `replace_section` — the HEADING anchor. Payload: `--content`\n\n        --append-to-section <HEADING>\n        Sugar: `append_to_section` — the HEADING anchor. Payload: `--content`\n\n        --delete-section <HEADING>\n        Sugar: `delete_section` — the HEADING anchor. No payload\n\n        --insert-before-heading <HEADING>\n        Sugar: `insert_before_heading` — the HEADING anchor. Payload: `--content`\n\n        --insert-after-heading <HEADING>\n        Sugar: `insert_after_heading` — the HEADING anchor. Payload: `--content`\n\n        --new <NEW>\n        Payload for `--str-replace` (the replacement text; JSON field `new`)\n\n        --content <BODY>\n        Payload for the section ops (JSON field `content`); also an alias for `--new` on `--str-replace`\n\n        --replace-all\n        Replace all matches for `--str-replace` (JSON field `replace_all`)\n        Possible values: true, false\n\n        --expected-hash <HASH>\n        Refuse the edit unless the document's current content hash equals HASH (blake3 hex of the full file — the `document_hash` plan ops carry). Opt-in compare-and-swap; absent = read-modify-write\n\n        --yes\n        Apply the change without an interactive confirm prompt\n        Possible values: true, false\n\n        --dry-run\n        Preview the change without writing\n        Possible values: true, false\n\n        --format <FORMAT>\n        Output format; `json` emits the mutation-report envelope\n        Possible values: records, json\n\nGLOBAL OPTIONS\n    -C, --cwd <CWD>         Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)\n        --verbose           Include full diagnostic detail in output\n        --no-cache-refresh  Skip the implicit cache refresh before reading the graph\n        --color <COLOR>     Color output. Honors NO_COLOR / CLICOLOR_FORCE.\n        --vault <NAME>      Target the registered vault with this name (see `norn vault register`)\n\nDocumentation: https://github.com/dbtlr/norn\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "help",
+      "volatile_masks": []
+    }
+  ],
+  "command": "edit",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

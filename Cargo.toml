@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# The workspace holds only the crates that have been earned. A crate's
+# absence here is not an absence from the crate map in docs/architecture.md,
+# which describes the whole target shape; crates arrive with the work that
+# earns them, and the dependency allowlist in that document is the complete
+# set of permitted workspace edges.
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/dbtlr/norn"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

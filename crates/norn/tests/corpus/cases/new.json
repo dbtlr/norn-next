@@ -1,0 +1,302 @@
+{
+  "case_count": 8,
+  "cases": [
+    {
+      "argv": [
+        "new",
+        "tasks/nrn430-policy.md",
+        "--field",
+        "type:task",
+        "--field",
+        "status:someday",
+        "--field",
+        "title:Policy",
+        "--yes"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-allowed-values-refusal-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: value 'someday' is not allowed for 'status' (allowed: backlog, active, done); use --force to override\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/created-doc.md",
+        "--field",
+        "title:Hello",
+        "--field",
+        "aaa:1",
+        "--yes"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-apply-records-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "path       notes/created-doc.md\noperation  new\napplied    true\nfields     aaa   = 1  (operator-flag)\n           title = Hello  (operator-flag)\nbody       0 bytes\nwarnings   unknown field: aaa\n           unknown field: title\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\naaa: 1\ntitle: Hello\n---\n",
+            "kind": "file",
+            "path": "notes/created-doc.md"
+          }
+        ],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "new",
+        "--as",
+        "typed-note"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-by-rule-not-creatable-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: rule `typed-note` is not creatable (no `target`)\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/alpha.md"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-exists-refusal-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: destination already exists (use --force to overwrite): notes/alpha.md\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/brand-new.md",
+        "--title",
+        "Brand New"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-explicit-forecast-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "path       notes/brand-new.md\noperation  new\napplied    false\nfields     none\nbody       0 bytes\nwarnings   title-ignored: --title 'Brand New' has no effect with an explicit path\n\nApply with --yes\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/alpha.md",
+        "--force"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-force-forecast-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "path       notes/alpha.md\noperation  new\napplied    false\nfields     none\nbody       0 bytes\nwarnings   none\n\nApply with --yes\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/alpha.md",
+        "--format",
+        "json"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"\",\n  \"operation\": \"new\",\n  \"path\": \"notes/alpha.md\",\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"body_bytes\": 0,\n  \"error\": {\n    \"code\": \"destination-exists\",\n    \"message\": \"destination already exists (use --force to overwrite): notes/alpha.md\",\n    \"path\": \"notes/alpha.md\"\n  }\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "new",
+        "notes/warn-doc.md",
+        "--field",
+        "bogus:x",
+        "--force",
+        "--format",
+        "json"
+      ],
+      "command": "new",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-new-unknown-field-warning-json-zoo",
+      "mutating": true,
+      "normalizations": [],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"\",\n  \"operation\": \"new\",\n  \"path\": \"notes/warn-doc.md\",\n  \"applied\": false,\n  \"outcome\": \"forecast\",\n  \"frontmatter_created\": [\n    {\n      \"field\": \"bogus\",\n      \"value\": \"x\",\n      \"source\": \"operator-flag\"\n    }\n  ],\n  \"body_bytes\": 0,\n  \"warnings\": [\n    {\n      \"code\": \"unknown-field\",\n      \"field\": \"bogus\",\n      \"message\": \"field 'bogus' not declared in schema\"\n    }\n  ]\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    }
+  ],
+  "command": "new",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}
