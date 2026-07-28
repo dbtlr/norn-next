@@ -13,9 +13,7 @@
       },
       "id": "help-count",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -45,9 +43,7 @@
       },
       "id": "read-count-by-multi-json-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -75,9 +71,7 @@
       },
       "id": "read-count-by-status-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -103,9 +97,7 @@
       },
       "id": "read-count-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -133,9 +125,7 @@
       },
       "id": "read-count-eq-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -163,9 +153,7 @@
       },
       "id": "read-count-group-by-alias-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

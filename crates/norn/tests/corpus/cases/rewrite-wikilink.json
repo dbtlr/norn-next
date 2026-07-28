@@ -15,9 +15,7 @@
       },
       "id": "mutate-rewrite-wikilink-apply-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -60,9 +58,7 @@
       },
       "id": "wl-rewrite-wikilink-caret-stem-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -105,9 +101,7 @@
       },
       "id": "wl-rewrite-wikilink-code-fence-shadow-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -150,9 +144,7 @@
       },
       "id": "wl-rewrite-wikilink-padded-target-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -195,9 +187,7 @@
       },
       "id": "wl-rewrite-wikilink-unrepresentable-refusal",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,

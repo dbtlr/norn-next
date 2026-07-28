@@ -14,9 +14,7 @@
       },
       "id": "describe-by-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -43,9 +41,7 @@
       },
       "id": "describe-data-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -72,9 +68,7 @@
       },
       "id": "describe-data-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -102,9 +96,7 @@
       },
       "id": "describe-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -131,9 +123,7 @@
       },
       "id": "describe-stats-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -159,9 +149,7 @@
       },
       "id": "describe-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

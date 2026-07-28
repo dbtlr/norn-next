@@ -16,9 +16,7 @@
       },
       "id": "edit-apply-str-replace-section-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -62,9 +60,7 @@
       },
       "id": "edit-atx-prefixed-heading-anchor-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -108,9 +104,7 @@
       },
       "id": "edit-dry-run-forecast-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -146,9 +140,7 @@
       },
       "id": "edit-eof-heading-append-to-section-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -192,9 +184,7 @@
       },
       "id": "edit-eof-heading-insert-after-heading-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -238,9 +228,7 @@
       },
       "id": "edit-eof-heading-replace-section-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -286,9 +274,7 @@
       },
       "id": "edit-json-ops-forecast-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -323,9 +309,7 @@
       },
       "id": "edit-malformed-op-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -360,9 +344,7 @@
       },
       "id": "edit-missing-target-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -398,9 +380,7 @@
       },
       "id": "edit-refusal-json-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -435,9 +415,7 @@
       },
       "id": "edit-setext-insert-after-heading-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -481,9 +459,7 @@
       },
       "id": "edit-setext-replace-section-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -524,9 +500,7 @@
       },
       "id": "help-edit",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

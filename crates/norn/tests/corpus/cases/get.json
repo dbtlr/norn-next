@@ -13,9 +13,7 @@
       },
       "id": "help-get",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -44,9 +42,7 @@
       },
       "id": "read-get-alias-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -77,9 +73,7 @@
       },
       "id": "read-get-alpha-all-cols-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -109,9 +103,7 @@
       },
       "id": "read-get-alpha-markdown-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -139,9 +131,7 @@
       },
       "id": "read-get-alpha-records-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -171,9 +161,7 @@
       },
       "id": "read-get-alpha-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -203,9 +191,7 @@
       },
       "id": "read-get-ambiguous-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -235,9 +221,7 @@
       },
       "id": "read-get-not-found-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -268,9 +252,7 @@
       },
       "id": "read-get-section-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -300,9 +282,7 @@
       },
       "id": "read-get-section-records-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -334,9 +314,7 @@
       },
       "id": "read-get-unknown-col-warning-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -367,9 +345,7 @@
       },
       "id": "text-edge-bom-doc-all-cols",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -401,9 +377,7 @@
       },
       "id": "text-edge-code-fenced-block-id-link",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -435,9 +409,7 @@
       },
       "id": "url-edge-decode-split-blockref",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -469,9 +441,7 @@
       },
       "id": "url-edge-scheme-classification",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

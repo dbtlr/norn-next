@@ -20,9 +20,7 @@
       },
       "id": "mutate-new-allowed-values-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -59,9 +57,7 @@
       },
       "id": "mutate-new-apply-records-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -102,9 +98,7 @@
       },
       "id": "mutate-new-by-rule-not-creatable-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -136,9 +130,7 @@
       },
       "id": "mutate-new-exists-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -173,9 +165,7 @@
       },
       "id": "mutate-new-explicit-forecast-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -208,9 +198,7 @@
       },
       "id": "mutate-new-force-forecast-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -245,9 +233,7 @@
       },
       "id": "mutate-new-refusal-json-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -285,9 +271,7 @@
       },
       "id": "mutate-new-unknown-field-warning-json-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

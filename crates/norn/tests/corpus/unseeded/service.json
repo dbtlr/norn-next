@@ -15,9 +15,7 @@
       },
       "id": "err-service-status-local-vault-flag-deleted-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -46,9 +44,7 @@
       },
       "id": "err-service-vault-global-flag-before-subcommand-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,

@@ -15,9 +15,7 @@
       },
       "id": "mutate-set-apply-records-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -60,9 +58,7 @@
       },
       "id": "mutate-set-comment-block-promote",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -105,9 +101,7 @@
       },
       "id": "mutate-set-dry-run-note-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -145,9 +139,7 @@
       },
       "id": "mutate-set-field-conflict-body-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -181,9 +173,7 @@
       },
       "id": "mutate-set-forecast-note-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -217,9 +207,7 @@
       },
       "id": "mutate-set-missing-target-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -253,9 +241,7 @@
       },
       "id": "mutate-set-null-block-promote",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -301,9 +287,7 @@
       },
       "id": "mutate-set-push-apply-json-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -347,9 +331,7 @@
       },
       "id": "mutate-set-refusal-json-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -383,9 +365,7 @@
       },
       "id": "mutate-set-value-not-allowed-body-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,

@@ -15,9 +15,7 @@
       },
       "id": "mutate-move-apply-cascade-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -68,9 +66,7 @@
       },
       "id": "mutate-move-dry-run-forecast-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -183,9 +179,7 @@
       },
       "id": "wl-move-code-fence-shadow-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -236,9 +230,7 @@
       },
       "id": "wl-move-embed-backlink-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -289,9 +281,7 @@
       },
       "id": "wl-move-spaced-alias-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -342,9 +332,7 @@
       },
       "id": "wl-move-unrepresentable-skip-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

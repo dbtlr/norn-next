@@ -306,9 +306,7 @@
       },
       "id": "apply-authored-independent-files-proceed-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-first.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# First\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-missing/second.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Second\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-third.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Third\\n\" },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -357,9 +355,7 @@
       },
       "id": "apply-authored-kind-operation-mismatch-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"set_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"priority\", \"new_value\": \"high\", \"operation\": \"remove_frontmatter\" }\n    }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -437,9 +433,7 @@
       },
       "id": "apply-authored-move-plan-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"move_document\",\n      \"fields\": { \"src\": \"notes/cycle-c.md\", \"dst\": \"notes/moved-c.md\", \"parents\": false }\n    }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -534,9 +528,7 @@
       },
       "id": "apply-authored-precondition-mismatch-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"preconditions\": [\n    {\n      \"id\": \"alpha-owner\",\n      \"kind\": \"owner_set\",\n      \"selector\": { \"stem\": \"alpha\" },\n      \"expected_paths\": [\"notes/not-actually-alpha.md\"]\n    }\n  ],\n  \"operations\": [\n    {\n      \"kind\": \"set_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"summary\", \"new_value\": \"should-not-apply\" }\n    }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -572,9 +564,7 @@
       },
       "id": "apply-authored-schema-version-refusal",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 99,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": []\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -611,9 +601,7 @@
       },
       "id": "apply-authored-sequenced-seq-creates-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task One\", \"type\": \"task\" },\n          \"body\": \"# Task One\\n\"\n        },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task Two\", \"type\": \"task\" },\n          \"body\": \"# Task Two\\n\"\n        },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -703,9 +691,7 @@
       },
       "id": "apply-authored-wrong-typed-bool-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"move_document\", \"fields\": { \"src\": \"notes/alpha.md\", \"dst\": \"notes/beta.md\", \"force\": \"true\" } }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -742,9 +728,7 @@
       },
       "id": "apply-authored-wrong-typed-document-hash-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"str_replace\", \"fields\": { \"path\": \"notes/alpha.md\", \"old\": \"NONEXISTENT_ZZZ\", \"new\": \"x\", \"document_hash\": 5 } }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",
@@ -822,9 +806,7 @@
       },
       "id": "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"delete_document\", \"fields\": { \"path\": \"notes/cycle-c.md\", \"rewrite_to\": 5 } }\n  ]\n}\n",
       "plan_vault_root_token": "{{VAULT_ROOT}}",

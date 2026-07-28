@@ -13,9 +13,7 @@
       },
       "id": "mutate-delete-ambiguous-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -48,9 +46,7 @@
       },
       "id": "mutate-delete-backlinks-refusal-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "refusal",
         "exit_code": 2,
@@ -86,9 +82,7 @@
       },
       "id": "mutate-delete-rewrite-to-apply-zoo",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -134,9 +128,7 @@
       },
       "id": "wl-delete-embed-backlink-diverge",
       "mutating": true,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,

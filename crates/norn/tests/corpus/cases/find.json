@@ -17,9 +17,7 @@
       },
       "id": "err-col-facet-did-you-mean-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -49,9 +47,7 @@
       },
       "id": "err-links-to-unresolvable-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -150,9 +146,7 @@
       },
       "id": "err-repeated-limit-last-wins-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -182,9 +176,7 @@
       },
       "id": "err-unknown-dynamic-field-did-you-mean-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -211,9 +203,7 @@
       },
       "id": "help-find",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -244,9 +234,7 @@
       },
       "id": "read-find-all-cols-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -276,9 +264,7 @@
       },
       "id": "read-find-bad-date-value-refuses-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -310,9 +296,7 @@
       },
       "id": "read-find-col-headings-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -344,9 +328,7 @@
       },
       "id": "read-find-col-headings-records-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -377,9 +359,7 @@
       },
       "id": "read-find-col-incoming-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -410,9 +390,7 @@
       },
       "id": "read-find-col-title-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -445,9 +423,7 @@
       },
       "id": "read-find-col-truncated-page-suppressed-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -479,9 +455,7 @@
       },
       "id": "read-find-col-zero-match-suppressed-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -511,9 +485,7 @@
       },
       "id": "read-find-date-before-json-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -543,9 +515,7 @@
       },
       "id": "read-find-declared-date-eq-refuses-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -575,9 +545,7 @@
       },
       "id": "read-find-dynamic-desugar-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -607,9 +575,7 @@
       },
       "id": "read-find-eq-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -639,9 +605,7 @@
       },
       "id": "read-find-eq-numeric-quoted-value-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -673,9 +637,7 @@
       },
       "id": "read-find-has-missing-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -705,9 +667,7 @@
       },
       "id": "read-find-in-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -736,9 +696,7 @@
       },
       "id": "read-find-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -767,9 +725,7 @@
       },
       "id": "read-find-jsonl-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -804,9 +760,7 @@
       },
       "id": "read-find-limit-nolimit-last-wins-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -836,9 +790,7 @@
       },
       "id": "read-find-malformed-path-glob-refuses-clean",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "operational",
         "exit_code": 1,
@@ -868,9 +820,7 @@
       },
       "id": "read-find-not-eq-numeric-quoted-value-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -899,9 +849,7 @@
       },
       "id": "read-find-paths-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -931,9 +879,7 @@
       },
       "id": "read-find-records-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -967,9 +913,7 @@
       },
       "id": "read-find-sort-limit-json-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
@@ -1004,9 +948,7 @@
       },
       "id": "read-find-starts-at-zero-indexed-zoo",
       "mutating": false,
-      "normalizations": [
-        "vault-root"
-      ],
+      "normalizations": [],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
