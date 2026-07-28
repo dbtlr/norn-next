@@ -2,7 +2,7 @@
 
 ## Architecture
 
-`docs/architecture.md` is the architecture contract — the invariant spine and the crate map, including the dependency allowlist and the boundary invariants reviews enforce against. Load it before proposing structural changes, adding a crate, or adding a dependency edge.
+`docs/architecture.md` describes the running system and is the authoritative form of the invariant spine and the crate map — the contract reviews enforce against, including the dependency allowlist and the boundary invariants. Load it before proposing structural changes, adding a crate, or adding a dependency edge.
 
 ## ADRs and Glossary
 
