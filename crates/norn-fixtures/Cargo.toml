@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "norn-fixtures"
+path = "src/main.rs"
+
 # This crate has no dependencies, and that is a contract rather than an
 # accident: it is a leaf in the dependency allowlist (docs/architecture.md),
 # and a generator that links a parser, a hasher, or a random-number crate
