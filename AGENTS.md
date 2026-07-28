@@ -1,5 +1,9 @@
 # norn
 
+## Architecture
+
+`docs/architecture.md` describes the running system and is the authoritative form of the invariant spine and the crate map — the contract reviews enforce against, including the dependency allowlist and the boundary invariants. Load it before proposing structural changes, adding a crate, or adding a dependency edge.
+
 ## ADRs and Glossary
 
 We use the `domain-modeling` skill for recording important decisions as well as glossary items. These can be found in the `docs/glossary.md` file and the `docs/decisions/` directory. An index of all decisions is maintained in `docs/decisions/README.md`, load this to get a high-level overview. These are load-bearing and should not be violated without a discussion with the user.
