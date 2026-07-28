@@ -1,0 +1,16 @@
+[package]
+name = "norn-fixtures"
+description = "Deterministic Markdown vault generator for tests, gates, and the soak lane; never ships"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# This crate has no dependencies, and that is a contract rather than an
+# accident: it is a leaf in the dependency allowlist (docs/architecture.md),
+# and a generator that links a parser, a hasher, or a random-number crate
+# inherits that crate's version drift into the trees every gate measures
+# against. The digest, the calendar arithmetic, the PRNG and the argument
+# parsing are all in-crate for that reason.
+[dependencies]
