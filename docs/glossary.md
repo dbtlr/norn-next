@@ -67,3 +67,19 @@ on the distinctions below.
   mapping so that configuring it is a deliberate edit rather than a discovery.
 - **Size-independence pair** — one operation run against two fixture profiles of different
   scale, with the counters compared name by name. Counts, never clocks.
+
+## Two-tier measurement
+
+Earned by [ADR 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md), whose
+contract turns on the distinctions below.
+
+- **Authored baseline** — a checked-in value a measurement is compared against, moved only
+  by a reviewed edit. It is the trend's whole memory: nothing fetches a history and nothing
+  compares a run to what a previous run happened to record, so a drift fails rather than
+  quietly becoming the new normal.
+- **Ratchet** — an authored baseline whose only argument-free direction is down. Lowering a
+  peak-memory ceiling needs no case made for it; raising one is a claim that the subject now
+  costs more, made in a diff.
+- **Sanity ceiling** — a wall-clock bar set where a run past it is broken rather than slow.
+  It lives in the soak lane, it gates nothing on a pull request, and the number it produces
+  — the recorded duration — is worth more than the pass.
