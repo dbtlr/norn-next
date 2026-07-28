@@ -701,7 +701,7 @@ fn is_local_package(id: &str) -> bool {
 pub fn cargo_metadata(args: &[&str]) -> Result<String, String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
-        .args(["metadata", "--format-version", "1"])
+        .args(["metadata", "--format-version", "1", "--locked"])
         .args(args)
         .output()
         .map_err(|e| format!("could not run `{cargo} metadata`: {e}"))?;
