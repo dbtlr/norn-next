@@ -139,9 +139,9 @@ This document describes the whole target shape; the workspace holds only what ha
 Two membership rules deserve emphasis because they are the ones most often eroded by
 convenience:
 
-- **`norn-client` is deliberately excluded from `init`.** If a verb scaffolds vault-side
-  config it is a vault request, and its disposition belongs to the verb charter — not to
-  the machine-local verb set.
+- **`norn-client` is deliberately excluded from `init`.** A verb that scaffolds
+  configuration inside a vault is making a vault request, so its disposition belongs to
+  the verb charter — not to the machine-local verb set.
 - **`norn-console` extensions are earned case by case.** The bar is doing *more* than clap
   allows, never a preference for our own code. Re-rolling a clap-native capability
   (parsing, completions generation, error surfaces) is a defect. The custom help renderer
