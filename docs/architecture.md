@@ -161,7 +161,7 @@ contract.
 |---|---|---|
 | `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
 | `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, wikilink syntax, `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a schema facet in `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
-| `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, and the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware). Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. |
+| `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, and the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware). Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
 | `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, and the read builders (wire params → emitted SQL). Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned against `(model id, version)` — pinning is required, and how it is done is the substrate design pass's question. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-config` | **Machine-local state, one owner** — config-directory layout, the registry file read/write, the bearer token read/write, host endpoint discovery conventions, weights-directory location. Never touches a vault. | The one state surface both sides of the client/host seam must read — the serving side to authenticate, the client to find the host at all. Hand-sharing that convention in two crates is a drift class on a security-relevant file. |
@@ -319,8 +319,8 @@ that reads `cargo metadata` and asserts the workspace **normal-dependency** grap
 (default features plus the release feature set; the platform watcher backend per target).
 
 - A forbidden edge fails.
-- **A new edge not deliberately added to the allowlist also fails** — default-EXCLUDE
-  applied to the dependency graph itself.
+- **A new edge not deliberately added to the allowlist also fails.** Absence from the table
+  is a rejection, not a gap to be filled by whatever compiles.
 - Development-dependency edges (every crate's tests reaching testkit) are documented but
   ungated: they inherently cycle. They are omitted from the graph above, whose dotted edges
   are testkit's own normal dependencies.
@@ -365,9 +365,9 @@ Two notes on that table:
   disk through SQLite; so does creating the file (SQLite creates on open) and rebuilding it
   (that is DDL). What is left over — removing a file, tearing a throwaway store down,
   preparing a parent directory — is where a `std::fs` allow would be needed. Fixing the
-  precise allow-set is the harness's job, not this table's. The lifecycle sits in `norn-store`
-  rather than `norn-fs` because the database is store's to own: rung 3 is a database-side
-  rung, and the host chooses the mode while store performs the operation.
+  precise allow-set is the harness's job, not this table's. The lifecycle sits in
+  `norn-store` rather than `norn-fs` because the database is store's to own: rung 3 is a
+  database-side rung, and the host chooses the mode while store performs the operation.
 - **The dev crates are not outside the rule.** One workspace-root `clippy.toml` binds
   workspace-wide and does not merge per-crate, so `norn-fixtures` and `norn-testkit` write
   temp trees under ordinary use-site `#[allow]`s. That is precisely why they appear in the
@@ -395,7 +395,7 @@ grows:
 - **The dependency graph is gated.** The architecture gate asserts exact equality against
   the allowlist, so an edge that would let a violation compile cannot be added silently.
 - **Symbol-level rules escalate to lints**, adopted one at a time as each invariant becomes
-  real. A rule arrives when there is something for it to bind against.
+  real.
 - **Invariants no rule can yet express are review-held** until one can. That is a real gap,
   not a formality — a review-held invariant rots quietly.
 

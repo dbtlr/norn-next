@@ -8,8 +8,8 @@
 # enough that a job approaching it is broken rather than slow. Performance
 # clocks — the bars that fail when a number drifts — live in soak.yml.
 #
-# The jobs below are structure only. Each is filled by the Layer 0 harness task
-# named in its comment; until then they pass trivially so the lane exists,
+# The jobs below are structure only. Each is filled by the harness task named
+# in its comment; until then they pass trivially so the lane exists,
 # triggers, and is reviewable before it has teeth. Every job name carries a
 # "(placeholder — ...)" suffix so a green check cannot be over-read as a gate
 # that ran; the suffix drops when the real gate lands.
