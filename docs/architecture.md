@@ -18,8 +18,16 @@ from here land as individual ADRs at the layer where they bind — see
 
 ## Part I — The invariant spine
 
-Five invariants bind every layer. They are carried by the gates named in each section below
-and in [Enforcement posture](#enforcement-posture), landing as the layers they measure land.
+Five invariants bind every layer. Each section below names its own gates where it has them:
+the per-PR memory benchmarks and soak trend line in §1, the churn and induced-failure suites
+in §3, the `EXPLAIN` and counter assertions in §4. Those gates arrive with the layers whose
+work they measure.
+
+Parts of §2 and §5 have no mechanical gate at all: whether an import earns admission, and
+whether a new capability is a second spelling of an existing one, are judgments made in
+review. That is a stated gap rather than an oversight — a review-held invariant rots
+quietly.
+
 Where a gate exists, its lane depends on what it measures: **counters and structure gate per
 PR; clocks and trends live in the soak lane and never fail a pull request.**
 
@@ -101,7 +109,7 @@ following:
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
-| Stale schema (DDL fingerprint mismatch) | **Handled at rung 3 before the first release**, while the schema version is pinned at 1 and a DDL edit is resolved by rebuilding. Once version 1 freezes as the migratable baseline, a version gap is the migrations pillar's job and only a genuinely unreadable schema reaches rung 3. |
+| Stale schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a schema that is damaged rather than merely out of date. |
 
 **Refusal is resolution.** Rung 3's second trigger reads "any state the lower rungs cannot
 resolve", and a transient environmental failure does not qualify. When the disk is full or a
@@ -274,11 +282,16 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
    scope is **vault requests**; the machine-local verbs (self-update, service lifecycle,
    `completions`, `manpage`) are the named exception class — they touch no vault and no
    database, and the absent edges are what makes that permanent.
-2. **`norn-host` is the sole opener of durable databases** and the sole plan executor.
-   `norn-store` exposes the substrate API; among product crates only the host links it into
-   a running process. `norn-testkit` depends on `norn-store` too — the harness asserts
-   against the substrate directly — but it never ships, so the shipped artifact has exactly
-   one opener.
+2. **`norn-host` drives the substrate; `norn-store` implements it.** Two separate claims,
+   about different things:
+   - **Driver calls live in `norn-store`.** No other crate's code opens a SQLite connection;
+     that is the lint's subject.
+   - **Among product crates, `norn-host` alone links `norn-store` into a running process**,
+     so in the shipped artifact one crate reaches the substrate. `norn-testkit` also depends
+     on `norn-store` — the harness asserts against the substrate directly — but it never
+     ships.
+
+   The host is likewise the plan executor: one applier, per invariant 4.
 3. **`norn-wire` has zero workspace dependencies and zero effects.** Nothing crosses the
    client/host seam that is not a wire type — no untyped JSON value, no JSON-in-a-string.
 4. **One plan vocabulary, one applier.** Mutation verbs and the repair planner both compile
@@ -310,15 +323,17 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
 10. **One parser.** All document syntax — frontmatter, headings, sections, wikilinks, tags —
     is read and written through `norn-text`. A second interpretation of document text
     anywhere else is a defect.
-11. **Machine-local state has one owner.** `norn-config` is the sole reader and writer of
-    config-directory bytes — registry file, bearer token, endpoint conventions. Registry
+11. **Machine-local state has one owner.** `norn-config` owns config-directory bytes —
+    registry file, bearer token, endpoint conventions — and every read and write of them
+    flows through its API. Registry
     *semantics* (the serving set and its mutation verbs) stay host-side; config owns shape
     and storage. The shared dependency is not a channel: client–host coordination still
     flows only over loopback HTTP. Config's API splits along that seam — the **registry
     surface is host-only**, which a crate edge cannot express and which therefore carries a
     named symbol lint, while the machine surface (endpoint discovery, token read) is
-    shared. Token *generation* at service install is the client's one legitimate
-    config-directory write.
+    shared. Token *generation* at service install is the client's action, executed through
+    that API — the client decides the write happens, `norn-config` performs it, and no second
+    byte-writer appears.
 12. **`norn-embed` is blind.** No `embed → store` and no `embed → fs` edge exists; the host
     mediates every vector write. Semantic search stays a query surface and never a
     correctness input, because the inference crate structurally cannot reach findings or
@@ -371,7 +386,7 @@ table says.
 | Site | Effect |
 |---|---|
 | `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock. This is the rule's home, not a carve-out |
-| `norn-store` | The derived database's file lifecycle: creating it, discarding and rebuilding it at heal rung 3, and tearing down the throwaway store behind disposable derivation |
+| `norn-store` | The parts of the derived database's file lifecycle the driver does not cover: deleting the database at heal rung 3, tearing down the throwaway store behind disposable derivation, and preparing its parent directory |
 | `norn-config` | Config-directory bytes: registry file, bearer token |
 | `norn-embed` | The opt-in weight fetch and load |
 | `norn-host` | The one-shot legacy-cache janitor |
@@ -380,11 +395,13 @@ table says.
 
 Two notes on that table:
 
-- **`norn-store`'s ordinary read and write traffic is driver-mediated** — queries and
-  increments reach disk through SQLite, not through `std::fs`, and need no allow. Only the
-  file-lifecycle operations above do. The lifecycle sits in `norn-store` rather than
-  `norn-fs` because the database is store's to own: rung 3 is a database-side rung, and the
-  host chooses the mode while store performs the operation.
+- **Most of `norn-store`'s disk contact is driver-mediated.** Queries and increments reach
+  disk through SQLite; so does creating the file (SQLite creates on open) and rebuilding it
+  (that is DDL). What is left over — removing a file, tearing a throwaway store down,
+  preparing a parent directory — is where a `std::fs` allow would be needed. Fixing the
+  precise allow-set is NORN-12's job, not this table's. The lifecycle sits in `norn-store`
+  rather than `norn-fs` because the database is store's to own: rung 3 is a database-side
+  rung, and the host chooses the mode while store performs the operation.
 - **The dev crates are not outside the rule.** One workspace-root `clippy.toml` binds
   workspace-wide and does not merge per-crate, so `norn-fixtures` and `norn-testkit` write
   temp trees under ordinary use-site `#[allow]`s. That is precisely why they appear in the
@@ -404,8 +421,7 @@ filesystem effect.
 Everything a person reads as *output* still goes through `norn-console`. The carve-outs
 cover machine-consumed byte streams only.
 
-Rules are adopted one at a time, as each invariant becomes real. Tooling choice is an
-implementation detail of NORN-12, not a fixed part of this contract.
+Tooling choice is an implementation detail of NORN-12, not a fixed part of this contract.
 
 ### Enforcement posture
 
@@ -419,10 +435,13 @@ grows:
 - **Invariants no rule can yet express are review-held** until one can. That is a real gap,
   not a formality — a review-held invariant rots quietly.
 
-**This document does not map invariants to mechanisms.** The authoritative
-invariant-to-mechanism ruleset lands with **NORN-12**, encoded as gate and lint code and
-documented there. Enforcement mechanics become true by being executable, and a prose ledger
-of them here would be a second, unexecuted spelling of that ruleset — drifting from the code
+**This document carries no authoritative per-invariant ledger.** Where an invariant's own
+statement names what carries it — absent edges in 1, 12 and 13, the named symbol lint in 11,
+the filesystem table in 8 — that statement stands and is load-bearing. What does not exist
+here is the complete mapping: the authoritative invariant-to-mechanism ruleset lands with
+**NORN-12**, encoded as gate and lint code and documented there. Enforcement mechanics become
+true by being executable, and a prose ledger of them here would be a second, unexecuted
+spelling of that ruleset — drifting from the code
 the moment either moved.
 
 ---
