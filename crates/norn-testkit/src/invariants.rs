@@ -366,22 +366,51 @@ impl ClippyConfig {
 
 /// The `path` an entry line configures.
 ///
-/// An entry names its path exactly once. A line where `path = "` appears
-/// twice — a `reason` quoting the phrase, say — is refused rather than
-/// resolved by position: taking the first would read the reason as the rule.
+/// An entry names its path exactly once. The `path` key is read whatever
+/// whitespace surrounds its `=` — `path="x"` and `path = "x"` are the same
+/// key — because the ambiguity guard below only holds if it recognizes every
+/// spelling of the key it is guarding. A line where the key appears twice —
+/// a `reason` quoting the phrase, say — is refused rather than resolved by
+/// position: taking the first would read the reason as the rule.
 fn entry_path(line: &str) -> Result<&str, &'static str> {
-    const KEY: &str = "path = \"";
-    let mut occurrences = line.match_indices(KEY);
-    let Some((at, _)) = occurrences.next() else {
+    let mut occurrences = path_key_positions(line);
+    let Some(after_key) = occurrences.next() else {
         return Err("carries no `path`");
     };
     if occurrences.next().is_some() {
         return Err("names `path` more than once, so which one is the rule is not decidable");
     }
-    line[at + KEY.len()..]
+    line[after_key..]
         .split_once('"')
         .map(|(path, _)| path)
         .ok_or("carries an unterminated `path`")
+}
+
+/// The offset just past the opening quote of every `path = "..."` key in
+/// `line`, however the key spaces its `=`. A `path` occurring inside a
+/// longer word (`filepath`) is not this key.
+fn path_key_positions(line: &str) -> impl Iterator<Item = usize> + '_ {
+    line.match_indices("path").filter_map(move |(start, _)| {
+        let before_is_boundary = line[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word_char(c));
+        if !before_is_boundary {
+            return None;
+        }
+        let rest = &line[start + "path".len()..];
+        let after_is_boundary = rest.chars().next().is_none_or(|c| !is_word_char(c));
+        if !after_is_boundary {
+            return None;
+        }
+        let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        Some(line.len() - rest.len())
+    })
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Every way the mapping contradicts the allowlist or the configured lints,
@@ -727,6 +756,19 @@ mod tests {
         let entryless = ClippyConfig::parse("disallowed-types = [\n    { }\n]\n")
             .expect_err("an entry naming no path");
         assert!(entryless.contains("carries no `path`"), "{entryless}");
+    }
+
+    /// `path` and `=` need no particular spacing: `path="x"` names the same
+    /// key as `path = "x"`.
+    #[test]
+    fn an_entry_spelled_without_spacing_around_equals_is_read() {
+        let config = ClippyConfig::parse(
+            "disallowed-methods = [\n\
+             \x20   { path=\"std::fs::read\", reason = \"tight spacing\" },\n\
+             ]\n",
+        )
+        .expect("an entry spelled without spacing");
+        assert!(config.carries("disallowed-methods", "std::fs::read"));
     }
 
     /// A reason quoting the phrase `path = "` — which a TOML literal string
