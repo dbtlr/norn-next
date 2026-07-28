@@ -1,0 +1,421 @@
+{
+  "case_count": 10,
+  "cases": [
+    {
+      "argv": [
+        "set",
+        "alpha",
+        "summary:hello",
+        "--yes"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-apply-records-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "set notes/alpha.md\n  summary: A short summary of alpha, unbounded in length. → hello\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: hello\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+            "kind": "file",
+            "path": "notes/alpha.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "set",
+        "comment-block",
+        "title:Hi",
+        "--yes"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "mutate-edge",
+        "seed": 1
+      },
+      "id": "mutate-set-comment-block-promote",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "set shapes/comment-block.md\n  title: <none> → Hi\n  warnings: 1\n    - unknown field: title\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\n# only a comment, no keys\ntitle: Hi\n---\n\nBody under a comment-only frontmatter block.\n",
+            "kind": "file",
+            "path": "shapes/comment-block.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/comment-block.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "set",
+        "alpha",
+        "summary:hello",
+        "--dry-run"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-dry-run-note-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "dry-run: set notes/alpha.md\n  summary: A short summary of alpha, unbounded in length. → hello\n\nApply with --yes\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "set",
+        "alpha",
+        "--field",
+        "tags:x",
+        "--push",
+        "tags:y",
+        "--yes"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-field-conflict-body-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: cross-class conflict on the same key:\n  'tags': --field + --push\neach key may be targeted by only one of --field/--field-json/--push/--pop/--remove per invocation\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "set",
+        "alpha",
+        "summary:hello"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-forecast-note-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "dry-run: set notes/alpha.md\n  summary: A short summary of alpha, unbounded in length. → hello\n\nApply with --yes\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "set",
+        "no-such-doc-xyzzy",
+        "status:done"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-missing-target-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: no document matched path or stem: no-such-doc-xyzzy\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "set",
+        "null-block",
+        "title:Hi",
+        "--yes"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "mutate-edge",
+        "seed": 1
+      },
+      "id": "mutate-set-null-block-promote",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "set shapes/null-block.md\n  title: <none> → Hi\n  warnings: 1\n    - unknown field: title\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Hi\n---\n\nBody under a bare-null frontmatter block.\n",
+            "kind": "file",
+            "path": "shapes/null-block.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "shapes/null-block.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "set",
+        "alpha",
+        "--push",
+        "tags:newtag",
+        "--yes",
+        "--format",
+        "json"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-push-apply-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"set\",\n  \"target\": \"notes/alpha.md\",\n  \"frontmatter_changes\": [\n    {\n      \"op\": \"set\",\n      \"field\": \"tags\",\n      \"old\": [\n        \"alpha\",\n        \"sample\"\n      ],\n      \"new\": [\n        \"alpha\",\n        \"sample\",\n        \"newtag\"\n      ]\n    }\n  ],\n  \"body_changed\": false,\n  \"applied\": true,\n  \"outcome\": \"applied\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample, newtag]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+            "kind": "file",
+            "path": "notes/alpha.md"
+          }
+        ],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "set",
+        "no-such-doc-xyzzy",
+        "status:done",
+        "--format",
+        "json"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"set\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"frontmatter_changes\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "set",
+        "task-001",
+        "status:bogus",
+        "--yes"
+      ],
+      "command": "set",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-set-value-not-allowed-body-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: value 'bogus' is not allowed for 'status' (allowed: backlog, active, done); use --force to override\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "tasks/task-001.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    }
+  ],
+  "command": "set",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

@@ -1,0 +1,294 @@
+{
+  "case_count": 9,
+  "cases": [
+    {
+      "argv": [
+        "validate",
+        "--help"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 2
+      },
+      "id": "help-validate",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Validate vault graph facts and configured frontmatter rules\n\nValidate vault graph facts and configured frontmatter rules.\n\nValidation reuses graph/index facts to surface unresolved links, ambiguous links, document diagnostics, and configured frontmatter requirements. Validate does not mutate files.\n\nUSAGE\n    norn validate [OPTIONS]\n\nOPTIONS\n        --format <FORMAT>\n        Stdout format\n        Possible values: records, jsonl, json, paths\n\n        --summary\n        Emit grouped validation finding counts instead of raw findings\n        Possible values: true, false\n\nTRIAGE FILTERS\n        --code <CODE>\n        Filter findings by code. Comma-separated values match any listed code\n\n        --severity <SEVERITY>\n        Filter findings by severity\n\n        --field <FIELD>\n        Filter findings by frontmatter field\n\n        --rule <RULE>\n        Filter findings by validate rule name\n\n        --path <PATH>\n        Filter findings by vault-relative path glob using config glob semantics\n\n        --target <TARGET>\n        Filter link findings by link target\n\n        --reason <REASON>\n        Filter link findings by unresolved reason\n\nEXAMPLES\n    norn validate\n        # human-readable findings on the configured vault\n\n    norn validate --format json\n        # machine-readable findings for pipelines\n\n    norn validate --severity error\n        # errors only; skip warnings\n\n    norn validate --code 'link-*'\n        # broken + ambiguous links\n\n    norn validate --code 'link-*' --format paths\n        # unique source paths only; pipe-friendly\n\nHOW VALIDATION WORKS\n    Validate reads `.norn/config.yaml` for the rules that shape your vault: required frontmatter fields, allowed values, expected types, and path scoping. Each rule produces findings with a stable code and a severity (`error`, `warning`, `info`).\n\n    Findings cover three surfaces. Frontmatter findings come from schema rules — codes like `frontmatter-required-field-missing` and `value-not-allowed`. Link findings come from graph facts — `link-target-missing`, `link-anchor-missing`, `link-block-missing`, and `link-ambiguous`. Document diagnostics come from parse — malformed frontmatter, encoding issues. Validate never writes files.\n\n    Exit code is `1` when any finding has severity `error`, `0` otherwise. Pipelines gate on this exit code.\n\n    Triage filters combine with AND across types and OR within a type. `--severity error --code frontmatter-required-field-missing` returns errors that match that code. `--code 'link-*'` returns the whole family. `--path 'notes/**'` scopes to a path glob; `--field`, `--rule`, `--target`, and `--reason` narrow further.\n\nFINDING CODES\n    Codes identify validation findings. Filter with --code <code>. Glob patterns supported (--code 'link-*').\n\n    link-target-missing         A wikilink target doesn't exist in the vault.\n    link-anchor-missing         The target exists but the #anchor isn't present.\n    link-block-missing          The target exists but the ^block-ref isn't present.\n    link-ambiguous              A wikilink resolves to multiple candidates.\n    frontmatter-required-field-missing\n                                A required frontmatter field is absent.\n    value-not-allowed           A field's value is not in the configured set.\n    field-type-invalid          A field's value doesn't match its declared type.\n    frontmatter-exceeds-max-length\n                                A string/list_of_strings field matches its type but exceeds max_length.\n    frontmatter-forbidden-field A field that the rule forbids is present.\n    document-misrouted          A doc is in a directory the rule's path selector excludes.\n    frontmatter-reference-type  A field's wikilink resolves to a document whose type is outside the allowed set.\n\nGLOBAL OPTIONS\n    -C, --cwd <CWD>         Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)\n        --verbose           Include full diagnostic detail in output\n        --no-cache-refresh  Skip the implicit cache refresh before reading the graph\n        --color <COLOR>     Color output. Honors NO_COLOR / CLICOLOR_FORCE.\n        --vault <NAME>      Target the registered vault with this name (see `norn vault register`)\n\nDocumentation: https://github.com/dbtlr/norn\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "help",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--format",
+        "json",
+        "--code",
+        "frontmatter-required-field-missing"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-code-filter-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings\": [\n    {\n      \"code\": \"frontmatter-required-field-missing\",\n      \"field\": \"title\",\n      \"message\": \"required frontmatter field is missing: title\",\n      \"path\": \"broken/no-frontmatter.md\",\n      \"severity\": \"warning\"\n    },\n    {\n      \"code\": \"frontmatter-required-field-missing\",\n      \"field\": \"title\",\n      \"message\": \"required frontmatter field is missing: title\",\n      \"path\": \"broken/parse-fail.md\",\n      \"severity\": \"warning\"\n    },\n    {\n      \"code\": \"frontmatter-required-field-missing\",\n      \"field\": \"kind\",\n      \"message\": \"required frontmatter field is missing: kind\",\n      \"path\": \"notes/missing-kind.md\",\n      \"rule\": \"typed-note\",\n      \"severity\": \"warning\"\n    },\n    {\n      \"code\": \"frontmatter-required-field-missing\",\n      \"field\": \"title\",\n      \"message\": \"required frontmatter field is missing: title\",\n      \"path\": \"shapes/empty-block.md\",\n      \"severity\": \"warning\"\n    }\n  ],\n  \"total\": 4\n}\n"
+      },
+      "requires_code": "frontmatter-required-field-missing",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--format",
+        "jsonl",
+        "--code",
+        "frontmatter-required-field-missing"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-jsonl-code-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"path\":\"broken/no-frontmatter.md\",\"code\":\"frontmatter-required-field-missing\",\"severity\":\"warning\",\"message\":\"required frontmatter field is missing: title\",\"field\":\"title\"}\n{\"path\":\"broken/parse-fail.md\",\"code\":\"frontmatter-required-field-missing\",\"severity\":\"warning\",\"message\":\"required frontmatter field is missing: title\",\"field\":\"title\"}\n{\"path\":\"notes/missing-kind.md\",\"code\":\"frontmatter-required-field-missing\",\"severity\":\"warning\",\"message\":\"required frontmatter field is missing: kind\",\"rule\":\"typed-note\",\"field\":\"kind\"}\n{\"path\":\"shapes/empty-block.md\",\"code\":\"frontmatter-required-field-missing\",\"severity\":\"warning\",\"message\":\"required frontmatter field is missing: title\",\"field\":\"title\"}\n"
+      },
+      "requires_code": "frontmatter-required-field-missing",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--format",
+        "json"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "validate-edge",
+        "seed": 1
+      },
+      "id": "validate-list-allowed-values-elementwise",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings\": [\n    {\n      \"code\": \"link-target-missing\",\n      \"message\": \"link target not found: bee\",\n      \"path\": \"notes/gamma.md\",\n      \"severity\": \"warning\",\n      \"target\": \"bee\"\n    }\n  ],\n  \"total\": 1\n}\n"
+      },
+      "requires_doc": "shapes/validate-edge/tags-elementwise.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--format",
+        "paths"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-paths-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "broken/no-frontmatter.md\nbroken/parse-fail.md\nnotes/ambi-bare.md\nnotes/bad-parent.md\nnotes/bad-types.md\nnotes/dangling-parent.md\nnotes/dead-end.md\nnotes/gamma.md\nnotes/has-legacy.md\nnotes/into-ignored.md\nnotes/missing-kind.md\nshapes/empty-block.md\nstray-task.md\ntasks/task-bad-status.md\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--summary",
+        "--format",
+        "json",
+        "--severity",
+        "warning"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-severity-summary-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings\": 19,\n  \"codes\": {\n    \"document-misrouted\": 1,\n    \"field-type-invalid\": 3,\n    \"frontmatter-exceeds-max-length\": 1,\n    \"frontmatter-forbidden-field\": 1,\n    \"frontmatter-parse-failed\": 1,\n    \"frontmatter-reference-type\": 1,\n    \"frontmatter-required-field-missing\": 4,\n    \"link-ambiguous\": 1,\n    \"link-target-missing\": 5,\n    \"value-not-allowed\": 1\n  },\n  \"severities\": {\n    \"warning\": 19\n  },\n  \"rules\": {\n    \"no-legacy\": 1,\n    \"task-rule\": 2,\n    \"typed-note\": 6\n  },\n  \"fields\": {\n    \"created\": 1,\n    \"due\": 1,\n    \"kind\": 1,\n    \"legacy\": 1,\n    \"parent\": 1,\n    \"project\": 1,\n    \"status\": 1,\n    \"tags\": 1,\n    \"title\": 3\n  },\n  \"disallowed_values\": {\n    \"status\": {\n      \"legacy\": 1\n    }\n  },\n  \"invalid_types\": {\n    \"created\": {\n      \"datetime\": 1\n    },\n    \"due\": {\n      \"date\": 1\n    },\n    \"tags\": {\n      \"list_of_strings\": 1\n    }\n  },\n  \"path_prefixes\": {\n    \"broken\": 3,\n    \"notes\": 13,\n    \"root\": 1,\n    \"shapes\": 1,\n    \"tasks\": 1\n  }\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--summary",
+        "--format",
+        "json"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "validate-summary-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings\": 0,\n  \"codes\": {},\n  \"severities\": {},\n  \"rules\": {},\n  \"fields\": {},\n  \"disallowed_values\": {},\n  \"invalid_types\": {},\n  \"path_prefixes\": {}\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--summary",
+        "--format",
+        "records"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-summary-records-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "running 7 rules across 35 documents…\n\n  ✓  21 documents pass\n  ⚠  19 warnings\n\n  by code\n    document-misrouted                  ·····································  1\n    field-type-invalid                  ·····································  3\n    frontmatter-exceeds-max-length      ·····································  1\n    frontmatter-forbidden-field         ·····································  1\n    frontmatter-parse-failed            ·····································  1\n    frontmatter-reference-type          ·····································  1\n    frontmatter-required-field-missing  ·····································  4\n    link-ambiguous                      ·····································  1\n    link-target-missing                 ·····································  5\n    value-not-allowed                   ·····································  1\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "validate",
+        "--summary",
+        "--format",
+        "json"
+      ],
+      "command": "validate",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "validate-summary-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"findings\": 19,\n  \"codes\": {\n    \"document-misrouted\": 1,\n    \"field-type-invalid\": 3,\n    \"frontmatter-exceeds-max-length\": 1,\n    \"frontmatter-forbidden-field\": 1,\n    \"frontmatter-parse-failed\": 1,\n    \"frontmatter-reference-type\": 1,\n    \"frontmatter-required-field-missing\": 4,\n    \"link-ambiguous\": 1,\n    \"link-target-missing\": 5,\n    \"value-not-allowed\": 1\n  },\n  \"severities\": {\n    \"warning\": 19\n  },\n  \"rules\": {\n    \"no-legacy\": 1,\n    \"task-rule\": 2,\n    \"typed-note\": 6\n  },\n  \"fields\": {\n    \"created\": 1,\n    \"due\": 1,\n    \"kind\": 1,\n    \"legacy\": 1,\n    \"parent\": 1,\n    \"project\": 1,\n    \"status\": 1,\n    \"tags\": 1,\n    \"title\": 3\n  },\n  \"disallowed_values\": {\n    \"status\": {\n      \"legacy\": 1\n    }\n  },\n  \"invalid_types\": {\n    \"created\": {\n      \"datetime\": 1\n    },\n    \"due\": {\n      \"date\": 1\n    },\n    \"tags\": {\n      \"list_of_strings\": 1\n    }\n  },\n  \"path_prefixes\": {\n    \"broken\": 3,\n    \"notes\": 13,\n    \"root\": 1,\n    \"shapes\": 1,\n    \"tasks\": 1\n  }\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "validate",
+      "volatile_masks": []
+    }
+  ],
+  "command": "validate",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

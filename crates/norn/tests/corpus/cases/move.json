@@ -1,0 +1,396 @@
+{
+  "case_count": 8,
+  "cases": [
+    {
+      "argv": [
+        "move",
+        "cycle-b",
+        "notes/moved-b.md",
+        "--yes"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-move-apply-cascade-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ moved cycle-b → notes/moved-b.md\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+            "kind": "file",
+            "path": "notes/moved-b.md"
+          }
+        ],
+        "modified": [
+          {
+            "content": "---\ntitle: Cycle A\n---\n\nPoints to [[moved-b]].\n",
+            "kind": "file",
+            "path": "notes/cycle-a.md"
+          }
+        ],
+        "removed": [
+          "notes/cycle-b.md"
+        ]
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "cycle-b",
+        "notes/moved-b.md",
+        "--dry-run"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-move-dry-run-forecast-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "norn move cycle-b → notes/moved-b.md\n  1 backlink to rewrite across 1 file\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "move",
+        "cycle-b",
+        "notes/moved-b.md",
+        "--dry-run",
+        "--format",
+        "json"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-move-dry-run-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "plan-hash"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"not-run\",\n      \"path\": \"notes/moved-b.md\",\n      \"stem\": \"moved-b\",\n      \"summary\": \"would move notes/cycle-b.md → notes/moved-b.md\",\n      \"cascade\": {\n        \"planned\": 1,\n        \"applied\": 1,\n        \"skipped\": 0,\n        \"failed\": 0,\n        \"files\": 1\n      }\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "no-such-doc-xyzzy",
+        "notes/dest.md",
+        "--format",
+        "json"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-move-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"no document matched path or stem: no-such-doc-xyzzy\",\n      \"error\": {\n        \"code\": \"target-not-found\",\n        \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "fence-target",
+        "wl/fence-moved.md",
+        "--yes"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-move-code-fence-shadow-diverge",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ moved fence-target → wl/fence-moved.md\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Fence Target\n---\n\nFence target body.\n",
+            "kind": "file",
+            "path": "wl/fence-moved.md"
+          }
+        ],
+        "modified": [
+          {
+            "content": "---\ntitle: Fence Src\n---\n\n```\n[[fence-target]]\n```\n\nReal prose [[fence-moved]] link.\n",
+            "kind": "file",
+            "path": "wl/fence-src.md"
+          }
+        ],
+        "removed": [
+          "wl/fence-target.md"
+        ]
+      },
+      "requires_doc": "wl/fence-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "embed-target",
+        "wl/embed-moved.md",
+        "--yes"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-move-embed-backlink-diverge",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ moved embed-target → wl/embed-moved.md\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Embed Target\n---\n\nEmbed target body.\n",
+            "kind": "file",
+            "path": "wl/embed-moved.md"
+          }
+        ],
+        "modified": [
+          {
+            "content": "---\ntitle: Embed Src\n---\n\nSee ![[embed-moved|Display]] here.\n",
+            "kind": "file",
+            "path": "wl/embed-src.md"
+          }
+        ],
+        "removed": [
+          "wl/embed-target.md"
+        ]
+      },
+      "requires_doc": "wl/embed-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "spaced-target",
+        "wl/spaced-moved.md",
+        "--yes"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-move-spaced-alias-diverge",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ moved spaced-target → wl/spaced-moved.md\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Spaced Target\n---\n\nSpaced target body.\n",
+            "kind": "file",
+            "path": "wl/spaced-moved.md"
+          }
+        ],
+        "modified": [
+          {
+            "content": "---\ntitle: Spaced Alias Src\n---\n\nSee [[spaced-moved|Display Name]] here.\n",
+            "kind": "file",
+            "path": "wl/spaced-alias-src.md"
+          }
+        ],
+        "removed": [
+          "wl/spaced-target.md"
+        ]
+      },
+      "requires_doc": "wl/spaced-alias-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "move",
+        "unrepr-target",
+        "wl/a|b.md",
+        "--yes"
+      ],
+      "command": "move",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-move-unrepresentable-skip-diverge",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ moved unrepr-target → wl/a|b.md\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Unrepr Target\n---\n\nUnrepresentable-rename target body.\n",
+            "kind": "file",
+            "path": "wl/a|b.md"
+          }
+        ],
+        "modified": [],
+        "removed": [
+          "wl/unrepr-target.md"
+        ]
+      },
+      "requires_doc": "wl/unrepr-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    }
+  ],
+  "command": "move",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

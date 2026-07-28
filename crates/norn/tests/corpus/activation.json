@@ -1,0 +1,38 @@
+{
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  },
+  "note": "The gate. A command's recorded cases run when its name appears in `activated`, and not otherwise; adding a name is an approval act that judges whether the recorded output is good. The `unseeded` commands carry no behavior at the pin and have no activation path at all \u2014 their disposition belongs to the verb charter. See docs/decisions/0001-corpus-activation-gate.md.",
+  "activated": [],
+  "activatable": [
+    "apply",
+    "count",
+    "delete",
+    "describe",
+    "edit",
+    "find",
+    "get",
+    "mcp",
+    "move",
+    "new",
+    "repair",
+    "rewrite-wikilink",
+    "set",
+    "top-level",
+    "validate"
+  ],
+  "unseeded": [
+    "audit",
+    "cache",
+    "completions",
+    "config",
+    "init",
+    "manpage",
+    "self-update",
+    "serve",
+    "service"
+  ],
+  "case_total": 158
+}

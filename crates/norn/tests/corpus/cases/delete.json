@@ -1,0 +1,180 @@
+{
+  "case_count": 4,
+  "cases": [
+    {
+      "argv": [
+        "delete",
+        "duplicate"
+      ],
+      "command": "delete",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-delete-ambiguous-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: ambiguous document stem: duplicate; candidates: archive2/duplicate.md, notes/duplicate.md\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/duplicate.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "delete",
+        "cycle-b"
+      ],
+      "command": "delete",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-delete-backlinks-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: document has 1 incoming link(s); pass --allow-broken-links to accept, or --rewrite-to <ALT_DOC> to redirect\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "delete",
+        "cycle-b",
+        "--rewrite-to",
+        "cycle-c",
+        "--yes"
+      ],
+      "command": "delete",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "mutate-delete-rewrite-to-apply-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ deleted cycle-b (incoming links redirected to notes/cycle-c.md)\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-c]].\n",
+            "kind": "file",
+            "path": "notes/cycle-a.md"
+          }
+        ],
+        "removed": [
+          "notes/cycle-b.md"
+        ]
+      },
+      "requires_doc": "notes/cycle-b.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "delete",
+        "embed-target",
+        "--rewrite-to",
+        "redirect-target",
+        "--yes"
+      ],
+      "command": "delete",
+      "fixture": {
+        "profile": "wikilink-edge",
+        "seed": 1
+      },
+      "id": "wl-delete-embed-backlink-diverge",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "✓ deleted embed-target (incoming links redirected to wl/redirect-target.md)\n✓ rewrote 1 backlink across 1 file\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [
+          {
+            "content": "---\ntitle: Embed Src\n---\n\nSee ![[redirect-target|Display]] here.\n",
+            "kind": "file",
+            "path": "wl/embed-src.md"
+          }
+        ],
+        "removed": [
+          "wl/embed-target.md"
+        ]
+      },
+      "requires_doc": "wl/embed-src.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "mutate",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    }
+  ],
+  "command": "delete",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

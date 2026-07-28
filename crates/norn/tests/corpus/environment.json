@@ -1,0 +1,41 @@
+{
+  "clear_environment": true,
+  "cwd": "the materialized fixture vault (no path flag in argv)",
+  "description": "The environment every recorded case ran under. The caller's environment is cleared and rebuilt from this allowlist so nothing the host carries can reach a case.",
+  "notes": [
+    "Recorded output is verbatim except for the placeholders above. Each is a property of the machine or the moment rather than of the invocation, so recording its literal value would pin a number that can never reproduce. Every case names the placeholders that fired on it in its own `volatile_masks` field.",
+    "The locale is pinned rather than forwarded: glyph selection reads LC_ALL -> LC_CTYPE -> LANG, so a forwarded host locale makes the recorded glyph set a property of the recording machine.",
+    "HOME and the XDG bases point into a scratch tree owned by the run, so any registry, cache, config, socket or log a binary creates for itself is created fresh and discarded with the run.",
+    "XDG_RUNTIME_DIR is a short temp dir: it holds an AF_UNIX socket path, and a long base overruns sun_path.",
+    "A read case shares one materialized vault per fixture; a mutating case gets a fresh vault of its own so its writes reach no other case."
+  ],
+  "passthrough": [
+    "PATH",
+    "TMPDIR"
+  ],
+  "placeholders": {
+    "<PLAN_HASH>": "a plan hash computed over the absolute vault root, so it tracks the temporary directory",
+    "<TIMESTAMP>": "a wall-clock stamp",
+    "<TRACE_ID>": "a telemetry id minted per invocation",
+    "<VAULT>": "the absolute path of the materialized fixture vault, in every spelling the platform reports"
+  },
+  "removed": [
+    "LANG",
+    "LC_CTYPE",
+    "NORN_ROOT",
+    "NORN_CONFIG_DIR"
+  ],
+  "set": {
+    "HOME": "<scratch>/scratch-home",
+    "LC_ALL": "C.UTF-8",
+    "NORN_EPHEMERAL_TTL_SECS": "5",
+    "XDG_CACHE_HOME": "<scratch>/scratch-cache",
+    "XDG_CONFIG_HOME": "<scratch>/scratch-config",
+    "XDG_RUNTIME_DIR": "<short-temp-dir>"
+  },
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

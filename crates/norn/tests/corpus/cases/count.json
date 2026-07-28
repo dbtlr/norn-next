@@ -1,0 +1,191 @@
+{
+  "case_count": 6,
+  "cases": [
+    {
+      "argv": [
+        "count",
+        "--help"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 2
+      },
+      "id": "help-count",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Count documents in the vault — grouped or total — with the find filter surface\n\nUSAGE\n    norn count [OPTIONS]\n\nCOUNT OPTIONS\n        --by <FIELD1,FIELD2,...>\n        Frontmatter field(s) to group document counts by, comma-separated. One field emits a flat distribution; several nest in order (e.g. --by project,lifecycle). Without --by, emits only the total\n\nFILTER OPTIONS\n        --text <NEEDLE>\n        Full-text body substring. Case-insensitive. Empty string is a no-op\n\n        --eq <FIELD:VALUE>\n        Frontmatter equality predicate `field:value`. JSON-typed. An unknown `--field value` filters as `--eq field:value` for fields this vault knows\n\n        --not-eq <FIELD:VALUE>\n        Frontmatter `field` is NOT equal to `value`\n\n        --in <FIELD:V1,V2,...>\n        Frontmatter `field` is one of the comma-separated values (ANY-of)\n\n        --not-in <FIELD:V1,V2,...>\n        Frontmatter `field` is NOT one of the comma-separated values\n\n        --starts-with <FIELD:VALUE>\n        Frontmatter `field` (or any array element) starts with `VALUE`. Case-sensitive\n\n        --ends-with <FIELD:VALUE>\n        Frontmatter `field` (or any array element) ends with `VALUE`. Case-sensitive\n\n        --contains <FIELD:VALUE>\n        Frontmatter `field` (or any array element) contains `VALUE`. Case-sensitive\n\n        --has <FIELD>\n        Frontmatter `field` is present (non-null)\n\n        --missing <FIELD>\n        Frontmatter `field` is absent or null\n\n        --before <FIELD:DATE>\n        Frontmatter `field` (a date) is before `DATE`. ISO 8601 expected\n\n        --after <FIELD:DATE>\n        Frontmatter `field` (a date) is after `DATE`\n\n        --on <FIELD:DATE>\n        Frontmatter `field` (a date) is exactly `DATE`. Accepts `today`\n\n        --path <GLOB>\n        Path glob pattern\n\n        --links-to <TARGET>\n        Documents whose outgoing links resolve to TARGET (path, stem, or `[[wikilink]]`). Repeatable; multiple targets are AND'd. Resolved-only — TARGET must resolve to an existing document\n\n        --unresolved-links\n        Documents with at least one unresolved link\n        Possible values: true, false\n\nOUTPUT\n        --format <FORMAT>\n        Output format. Default records (records-block)\n        Possible values: records, json\n\nEXAMPLES\n    norn count\n        # total document count in the vault\n\n    norn count --eq type:note --by status\n        # notes only, grouped by status\n\n    norn count --path 'Workspaces/**/tasks/*.md' --by status\n        # one project's tasks, grouped by status\n\nGLOBAL OPTIONS\n    -C, --cwd <CWD>         Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)\n        --verbose           Include full diagnostic detail in output\n        --no-cache-refresh  Skip the implicit cache refresh before reading the graph\n        --color <COLOR>     Color output. Honors NO_COLOR / CLICOLOR_FORCE.\n        --vault <NAME>      Target the registered vault with this name (see `norn vault register`)\n\nDocumentation: https://github.com/dbtlr/norn\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "help",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "count",
+        "--by",
+        "type,status",
+        "--format",
+        "json"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-count-by-multi-json-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"by\":[\"type\",\"status\"],\"total\":82,\"groups\":{\"(missing)\":{\"(missing)\":29},\"note\":{\"(missing)\":21},\"phase\":{\"active\":8,\"backlog\":2,\"done\":4},\"task\":{\"active\":4,\"backlog\":9,\"done\":5}}}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "count",
+        "--by",
+        "status"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-count-by-status-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "total      82\n\nstatus     count\n(missing)  50\nactive     12\nbacklog    11\ndone       9\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "count"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-count-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "total      82\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "count",
+        "--eq",
+        "type:note"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-count-eq-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "total      11\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "count",
+        "--group-by",
+        "status"
+      ],
+      "command": "count",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-count-group-by-alias-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "total      82\n\nstatus     count\n(missing)  50\nactive     12\nbacklog    11\ndone       9\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    }
+  ],
+  "command": "count",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

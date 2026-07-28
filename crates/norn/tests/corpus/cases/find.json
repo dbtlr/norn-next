@@ -1,0 +1,1032 @@
+{
+  "case_count": 31,
+  "cases": [
+    {
+      "argv": [
+        "find",
+        "--all",
+        "--col",
+        ".headngs",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-col-facet-did-you-mean-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "warning: unknown --col facet '.headngs' — did you mean '.headings'? (valid facets: .path, .stem, .frontmatter, .headings, .outgoing_links, .unresolved_links, .incoming_links, .body, .document_hash; bare names select frontmatter fields)\n",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"path\": \"Wide Open Spaces.md\"\n    },\n    {\n      \"path\": \"archive2/duplicate.md\"\n    },\n    {\n      \"path\": \"broken/no-frontmatter.md\"\n    },\n    {\n      \"path\": \"broken/parse-fail.md\"\n    },\n    {\n      \"path\": \"drafts/a/draft-note.md\"\n    },\n    {\n      \"path\": \"index.md\"\n    },\n    {\n      \"path\": \"logs/2025-01-15.md\"\n    },\n    {\n      \"path\": \"logs/scratch/rough.md\"\n    },\n    {\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"path\": \"notes/ambi-bare.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 35\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--links-to",
+        "zzz-nonexistent-target",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-links-to-unresolvable-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: no document matched path or stem: zzz-nonexistent-target\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--all",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "bad-config",
+        "seed": 1
+      },
+      "id": "err-malformed-config",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: invalid config <VAULT>/.norn/config.yaml: unknown field `not_a_real_section`, expected one of `version`, `files`, `links`, `validate`, `repair`, `templates`, `cache`, `inbox`, `index`, `graph`\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "-C",
+        "no-such-vault-root-nrn414",
+        "--all",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-missing-vault-root-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: vault root does not exist: <VAULT>/no-such-vault-root-nrn414 (from -C)\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--all",
+        "--sort",
+        "path",
+        "--limit",
+        "5",
+        "--limit",
+        "1",
+        "--format",
+        "paths"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-repeated-limit-last-wins-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "note: showing 1 of 35 (--no-limit for all)\n",
+        "stdout": "Wide Open Spaces.md\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--titel",
+        "foo",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 3
+      },
+      "id": "err-unknown-dynamic-field-did-you-mean-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: unknown field `titel`\nhint: did you mean `title`?\nhint: filter a known field with `--eq titel:value`; a dynamic `--titel value` predicate only works for a field this vault knows\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "errors",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--help"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 2
+      },
+      "id": "help-find",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Find documents in the vault — full-text + metadata filters with sort/limit/paging\n\nUSAGE\n    norn find [OPTIONS]\n\nFILTER OPTIONS\n        --text <NEEDLE>\n        Full-text body substring. Case-insensitive. Empty string is a no-op\n\n        --eq <FIELD:VALUE>\n        Frontmatter equality predicate `field:value`. JSON-typed. An unknown `--field value` filters as `--eq field:value` for fields this vault knows\n\n        --not-eq <FIELD:VALUE>\n        Frontmatter `field` is NOT equal to `value`\n\n        --in <FIELD:V1,V2,...>\n        Frontmatter `field` is one of the comma-separated values (ANY-of)\n\n        --not-in <FIELD:V1,V2,...>\n        Frontmatter `field` is NOT one of the comma-separated values\n\n        --starts-with <FIELD:VALUE>\n        Frontmatter `field` (or any array element) starts with `VALUE`. Case-sensitive\n\n        --ends-with <FIELD:VALUE>\n        Frontmatter `field` (or any array element) ends with `VALUE`. Case-sensitive\n\n        --contains <FIELD:VALUE>\n        Frontmatter `field` (or any array element) contains `VALUE`. Case-sensitive\n\n        --has <FIELD>\n        Frontmatter `field` is present (non-null)\n\n        --missing <FIELD>\n        Frontmatter `field` is absent or null\n\n        --before <FIELD:DATE>\n        Frontmatter `field` (a date) is before `DATE`. ISO 8601 expected\n\n        --after <FIELD:DATE>\n        Frontmatter `field` (a date) is after `DATE`\n\n        --on <FIELD:DATE>\n        Frontmatter `field` (a date) is exactly `DATE`. Accepts `today`\n\n        --path <GLOB>\n        Path glob pattern\n\n        --links-to <TARGET>\n        Documents whose outgoing links resolve to TARGET (path, stem, or `[[wikilink]]`). Repeatable; multiple targets are AND'd. Resolved-only — TARGET must resolve to an existing document\n\n        --unresolved-links\n        Documents with at least one unresolved link\n        Possible values: true, false\n\n        --all\n        Return every document — escape hatch when no predicate is specified. Without --all and without any predicate, `norn find` prints its help page (a full-vault dump is almost always a mistake; require opt-in)\n        Possible values: true, false\n\nSORT AND PAGING\n        --sort <FIELD>\n        Sort by field (frontmatter key, `path`, or `stem`). Ascending by default\n\n        --desc\n        Sort descending (only meaningful with --sort)\n        Possible values: true, false\n\n        --limit <N>\n        Maximum number of records to return. `find` defaults to 10; `get` returns every named target\n\n        --no-limit\n        Return all records; no limit. Competes with `--limit`; the last of the two given wins\n        Possible values: true, false\n\n        --starts-at <N>\n        Zero-indexed starting offset for paging. Default 0\n\nOUTPUT\n        --format <FORMAT>\n        Output format. Default auto-detects: TTY → records, piped → paths\n        Possible values: paths, records, json, jsonl\n\n        --all-cols\n        Emit the full structured dump for each match: whole frontmatter plus every cache-served facet (`.headings`, the three link sets, `.body`). Competes with `--col` over the projection; the last of the two given wins\n        Possible values: true, false\n\n        --col <COL1,COL2,...>\n        Comma-separated columns to include. Bare names select frontmatter fields (e.g. `status,title`), exactly like `norn get`. Structural facets are dot-prefixed: `.path`, `.stem`, `.frontmatter` (the whole block), `.headings`, `.outgoing_links`, `.unresolved_links`, `.incoming_links`, `.body`, `.document_hash` (the content hash `edit --expected-hash` wants; opt-in only — never in `--all-cols`). Default (no --col): frontmatter only. Ignored with a warning on paths format\n\n        --no-pager\n        Skip the pager even when stdout is a TTY\n        Possible values: true, false\n\nEXAMPLES\n    norn find --eq type:note --limit 5\n        # 5 notes; default sort\n\n    norn find --text reorg --format paths\n        # full-text search; pipe-friendly paths\n\n    norn find --has aliases --col title,aliases\n        # docs that declare aliases\n\n    norn find --in type:note,log --sort modified --desc\n        # two types, newest first\n\n    norn find --eq type:task --links-to norn --format paths\n        # tasks that link to a doc; pipe-friendly paths\n\nGLOBAL OPTIONS\n    -C, --cwd <CWD>         Run as if norn started in this directory (default: $NORN_ROOT, else the current directory)\n        --verbose           Include full diagnostic detail in output\n        --no-cache-refresh  Skip the implicit cache refresh before reading the graph\n        --color <COLOR>     Color output. Honors NO_COLOR / CLICOLOR_FORCE.\n        --vault <NAME>      Target the registered vault with this name (see `norn vault register`)\n\nDocumentation: https://github.com/dbtlr/norn\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "help",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--all-cols",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-all-cols-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"body\": \"\\n# Alpha\\n\\nAn introductory paragraph for the alpha fixture document.\\n\\n## Section One\\n\\nContent belonging to section one.\\n\\n## Section Two\\n\\nContent belonging to section two.\\n\\n## Section Three\\n\\nContent belonging to section three.\\n\",\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"headings\": [\n        {\n          \"level\": 1,\n          \"slug\": \"alpha\",\n          \"source_span\": {\n            \"byte_offset\": 294,\n            \"column\": 1,\n            \"line\": 17\n          },\n          \"text\": \"Alpha\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-one\",\n          \"source_span\": {\n            \"byte_offset\": 362,\n            \"column\": 1,\n            \"line\": 21\n          },\n          \"text\": \"Section One\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-two\",\n          \"source_span\": {\n            \"byte_offset\": 413,\n            \"column\": 1,\n            \"line\": 25\n          },\n          \"text\": \"Section Two\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-three\",\n          \"source_span\": {\n            \"byte_offset\": 464,\n            \"column\": 1,\n            \"line\": 29\n          },\n          \"text\": \"Section Three\"\n        }\n      ],\n      \"incoming_links\": [\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"index.md\",\n            \"source_span\": {\n              \"byte_offset\": 58,\n              \"column\": 3,\n              \"line\": 9\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"index.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"frontmatter\",\n              \"property\": \"parent\"\n            },\n            \"source_path\": \"notes/bad-parent.md\",\n            \"source_span\": {\n              \"byte_offset\": 53,\n              \"column\": 10,\n              \"line\": 5\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/bad-parent.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 114,\n              \"column\": 9,\n              \"line\": 12\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[notes/alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 142,\n              \"column\": 19,\n              \"line\": 13\n            },\n            \"status\": \"resolved\",\n            \"target\": \"notes/alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"label\": \"the first note\",\n            \"raw\": \"[[alpha|the first note]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 169,\n              \"column\": 12,\n              \"line\": 14\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"anchor\": \"Section One\",\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha#Section One]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 212,\n              \"column\": 19,\n              \"line\": 15\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"markdown\",\n            \"raw\": \"alpha.md\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 255,\n              \"column\": 22,\n              \"line\": 16\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha.md\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        }\n      ],\n      \"outgoing_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[phase-one]]\",\n          \"resolved_path\": \"phases/phase-one.md\",\n          \"source_context\": {\n            \"area\": \"frontmatter\",\n            \"property\": \"parent\"\n          },\n          \"source_path\": \"notes/alpha.md\",\n          \"source_span\": {\n            \"byte_offset\": 146,\n            \"column\": 10,\n            \"line\": 9\n          },\n          \"status\": \"resolved\",\n          \"target\": \"phase-one\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[beta]]\",\n          \"resolved_path\": \"notes/beta.md\",\n          \"source_context\": {\n            \"area\": \"frontmatter\",\n            \"property\": \"related\"\n          },\n          \"source_path\": \"notes/alpha.md\",\n          \"source_span\": {\n            \"byte_offset\": 171,\n            \"column\": 11,\n            \"line\": 10\n          },\n          \"status\": \"resolved\",\n          \"target\": \"beta\"\n        }\n      ],\n      \"path\": \"notes/alpha.md\",\n      \"unresolved_links\": []\n    },\n    {\n      \"body\": \"\\nBare, ambiguous: [[duplicate]].\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/ambi-bare.md\",\n      \"unresolved_links\": [\n        {\n          \"candidates\": [\n            \"archive2/duplicate.md\",\n            \"notes/duplicate.md\"\n          ],\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[duplicate]]\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/ambi-bare.md\",\n          \"source_span\": {\n            \"byte_offset\": 65,\n            \"column\": 18,\n            \"line\": 7\n          },\n          \"status\": \"ambiguous\",\n          \"target\": \"duplicate\",\n          \"unresolved_reason\": \"ambiguous\"\n        }\n      ]\n    },\n    {\n      \"body\": \"\\n`parent` resolves to a note, not a phase — frontmatter-reference-type.\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[alpha]]\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"frontmatter\",\n            \"property\": \"parent\"\n          },\n          \"source_path\": \"notes/bad-parent.md\",\n          \"source_span\": {\n            \"byte_offset\": 53,\n            \"column\": 10,\n            \"line\": 5\n          },\n          \"status\": \"resolved\",\n          \"target\": \"alpha\"\n        }\n      ],\n      \"path\": \"notes/bad-parent.md\",\n      \"unresolved_links\": []\n    },\n    {\n      \"body\": \"\\nSeveral field-type-invalid findings plus one frontmatter-exceeds-max-length.\\n\",\n      \"frontmatter\": {\n        \"created\": \"not-a-date\",\n        \"due\": \"2025-13-45\",\n        \"kind\": \"note\",\n        \"project\": \"this-is-a-very-long-project-name-that-exceeds-the-limit\",\n        \"tags\": [\n          \"ok\",\n          7\n        ],\n        \"title\": \"Bad Types\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/bad-types.md\",\n      \"unresolved_links\": []\n    },\n    {\n      \"body\": \"\\n# Beta\\n\\nEvery link shape, exercised once each:\\n\\n- Stem: [[alpha]]\\n- Path-qualified: [[notes/alpha]]\\n- Aliased: [[alpha|the first note]]\\n- Heading anchor: [[alpha#Section One]]\\n- Markdown relative: [alpha](alpha.md)\\n- Attachment embed: ![pic](../Assets/pic.png)\\n\",\n      \"frontmatter\": {\n        \"aliases\": [\n          \"bee\"\n        ],\n        \"kind\": \"note\",\n        \"title\": \"Beta\",\n        \"type\": \"note\"\n      },\n      \"headings\": [\n        {\n          \"level\": 1,\n          \"slug\": \"beta\",\n          \"source_span\": {\n            \"byte_offset\": 58,\n            \"column\": 1,\n            \"line\": 8\n          },\n          \"text\": \"Beta\"\n        }\n      ],\n      \"incoming_links\": [\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[beta]]\",\n            \"resolved_path\": \"notes/beta.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"index.md\",\n            \"source_span\": {\n              \"byte_offset\": 70,\n              \"column\": 3,\n              \"line\": 10\n            },\n            \"status\": \"resolved\",\n            \"target\": \"beta\"\n          },\n          \"source_path\": \"index.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[beta]]\",\n            \"resolved_path\": \"notes/beta.md\",\n            \"source_context\": {\n              \"area\": \"frontmatter\",\n              \"property\": \"related\"\n            },\n            \"source_path\": \"notes/alpha.md\",\n            \"source_span\": {\n              \"byte_offset\": 171,\n              \"column\": 11,\n              \"line\": 10\n            },\n            \"status\": \"resolved\",\n            \"target\": \"beta\"\n          },\n          \"source_path\": \"notes/alpha.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[beta]]\",\n            \"resolved_path\": \"notes/beta.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/gamma.md\",\n            \"source_span\": {\n              \"byte_offset\": 62,\n              \"column\": 19,\n              \"line\": 7\n            },\n            \"status\": \"resolved\",\n            \"target\": \"beta\"\n          },\n          \"source_path\": \"notes/gamma.md\"\n        }\n      ],\n      \"outgoing_links\": [\n        {\n          \"kind\": \"markdown\",\n          \"raw\": \"alpha.md\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 255,\n            \"column\": 22,\n            \"line\": 16\n          },\n          \"status\": \"resolved\",\n          \"target\": \"alpha.md\"\n        },\n        {\n          \"kind\": \"embed\",\n          \"raw\": \"../Assets/pic.png\",\n          \"resolved_path\": \"Assets/pic.png\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 293,\n            \"column\": 21,\n            \"line\": 17\n          },\n          \"status\": \"resolved\",\n          \"target\": \"../Assets/pic.png\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[alpha]]\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 114,\n            \"column\": 9,\n            \"line\": 12\n          },\n          \"status\": \"resolved\",\n          \"target\": \"alpha\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[notes/alpha]]\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 142,\n            \"column\": 19,\n            \"line\": 13\n          },\n          \"status\": \"resolved\",\n          \"target\": \"notes/alpha\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"label\": \"the first note\",\n          \"raw\": \"[[alpha|the first note]]\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 169,\n            \"column\": 12,\n            \"line\": 14\n          },\n          \"status\": \"resolved\",\n          \"target\": \"alpha\"\n        },\n        {\n          \"anchor\": \"Section One\",\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[alpha#Section One]]\",\n          \"resolved_path\": \"notes/alpha.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/beta.md\",\n          \"source_span\": {\n            \"byte_offset\": 212,\n            \"column\": 19,\n            \"line\": 15\n          },\n          \"status\": \"resolved\",\n          \"target\": \"alpha\"\n        }\n      ],\n      \"path\": \"notes/beta.md\",\n      \"unresolved_links\": []\n    },\n    {\n      \"body\": \"\\n`parent` does not resolve at all — stays a link-* finding, not reference-type.\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[missing-phase]]\",\n        \"title\": \"Dangling Parent\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/dangling-parent.md\",\n      \"unresolved_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[missing-phase]]\",\n          \"source_context\": {\n            \"area\": \"frontmatter\",\n            \"property\": \"parent\"\n          },\n          \"source_path\": \"notes/dangling-parent.md\",\n          \"source_span\": {\n            \"byte_offset\": 58,\n            \"column\": 10,\n            \"line\": 5\n          },\n          \"status\": \"unresolved\",\n          \"target\": \"missing-phase\",\n          \"unresolved_reason\": \"target-missing\"\n        }\n      ]\n    },\n    {\n      \"body\": \"\\nBroken links: [[does-not-exist]] and [missing](nope.md).\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Dead End\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/dead-end.md\",\n      \"unresolved_links\": [\n        {\n          \"kind\": \"markdown\",\n          \"raw\": \"nope.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/dead-end.md\",\n          \"source_span\": {\n            \"byte_offset\": 84,\n            \"column\": 38,\n            \"line\": 7\n          },\n          \"status\": \"unresolved\",\n          \"target\": \"nope.md\",\n          \"unresolved_reason\": \"target-missing\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[does-not-exist]]\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/dead-end.md\",\n          \"source_span\": {\n            \"byte_offset\": 61,\n            \"column\": 15,\n            \"line\": 7\n          },\n          \"status\": \"unresolved\",\n          \"target\": \"does-not-exist\",\n          \"unresolved_reason\": \"target-missing\"\n        }\n      ]\n    },\n    {\n      \"body\": \"\\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Gamma\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[gamma]]\",\n            \"resolved_path\": \"notes/gamma.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"index.md\",\n            \"source_span\": {\n              \"byte_offset\": 81,\n              \"column\": 3,\n              \"line\": 11\n            },\n            \"status\": \"resolved\",\n            \"target\": \"gamma\"\n          },\n          \"source_path\": \"index.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[gamma]]\",\n            \"resolved_path\": \"notes/gamma.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/gamma.md\",\n            \"source_span\": {\n              \"byte_offset\": 113,\n              \"column\": 70,\n              \"line\": 7\n            },\n            \"status\": \"resolved\",\n            \"target\": \"gamma\"\n          },\n          \"source_path\": \"notes/gamma.md\"\n        }\n      ],\n      \"outgoing_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[beta]]\",\n          \"resolved_path\": \"notes/beta.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/gamma.md\",\n          \"source_span\": {\n            \"byte_offset\": 62,\n            \"column\": 19,\n            \"line\": 7\n          },\n          \"status\": \"resolved\",\n          \"target\": \"beta\"\n        },\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[gamma]]\",\n          \"resolved_path\": \"notes/gamma.md\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/gamma.md\",\n          \"source_span\": {\n            \"byte_offset\": 113,\n            \"column\": 70,\n            \"line\": 7\n          },\n          \"status\": \"resolved\",\n          \"target\": \"gamma\"\n        }\n      ],\n      \"path\": \"notes/gamma.md\",\n      \"unresolved_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[bee]]\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/gamma.md\",\n          \"source_span\": {\n            \"byte_offset\": 75,\n            \"column\": 32,\n            \"line\": 7\n          },\n          \"status\": \"unresolved\",\n          \"target\": \"bee\",\n          \"unresolved_reason\": \"target-missing\"\n        }\n      ]\n    },\n    {\n      \"body\": \"\\nLinks into a files.ignore'd target: [[hidden-away]].\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Into Ignored\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/into-ignored.md\",\n      \"unresolved_links\": [\n        {\n          \"kind\": \"wikilink\",\n          \"raw\": \"[[hidden-away]]\",\n          \"source_context\": {\n            \"area\": \"body\"\n          },\n          \"source_path\": \"notes/into-ignored.md\",\n          \"source_span\": {\n            \"byte_offset\": 87,\n            \"column\": 37,\n            \"line\": 7\n          },\n          \"status\": \"unresolved\",\n          \"target\": \"hidden-away\",\n          \"unresolved_reason\": \"target-missing\"\n        }\n      ]\n    },\n    {\n      \"body\": \"\\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\\n\",\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"legacy\": true,\n        \"title\": \"Kept\",\n        \"type\": \"note\"\n      },\n      \"headings\": [],\n      \"incoming_links\": [],\n      \"outgoing_links\": [],\n      \"path\": \"notes/keep/kept.md\",\n      \"unresolved_links\": []\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--before",
+        "created:yesterday",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-find-bad-date-value-refuses-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: invalid --before date value 'yesterday': expected `today`, an ISO 8601 date (YYYY-MM-DD), or an ISO 8601 datetime\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--col",
+        ".headings",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-col-headings-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"headings\": [\n        {\n          \"level\": 1,\n          \"slug\": \"alpha\",\n          \"source_span\": {\n            \"byte_offset\": 294,\n            \"column\": 1,\n            \"line\": 17\n          },\n          \"text\": \"Alpha\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-one\",\n          \"source_span\": {\n            \"byte_offset\": 362,\n            \"column\": 1,\n            \"line\": 21\n          },\n          \"text\": \"Section One\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-two\",\n          \"source_span\": {\n            \"byte_offset\": 413,\n            \"column\": 1,\n            \"line\": 25\n          },\n          \"text\": \"Section Two\"\n        },\n        {\n          \"level\": 2,\n          \"slug\": \"section-three\",\n          \"source_span\": {\n            \"byte_offset\": 464,\n            \"column\": 1,\n            \"line\": 29\n          },\n          \"text\": \"Section Three\"\n        }\n      ],\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/bad-parent.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/bad-types.md\"\n    },\n    {\n      \"headings\": [\n        {\n          \"level\": 1,\n          \"slug\": \"beta\",\n          \"source_span\": {\n            \"byte_offset\": 58,\n            \"column\": 1,\n            \"line\": 8\n          },\n          \"text\": \"Beta\"\n        }\n      ],\n      \"path\": \"notes/beta.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/dangling-parent.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/dead-end.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/gamma.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/into-ignored.md\"\n    },\n    {\n      \"headings\": [],\n      \"path\": \"notes/keep/kept.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--col",
+        ".headings",
+        "--format",
+        "records"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-col-headings-records-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "11 documents · showing 1–10\n\nnotes/alpha.md\n  headings  # Alpha ## Section One ## Section Two ## Section Three\n────────────────────────────────────────────────────────────\nnotes/ambi-bare.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/bad-parent.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/bad-types.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/beta.md\n  headings  # Beta\n────────────────────────────────────────────────────────────\nnotes/dangling-parent.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/dead-end.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/gamma.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/into-ignored.md\n  (no matching fields)\n────────────────────────────────────────────────────────────\nnotes/keep/kept.md\n  (no matching fields)\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--col",
+        ".incoming_links",
+        "--format",
+        "json",
+        "--all"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-col-incoming-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"incoming_links\": [\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[Wide Open Spaces]]\",\n            \"resolved_path\": \"Wide Open Spaces.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"index.md\",\n            \"source_span\": {\n              \"byte_offset\": 157,\n              \"column\": 3,\n              \"line\": 16\n            },\n            \"status\": \"resolved\",\n            \"target\": \"Wide Open Spaces\"\n          },\n          \"source_path\": \"index.md\"\n        }\n      ],\n      \"path\": \"Wide Open Spaces.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"archive2/duplicate.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"broken/no-frontmatter.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"broken/parse-fail.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"drafts/a/draft-note.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"index.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"logs/2025-01-15.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"logs/scratch/rough.md\"\n    },\n    {\n      \"incoming_links\": [\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"index.md\",\n            \"source_span\": {\n              \"byte_offset\": 58,\n              \"column\": 3,\n              \"line\": 9\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"index.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"frontmatter\",\n              \"property\": \"parent\"\n            },\n            \"source_path\": \"notes/bad-parent.md\",\n            \"source_span\": {\n              \"byte_offset\": 53,\n              \"column\": 10,\n              \"line\": 5\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/bad-parent.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 114,\n              \"column\": 9,\n              \"line\": 12\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[notes/alpha]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 142,\n              \"column\": 19,\n              \"line\": 13\n            },\n            \"status\": \"resolved\",\n            \"target\": \"notes/alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"wikilink\",\n            \"label\": \"the first note\",\n            \"raw\": \"[[alpha|the first note]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 169,\n              \"column\": 12,\n              \"line\": 14\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"anchor\": \"Section One\",\n            \"kind\": \"wikilink\",\n            \"raw\": \"[[alpha#Section One]]\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 212,\n              \"column\": 19,\n              \"line\": 15\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        },\n        {\n          \"link\": {\n            \"kind\": \"markdown\",\n            \"raw\": \"alpha.md\",\n            \"resolved_path\": \"notes/alpha.md\",\n            \"source_context\": {\n              \"area\": \"body\"\n            },\n            \"source_path\": \"notes/beta.md\",\n            \"source_span\": {\n              \"byte_offset\": 255,\n              \"column\": 22,\n              \"line\": 16\n            },\n            \"status\": \"resolved\",\n            \"target\": \"alpha.md\"\n          },\n          \"source_path\": \"notes/beta.md\"\n        }\n      ],\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"incoming_links\": [],\n      \"path\": \"notes/ambi-bare.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 35\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--col",
+        "title",
+        "--format",
+        "json",
+        "--all"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-find-col-title-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"title\": \"Wide Open Spaces\"\n      },\n      \"path\": \"Wide Open Spaces.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Duplicate Two\"\n      },\n      \"path\": \"archive2/duplicate.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Draft Note\"\n      },\n      \"path\": \"drafts/a/draft-note.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Compass 33\"\n      },\n      \"path\": \"garden/compass-033.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Harbor 35\"\n      },\n      \"path\": \"garden/grove/grove/harbor-035.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Umber 55\"\n      },\n      \"path\": \"garden/grove/grove/umber-055.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Brook 7\"\n      },\n      \"path\": \"garden/grove/meadow/brook-007.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Cinder 10\"\n      },\n      \"path\": \"garden/grove/meadow/cinder-010.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Marrow 47\"\n      },\n      \"path\": \"garden/grove/meadow/marrow-047.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Wisp 57\"\n      },\n      \"path\": \"garden/grove/meadow/wisp-057.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 82\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--all",
+        "--col",
+        "nosuchfield",
+        "--limit",
+        "1",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-col-truncated-page-suppressed-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {},\n      \"path\": \"Wide Open Spaces.md\"\n    }\n  ],\n  \"returned\": 1,\n  \"starts_at\": 1,\n  \"total\": 35\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:zzz-nonexistent",
+        "--col",
+        "nosuchfield",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-col-zero-match-suppressed-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [],\n  \"returned\": 0,\n  \"starts_at\": 1,\n  \"total\": 0\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--before",
+        "created:2026-01-01",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-find-date-before-json-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-06-27T05:07:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-07-14 21:46:00\",\n        \"title\": \"Umber 55\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/grove/grove/umber-055.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2025-08-06T07:29:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2025-08-13 04:39:00\",\n        \"title\": \"Cinder 10\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/grove/meadow/cinder-010.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-04-03T21:42:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-04-14 16:02:00\",\n        \"title\": \"Cinder 40\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/grove/thicket/cinder-040.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-02-16T13:13:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-03-16 17:20:00\",\n        \"title\": \"Quartz 9\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/grove/thicket/quartz-009.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-09T21:59:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-03 09:46:00\",\n        \"title\": \"Meridian 38\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/grove/meridian-038.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-03-23T20:17:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-04-21 08:49:00\",\n        \"title\": \"Linden 16\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/meadow/linden-016.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2025-01-10T21:46:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2025-01-14 18:07:00\",\n        \"title\": \"Tundra 54\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/meadow/tundra-054.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-08-06T20:15:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-08-07 10:55:00\",\n        \"title\": \"Compass 3\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/thicket/compass-003.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-06-02T01:57:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-06-05 05:37:00\",\n        \"title\": \"Meridian 8\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/thicket/meridian-008.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-10-06T02:25:00Z\",\n        \"kind\": \"note\",\n        \"modified\": \"2024-10-25 00:23:00\",\n        \"title\": \"Zephyr 29\",\n        \"type\": \"note\"\n      },\n      \"path\": \"garden/meadow/zephyr-029.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 18\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "due:someday",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-declared-date-eq-refuses-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: invalid --eq value for field 'due': 'someday' is not a valid date value (expected an ISO 8601 date (YYYY-MM-DD) or datetime)\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--type",
+        "note",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-dynamic-desugar-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"not-a-date\",\n        \"due\": \"2025-13-45\",\n        \"kind\": \"note\",\n        \"project\": \"this-is-a-very-long-project-name-that-exceeds-the-limit\",\n        \"tags\": [\n          \"ok\",\n          7\n        ],\n        \"title\": \"Bad Types\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-types.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"aliases\": [\n          \"bee\"\n        ],\n        \"kind\": \"note\",\n        \"title\": \"Beta\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/beta.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[missing-phase]]\",\n        \"title\": \"Dangling Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dangling-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Dead End\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dead-end.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Gamma\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/gamma.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Into Ignored\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/into-ignored.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"legacy\": true,\n        \"title\": \"Kept\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/keep/kept.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-eq-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"not-a-date\",\n        \"due\": \"2025-13-45\",\n        \"kind\": \"note\",\n        \"project\": \"this-is-a-very-long-project-name-that-exceeds-the-limit\",\n        \"tags\": [\n          \"ok\",\n          7\n        ],\n        \"title\": \"Bad Types\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-types.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"aliases\": [\n          \"bee\"\n        ],\n        \"kind\": \"note\",\n        \"title\": \"Beta\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/beta.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[missing-phase]]\",\n        \"title\": \"Dangling Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dangling-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Dead End\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dead-end.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Gamma\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/gamma.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Into Ignored\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/into-ignored.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"legacy\": true,\n        \"title\": \"Kept\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/keep/kept.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "zip:07030",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-eq-numeric-quoted-value-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    }\n  ],\n  \"returned\": 1,\n  \"starts_at\": 1,\n  \"total\": 1\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--has",
+        "title",
+        "--missing",
+        "status",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-has-missing-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"title\": \"Wide Open Spaces\"\n      },\n      \"path\": \"Wide Open Spaces.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Duplicate Two\"\n      },\n      \"path\": \"archive2/duplicate.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Draft Note\"\n      },\n      \"path\": \"drafts/a/draft-note.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Index\"\n      },\n      \"path\": \"index.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Log 2025-01-15\",\n        \"when\": \"2025-01-15\"\n      },\n      \"path\": \"logs/2025-01-15.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Rough Notes\"\n      },\n      \"path\": \"logs/scratch/rough.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Ambi\"\n      },\n      \"path\": \"notes/ambi.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-parent.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 26\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--in",
+        "status:active,backlog",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-in-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"status\": \"active\",\n        \"title\": \"Phase One\",\n        \"type\": \"phase\"\n      },\n      \"path\": \"phases/phase-one.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"status\": \"backlog\",\n        \"title\": \"Stray Task\",\n        \"type\": \"task\"\n      },\n      \"path\": \"stray-task.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"parent\": \"[[phase-one]]\",\n        \"status\": \"backlog\",\n        \"title\": \"Task One\",\n        \"type\": \"task\"\n      },\n      \"path\": \"tasks/task-001.md\"\n    }\n  ],\n  \"returned\": 3,\n  \"starts_at\": 1,\n  \"total\": 3\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--format",
+        "json",
+        "--all"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"title\": \"Wide Open Spaces\"\n      },\n      \"path\": \"Wide Open Spaces.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Duplicate Two\"\n      },\n      \"path\": \"archive2/duplicate.md\"\n    },\n    {\n      \"frontmatter\": null,\n      \"path\": \"broken/no-frontmatter.md\"\n    },\n    {\n      \"frontmatter\": null,\n      \"path\": \"broken/parse-fail.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Draft Note\"\n      },\n      \"path\": \"drafts/a/draft-note.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Index\"\n      },\n      \"path\": \"index.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Log 2025-01-15\",\n        \"when\": \"2025-01-15\"\n      },\n      \"path\": \"logs/2025-01-15.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Rough Notes\"\n      },\n      \"path\": \"logs/scratch/rough.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    }\n  ],\n  \"returned\": 10,\n  \"starts_at\": 1,\n  \"total\": 35\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--format",
+        "jsonl",
+        "--all"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-jsonl-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "note: showing 10 of 35 (--no-limit for all)\n",
+        "stdout": "{\"frontmatter\":{\"title\":\"Wide Open Spaces\"},\"path\":\"Wide Open Spaces.md\"}\n{\"frontmatter\":{\"title\":\"Duplicate Two\"},\"path\":\"archive2/duplicate.md\"}\n{\"frontmatter\":null,\"path\":\"broken/no-frontmatter.md\"}\n{\"frontmatter\":null,\"path\":\"broken/parse-fail.md\"}\n{\"frontmatter\":{\"title\":\"Draft Note\"},\"path\":\"drafts/a/draft-note.md\"}\n{\"frontmatter\":{\"title\":\"Index\"},\"path\":\"index.md\"}\n{\"frontmatter\":{\"title\":\"Log 2025-01-15\",\"when\":\"2025-01-15\"},\"path\":\"logs/2025-01-15.md\"}\n{\"frontmatter\":{\"title\":\"Rough Notes\"},\"path\":\"logs/scratch/rough.md\"}\n{\"frontmatter\":{\"created\":\"2024-01-01T09:00:00Z\",\"due\":\"2024-03-01\",\"internal\":true,\"kind\":\"note\",\"modified\":\"2024-02-01 10:30:00\",\"parent\":\"[[phase-one]]\",\"project\":\"sample-project\",\"related\":\"[[beta]]\",\"summary\":\"A short summary of alpha, unbounded in length.\",\"tags\":[\"alpha\",\"sample\"],\"title\":\"Alpha\",\"type\":\"note\",\"zip\":\"07030\"},\"path\":\"notes/alpha.md\"}\n{\"frontmatter\":{\"kind\":\"note\",\"title\":\"Ambi Bare\",\"type\":\"note\"},\"path\":\"notes/ambi-bare.md\"}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--sort",
+        "path",
+        "--limit",
+        "2",
+        "--no-limit",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-limit-nolimit-last-wins-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"not-a-date\",\n        \"due\": \"2025-13-45\",\n        \"kind\": \"note\",\n        \"project\": \"this-is-a-very-long-project-name-that-exceeds-the-limit\",\n        \"tags\": [\n          \"ok\",\n          7\n        ],\n        \"title\": \"Bad Types\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-types.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"aliases\": [\n          \"bee\"\n        ],\n        \"kind\": \"note\",\n        \"title\": \"Beta\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/beta.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[missing-phase]]\",\n        \"title\": \"Dangling Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dangling-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Dead End\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/dead-end.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Gamma\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/gamma.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Into Ignored\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/into-ignored.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"legacy\": true,\n        \"title\": \"Kept\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/keep/kept.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"title\": \"Missing Kind\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/missing-kind.md\"\n    }\n  ],\n  \"returned\": 11,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--path",
+        "{unclosed",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "clean",
+        "seed": 1
+      },
+      "id": "read-find-malformed-path-glob-refuses-clean",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "operational",
+        "exit_code": 1,
+        "stderr": "norn: invalid --path glob '{unclosed': invalid glob pattern: error parsing glob '{unclosed': unclosed alternate group; missing '}' (maybe escape '{' with '[{]'?)\n",
+        "stdout": ""
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--not-eq",
+        "zip:07030",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-not-eq-numeric-quoted-value-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [],\n  \"returned\": 0,\n  \"starts_at\": 1,\n  \"total\": 0\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--format",
+        "paths",
+        "--all"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-paths-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "note: showing 10 of 35 (--no-limit for all)\n",
+        "stdout": "Wide Open Spaces.md\narchive2/duplicate.md\nbroken/no-frontmatter.md\nbroken/parse-fail.md\ndrafts/a/draft-note.md\nindex.md\nlogs/2025-01-15.md\nlogs/scratch/rough.md\nnotes/alpha.md\nnotes/ambi-bare.md\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--format",
+        "records"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-records-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "11 documents · showing 1–10\n\nnotes/alpha.md\n  created   2024-01-01T09:00:00Z\n  due       2024-03-01\n  internal  true\n  kind      note\n  modified  2024-02-01 10:30:00\n  parent    [[phase-one]]\n  project   sample-project\n  related   [[beta]]\n  summary   A short summary of alpha, unbounded in length.\n  tags      alpha, sample\n  title     Alpha\n  type      note\n  zip       07030\n────────────────────────────────────────────────────────────\nnotes/ambi-bare.md\n  kind   note\n  title  Ambi Bare\n  type   note\n────────────────────────────────────────────────────────────\nnotes/bad-parent.md\n  kind    note\n  parent  [[alpha]]\n  title   Bad Parent\n  type    note\n────────────────────────────────────────────────────────────\nnotes/bad-types.md\n  created  not-a-date\n  due      2025-13-45\n  kind     note\n  project  this-is-a-very-long-project-name-that-exceeds-the-limit\n  tags     ok, 7\n  title    Bad Types\n  type     note\n────────────────────────────────────────────────────────────\nnotes/beta.md\n  aliases  bee\n  kind     note\n  title    Beta\n  type     note\n────────────────────────────────────────────────────────────\nnotes/dangling-parent.md\n  kind    note\n  parent  [[missing-phase]]\n  title   Dangling Parent\n  type    note\n────────────────────────────────────────────────────────────\nnotes/dead-end.md\n  kind   note\n  title  Dead End\n  type   note\n────────────────────────────────────────────────────────────\nnotes/gamma.md\n  kind   note\n  title  Gamma\n  type   note\n────────────────────────────────────────────────────────────\nnotes/into-ignored.md\n  kind   note\n  title  Into Ignored\n  type   note\n────────────────────────────────────────────────────────────\nnotes/keep/kept.md\n  kind    note\n  legacy  true\n  title   Kept\n  type    note\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--eq",
+        "type:note",
+        "--sort",
+        "title",
+        "--limit",
+        "5",
+        "--format",
+        "json"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-sort-limit-json-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"documents\": [\n    {\n      \"frontmatter\": {\n        \"created\": \"2024-01-01T09:00:00Z\",\n        \"due\": \"2024-03-01\",\n        \"internal\": true,\n        \"kind\": \"note\",\n        \"modified\": \"2024-02-01 10:30:00\",\n        \"parent\": \"[[phase-one]]\",\n        \"project\": \"sample-project\",\n        \"related\": \"[[beta]]\",\n        \"summary\": \"A short summary of alpha, unbounded in length.\",\n        \"tags\": [\n          \"alpha\",\n          \"sample\"\n        ],\n        \"title\": \"Alpha\",\n        \"type\": \"note\",\n        \"zip\": \"07030\"\n      },\n      \"path\": \"notes/alpha.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"title\": \"Ambi Bare\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/ambi-bare.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"kind\": \"note\",\n        \"parent\": \"[[alpha]]\",\n        \"title\": \"Bad Parent\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-parent.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"created\": \"not-a-date\",\n        \"due\": \"2025-13-45\",\n        \"kind\": \"note\",\n        \"project\": \"this-is-a-very-long-project-name-that-exceeds-the-limit\",\n        \"tags\": [\n          \"ok\",\n          7\n        ],\n        \"title\": \"Bad Types\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/bad-types.md\"\n    },\n    {\n      \"frontmatter\": {\n        \"aliases\": [\n          \"bee\"\n        ],\n        \"kind\": \"note\",\n        \"title\": \"Beta\",\n        \"type\": \"note\"\n      },\n      \"path\": \"notes/beta.md\"\n    }\n  ],\n  \"returned\": 5,\n  \"starts_at\": 1,\n  \"total\": 11\n}\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "find",
+        "--all",
+        "--sort",
+        "path",
+        "--limit",
+        "1",
+        "--starts-at",
+        "1",
+        "--format",
+        "paths"
+      ],
+      "command": "find",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "read-find-starts-at-zero-indexed-zoo",
+      "mutating": false,
+      "normalizations": [
+        "vault-root"
+      ],
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "note: showing 1 of 35 (--no-limit for all)\n",
+        "stdout": "archive2/duplicate.md\n"
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "read",
+      "volatile_masks": []
+    }
+  ],
+  "command": "find",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

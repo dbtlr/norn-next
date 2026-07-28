@@ -1,0 +1,877 @@
+{
+  "case_count": 20,
+  "cases": [
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--dry-run",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-add-frontmatter-plan-dry-run-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "plan-hash"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"add_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"priority\", \"new_value\": \"high\" }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"add_frontmatter\",\n      \"status\": \"not-run\",\n      \"summary\": \"would add_frontmatter frontmatter field 'priority' in notes/alpha.md\"\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-create-destination-exists-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"create_document\", \"fields\": { \"path\": \"notes/alpha.md\", \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"x\" }, \"force\": false } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create notes/alpha.md\",\n      \"error\": {\n        \"code\": \"create-destination-exists\",\n        \"message\": \"create_document: destination already exists (use --force to overwrite): notes/alpha.md\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-create-nonobject-frontmatter-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"create_document\", \"fields\": { \"path\": \"newdoc.md\", \"new_value\": { \"frontmatter\": \"notanobject\", \"body\": \"x\" } } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create newdoc.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"create_document: missing or non-object frontmatter in new_value\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-create-parent-missing-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"create_document\", \"fields\": { \"path\": \"nope/new.md\", \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"x\" }, \"force\": false } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create nope/new.md\",\n      \"error\": {\n        \"code\": \"create-parent-missing\",\n        \"message\": \"create_document: parent directory does not exist (use -p / --parents to auto-create): nope/new.md\",\n        \"path\": \"nope/new.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-delete-hash-required-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "plan-hash"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"delete_document\", \"fields\": { \"path\": \"notes/alpha.md\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"delete_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would delete_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"delete-hash-required\",\n        \"message\": \"delete_document op for notes/alpha.md carries no document_hash; a delete requires a plan-time hash so the file is compare-and-swapped before removal — add `document_hash` to the op (or regenerate the plan with `norn repair --plan`)\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-duplicate-op-id-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"create_document\", \"id\": \"dup\", \"fields\": { \"path\": \"x.md\", \"new_value\": { \"frontmatter\": {}, \"body\": \"x\" } } },\n    { \"kind\": \"create_document\", \"id\": \"dup\", \"fields\": { \"path\": \"y.md\", \"new_value\": { \"frontmatter\": {}, \"body\": \"y\" } } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create_document x.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"duplicate operation id in MigrationPlan: dup\"\n      }\n    },\n    {\n      \"op_id\": \"1\",\n      \"kind\": \"create_document\",\n      \"status\": \"not-run\",\n      \"summary\": \"would create_document y.md\"\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-empty-stem-precondition-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"preconditions\": [\n    { \"id\": \"p\", \"kind\": \"owner_set\", \"selector\": { \"stem\": \"\" }, \"expected_paths\": [] }\n  ],\n  \"operations\": [\n    { \"kind\": \"set_frontmatter\", \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"summary\", \"new_value\": \"x\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"invalid-precondition\",\n        \"message\": \"owner-set precondition 'p' has an empty stem selector\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-independent-files-proceed-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-first.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# First\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-missing/second.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Second\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-third.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Third\\n\" },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "partial-apply",
+        "exit_code": 1,
+        "stderr": "",
+        "stdout": "apply failed\n  applied: 2  skipped: 0  failed: 1  remaining: 0\n  [applied] create nrn406-first.md\n  [failed] create nrn406-missing/second.md\n  [applied] create nrn406-third.md\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntype: note\n---\n# First\n",
+            "kind": "file",
+            "path": "nrn406-first.md"
+          },
+          {
+            "content": "---\ntype: note\n---\n# Third\n",
+            "kind": "file",
+            "path": "nrn406-third.md"
+          }
+        ],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-kind-operation-mismatch-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"set_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"priority\", \"new_value\": \"high\", \"operation\": \"remove_frontmatter\" }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-missing-field-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"move_document\", \"fields\": { \"src\": \"notes/alpha.md\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"move_document missing dst\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-move-plan-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"move_document\",\n      \"fields\": { \"src\": \"notes/cycle-c.md\", \"dst\": \"notes/moved-c.md\", \"parents\": false }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "apply applied\n  applied: 1  skipped: 0  failed: 0  remaining: 0\n  [applied] move notes/cycle-c.md → notes/moved-c.md\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+            "kind": "file",
+            "path": "notes/moved-c.md"
+          }
+        ],
+        "modified": [
+          {
+            "content": "---\ntitle: Cycle B\n---\n\nPoints to [[moved-c]].\n",
+            "kind": "file",
+            "path": "notes/cycle-b.md"
+          }
+        ],
+        "removed": [
+          "notes/cycle-c.md"
+        ]
+      },
+      "requires_doc": "notes/cycle-c.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-move-stale-hash-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "plan-hash"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"move_document\", \"fields\": { \"src\": \"notes/alpha.md\", \"dst\": \"notes/alpha-moved.md\", \"no_link_rewrite\": true, \"document_hash\": \"0000000000000000000000000000000000000000000000000000000000000000\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move notes/alpha.md → notes/alpha-moved.md\",\n      \"error\": {\n        \"code\": \"stale-document-hash\",\n        \"message\": \"stale repair plan for notes/alpha.md: expected hash 0000000000000000000000000000000000000000000000000000000000000000, found de7c80138cd917d1f34a1b925329bf1b7245c949cb180e36c1c6bdc9f837abdf; regenerate with `norn repair --plan`\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-precondition-mismatch-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"preconditions\": [\n    {\n      \"id\": \"alpha-owner\",\n      \"kind\": \"owner_set\",\n      \"selector\": { \"stem\": \"alpha\" },\n      \"expected_paths\": [\"notes/not-actually-alpha.md\"]\n    }\n  ],\n  \"operations\": [\n    {\n      \"kind\": \"set_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"summary\", \"new_value\": \"should-not-apply\" }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "apply refused\n  applied: 0  skipped: 0  failed: 0  remaining: 1\npreconditions:\n  [failed] alpha-owner\n    owner-set-mismatch: owner-set precondition 'alpha-owner' did not match the current vault\n  [not-run] would set_frontmatter notes/alpha.md\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-schema-version-refusal",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 99,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": []\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: unsupported plan schema_version 99; this norn build supports v2\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes",
+        "--parents"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-sequenced-seq-creates-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task One\", \"type\": \"task\" },\n          \"body\": \"# Task One\\n\"\n        },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task Two\", \"type\": \"task\" },\n          \"body\": \"# Task Two\\n\"\n        },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "ok",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "apply applied\n  applied: 2  skipped: 0  failed: 0  remaining: 0\n  [applied] create seq/task-1.md\n  [applied] create seq/task-2.md\ntrace: <TRACE_ID>\n"
+      },
+      "recorded_tree_delta": {
+        "added": [
+          {
+            "content": "---\ntitle: Task One\ntype: task\n---\n# Task One\n",
+            "kind": "file",
+            "path": "seq/task-1.md"
+          },
+          {
+            "content": "---\ntitle: Task Two\ntype: task\n---\n# Task Two\n",
+            "kind": "file",
+            "path": "seq/task-2.md"
+          }
+        ],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-unknown-kind-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"no_such_kind\", \"fields\": { \"path\": \"notes/alpha.md\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"no_such_kind\",\n      \"status\": \"failed\",\n      \"summary\": \"would no_such_kind notes/alpha.md\",\n      \"error\": {\n        \"code\": \"unknown-operation-kind\",\n        \"message\": \"unknown operation kind: no_such_kind\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-wrong-typed-bool-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"move_document\", \"fields\": { \"src\": \"notes/alpha.md\", \"dst\": \"notes/beta.md\", \"force\": \"true\" } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: op.fields for move_document could not be decoded: field `force` must be a boolean\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/beta.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-wrong-typed-document-hash-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"str_replace\", \"fields\": { \"path\": \"notes/alpha.md\", \"old\": \"NONEXISTENT_ZZZ\", \"new\": \"x\", \"document_hash\": 5 } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: op.fields for str_replace could not be decoded: invalid type: integer `5`, expected a string\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/alpha.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--format",
+        "json"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-wrong-typed-field-refusal-json-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"set_frontmatter\", \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"priority\", \"new_value\": \"high\", \"operation\": 5 } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "",
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"op.fields for set_frontmatter could not be decoded: invalid type: integer `5`, expected a string\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": [
+        "<PLAN_HASH>",
+        "<TRACE_ID>"
+      ]
+    },
+    {
+      "argv": [
+        "apply",
+        "{PLAN}",
+        "--yes"
+      ],
+      "command": "apply",
+      "fixture": {
+        "profile": "zoo",
+        "seed": 1
+      },
+      "id": "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
+      "mutating": true,
+      "normalizations": [
+        "vault-root",
+        "trace-id"
+      ],
+      "plan_argv_placeholder": "{PLAN}",
+      "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"delete_document\", \"fields\": { \"path\": \"notes/cycle-c.md\", \"rewrite_to\": 5 } }\n  ]\n}\n",
+      "plan_vault_root_token": "{{VAULT_ROOT}}",
+      "recorded": {
+        "exit_class": "refusal",
+        "exit_code": 2,
+        "stderr": "error: op.fields for delete_document could not be decoded: field `rewrite_to` must be a string\n",
+        "stdout": ""
+      },
+      "recorded_tree_delta": {
+        "added": [],
+        "modified": [],
+        "removed": []
+      },
+      "requires_doc": "notes/cycle-c.md",
+      "source": {
+        "branch": "rewrite/0017",
+        "commit": "76af2c3b",
+        "line": "norn-legacy"
+      },
+      "suite": "apply",
+      "volatile_masks": []
+    }
+  ],
+  "command": "apply",
+  "note": "Recorded invocations: argv in, bytes and an exit class out. Evidence with zero authority — a recording says what a program did once, never what this program should do. Nothing here runs until its command is activated, and activation judges whether the recorded output is good. See docs/decisions/0001-corpus-activation-gate.md.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}
