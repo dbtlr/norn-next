@@ -1,7 +1,10 @@
 # Per-PR gate lane.
 #
-# CI is two-tier: counters gate here, clocks trend in soak.yml. No wall-clock
-# pass/fail ever runs in this lane — see docs/architecture.md.
+# CI is two-tier: structure and counters gate here, clocks trend in soak.yml.
+# No wall-clock pass/fail ever runs in this lane — see docs/architecture.md.
+# "Counters" names the measurement gates this lane is being built toward; a
+# gate that asserts structure rather than a number belongs here too, on the
+# same terms.
 #
 # The timeout-minutes below are not an exception to that. A timeout is a
 # runaway guard: it bounds what a hung job can cost, and it is set loose
@@ -29,10 +32,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # A real gate, not a placeholder: the workspace compiles and its tests pass.
-  # The corpus suite is dormant — no command is activated — so this job builds
-  # and runs in seconds; what it asserts is that the workspace holds together
-  # and that the corpus data is structurally sound.
+  # A real gate, not a placeholder: the workspace compiles clean, is
+  # formatted, and its tests pass. The corpus suite is dormant — no command is
+  # activated — so this job runs in seconds; what it asserts is that the
+  # workspace holds together and that the corpus data is structurally sound.
   build:
     name: build and test
     runs-on: ubuntu-latest
@@ -45,8 +48,12 @@ jobs:
           rustc --version
           cargo --version
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --workspace
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
 
