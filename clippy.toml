@@ -1,0 +1,106 @@
+# The boundary-lint ruleset.
+#
+# Symbol-level rules the dependency graph cannot express live here, and they
+# live here in one file because clippy's configuration does not merge
+# per-crate: a workspace-root clippy.toml binds every crate, dev crates
+# included. `cargo clippy --workspace --all-targets -- -D warnings` is where
+# it bites.
+#
+# **A crate that legitimately owns an effect carves it out at the use site**,
+# with `#[allow(clippy::disallowed_methods)]` or `#[allow(clippy::disallowed_types)]`
+# on the smallest item that holds the effect. The allow is the audit marker:
+# it says where the effect is, which a crate-wide allow would erase.
+#
+# Rules are adopted one at a time, as each invariant's subject becomes real.
+# The rules named but not yet configured — no SQLite connection outside
+# norn-store, no serde_json::Value crossing the wire seam, no norn-config
+# registry-surface use outside norn-host — are carried as pending entries in
+# the mapping in crates/norn-testkit/src/invariants.rs, which is the
+# authoritative record of what carries which invariant. That mapping is
+# asserted against this file: an entry here that no live rule claims fails the
+# architecture gate, so a rule cannot arrive in one place and not the other.
+#
+# **These rules bind std-surface effects, and that is their whole reach.** An
+# effect reached another way is outside them and is review-held: a child
+# process inheriting this process's stdout writes to a terminal no render seam
+# saw, and a raw `libc` call reaches the filesystem without naming a `std`
+# path. Neither is a lint's subject; both are a reviewer's.
+
+# `std::fs` disallowed workspace-wide.
+#
+# The vault filesystem seam is norn-fs and the derived database's file
+# lifecycle is norn-store's; every other filesystem effect is machine-local
+# and belongs to the crate that owns that state. The entries cover the calls
+# that reach a filesystem, including the ones spelled as `Path` methods —
+# `path.exists()` is the same effect as `std::fs::metadata` and would
+# otherwise be the way around the rule — the ones spelled through the unix
+# extension traits, and `set_current_dir`, which relocates every relative path
+# in the process at once.
+disallowed-methods = [
+    { path = "std::fs::canonicalize", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::copy", reason = "a filesystem effect; norn-fs owns vault bytes" },
+    { path = "std::fs::create_dir", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::create_dir_all", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::exists", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::hard_link", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::metadata", reason = "a filesystem effect; norn-fs owns vault stat" },
+    { path = "std::fs::read", reason = "a filesystem effect; norn-fs owns vault reads" },
+    { path = "std::fs::read_dir", reason = "a filesystem effect; norn-fs owns the walk" },
+    { path = "std::fs::read_link", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::read_to_string", reason = "a filesystem effect; norn-fs owns vault reads" },
+    { path = "std::fs::remove_dir", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::remove_dir_all", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::remove_file", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::rename", reason = "the atomic-write protocol is norn-fs's, swap included" },
+    { path = "std::fs::set_permissions", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::soft_link", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::symlink_metadata", reason = "a filesystem effect; norn-fs owns vault stat" },
+    { path = "std::fs::write", reason = "the atomic-write protocol is norn-fs's; nothing writes a vault file directly" },
+    { path = "std::fs::DirBuilder::new", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::File::create", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::fs::File::create_new", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::fs::File::open", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::fs::File::options", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::fs::OpenOptions::new", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::path::Path::canonicalize", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::exists", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::is_dir", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::is_file", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::is_symlink", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::metadata", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::read_dir", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::read_link", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::symlink_metadata", reason = "a filesystem effect spelled as a path method" },
+    { path = "std::path::Path::try_exists", reason = "a filesystem effect spelled as a path method" },
+    # The same effects spelled through the unix extension traits, which reach
+    # the filesystem without ever naming `std::fs`.
+    { path = "std::os::unix::fs::chown", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::os::unix::fs::fchown", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::os::unix::fs::lchown", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::os::unix::fs::symlink", reason = "a filesystem effect; norn-fs owns vault paths" },
+    # The process's working directory is machine-local state shared by every
+    # relative path in it, and a harness that changes it changes it for every
+    # test running beside it.
+    { path = "std::env::set_current_dir", reason = "process-wide state; a path is passed, never implied" },
+    # No direct stdout writes outside norn-console. A handle to stdout is a
+    # render seam nobody reviewed.
+    { path = "std::io::stdout", reason = "norn-console owns the render seam; verbs return data" },
+]
+
+# The types that open a filesystem handle. A type only ever obtained from a
+# call above — `Metadata`, `DirEntry`, `Permissions` — needs no entry: the
+# call that produced it is already the rule's subject.
+disallowed-types = [
+    { path = "std::fs::DirBuilder", reason = "a filesystem effect; norn-fs owns vault paths" },
+    { path = "std::fs::File", reason = "a filesystem effect; norn-fs owns vault handles" },
+    { path = "std::fs::OpenOptions", reason = "a filesystem effect; norn-fs owns vault handles" },
+]
+
+# No direct stdout writes outside norn-console. Everything a person reads as
+# output goes through the render seam; the carve-outs are machine-consumed
+# byte streams and the dev crates' own command lines. Standard error is not
+# this rule's subject.
+disallowed-macros = [
+    { path = "std::print", reason = "norn-console owns the render seam; verbs return data" },
+    { path = "std::println", reason = "norn-console owns the render seam; verbs return data" },
+]

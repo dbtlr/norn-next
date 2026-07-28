@@ -49,3 +49,21 @@ turns on the distinctions below.
   expected to land in, each carrying its reasoning. Authored rather than measured, and moved
   only by a reviewed edit — which is what makes recalibration a deliberate act rather than
   something a generator does to itself.
+
+## Boundary enforcement
+
+Earned by [ADR 0003](decisions/0003-boundary-enforcement-harness.md), whose contract turns
+on the distinctions below.
+
+- **Architecture gate** — the per-PR test that reads the workspace dependency graph and
+  holds it to the allowlist: every observed edge permitted, every permitted edge between two
+  present crates observed, every member a crate the map names.
+- **Edge-held** — carried by an edge the allowlist withholds, so a violation cannot compile.
+- **Lint-held** — carried by a symbol-level rule the dependency graph cannot express, with
+  the crates that legitimately own the effect carving it out at the use site.
+- **Review-held** — carried by a judgment a person makes, because no rule expresses it yet.
+  Named as such rather than left implied: a review-held invariant rots quietly.
+- **Pending rule** — a named lint rule whose subject does not exist yet, recorded in the
+  mapping so that configuring it is a deliberate edit rather than a discovery.
+- **Size-independence pair** — one operation run against two fixture profiles of different
+  scale, with the counters compared name by name. Counts, never clocks.

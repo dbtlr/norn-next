@@ -28,6 +28,7 @@ pub fn walk(root: &Path) -> io::Result<Vec<Node>> {
     Ok(out)
 }
 
+#[allow(clippy::disallowed_methods)] // The walk this crate measures generated trees with.
 fn collect(dir: &Path, prefix: &str, out: &mut Vec<Node>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

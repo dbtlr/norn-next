@@ -117,6 +117,7 @@ fn the_probe_and_the_manifest_agree_on_the_tree() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Reads the generated documents the case counts links in.
 fn the_dangling_share_lands_where_the_knob_puts_it() {
     // The generator reports how many links it made dangle; the tree names
     // those targets in a form nothing else emits, so the claim is checkable.
@@ -143,6 +144,7 @@ fn the_dangling_share_lands_where_the_knob_puts_it() {
     });
 }
 
+#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
 fn walk_markdown(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];

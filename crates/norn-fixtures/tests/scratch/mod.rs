@@ -18,6 +18,7 @@ use norn_fixtures::probe::VaultStats;
 use norn_fixtures::{Manifest, Profile, generate, probe};
 
 /// A fresh, empty, non-hidden directory named `label`.
+#[allow(clippy::disallowed_methods)] // Scratch trees are this module's to make and remove.
 pub fn fresh(label: &str) -> PathBuf {
     assert!(
         !label.starts_with('.'),
@@ -35,6 +36,7 @@ pub fn fresh(label: &str) -> PathBuf {
 /// The digest comes off the manifest rather than off a walk of the result:
 /// the contract is stated over what the generator emits, and a walk would key
 /// on whatever spelling the filesystem hands back.
+#[allow(clippy::disallowed_methods)] // Scratch trees are this module's to make and remove.
 pub fn generate_and_digest(label: &str, profile: &Profile, seed: u64) -> ([u8; 32], Manifest) {
     let dir = fresh(label);
     let manifest = generate(profile, seed, &dir).expect("generating a scratch tree");
@@ -43,6 +45,7 @@ pub fn generate_and_digest(label: &str, profile: &Profile, seed: u64) -> ([u8; 3
 }
 
 /// Generate, measure the tree's shape, then delete it.
+#[allow(clippy::disallowed_methods)] // Scratch trees are this module's to make and remove.
 pub fn generate_and_measure(label: &str, profile: &Profile, seed: u64) -> (VaultStats, Manifest) {
     let dir = fresh(label);
     let manifest = generate(profile, seed, &dir).expect("generating a scratch tree");
@@ -52,6 +55,7 @@ pub fn generate_and_measure(label: &str, profile: &Profile, seed: u64) -> (Vault
 }
 
 /// Generate, hand the tree to `inspect`, then delete it.
+#[allow(clippy::disallowed_methods)] // Scratch trees are this module's to make and remove.
 pub fn with_tree<T>(
     label: &str,
     profile: &Profile,

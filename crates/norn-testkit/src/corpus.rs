@@ -1172,6 +1172,7 @@ impl Corpus {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Reads the corpus files this module loads.
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, CorpusError> {
     let text = std::fs::read_to_string(path).map_err(|source| CorpusError::Read {
         path: path.to_path_buf(),
@@ -1183,6 +1184,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, CorpusError
     })
 }
 
+#[allow(clippy::disallowed_methods)] // Reads the corpus files this module loads.
 fn read_command_dir(dir: &Path) -> Result<BTreeMap<String, CommandCases>, CorpusError> {
     let mut out: BTreeMap<String, CommandCases> = BTreeMap::new();
     let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -1932,6 +1934,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Builds the temporary directory this case loads from.
     fn two_files_claiming_one_command_are_refused() {
         let dir = std::env::temp_dir().join(format!("norn-testkit-dup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -51,44 +51,53 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
-  # Filled by NORN-12 (drift-prevention harness): the architecture gate reads
-  # `cargo metadata` and asserts the workspace normal-dependency graph exactly
-  # equals the allowlist in docs/architecture.md, under a pinned feature/target
-  # matrix. Symbol-level rules escalate to lint tooling in the same task.
+  # The architecture gate: it reads `cargo metadata` once per entry in the
+  # pinned feature matrix and asserts the workspace normal-dependency graph
+  # against the allowlist in docs/architecture.md; it asserts the transcribed
+  # allowlist and crate list against the tables in that document; it refuses a
+  # local crate the workspace does not hold as a member; and it holds the
+  # invariant-to-mechanism mapping to the boundary lints configured in
+  # clippy.toml. The lints themselves bind in the build job, where clippy runs.
   architecture:
-    name: architecture gate (placeholder — NORN-12)
+    name: architecture gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Pending
-        run: |
-          echo "Architecture gate lands with NORN-12."
-          echo "Asserts: workspace dependency allowlist, boundary lints."
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Gate
+        run: cargo test --locked -p norn-testkit --test architecture
 
-  # Filled by NORN-12 (counter and EXPLAIN assertions) and NORN-13
-  # (size-independence pairs). All assertions are counts, never clocks, at a
-  # ~2k-document realistic fixture profile.
+  # Filled by NORN-13: size-independence pairs, and the counter and EXPLAIN
+  # bars over the read builders that arrive with norn-store. The machinery
+  # they are written with — counter snapshots, the SQL-and-plan pairing, the
+  # scale pair — is in norn-testkit; what is missing is the subject. All
+  # assertions are counts, never clocks, at a ~2k-document realistic fixture
+  # profile.
   gates:
-    name: counter and plan gates (placeholder — NORN-12/13)
+    name: counter and plan gates (placeholder — NORN-13)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Pending
         run: |
-          echo "Counter and plan gates land with NORN-12 and NORN-13."
+          echo "Counter and plan gates land with NORN-13."
           echo "Asserts: zero derivation counters on warm paths;"
           echo "         EXPLAIN plans against the builder's emitted SQL;"
           echo "         size-independence pairs, expressed as counts."
 
-  # Filled by NORN-13 (instrumentation harness): peak memory at the
-  # ~2k-document profile. The trend line over time lives in the soak lane;
-  # this job is the per-PR bar.
+  # Filled by NORN-13: peak memory at the ~2k-document profile. The
+  # instrumentation it is written with — the sandboxed spawn and the
+  # peak-resident-set reading taken from the kernel when the child is waited
+  # on — is in norn-testkit (process.rs); what is missing is the subject and
+  # the bar. The trend line over time lives in the soak lane; this job is the
+  # per-PR bar.
   memory:
     name: memory invariant (placeholder — NORN-13)
     runs-on: ubuntu-latest

@@ -280,6 +280,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Create `rel` and every ancestor of it, recording each.
+    #[allow(clippy::disallowed_methods)] // The generator's own writer: it creates the tree it emits.
     fn ensure_dir(&mut self, rel: &str) -> io::Result<()> {
         if rel.is_empty() || self.dirs.contains(rel) {
             return Ok(());
@@ -296,6 +297,7 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // The generator's own writer: it writes the bytes it emits.
     fn write(&mut self, rel: &str, bytes: &[u8]) -> io::Result<()> {
         if let Some((parent, _)) = rel.rsplit_once('/') {
             self.ensure_dir(parent)?;
@@ -318,6 +320,7 @@ impl<'a> Writer<'a> {
 }
 
 /// Refuse anything but an absent or empty directory, and create it if absent.
+#[allow(clippy::disallowed_methods)] // The generator's own target: stat, listing and creation of the output directory.
 fn prepare_out_dir(out_dir: &Path) -> io::Result<()> {
     match fs::metadata(out_dir) {
         Ok(meta) => {

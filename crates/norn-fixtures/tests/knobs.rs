@@ -22,6 +22,7 @@ fn profile(name: &str) -> Profile {
     Profile::by_name(name).unwrap_or_else(|| panic!("no profile named `{name}`"))
 }
 
+#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
 fn markdown_files(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -40,6 +41,7 @@ fn markdown_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Occurrences of the inline link lead-in across the whole tree.
+#[allow(clippy::disallowed_methods)] // Reads the generated documents the case counts.
 fn inline_link_lead_ins(dir: &Path) -> usize {
     markdown_files(dir)
         .iter()
@@ -53,6 +55,7 @@ fn inline_link_lead_ins(dir: &Path) -> usize {
 }
 
 /// The largest number of documents any single directory holds.
+#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
 fn fullest_directory(dir: &Path) -> usize {
     let mut best = 0;
     let mut stack = vec![dir.to_path_buf()];

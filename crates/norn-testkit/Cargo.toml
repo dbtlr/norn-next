@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# `norn-fixtures` is the generator whose profiles name the two scales a
+# size-independence pair is run at. `libc` is the child-process accounting the
+# process harness reads its peak resident set from.
 [dependencies]
+libc = { workspace = true }
+norn-fixtures = { path = "../norn-fixtures" }
 serde = { workspace = true }
 serde_json = { workspace = true }
