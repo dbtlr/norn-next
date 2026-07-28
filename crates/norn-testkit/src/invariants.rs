@@ -20,7 +20,7 @@
 //! A **review-held** entry is the honest name for a gap: no rule expresses it
 //! yet, so it is judged by a person or not at all.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::architecture::{ALLOWED_EDGES, WORKSPACE_CRATES};
@@ -41,9 +41,11 @@ pub enum LintState {
 pub struct LintRule {
     pub name: &'static str,
     pub state: LintState,
-    /// The path prefixes this rule owns in the workspace-root `clippy.toml`.
-    /// Every configured entry belongs to exactly one live rule through them.
-    pub prefixes: &'static [&'static str],
+    /// The configuration this rule owns, as `(clippy.toml key, path prefix)`.
+    /// Every configured entry belongs to some live rule through them, and the
+    /// key is part of the claim: a rule that owns `std::fs::` under
+    /// `disallowed-methods` does not thereby own it under `disallowed-macros`.
+    pub prefixes: &'static [(&'static str, &'static str)],
     /// Entries the rule requires, as `(clippy.toml key, path)`. A live rule
     /// carries at least one; a pending rule carries none.
     pub required: &'static [(&'static str, &'static str)],
@@ -58,16 +60,27 @@ pub const LINT_RULES: &[LintRule] = &[
     LintRule {
         name: "std::fs disallowed workspace-wide",
         state: LintState::Live,
-        prefixes: &["std::fs::", "std::path::Path::"],
+        prefixes: &[
+            ("disallowed-methods", "std::fs::"),
+            ("disallowed-methods", "std::path::Path::"),
+            ("disallowed-methods", "std::os::unix::fs::"),
+            ("disallowed-methods", "std::env::set_current_dir"),
+            ("disallowed-types", "std::fs::"),
+        ],
         required: &[
             ("disallowed-methods", "std::fs::read"),
             ("disallowed-methods", "std::fs::write"),
             ("disallowed-methods", "std::fs::read_dir"),
             ("disallowed-methods", "std::fs::remove_file"),
             ("disallowed-methods", "std::fs::create_dir_all"),
+            ("disallowed-methods", "std::fs::soft_link"),
             ("disallowed-methods", "std::fs::File::open"),
             ("disallowed-methods", "std::fs::File::create"),
             ("disallowed-methods", "std::fs::OpenOptions::new"),
+            ("disallowed-methods", "std::os::unix::fs::symlink"),
+            ("disallowed-methods", "std::os::unix::fs::chown"),
+            ("disallowed-methods", "std::os::unix::fs::lchown"),
+            ("disallowed-methods", "std::env::set_current_dir"),
             ("disallowed-types", "std::fs::File"),
             ("disallowed-types", "std::fs::OpenOptions"),
         ],
@@ -75,7 +88,10 @@ pub const LINT_RULES: &[LintRule] = &[
     LintRule {
         name: "no direct stdout writes outside norn-console",
         state: LintState::Live,
-        prefixes: &["std::print", "std::println", "std::io::stdout"],
+        prefixes: &[
+            ("disallowed-macros", "std::print"),
+            ("disallowed-methods", "std::io::stdout"),
+        ],
         required: &[
             ("disallowed-macros", "std::print"),
             ("disallowed-macros", "std::println"),
@@ -103,8 +119,13 @@ pub const LINT_RULES: &[LintRule] = &[
 ];
 
 /// What an edge-held invariant asks of the allowlist.
+///
+/// The absence claims are about **reachability, not adjacency**. "`norn-embed`
+/// cannot reach findings" is not satisfied by there being no direct
+/// `norn-embed -> norn-store` edge: two individually innocuous allowlist edits
+/// can compose into a path, and a type reached through one crate is reached.
 pub enum EdgeClaim {
-    /// Named edges the allowlist withholds.
+    /// Named crates the allowlist gives no path between, direct or indirect.
     Absent(&'static [(&'static str, &'static str)]),
     /// A crate with no workspace dependency at all.
     NoDependencies(&'static str),
@@ -139,7 +160,7 @@ pub struct Invariant {
 pub const INVARIANTS: &[Invariant] = &[
     Invariant {
         number: 1,
-        claim: "norn-client never depends on norn-store, norn-host or norn-serve, so no \
+        claim: "norn-client never reaches norn-store, norn-host or norn-serve, so no \
                 client-side path can open a database or serve in-process",
         mechanisms: &[Mechanism::Edge(EdgeClaim::Absent(&[
             ("norn-client", "norn-store"),
@@ -268,9 +289,14 @@ pub fn lint_rule(name: &str) -> Option<&'static LintRule> {
 ///
 /// The reader is narrow on purpose: it accepts the shape this workspace's
 /// configuration is written in — a key, a bracketed list, one `{ path = "..",
-/// reason = ".." }` entry per line — and refuses anything else rather than
-/// skipping past it. A parser that shrugs at a line it does not understand
-/// would report a rule as configured when it is not.
+/// reason = ".." }` entry per line — and refuses a malformed list entry
+/// rather than skipping past it. A parser that shrugs at an entry it does not
+/// understand would report a rule as configured when it is not.
+///
+/// A scalar `key = value` line is read and ignored. Clippy's configuration
+/// carries settings that are not rulesets — `msrv` among them — and refusing
+/// a legitimate one would make the ruleset unable to hold a setting rather
+/// than making the reader strict.
 #[derive(Clone, Debug, Default)]
 pub struct ClippyConfig {
     pub path: PathBuf,
@@ -301,14 +327,18 @@ impl ClippyConfig {
             }
             match key {
                 None => {
-                    let opened = line
-                        .split_once(" = [")
-                        .filter(|(_, rest)| rest.is_empty())
-                        .map(|(name, _)| name);
-                    key =
-                        Some(opened.ok_or_else(|| {
-                            format!("line {at} opens no configuration key: {line}")
-                        })?);
+                    let Some((name, value)) = line.split_once(" = ") else {
+                        return Err(format!("line {at} opens no configuration key: {line}"));
+                    };
+                    if value == "[" {
+                        key = Some(name);
+                    } else if value.is_empty() || value.ends_with('[') {
+                        // A list spelled any other way is a shape this reader
+                        // does not understand, and skipping it would hide
+                        // whatever it configures.
+                        return Err(format!("line {at} opens no configuration key: {line}"));
+                    }
+                    // Anything else is a scalar setting, which is not a rule.
                 }
                 Some(current) => {
                     if line == "]" {
@@ -316,7 +346,7 @@ impl ClippyConfig {
                         continue;
                     }
                     let path = entry_path(line)
-                        .ok_or_else(|| format!("line {at} carries no `path`: {line}"))?;
+                        .map_err(|problem| format!("line {at} {problem}: {line}"))?;
                     config
                         .entries
                         .insert((current.to_string(), path.to_string()));
@@ -334,10 +364,24 @@ impl ClippyConfig {
     }
 }
 
-fn entry_path(line: &str) -> Option<&str> {
-    let (_, rest) = line.split_once("path = \"")?;
-    let (path, _) = rest.split_once('"')?;
-    Some(path)
+/// The `path` an entry line configures.
+///
+/// An entry names its path exactly once. A line where `path = "` appears
+/// twice — a `reason` quoting the phrase, say — is refused rather than
+/// resolved by position: taking the first would read the reason as the rule.
+fn entry_path(line: &str) -> Result<&str, &'static str> {
+    const KEY: &str = "path = \"";
+    let mut occurrences = line.match_indices(KEY);
+    let Some((at, _)) = occurrences.next() else {
+        return Err("carries no `path`");
+    };
+    if occurrences.next().is_some() {
+        return Err("names `path` more than once, so which one is the rule is not decidable");
+    }
+    line[at + KEY.len()..]
+        .split_once('"')
+        .map(|(path, _)| path)
+        .ok_or("carries an unterminated `path`")
 }
 
 /// Every way the mapping contradicts the allowlist or the configured lints,
@@ -348,6 +392,7 @@ pub fn consistency_violations(config: &ClippyConfig) -> Vec<String> {
     let allowed: BTreeSet<(&str, &str)> = ALLOWED_EDGES.iter().copied().collect();
 
     let mut numbers: BTreeSet<u8> = BTreeSet::new();
+    let mut claimed_rules: BTreeSet<&str> = BTreeSet::new();
     for invariant in INVARIANTS {
         if !numbers.insert(invariant.number) {
             problems.push(format!("invariant {} is mapped twice", invariant.number));
@@ -363,13 +408,16 @@ pub fn consistency_violations(config: &ClippyConfig) -> Vec<String> {
                 Mechanism::Edge(claim) => {
                     edge_claim_violations(invariant.number, claim, &known, &allowed, &mut problems)
                 }
-                Mechanism::Lint(name) => match lint_rule(name) {
-                    None => problems.push(format!(
-                        "invariant {} names lint rule `{name}`, which the ruleset does not carry",
-                        invariant.number
-                    )),
-                    Some(rule) => lint_rule_violations(rule, config, &mut problems),
-                },
+                Mechanism::Lint(name) => {
+                    claimed_rules.insert(name);
+                    if lint_rule(name).is_none() {
+                        problems.push(format!(
+                            "invariant {} names lint rule `{name}`, which the ruleset does not \
+                             carry",
+                            invariant.number
+                        ));
+                    }
+                }
                 Mechanism::Review(judgment) => {
                     if judgment.trim().is_empty() {
                         problems.push(format!(
@@ -381,17 +429,36 @@ pub fn consistency_violations(config: &ClippyConfig) -> Vec<String> {
             }
         }
     }
-    for number in 1..=13u8 {
+    // The numbering is the document's, so a gap in it is a claim mapped under
+    // the wrong number rather than a claim nobody wrote down.
+    for number in 1..=INVARIANTS.len() as u8 {
         if !numbers.contains(&number) {
             problems.push(format!("invariant {number} is not mapped to any mechanism"));
         }
+    }
+
+    // The ruleset is walked in its own right, not only where an invariant
+    // reaches it: a rule nothing names is a rule nothing is holding up.
+    for rule in LINT_RULES {
+        if !claimed_rules.contains(rule.name) {
+            problems.push(format!(
+                "rule `{}` is in the ruleset and no invariant names it, so nothing says what it \
+                 carries",
+                rule.name
+            ));
+        }
+        lint_rule_violations(rule, config, &mut problems);
     }
 
     for (key, path) in &config.entries {
         let claimed = LINT_RULES
             .iter()
             .filter(|rule| rule.state == LintState::Live)
-            .any(|rule| rule.prefixes.iter().any(|prefix| path.starts_with(prefix)));
+            .any(|rule| {
+                rule.prefixes
+                    .iter()
+                    .any(|(owned, prefix)| owned == key && path.starts_with(prefix))
+            });
         if !claimed {
             problems.push(format!(
                 "`{key}` configures `{path}`, which no live rule in the mapping claims"
@@ -408,6 +475,13 @@ fn lint_rule_violations(rule: &LintRule, config: &ClippyConfig, problems: &mut V
             if rule.required.is_empty() {
                 problems.push(format!(
                     "rule `{}` is live and requires no configuration, so nothing carries it",
+                    rule.name
+                ));
+            }
+            if rule.prefixes.is_empty() {
+                problems.push(format!(
+                    "rule `{}` is live and owns no configuration prefix, so every entry it \
+                     configures reads as unclaimed",
                     rule.name
                 ));
             }
@@ -429,8 +503,70 @@ fn lint_rule_violations(rule: &LintRule, config: &ClippyConfig, problems: &mut V
                     rule.name
                 ));
             }
+            if !rule.prefixes.is_empty() {
+                problems.push(format!(
+                    "rule `{}` is pending and claims configuration prefixes; a rule that claims \
+                     entries is live",
+                    rule.name
+                ));
+            }
         }
     }
+}
+
+/// Every crate `from` can reach through the allowlist, however many hops it
+/// takes.
+fn reachable<'a>(from: &str, allowed: &BTreeSet<(&'a str, &'a str)>) -> BTreeSet<&'a str> {
+    let mut found: BTreeSet<&str> = BTreeSet::new();
+    let mut frontier: Vec<&str> = vec![];
+    for &(source, target) in allowed {
+        if source == from {
+            frontier.push(target);
+        }
+    }
+    while let Some(crate_name) = frontier.pop() {
+        if !found.insert(crate_name) {
+            continue;
+        }
+        for &(source, target) in allowed {
+            if source == crate_name && !found.contains(target) {
+                frontier.push(target);
+            }
+        }
+    }
+    found
+}
+
+/// One shortest route the allowlist permits from `from` to `to`, as the
+/// crates along it, or `None` where the allowlist permits no route at all.
+fn path_between<'a>(
+    from: &'a str,
+    to: &'a str,
+    allowed: &BTreeSet<(&'a str, &'a str)>,
+) -> Option<Vec<&'a str>> {
+    let mut came_from: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut queue: VecDeque<&str> = VecDeque::from([from]);
+    let mut seen: BTreeSet<&str> = BTreeSet::from([from]);
+    while let Some(crate_name) = queue.pop_front() {
+        for &(source, target) in allowed {
+            if source != crate_name || !seen.insert(target) {
+                continue;
+            }
+            came_from.insert(target, crate_name);
+            if target == to {
+                let mut route = vec![to];
+                let mut step = to;
+                while let Some(&previous) = came_from.get(step) {
+                    route.push(previous);
+                    step = previous;
+                }
+                route.reverse();
+                return Some(route);
+            }
+            queue.push_back(target);
+        }
+    }
+    None
 }
 
 fn edge_claim_violations(
@@ -450,10 +586,16 @@ fn edge_claim_violations(
                         problems.push(unknown(name));
                     }
                 }
-                if allowed.contains(&(from, to)) {
+                if let Some(path) = path_between(from, to, allowed) {
+                    let route = path.join("` -> `");
+                    let how = if path.len() == 2 {
+                        "the allowlist permits one"
+                    } else {
+                        "the allowlist composes one"
+                    };
                     problems.push(format!(
-                        "invariant {number} requires no `{from}` -> `{to}` edge, and the \
-                         allowlist permits one"
+                        "invariant {number} requires no path from `{from}` to `{to}`, and {how}: \
+                         `{route}`"
                     ));
                 }
             }
@@ -462,13 +604,14 @@ fn edge_claim_violations(
             if !known.contains(crate_name) {
                 problems.push(unknown(crate_name));
             }
-            for &(from, to) in allowed {
-                if from == crate_name {
-                    problems.push(format!(
-                        "invariant {number} requires `{crate_name}` to depend on nothing, and \
-                         the allowlist permits `{from}` -> `{to}`"
-                    ));
-                }
+            for reached in reachable(crate_name, allowed) {
+                let route = path_between(crate_name, reached, allowed)
+                    .unwrap_or_default()
+                    .join("` -> `");
+                problems.push(format!(
+                    "invariant {number} requires `{crate_name}` to depend on nothing, and the \
+                     allowlist reaches `{reached}`: `{route}`"
+                ));
             }
         }
         EdgeClaim::OnlyDependents { on, from } => {
@@ -562,9 +705,10 @@ mod tests {
     }
 
     #[test]
-    fn the_configuration_reader_takes_entries_and_refuses_anything_else() {
+    fn the_configuration_reader_takes_entries_and_refuses_a_malformed_one() {
         let config = ClippyConfig::parse(
             "# a comment\n\
+             msrv = \"1.97\"\n\
              disallowed-methods = [\n\
              \x20   # why the next one is here\n\
              \x20   { path = \"std::fs::read\", reason = \"the seam owns reads\" },\n\
@@ -572,17 +716,124 @@ mod tests {
         )
         .expect("a configuration in the shape this workspace writes");
         assert!(config.carries("disallowed-methods", "std::fs::read"));
-        assert_eq!(config.entries.len(), 1);
+        assert_eq!(config.entries.len(), 1, "a scalar setting is not an entry");
 
         let unclosed = ClippyConfig::parse("disallowed-types = [\n").expect_err("an unclosed key");
         assert!(unclosed.contains("never closed"), "{unclosed}");
 
-        let stray = ClippyConfig::parse("avoid-breaking-exported-api = true\n")
-            .expect_err("a key that is not a list");
+        let stray = ClippyConfig::parse("nonsense\n").expect_err("a line that assigns nothing");
         assert!(stray.contains("opens no configuration key"), "{stray}");
 
         let entryless = ClippyConfig::parse("disallowed-types = [\n    { }\n]\n")
             .expect_err("an entry naming no path");
         assert!(entryless.contains("carries no `path`"), "{entryless}");
+    }
+
+    /// A reason quoting the phrase `path = "` — which a TOML literal string
+    /// carries verbatim — would otherwise be read as the entry's path, and
+    /// the rule would report itself configured against a symbol nobody wrote.
+    #[test]
+    fn an_entry_naming_path_twice_is_refused() {
+        let error = ClippyConfig::parse(
+            "disallowed-methods = [\n\
+             \x20   { reason = 'path = \"std::fs::read\" is the same effect', \
+             path = \"std::fs::metadata\" },\n\
+             ]\n",
+        )
+        .expect_err("an ambiguous entry");
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    /// Reachability, not adjacency: two edits that each look harmless can
+    /// compose into the path an invariant denies.
+    #[test]
+    fn an_indirect_path_trips_an_absence_claim() {
+        let known: BTreeSet<&str> = WORKSPACE_CRATES.iter().copied().collect();
+        let direct: BTreeSet<(&str, &str)> = [("norn-embed", "norn-store")].into_iter().collect();
+        let indirect: BTreeSet<(&str, &str)> =
+            [("norn-embed", "norn-text"), ("norn-text", "norn-store")]
+                .into_iter()
+                .collect();
+        let claim = EdgeClaim::Absent(&[("norn-embed", "norn-store")]);
+
+        let mut problems = Vec::new();
+        edge_claim_violations(12, &claim, &known, &BTreeSet::new(), &mut problems);
+        assert_eq!(problems, Vec::<String>::new());
+
+        let mut problems = Vec::new();
+        edge_claim_violations(12, &claim, &known, &direct, &mut problems);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("the allowlist permits one"),
+            "{problems:?}"
+        );
+
+        let mut problems = Vec::new();
+        edge_claim_violations(12, &claim, &known, &indirect, &mut problems);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("composes one: `norn-embed` -> `norn-text` -> `norn-store`"),
+            "{problems:?}"
+        );
+    }
+
+    /// The same for a leaf: a crate that reaches anything at all, however
+    /// indirectly, is not a crate with no dependencies.
+    #[test]
+    fn a_leaf_that_reaches_anything_trips_its_claim() {
+        let known: BTreeSet<&str> = WORKSPACE_CRATES.iter().copied().collect();
+        let allowed: BTreeSet<(&str, &str)> =
+            [("norn-console", "norn-config")].into_iter().collect();
+        let mut problems = Vec::new();
+        edge_claim_violations(
+            7,
+            &EdgeClaim::NoDependencies("norn-console"),
+            &known,
+            &allowed,
+            &mut problems,
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("reaches `norn-config`"),
+            "{problems:?}"
+        );
+    }
+
+    /// The ruleset is walked in its own right, so a rule nothing names is
+    /// caught even though no invariant leads the check to it.
+    #[test]
+    fn a_rule_no_invariant_names_is_caught() {
+        let claimed: BTreeSet<&str> = INVARIANTS
+            .iter()
+            .flat_map(|invariant| invariant.mechanisms)
+            .filter_map(|mechanism| match mechanism {
+                Mechanism::Lint(name) => Some(*name),
+                _ => None,
+            })
+            .collect();
+        for rule in LINT_RULES {
+            assert!(
+                claimed.contains(rule.name),
+                "rule `{}` is in the ruleset and no invariant names it",
+                rule.name
+            );
+        }
+    }
+
+    /// The unclaimed-entry check is keyed on `(key, prefix)`: a rule owning a
+    /// prefix under one clippy key does not thereby own it under another.
+    #[test]
+    fn an_entry_filed_under_the_wrong_key_is_unclaimed() {
+        let mut config = config();
+        config
+            .entries
+            .insert(("disallowed-macros".to_string(), "std::fs::read".to_string()));
+        let problems = consistency_violations(&config);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no live rule") && p.contains("disallowed-macros")),
+            "{problems:?}"
+        );
     }
 }
