@@ -504,21 +504,34 @@ pub fn exclusion_gaps(
         .collect()
 }
 
-/// Every direct subdirectory of `<root>/crates/` that holds a `Cargo.toml`.
+/// Every directory under `<root>/crates/`, at whatever depth, that holds a
+/// `Cargo.toml`. A directory that holds one claims its whole subtree: the
+/// scan does not descend past it, so a workspace nested inside a crate is
+/// not reported as more crates.
 #[allow(clippy::disallowed_methods)] // Reading the workspace's own layout, which is this gate's subject.
 pub fn crate_directories(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let crates = root.join("crates");
     let mut directories = BTreeSet::new();
-    let entries = std::fs::read_dir(&crates)
-        .map_err(|e| format!("could not read {}: {e}", crates.display()))?;
+    scan_for_manifests(&root.join("crates"), &mut directories)?;
+    Ok(directories)
+}
+
+#[allow(clippy::disallowed_methods)] // Reading the workspace's own layout, which is this gate's subject.
+fn scan_for_manifests(dir: &Path, found: &mut BTreeSet<PathBuf>) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("could not read {}: {e}", dir.display()))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("could not read {}: {e}", crates.display()))?;
+        let entry = entry.map_err(|e| format!("could not read {}: {e}", dir.display()))?;
         let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
         if path.join("Cargo.toml").is_file() {
-            directories.insert(path);
+            found.insert(path);
+        } else {
+            scan_for_manifests(&path, found)?;
         }
     }
-    Ok(directories)
+    Ok(())
 }
 
 /// The text of `<root>/docs/architecture.md`, which the tables here are
@@ -1100,25 +1113,36 @@ mod tests {
     }
 
     /// The directory reader against a tree built for it, so the scan is
-    /// tested without waiting for somebody to exclude a real crate.
+    /// tested without waiting for somebody to exclude a real crate. The
+    /// manifest under `crates/tools/secret` sits two levels down, with no
+    /// manifest at `crates/tools` itself, so it is only found by recursing.
     #[test]
     #[allow(clippy::disallowed_methods)] // Building the tree the reader is tested against.
     fn the_crate_directory_reader_takes_directories_holding_a_manifest() {
         let root = std::env::temp_dir().join(format!("norn-crates-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for directory in ["crates/one", "crates/two", "crates/notacrate"] {
+        for directory in [
+            "crates/one",
+            "crates/two",
+            "crates/notacrate",
+            "crates/tools/secret",
+        ] {
             std::fs::create_dir_all(root.join(directory)).expect("a scratch tree");
         }
-        for directory in ["crates/one", "crates/two"] {
+        for directory in ["crates/one", "crates/two", "crates/tools/secret"] {
             std::fs::write(root.join(directory).join("Cargo.toml"), b"[package]\n")
                 .expect("a manifest");
         }
         let found = crate_directories(&root).expect("reading the scratch tree");
         assert_eq!(
             found,
-            [root.join("crates/one"), root.join("crates/two")]
-                .into_iter()
-                .collect()
+            [
+                root.join("crates/one"),
+                root.join("crates/two"),
+                root.join("crates/tools/secret"),
+            ]
+            .into_iter()
+            .collect()
         );
         let _ = std::fs::remove_dir_all(&root);
     }
