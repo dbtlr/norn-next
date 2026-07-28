@@ -1,23 +1,25 @@
 # Decisions
 
 Architecture decision records for `norn`. Each ADR is a present-tense contract: it states
-what *is* decided, not what was discussed. ADRs are re-authored at the layer where they
-bind — nothing is bulk-copied from an earlier line, and prior decisions are cited as
-evidence by reference, never inherited as authority.
+what *is* decided about the system as it stands, not how the project arrived there.
 
-Files are `NNNN-slug.md`, numbered sequentially. To add one, take the next number above
+**Decisions land layered.** An ADR is written at the layer where its decision binds, as that
+layer lands — not in advance, and never as one document covering everything. Files are
+`NNNN-slug.md`, numbered sequentially from `0001`. To add one, take the next number above
 the highest here and add its row to the index below.
 
 Statuses: `accepted`, `proposed`, `deprecated`, `superseded by NNNN`.
 
 ## Index
 
-| ADR | Title | Status | Covers |
-|---|---|---|---|
-| [0001](0001-restart-decision-of-record.md) | Restart decision of record | accepted | The blank-repo bottom-up rebuild under default-EXCLUDE: standing laws, layer numbering, release gating, the three test strata, host topology, lockdown gates, the verb charter, mutations, repair and surfaces, and the graduation gate |
+*No ADRs yet.*
+
+Until the first one lands, Mimir artifact **NORN-a1** is the frozen pre-repository record of
+what has been decided. It is consultable as evidence; it is not an in-repo contract, and
+nothing cites it as authority.
 
 ## Related
 
-- [`../architecture.md`](../architecture.md) — the invariant spine and crate map the ADRs
-  bind against.
+- [`../architecture.md`](../architecture.md) — the invariant spine and crate map, and the
+  contract reviews enforce against today.
 - [`../glossary.md`](../glossary.md) — domain terms.
