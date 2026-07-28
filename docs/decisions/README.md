@@ -15,13 +15,13 @@ is updated in the same change — it does not become stale with a footnote.
 
 Statuses: `accepted`, `proposed`, `deprecated`, `superseded by NNNN`.
 
+Mimir artifact **NORN-a1** is the frozen pre-repository *design* record — the thinking that
+preceded this tree. It is consultable as evidence and is cited as authority by nothing;
+`../architecture.md` is what governs today. This holds however many ADRs are listed below.
+
 ## Index
 
 *No ADRs yet.*
-
-Mimir artifact **NORN-a1** is the frozen pre-repository *design* record — the thinking that
-preceded this tree. It is consultable as evidence and is cited as authority by nothing;
-`../architecture.md` is what governs today.
 
 ## Related
 
