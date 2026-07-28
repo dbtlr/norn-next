@@ -58,22 +58,21 @@
 //!
 //! Running a case means materializing its fixture vault, spawning the built
 //! binary with its argv under the recorded environment, and judging what
-//! comes back. Two of those three do not exist yet:
+//! comes back. One of those three does not exist yet:
 //!
-//! - **The fixture vault.** Every case names a generator profile and seed,
-//!   and `tests/corpus/fixtures.json` records the tree each of those
-//!   produced, file by file. The generator that turns a profile and seed
-//!   into a tree arrives with the `norn-fixtures` crate, and it is
-//!   re-derived with different realism knobs — so **a case is judgeable only
-//!   once that generator reproduces its recorded tree exactly.** Until then
-//!   a difference in output would read as a defect in this program when it
-//!   is drift in the generator.
+//! - **The fixture vault** is recorded in full. `tests/corpus/fixtures.json`
+//!   holds every entry's exact bytes, so a case materializes its tree by
+//!   writing each entry out at its path — code that is not written, against
+//!   data that is complete. **No generator is in that path**: the profile and
+//!   seed name a recording rather than instruct a regeneration, and the
+//!   `norn-fixtures` generator binds only its own profiles.
 //! - **The binary's behavior.** The composition root is a stub; there is no
 //!   command to invoke.
 //!
-//! Until both land, [`activated_cases_reach_a_runner`] fails loudly for any
-//! case that is activated, naming what is missing. That is the honest
-//! failure: the gate is real, and what sits behind it is not built.
+//! Until the runner and the composition root land,
+//! [`activated_cases_reach_a_runner`] fails loudly for any case that is
+//! activated, naming what is missing. That is the honest failure: the gate is
+//! real, and what sits behind it is not built.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -167,9 +166,9 @@ fn unseeded_commands_have_no_activation_path() {
     );
 }
 
-/// Every case's input tree is recorded, so activation has something to hold
-/// a future generator to. A case whose fixture tree went unrecorded could
-/// never be judged: a difference in output would be unattributable.
+/// Every case names a tree that is recorded. A case whose fixture tree went
+/// unrecorded could never be judged — there would be nothing to materialize
+/// it from, and a difference in output would be unattributable.
 #[test]
 fn every_case_has_a_recorded_input_tree() {
     let corpus = corpus();
@@ -186,6 +185,58 @@ fn every_case_has_a_recorded_input_tree() {
             case.fixture
         );
     }
+}
+
+/// Every recorded entry hands back the bytes of the file it stands for.
+///
+/// This is the property the activation contract rests on: a case materializes
+/// its tree from its manifest, so a manifest that could not rebuild its own
+/// tree would put a generator back in the path. Asserting it against the real
+/// corpus is what makes "the recording is complete" a checked claim rather
+/// than a description — and it exercises the binary entries specifically,
+/// which are the ones that used to carry a length instead of contents.
+#[test]
+fn every_recorded_entry_reconstructs_its_bytes() {
+    let corpus = corpus();
+    let mut entries = 0;
+    let mut files = 0;
+    let mut directories = 0;
+    let mut binary = 0;
+    for manifest in &corpus.fixtures.fixtures {
+        for entry in &manifest.entries {
+            entries += 1;
+            let reconstructed = entry.bytes().unwrap_or_else(|problem| {
+                panic!(
+                    "fixture `{}` entry `{}` does not reconstruct: {problem}",
+                    manifest.fixture_ref(),
+                    entry.path
+                )
+            });
+            let Some(bytes) = reconstructed else {
+                directories += 1;
+                continue;
+            };
+            files += 1;
+            if entry.content_base64.is_some() {
+                assert!(
+                    std::str::from_utf8(&bytes).is_err(),
+                    "fixture `{}` entry `{}` is recorded as binary but decodes to text",
+                    manifest.fixture_ref(),
+                    entry.path
+                );
+                binary += 1;
+            }
+        }
+    }
+    // Counted apart, so a directory entry appearing in a future recording
+    // shows up as one rather than inflating the file total.
+    assert_eq!(entries, 422, "the recorded entry total moved");
+    assert_eq!(files, 422, "the recorded file total moved");
+    assert_eq!(
+        directories, 0,
+        "a recorded manifest gained a directory entry"
+    );
+    assert_eq!(binary, 11, "the recorded binary-entry total moved");
 }
 
 /// Rulings no activation will ever bring up, because every command they
@@ -225,7 +276,7 @@ fn activated_cases_reach_a_runner() {
     assert!(
         unrunnable.is_empty(),
         "no runner can execute an activated case yet: a case needs its fixture \
-         vault reproduced by the deterministic generator, and its argv needs a \
+         vault written out from its recorded manifest, and its argv needs a \
          composition root that does something. Activate a command once both \
          exist. Activated cases:\n  {}",
         unrunnable.join("\n  ")

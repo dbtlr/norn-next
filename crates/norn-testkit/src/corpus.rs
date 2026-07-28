@@ -233,9 +233,11 @@ impl ExitClass {
     }
 }
 
-/// The vault a case ran against, named by the generator profile and seed
-/// that produce it. The tree itself is recorded in `fixtures.json`, because
-/// the name alone does not determine it.
+/// The vault a case ran against, named by the profile and seed it was
+/// generated from at the pin.
+///
+/// The name is a label on a recording, not a recipe: the tree itself is in
+/// `fixtures.json` byte for byte, because the pair does not determine it.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(deny_unknown_fields)]
 pub struct FixtureRef {
@@ -256,36 +258,72 @@ pub enum TreeEntryKind {
     EmptyDir,
 }
 
-/// One node of a vault tree: a file with its bytes, or an empty directory.
+/// One node of a vault tree: a file with its exact bytes, or an empty
+/// directory.
+///
+/// **Every file entry carries its bytes.** A file whose bytes are valid UTF-8
+/// carries them as `content`; a file whose bytes are not carries them
+/// base64-encoded as `content_base64`. There is no third state, and in
+/// particular no state that records a file's *length* in place of its
+/// contents: a manifest is the input side of a case, so an entry that cannot
+/// be turned back into the file is not a recording of it.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeEntry {
     pub path: String,
     pub kind: TreeEntryKind,
-    /// A text file's contents.
+    /// A file whose bytes are valid UTF-8, verbatim.
     #[serde(default)]
     pub content: Option<String>,
-    /// A file whose bytes are not valid UTF-8 carries its length instead.
+    /// A file whose bytes are not valid UTF-8, base64-encoded. The encoding is
+    /// canonical (see [`crate::base64`]), so one byte sequence has exactly one
+    /// spelling here.
     #[serde(default)]
-    pub non_utf8_len: Option<usize>,
+    pub content_base64: Option<String>,
 }
 
 impl TreeEntry {
-    /// Why this entry does not describe a tree node, if it does not. A file
-    /// carries exactly one of its two content fields; a directory carries
-    /// neither, because an empty directory has nothing to hold.
-    pub fn malformed(&self) -> Option<&'static str> {
-        match (self.kind, &self.content, self.non_utf8_len) {
-            (TreeEntryKind::File, Some(_), None) | (TreeEntryKind::File, None, Some(_)) => None,
-            (TreeEntryKind::File, Some(_), Some(_)) => {
-                Some("a file carries either its contents or a non-UTF-8 length, never both")
+    /// The exact bytes this entry records: `Ok(Some(bytes))` for a file,
+    /// `Ok(None)` for a directory, and an error describing why the entry does
+    /// not describe a tree node at all.
+    ///
+    /// This is the materialization accessor — writing `bytes()` at `path` for
+    /// every entry reconstructs the recorded tree — and it is also where the
+    /// well-formedness rules live, so the audit and the reconstruction cannot
+    /// disagree about what a legal entry is.
+    pub fn bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        match (self.kind, &self.content, &self.content_base64) {
+            (TreeEntryKind::File, Some(text), None) => Ok(Some(text.as_bytes().to_vec())),
+            (TreeEntryKind::File, None, Some(encoded)) => {
+                let bytes = crate::base64::decode(encoded)
+                    .map_err(|e| format!("base64 contents do not decode: {e}"))?;
+                if std::str::from_utf8(&bytes).is_ok() {
+                    return Err(
+                        "base64 contents decode to valid UTF-8, so this file is recorded \
+                         in the wrong field — text is recorded as text"
+                            .to_string(),
+                    );
+                }
+                Ok(Some(bytes))
             }
-            (TreeEntryKind::File, None, None) => {
-                Some("a file carries neither its contents nor a non-UTF-8 length")
+            (TreeEntryKind::File, Some(_), Some(_)) => Err(
+                "a file carries either its contents or its base64 contents, never both".to_string(),
+            ),
+            (TreeEntryKind::File, None, None) => Err(
+                "a file carries no contents; a manifest records every file's bytes, and a \
+                 length is not a recording"
+                    .to_string(),
+            ),
+            (TreeEntryKind::EmptyDir, None, None) => Ok(None),
+            (TreeEntryKind::EmptyDir, _, _) => {
+                Err("an empty directory carries no content".to_string())
             }
-            (TreeEntryKind::EmptyDir, None, None) => None,
-            (TreeEntryKind::EmptyDir, _, _) => Some("an empty directory carries no content"),
         }
+    }
+
+    /// Why this entry does not describe a tree node, if it does not.
+    pub fn malformed(&self) -> Option<String> {
+        self.bytes().err()
     }
 }
 
@@ -300,11 +338,12 @@ pub struct TreeDelta {
 
 /// The tree one `(profile, seed)` produced at the pin.
 ///
-/// This is the input side of every case that names it. A future generator
-/// reproduces the fixture when it emits exactly these paths with exactly
-/// these bytes; until it does, a case naming this fixture cannot be
-/// activated, because a difference in output would read as a defect in this
-/// program when it is drift in the generator.
+/// This is the input side of every case that names it, and it is complete:
+/// every entry carries its exact bytes, so a case materializes its tree from
+/// this recording. **No generator is in that path.** `(profile, seed)` is the
+/// recorded tree's *name*, not an instruction to regenerate it — the
+/// generator in this workspace binds its own profiles and is neither asked
+/// nor required to reproduce anything recorded here.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FixtureManifest {
@@ -1266,7 +1305,7 @@ mod tests {
                         path: "a.md".into(),
                         kind: TreeEntryKind::File,
                         content: Some("a".into()),
-                        non_utf8_len: None,
+                        content_base64: None,
                     }],
                 }],
             },
@@ -1712,7 +1751,7 @@ mod tests {
                 path: "note.md".into(),
                 kind: TreeEntryKind::File,
                 content: Some("trace: <TRACE_ID>\n".into()),
-                non_utf8_len: None,
+                content_base64: None,
             }],
             removed: Vec::new(),
             modified: Vec::new(),
@@ -1786,20 +1825,82 @@ mod tests {
     // --- fixture integrity -----------------------------------------------
 
     #[test]
-    fn a_fixture_file_carrying_both_content_and_a_length_is_caught() {
+    fn a_fixture_file_carrying_both_spellings_of_its_bytes_is_caught() {
         let mut corpus = sound();
-        corpus.fixtures.fixtures[0].entries[0].non_utf8_len = Some(4);
+        corpus.fixtures.fixtures[0].entries[0].content_base64 = Some("//8=".into());
         audit_mentions(&corpus, "never both");
     }
 
+    /// The state a manifest used to be allowed to end in — a file recorded by
+    /// length rather than by contents — no longer exists. An entry carrying
+    /// neither spelling of its bytes is a manifest that cannot reconstruct
+    /// its own tree, and the audit says so.
     #[test]
-    fn a_fixture_file_carrying_neither_is_caught() {
+    fn a_fixture_file_carrying_no_contents_at_all_is_caught() {
         let mut corpus = sound();
         corpus.fixtures.fixtures[0].entries[0].content = None;
-        audit_mentions(
-            &corpus,
-            "carries neither its contents nor a non-UTF-8 length",
+        audit_mentions(&corpus, "a length is not a recording");
+    }
+
+    /// `non_utf8_len` was the field that recorded a length in place of bytes.
+    /// It is gone, and `deny_unknown_fields` is what makes its return a
+    /// parse failure rather than a silently ignored key.
+    #[test]
+    fn a_manifest_entry_recording_a_length_no_longer_parses() {
+        let json = r#"{
+            "path": "Assets/pic.png",
+            "kind": "file",
+            "non_utf8_len": 67
+        }"#;
+        let error = serde_json::from_str::<TreeEntry>(json)
+            .expect_err("a length-only entry must not parse");
+        assert!(
+            error.to_string().contains("non_utf8_len"),
+            "the parse failure should name the rejected field: {error}"
         );
+    }
+
+    #[test]
+    fn a_fixture_file_whose_base64_does_not_decode_is_caught() {
+        let mut corpus = sound();
+        corpus.fixtures.fixtures[0].entries[0].content = None;
+        corpus.fixtures.fixtures[0].entries[0].content_base64 = Some("not base64!".into());
+        audit_mentions(&corpus, "base64 contents do not decode");
+    }
+
+    /// One file, one spelling: bytes that are valid UTF-8 belong in
+    /// `content`, so recording them base64 would give the corpus two ways to
+    /// say the same thing.
+    #[test]
+    fn a_fixture_file_hiding_text_inside_base64_is_caught() {
+        let mut corpus = sound();
+        corpus.fixtures.fixtures[0].entries[0].content = None;
+        corpus.fixtures.fixtures[0].entries[0].content_base64 =
+            Some(crate::base64::encode(b"plain text"));
+        audit_mentions(&corpus, "text is recorded as text");
+    }
+
+    #[test]
+    fn a_recorded_entry_reconstructs_its_bytes() {
+        let corpus = sound();
+        let entry = &corpus.fixtures.fixtures[0].entries[0];
+        assert_eq!(entry.bytes(), Ok(Some(b"a".to_vec())));
+
+        let binary = TreeEntry {
+            path: "Assets/pic.png".into(),
+            kind: TreeEntryKind::File,
+            content: None,
+            content_base64: Some(crate::base64::encode(&[0x89, 0xff, 0x00])),
+        };
+        assert_eq!(binary.bytes(), Ok(Some(vec![0x89, 0xff, 0x00])));
+
+        let directory = TreeEntry {
+            path: "empty".into(),
+            kind: TreeEntryKind::EmptyDir,
+            content: None,
+            content_base64: None,
+        };
+        assert_eq!(directory.bytes(), Ok(None));
     }
 
     #[test]

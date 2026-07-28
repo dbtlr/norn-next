@@ -29,3 +29,23 @@ distinctions below.
   operational failure, usage error, or — on a command that writes — a refusal that left the
   vault untouched, or a partial apply. A property of the evidence; this program's exit
   contract is authored with the verb charter.
+
+## Fixture generation
+
+Earned by [ADR 0002](decisions/0002-fixture-determinism-and-calibration.md), whose contract
+turns on the distinctions below.
+
+- **Fixture profile** — a named, compile-time constant naming a document count and one
+  setting per realism knob. With a seed it is the *whole* input to generation, which is what
+  makes a generated tree reproducible; a setting reachable from outside the pair would break
+  that.
+- **Realism knob** — one dial of how closely a generated tree resembles a real collection:
+  body length, ambiguity classes, link density, directory shape, non-Markdown clutter. Each
+  is a seeded draw, so turning one changes the tree without making it unpredictable.
+- **Ambiguity class** — a set of documents sharing one file-name stem in different
+  directories. Its size is **`k`**: resolving the bare stem names all `k`, so a class larger
+  than a bounded candidate list is what proves the bound truncates rather than merely fits.
+- **Calibration envelope** — the checked-in ranges a generated tree's shape statistics are
+  expected to land in, each carrying its reasoning. Authored rather than measured, and moved
+  only by a reviewed edit — which is what makes recalibration a deliberate act rather than
+  something a generator does to itself.
