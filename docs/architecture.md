@@ -18,9 +18,11 @@ from here land as individual ADRs at the layer where they bind — see
 
 ## Part I — The invariant spine
 
-Five invariants bind every layer. They are not aspirations — each is, or becomes, a
-mechanical check. The check's lane depends on what it measures: **counters and structure
-gate per PR; clocks and trends live in the soak lane and never fail a pull request.**
+Five invariants bind every layer. Most are carried by a mechanical check; some are carried
+by review, and the [boundary-invariant table](#boundary-invariants) is the truth source for
+which is which. Where a check exists, its lane depends on what it measures: **counters and
+structure gate per PR; clocks and trends live in the soak lane and never fail a pull
+request.**
 
 ### 1. The memory invariant
 
@@ -84,19 +86,34 @@ At the first release, version 1 freezes as the first migratable baseline. From t
 **migrations pillar is the schema-evolution path**, and rebuild-from-zero narrows to the
 second trigger alone.
 
-**Every rung is reached by a test.** The induced-failure suite injects each of the following
-and asserts the named rung handles it:
+**Every rung is reached by a test, across two suites.**
 
-| Injected failure | Rung that must handle it |
+Rung 1 is exercised continuously by the **churn suite** — bursts, atomic replaces, branch
+flips, mid-mutation edits — whose bar is convergence-to-equivalence with a from-scratch
+build and a settle bound proportional to the changed set. It is the warm path, so it is
+tested by ordinary operation rather than by injected failure.
+
+Rungs 2 and 3 are reached by the **induced-failure suite**, which injects each of the
+following:
+
+| Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | 1 → 2: the torn increment is detected and the entry re-heals |
-| Disk full | 2: the increment cannot complete; the entry stays untrusted until a heal succeeds |
-| Permission loss on vault paths | 2: an unreadable path is an error, never evidence of deletion — it must not prune |
-| Corruption injection | 3 |
-| Stale schema (DDL fingerprint mismatch) | 3 |
+| Process killed mid-increment | **Handled at rung 2.** The torn increment is detected at the next attach and the entry re-heals. A partial increment is never treated as complete. |
+| Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
+| Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
+| Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
+| Stale schema (DDL fingerprint mismatch) | **Handled at rung 3.** The database is discarded and rebuilt. |
 
-**Cold is a state of a vault entry, not a code path.** There is exactly one attach seam,
-and both host lifecycles use it.
+**Refusal is resolution.** Rung 3's second trigger reads "any state the lower rungs cannot
+resolve", and a transient environmental failure does not qualify. When the disk is full or a
+permission was revoked, refusing and leaving the entry untrusted *is* the lower rung
+resolving the situation correctly: the environment is broken, the stored state is not, and
+discarding a sound database would destroy work to fix nothing. **Rung 3 is for damaged
+state, never for a hostile environment.**
+
+**Cold is a state of a vault entry, not a code path.** There is exactly one attach seam and
+both host lifecycles use it, so "cold" names rung 2 running on first touch — not a separate
+code path with its own behavior.
 
 ### 4. Raw-SQL acceptance
 
@@ -176,20 +193,26 @@ convenience:
   and the short/long help stance are the exemplars, and the class stays open on those
   terms — new exceptions are judged by the Layer 3 verb charter, which owns help doctrine.
 
-Three implementation questions are **registered open** against Layer 1 rather than settled
-here:
+Two implementation mechanisms are **registered open** against Layer 1 — undecided, and
+deliberately so:
 
 - **Watcher backend.** Default posture is buy over build (`notify`). Rolling our own
   requires demonstrated advantages with isolated costs, judged against the churn-fidelity
   bars — convergence-to-equivalence with a from-scratch build, and a settle bound
   proportional to the changed set. Either way it is an implementation detail *inside*
   `norn-fs`; no other crate learns which backend won.
-- **Model-weight fetch mechanics.** The enabling verb, the storage location, and how
-  downloaded weights are integrity-pinned against `(model id, version)`. The pinning
-  requirement is fixed (see the `norn-embed` rule); the mechanism is not.
-- **`#tag` graduation.** The syntax family lands in `norn-text` at Layer 1 and graduates in
-  two steps: a **schema facet in `norn-store` at Layer 1**, and a **query surface at the
-  Layer 3 verb charter**. Both steps are committed; their shape is not.
+- **Model-weight fetch mechanics.** The enabling verb, the storage location, and the pinning
+  mechanism. **Integrity pinning against `(model id, version)` is itself required and is not
+  open** — it is fixed in the `norn-embed` membership rule above. Layer 1 decides *how*
+  weights are pinned, never *whether*.
+
+Separately, one capability is **committed with its shape open**, which is a different kind
+of pending:
+
+- **`#tag` graduation.** The syntax family lands in `norn-text` at Layer 1, and the family
+  graduates in two committed steps — a **schema facet in `norn-store` at Layer 1**, and a
+  **query surface decided by the Layer 3 verb charter**. Both steps will happen; what they
+  look like is the deciding layer's call.
 
 ### Dependency allowlist
 
@@ -240,11 +263,10 @@ facts, never raw documents.
 
 ### Boundary invariants
 
-Thirteen invariants, held by two different mechanisms. **Five (1, 7, 12, 13, and the
-dependency half of 3) are held by the absence of an edge**, which makes their violation a
-compile error rather than a review finding. The rest escalate to lint tooling, adopted as
-each invariant becomes real; a few — notably 3 and 11 — are held partly by each. The
-enforcement section below states which mechanism carries what.
+Thirteen invariants. They are not all carried the same way: some are compile errors, some
+are lints, some are review findings. The
+[mechanism table](#which-mechanism-carries-which-invariant) in the enforcement section
+states which is which, invariant by invariant.
 
 1. **`norn-client` never depends on `norn-store`, `norn-host`, or `norn-serve`.**
    Always-routed is therefore true by construction: no client-side code path can open a
@@ -274,9 +296,12 @@ enforcement section below states which mechanism carries what.
    that touch a vault — its files and its derived database. Derivation is
    `fs.walk → text.parse → store.upsert`; application is
    `text.compose → fs.write_atomic → store.increment`. The seam governs *vault* effects
-   specifically: serving sockets (serve), loopback and spawn (client), tty (console), and
-   machine-local config-directory state each belong to their owning crate and are not
-   violations. Development crates are exempt.
+   specifically. These are not violations of it, and each belongs to its owning crate:
+   serving sockets (serve); loopback routing and process spawn (client); tty (console);
+   machine-local config-directory state (config); and the client's machine-local filesystem
+   effects — self-update binary replacement and service-unit install. Development crates are
+   outside the seam's scope entirely. The filesystem carve-out table in the enforcement
+   section enumerates every permitted effect site.
 9. **The fs event stream carries filesystem facts only**, from a single producer (the
    watcher). Domain eventing, if it ever earns existence, is a separate host-internal
    concern — never a rider on the fs bus.
@@ -333,20 +358,68 @@ One workspace-root `clippy.toml` holds the whole ruleset, because that configura
 does not merge per-crate. The crate that legitimately owns an effect carves it out with an
 explicit `#[allow]` **at the use site**, which doubles as an audit marker.
 
-Two rules carry a defined carve-out set. The carve-outs are the whole permitted list — an
-`#[allow]` anywhere else is the violation the lint exists to catch.
+Two rules carry a defined carve-out set. Each list below is exhaustive — an `#[allow]`
+anywhere else is exactly the violation the lint exists to catch.
 
-- **Filesystem** (`std::fs`): `norn-fs`, `norn-config`, the `norn-embed` weight fetch, and
-  the `norn-host` janitor.
-- **Stdout**: the `norn-client` stdio-MCP shim, which necessarily writes JSON-RPC frames to
-  stdout, and `norn-client`'s `completions` and `manpage` generation, which emit artifacts
-  rather than rendered records. Everything a user reads as *output* still goes through
-  `norn-console`; the carve-out covers machine-consumed byte streams only.
+**Filesystem (`std::fs`)** — the permitted effect sites are:
 
-Vault-effect lints bind product crates only; `norn-fixtures` and `norn-testkit` are exempt.
+| Site | Effect |
+|---|---|
+| `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock |
+| `norn-config` | Config-directory bytes: registry file, bearer token |
+| `norn-embed` | The opt-in weight fetch and load |
+| `norn-host` | The one-shot legacy-cache janitor |
+| `norn-client` | Machine-local effects only: self-update binary replacement, service-unit install, and the token-generation write blessed by boundary invariant 11 |
+| `norn-fixtures`, `norn-testkit` (dev) | Temp trees and harness scaffolding — writing them is the job |
+
+The dev-crate row is part of the rule, not an exception to it: vault-effect lints bind
+product crates, and the two development crates are outside their scope by construction.
+
+Two non-entries are deliberate. `norn-store` reaches the filesystem through the SQLite
+driver rather than `std::fs`, so it needs no carve-out; and `norn-serve` binds a loopback
+socket, which is not a filesystem effect.
+
+**Stdout** — the permitted write sites are:
+
+| Site | Why |
+|---|---|
+| `norn-console` | The render seam; this is the rule's home, not a carve-out |
+| `norn-client` stdio-MCP shim | JSON-RPC frames are the protocol; they cannot route through a record renderer |
+| `norn-client` `completions` and `manpage` | Generated artifacts consumed by other programs, not rendered records |
+
+Everything a person reads as *output* still goes through `norn-console`. The carve-outs
+cover machine-consumed byte streams only.
 
 Rules are adopted one at a time, as each invariant becomes real. Tooling choice is an
 implementation detail of NORN-12, not a fixed part of this contract.
+
+### Which mechanism carries which invariant
+
+**Edge** means the invariant is held by an absent dependency edge: violating it is a compile
+error, and the architecture gate fails any attempt to add the edge that would make it
+compile. **Lint** means a named rule from the list above. **Review** means no mechanical
+check exists and the invariant is enforced by reading the diff — these are the ones that
+rot silently, so they are called out rather than buried.
+
+| # | Invariant | Carried by |
+|---|---|---|
+| 1 | Client never depends on store, host, or serve | **Edge** |
+| 2 | Host is the sole opener of durable databases, and the sole plan executor | **Edge** for the database half (only `norn-host` may depend on `norn-store`), reinforced by the no-SQLite-connection-outside-store lint. The sole-applier half rides invariant 4 |
+| 3 | Wire has zero workspace dependencies and zero effects | **Edge + lint** — the allowlist pins wire's dependencies to none; the `serde_json::Value` rule keeps untyped payloads off the seam |
+| 4 | One plan vocabulary, one applier | **Review** |
+| 5 | Surface-specific parameters are defects | **Review** |
+| 6 | One render seam, owned by console | **Lint** for stdout writes; **review** for colour and tty resolution, which no current rule expresses |
+| 7 | Console never depends on a workspace crate | **Edge** |
+| 8 | Two vault-effect seams, and only two | **Edge + lint** — crates with no edge to `norn-fs` or `norn-store` cannot reach a vault at all; the `std::fs` rule and its carve-out table hold the rest |
+| 9 | The fs event stream carries filesystem facts only | **Review** |
+| 10 | One parser | **Review** — the allowlist limits who may *call* `norn-text`, but nothing stops a second interpretation being hand-rolled inside a crate that already has the edge |
+| 11 | Machine-local state has one owner | **Lint** — the `std::fs` carve-out table confines config-directory bytes, and a named symbol lint keeps the registry surface out of everything but `norn-host` |
+| 12 | Embed is blind | **Edge** |
+| 13 | The orchestrator is protocol-blind | **Edge** |
+
+Four invariants — 4, 5, 9, and 10 — have no mechanical carrier today. That is a standing
+weakness, not a settled state: a rule that makes any of them checkable is a welcome addition
+to the lint set.
 
 ---
 
@@ -356,7 +429,7 @@ implementation detail of NORN-12, not a fixed part of this contract.
 
 **One host process serves all registered vaults**, with two lifecycles: a supervised
 service, or an auto-launched TTL instance (supervisor off, TTL on). Same binary, same attach
-seam. Cold is a state of a vault entry, not a code path.
+seam — the one described in [the heal ladder](#3-the-heal-ladder).
 
 The registry is the host's serving set. Registration gates durability — durable database,
 watcher, warm trust — while unregistered roots get disposable derivation over a throwaway
@@ -410,18 +483,20 @@ hydration. Warm requests assert zero derivation counters.
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
 matches only `**/norn/glossary.md`; stem resolution is the one-segment case. This is *the*
-grammar across every target surface: CLI, MCP, wikilinks, filters. The grammar is specified
-by its own ADR and expressed as `norn-wire` resolution types; `norn-text` parses link
-*syntax* only; execution is a store builder with its own `EXPLAIN` bar and index support.
-Candidates emit as minimal disambiguating suffixes, and the findings pillar indexes full
-candidate enumeration so the wire's bounded head stays a head rather than becoming the query
-surface.
+grammar across every target surface: CLI, MCP, wikilinks, filters. It is expressed as
+`norn-wire` resolution types; `norn-text` parses link *syntax* only; execution is a store
+builder with its own `EXPLAIN` bar and index support. Candidates emit as minimal
+disambiguating suffixes, and the findings pillar indexes full candidate enumeration so the
+wire's bounded head stays a head rather than becoming the query surface.
+
+The grammar's own ADR lands with the Layer 3 verb charter, which is where it binds. Until
+then the paragraph above is the working shape, and anything built against it is building
+against a statement that has not yet been ratified at its layer.
 
 **Derivation — attach, heal, watch.** Pure host composition. Cold attach walks
 `fs.walk → text.parse → store.upsert`. Warm operation is watcher facts from `norn-fs`
-driving scoped `norn-store` increments. The heal ladder splits along the same seam:
-tree-walking rungs orchestrate through `fs`, database-side rungs (schema fingerprint,
-rebuild-from-zero) live in `store`.
+driving scoped `norn-store` increments; the heal ladder splits across the same two seams
+(see [the heal ladder](#3-the-heal-ladder)).
 
 Full-text search is maintained transactionally inside the increment. Embeddings are
 eventually consistent via async workers, and the surface says so. Vectors are versioned,
