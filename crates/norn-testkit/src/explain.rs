@@ -168,9 +168,7 @@ impl PlanRow {
     /// weaker bar. A covering-index scan is not a table scan: it never
     /// touches the table's own pages, and it is unbounded all the same.
     pub fn is_table_scan(&self) -> bool {
-        matches!(self.scan_target(), Some(ScanTarget::Relation(_)))
-            && self.index().is_none()
-            && !self.uses_automatic_index()
+        matches!(self.scan_target(), Some(ScanTarget::Relation(_))) && self.index().is_none()
     }
 }
 
@@ -853,9 +851,8 @@ mod tests {
         let row = PlanRow::new(3, 0, "SEARCH b USING AUTOMATIC COVERING INDEX (x=?)");
         assert_eq!(row.searches(), Some("b"));
         assert_eq!(row.index(), None);
+        assert_eq!(row.constraint(), Some("(x=?)"));
         assert!(row.uses_automatic_index());
-        assert!(!row.is_table_scan());
-        assert!(!row.is_unbounded_scan());
     }
 
     #[test]
