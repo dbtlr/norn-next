@@ -16,8 +16,7 @@
       "id": "mutate-move-apply-cascade-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -109,14 +108,13 @@
       "id": "mutate-move-dry-run-json-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "plan-hash"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"not-run\",\n      \"path\": \"notes/moved-b.md\",\n      \"stem\": \"moved-b\",\n      \"summary\": \"would move notes/cycle-b.md → notes/moved-b.md\",\n      \"cascade\": {\n        \"planned\": 1,\n        \"applied\": 1,\n        \"skipped\": 0,\n        \"failed\": 0,\n        \"files\": 1\n      }\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"not-run\",\n      \"path\": \"notes/moved-b.md\",\n      \"stem\": \"moved-b\",\n      \"summary\": \"would move notes/cycle-b.md → notes/moved-b.md\",\n      \"cascade\": {\n        \"planned\": 1,\n        \"applied\": 1,\n        \"skipped\": 0,\n        \"failed\": 0,\n        \"files\": 1\n      }\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -131,8 +129,7 @@
       },
       "suite": "mutate",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -157,7 +154,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"no document matched path or stem: no-such-doc-xyzzy\",\n      \"error\": {\n        \"code\": \"target-not-found\",\n        \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"no document matched path or stem: no-such-doc-xyzzy\",\n      \"error\": {\n        \"code\": \"target-not-found\",\n        \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -170,10 +167,7 @@
         "line": "norn-legacy"
       },
       "suite": "mutate",
-      "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -190,8 +184,7 @@
       "id": "wl-move-code-fence-shadow-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -244,8 +237,7 @@
       "id": "wl-move-embed-backlink-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -298,8 +290,7 @@
       "id": "wl-move-spaced-alias-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -352,8 +343,7 @@
       "id": "wl-move-unrepresentable-skip-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",

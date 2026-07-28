@@ -17,8 +17,7 @@
       "id": "apply-authored-add-frontmatter-plan-dry-run-json-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "plan-hash"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"add_frontmatter\",\n      \"fields\": { \"path\": \"notes/alpha.md\", \"field\": \"priority\", \"new_value\": \"high\" }\n    }\n  ]\n}\n",
@@ -27,7 +26,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"add_frontmatter\",\n      \"status\": \"not-run\",\n      \"summary\": \"would add_frontmatter frontmatter field 'priority' in notes/alpha.md\"\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 0,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"add_frontmatter\",\n      \"status\": \"not-run\",\n      \"summary\": \"would add_frontmatter frontmatter field 'priority' in notes/alpha.md\"\n    }\n  ],\n  \"outcome\": \"forecast\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -42,8 +41,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -70,7 +68,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create notes/alpha.md\",\n      \"error\": {\n        \"code\": \"create-destination-exists\",\n        \"message\": \"create_document: destination already exists (use --force to overwrite): notes/alpha.md\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create notes/alpha.md\",\n      \"error\": {\n        \"code\": \"create-destination-exists\",\n        \"message\": \"create_document: destination already exists (use --force to overwrite): notes/alpha.md\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -85,8 +83,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -113,7 +110,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create newdoc.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"create_document: missing or non-object frontmatter in new_value\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create newdoc.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"create_document: missing or non-object frontmatter in new_value\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -127,8 +124,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -155,7 +151,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create nope/new.md\",\n      \"error\": {\n        \"code\": \"create-parent-missing\",\n        \"message\": \"create_document: parent directory does not exist (use -p / --parents to auto-create): nope/new.md\",\n        \"path\": \"nope/new.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create nope/new.md\",\n      \"error\": {\n        \"code\": \"create-parent-missing\",\n        \"message\": \"create_document: parent directory does not exist (use -p / --parents to auto-create): nope/new.md\",\n        \"path\": \"nope/new.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -169,8 +165,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -188,8 +183,7 @@
       "id": "apply-authored-delete-hash-required-refusal-json-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "plan-hash"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"delete_document\", \"fields\": { \"path\": \"notes/alpha.md\" } }\n  ]\n}\n",
@@ -198,7 +192,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"delete_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would delete_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"delete-hash-required\",\n        \"message\": \"delete_document op for notes/alpha.md carries no document_hash; a delete requires a plan-time hash so the file is compare-and-swapped before removal — add `document_hash` to the op (or regenerate the plan with `norn repair --plan`)\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"delete_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would delete_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"delete-hash-required\",\n        \"message\": \"delete_document op for notes/alpha.md carries no document_hash; a delete requires a plan-time hash so the file is compare-and-swapped before removal — add `document_hash` to the op (or regenerate the plan with `norn repair --plan`)\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -213,8 +207,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -241,7 +234,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create_document x.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"duplicate operation id in MigrationPlan: dup\"\n      }\n    },\n    {\n      \"op_id\": \"1\",\n      \"kind\": \"create_document\",\n      \"status\": \"not-run\",\n      \"summary\": \"would create_document y.md\"\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 1,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"create_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would create_document x.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"duplicate operation id in MigrationPlan: dup\"\n      }\n    },\n    {\n      \"op_id\": \"1\",\n      \"kind\": \"create_document\",\n      \"status\": \"not-run\",\n      \"summary\": \"would create_document y.md\"\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -255,8 +248,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -283,7 +275,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"invalid-precondition\",\n        \"message\": \"owner-set precondition 'p' has an empty stem selector\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"invalid-precondition\",\n        \"message\": \"owner-set precondition 'p' has an empty stem selector\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -298,8 +290,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -316,8 +307,7 @@
       "id": "apply-authored-independent-files-proceed-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-first.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# First\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-missing/second.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Second\\n\" },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"nrn406-third.md\",\n        \"new_value\": { \"frontmatter\": { \"type\": \"note\" }, \"body\": \"# Third\\n\" },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
@@ -417,7 +407,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"move_document missing dst\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move_document notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"move_document missing dst\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -431,8 +421,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -449,8 +438,7 @@
       "id": "apply-authored-move-plan-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"move_document\",\n      \"fields\": { \"src\": \"notes/cycle-c.md\", \"dst\": \"notes/moved-c.md\", \"parents\": false }\n    }\n  ]\n}\n",
@@ -506,8 +494,7 @@
       "id": "apply-authored-move-stale-hash-refusal-json-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "plan-hash"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"move_document\", \"fields\": { \"src\": \"notes/alpha.md\", \"dst\": \"notes/alpha-moved.md\", \"no_link_rewrite\": true, \"document_hash\": \"0000000000000000000000000000000000000000000000000000000000000000\" } }\n  ]\n}\n",
@@ -516,7 +503,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move notes/alpha.md → notes/alpha-moved.md\",\n      \"error\": {\n        \"code\": \"stale-document-hash\",\n        \"message\": \"stale repair plan for notes/alpha.md: expected hash 0000000000000000000000000000000000000000000000000000000000000000, found de7c80138cd917d1f34a1b925329bf1b7245c949cb180e36c1c6bdc9f837abdf; regenerate with `norn repair --plan`\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"move_document\",\n      \"status\": \"failed\",\n      \"summary\": \"would move notes/alpha.md → notes/alpha-moved.md\",\n      \"error\": {\n        \"code\": \"stale-document-hash\",\n        \"message\": \"stale repair plan for notes/alpha.md: expected hash 0000000000000000000000000000000000000000000000000000000000000000, found de7c80138cd917d1f34a1b925329bf1b7245c949cb180e36c1c6bdc9f837abdf; regenerate with `norn repair --plan`\",\n        \"path\": \"notes/alpha.md\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -531,8 +518,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -626,8 +612,7 @@
       "id": "apply-authored-sequenced-seq-creates-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task One\", \"type\": \"task\" },\n          \"body\": \"# Task One\\n\"\n        },\n        \"force\": false\n      }\n    },\n    {\n      \"kind\": \"create_document\",\n      \"fields\": {\n        \"path\": \"seq/task-{{seq}}.md\",\n        \"new_value\": {\n          \"frontmatter\": { \"title\": \"Task Two\", \"type\": \"task\" },\n          \"body\": \"# Task Two\\n\"\n        },\n        \"force\": false\n      }\n    }\n  ]\n}\n",
@@ -688,7 +673,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"no_such_kind\",\n      \"status\": \"failed\",\n      \"summary\": \"would no_such_kind notes/alpha.md\",\n      \"error\": {\n        \"code\": \"unknown-operation-kind\",\n        \"message\": \"unknown operation kind: no_such_kind\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"no_such_kind\",\n      \"status\": \"failed\",\n      \"summary\": \"would no_such_kind notes/alpha.md\",\n      \"error\": {\n        \"code\": \"unknown-operation-kind\",\n        \"message\": \"unknown operation kind: no_such_kind\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -702,8 +687,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -808,7 +792,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"op.fields for set_frontmatter could not be decoded: invalid type: integer `5`, expected a string\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 3,\n  \"trace_id\": \"\",\n  \"plan_hash\": \"<PLAN_HASH>\",\n  \"vault_root\": \"<VAULT>\",\n  \"dry_run\": true,\n  \"applied\": 0,\n  \"skipped\": 0,\n  \"failed\": 1,\n  \"remaining\": 0,\n  \"operations\": [\n    {\n      \"op_id\": \"0\",\n      \"kind\": \"set_frontmatter\",\n      \"status\": \"failed\",\n      \"summary\": \"would set_frontmatter notes/alpha.md\",\n      \"error\": {\n        \"code\": \"malformed-plan\",\n        \"message\": \"op.fields for set_frontmatter could not be decoded: invalid type: integer `5`, expected a string\"\n      }\n    }\n  ],\n  \"outcome\": \"refused\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -822,8 +806,7 @@
       },
       "suite": "apply",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -840,8 +823,7 @@
       "id": "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "plan_argv_placeholder": "{PLAN}",
       "plan_template": "{\n  \"schema_version\": 2,\n  \"vault_root\": \"{{VAULT_ROOT}}\",\n  \"operations\": [\n    { \"kind\": \"delete_document\", \"fields\": { \"path\": \"notes/cycle-c.md\", \"rewrite_to\": 5 } }\n  ]\n}\n",

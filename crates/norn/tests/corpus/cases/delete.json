@@ -87,8 +87,7 @@
       "id": "mutate-delete-rewrite-to-apply-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -136,8 +135,7 @@
       "id": "wl-delete-embed-backlink-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",

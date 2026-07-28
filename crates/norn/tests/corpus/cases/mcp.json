@@ -85,7 +85,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":0,\\\"dry_run\\\":true,\\\"failed\\\":0,\\\"operations\\\":[{\\\"cascade\\\":{\\\"applied\\\":0,\\\"failed\\\":0,\\\"files\\\":0,\\\"planned\\\":0,\\\"skipped\\\":0},\\\"kind\\\":\\\"delete_document\\\",\\\"link_impact\\\":{\\\"incoming_files\\\":[\\\"index.md\\\",\\\"notes/bad-parent.md\\\",\\\"notes/beta.md\\\"],\\\"incoming_total\\\":7},\\\"op_id\\\":\\\"0\\\",\\\"status\\\":\\\"not-run\\\",\\\"summary\\\":\\\"would delete notes/alpha.md\\\"}],\\\"outcome\\\":\\\"forecast\\\",\\\"plan_hash\\\":\\\"<PLAN_HASH>\\\",\\\"remaining\\\":1,\\\"schema_version\\\":3,\\\"skipped\\\":0,\\\"trace_id\\\":\\\"<TRACE_ID>\\\",\\\"vault_root\\\":\\\"<VAULT>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":0,\"dry_run\":true,\"failed\":0,\"operations\":[{\"cascade\":{\"applied\":0,\"failed\":0,\"files\":0,\"planned\":0,\"skipped\":0},\"kind\":\"delete_document\",\"link_impact\":{\"incoming_files\":[\"index.md\",\"notes/bad-parent.md\",\"notes/beta.md\"],\"incoming_total\":7},\"op_id\":\"0\",\"status\":\"not-run\",\"summary\":\"would delete notes/alpha.md\"}],\"outcome\":\"forecast\",\"plan_hash\":\"<PLAN_HASH>\",\"remaining\":1,\"schema_version\":3,\"skipped\":0,\"trace_id\":\"<TRACE_ID>\",\"vault_root\":\"<VAULT>\"}},\"isError\":false}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":0,\\\"dry_run\\\":true,\\\"failed\\\":0,\\\"operations\\\":[{\\\"cascade\\\":{\\\"applied\\\":0,\\\"failed\\\":0,\\\"files\\\":0,\\\"planned\\\":0,\\\"skipped\\\":0},\\\"kind\\\":\\\"delete_document\\\",\\\"link_impact\\\":{\\\"incoming_files\\\":[\\\"index.md\\\",\\\"notes/bad-parent.md\\\",\\\"notes/beta.md\\\"],\\\"incoming_total\\\":7},\\\"op_id\\\":\\\"0\\\",\\\"status\\\":\\\"not-run\\\",\\\"summary\\\":\\\"would delete notes/alpha.md\\\"}],\\\"outcome\\\":\\\"forecast\\\",\\\"plan_hash\\\":\\\"<PLAN_HASH>\\\",\\\"remaining\\\":1,\\\"schema_version\\\":3,\\\"skipped\\\":0,\\\"trace_id\\\":\\\"\\\",\\\"vault_root\\\":\\\"<VAULT>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":0,\"dry_run\":true,\"failed\":0,\"operations\":[{\"cascade\":{\"applied\":0,\"failed\":0,\"files\":0,\"planned\":0,\"skipped\":0},\"kind\":\"delete_document\",\"link_impact\":{\"incoming_files\":[\"index.md\",\"notes/bad-parent.md\",\"notes/beta.md\"],\"incoming_total\":7},\"op_id\":\"0\",\"status\":\"not-run\",\"summary\":\"would delete notes/alpha.md\"}],\"outcome\":\"forecast\",\"plan_hash\":\"<PLAN_HASH>\",\"remaining\":1,\"schema_version\":3,\"skipped\":0,\"trace_id\":\"\",\"vault_root\":\"<VAULT>\"}},\"isError\":false}}\n"
       },
       "requires_doc": "notes/alpha.md",
       "source": {
@@ -100,8 +100,7 @@
       ],
       "suite": "mcp",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -289,7 +288,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":0,\\\"dry_run\\\":true,\\\"failed\\\":0,\\\"operations\\\":[{\\\"cascade\\\":{\\\"applied\\\":7,\\\"failed\\\":0,\\\"files\\\":3,\\\"planned\\\":7,\\\"skipped\\\":0},\\\"kind\\\":\\\"move_document\\\",\\\"op_id\\\":\\\"0\\\",\\\"path\\\":\\\"notes/renamed-alpha.md\\\",\\\"status\\\":\\\"not-run\\\",\\\"stem\\\":\\\"renamed-alpha\\\",\\\"summary\\\":\\\"would move notes/alpha.md → notes/renamed-alpha.md\\\"}],\\\"outcome\\\":\\\"forecast\\\",\\\"plan_hash\\\":\\\"<PLAN_HASH>\\\",\\\"remaining\\\":1,\\\"schema_version\\\":3,\\\"skipped\\\":0,\\\"trace_id\\\":\\\"<TRACE_ID>\\\",\\\"vault_root\\\":\\\"<VAULT>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":0,\"dry_run\":true,\"failed\":0,\"operations\":[{\"cascade\":{\"applied\":7,\"failed\":0,\"files\":3,\"planned\":7,\"skipped\":0},\"kind\":\"move_document\",\"op_id\":\"0\",\"path\":\"notes/renamed-alpha.md\",\"status\":\"not-run\",\"stem\":\"renamed-alpha\",\"summary\":\"would move notes/alpha.md → notes/renamed-alpha.md\"}],\"outcome\":\"forecast\",\"plan_hash\":\"<PLAN_HASH>\",\"remaining\":1,\"schema_version\":3,\"skipped\":0,\"trace_id\":\"<TRACE_ID>\",\"vault_root\":\"<VAULT>\"}},\"isError\":false}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":0,\\\"dry_run\\\":true,\\\"failed\\\":0,\\\"operations\\\":[{\\\"cascade\\\":{\\\"applied\\\":7,\\\"failed\\\":0,\\\"files\\\":3,\\\"planned\\\":7,\\\"skipped\\\":0},\\\"kind\\\":\\\"move_document\\\",\\\"op_id\\\":\\\"0\\\",\\\"path\\\":\\\"notes/renamed-alpha.md\\\",\\\"status\\\":\\\"not-run\\\",\\\"stem\\\":\\\"renamed-alpha\\\",\\\"summary\\\":\\\"would move notes/alpha.md → notes/renamed-alpha.md\\\"}],\\\"outcome\\\":\\\"forecast\\\",\\\"plan_hash\\\":\\\"<PLAN_HASH>\\\",\\\"remaining\\\":1,\\\"schema_version\\\":3,\\\"skipped\\\":0,\\\"trace_id\\\":\\\"\\\",\\\"vault_root\\\":\\\"<VAULT>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":0,\"dry_run\":true,\"failed\":0,\"operations\":[{\"cascade\":{\"applied\":7,\"failed\":0,\"files\":3,\"planned\":7,\"skipped\":0},\"kind\":\"move_document\",\"op_id\":\"0\",\"path\":\"notes/renamed-alpha.md\",\"status\":\"not-run\",\"stem\":\"renamed-alpha\",\"summary\":\"would move notes/alpha.md → notes/renamed-alpha.md\"}],\"outcome\":\"forecast\",\"plan_hash\":\"<PLAN_HASH>\",\"remaining\":1,\"schema_version\":3,\"skipped\":0,\"trace_id\":\"\",\"vault_root\":\"<VAULT>\"}},\"isError\":false}}\n"
       },
       "requires_doc": "notes/alpha.md",
       "source": {
@@ -304,8 +303,7 @@
       ],
       "suite": "mcp",
       "volatile_masks": [
-        "<PLAN_HASH>",
-        "<TRACE_ID>"
+        "<PLAN_HASH>"
       ]
     },
     {
@@ -326,7 +324,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_bytes\\\":0,\\\"operation\\\":\\\"new\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"path\\\":\\\"notes/mcp-brand-new.md\\\",\\\"schema_version\\\":2,\\\"trace_id\\\":\\\"<TRACE_ID>\\\",\\\"warnings\\\":[{\\\"code\\\":\\\"title-ignored\\\",\\\"message\\\":\\\"--title 'Brand New' has no effect with an explicit path\\\"}]}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_bytes\":0,\"operation\":\"new\",\"outcome\":\"forecast\",\"path\":\"notes/mcp-brand-new.md\",\"schema_version\":2,\"trace_id\":\"<TRACE_ID>\",\"warnings\":[{\"code\":\"title-ignored\",\"message\":\"--title 'Brand New' has no effect with an explicit path\"}]}},\"isError\":false}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_bytes\\\":0,\\\"operation\\\":\\\"new\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"path\\\":\\\"notes/mcp-brand-new.md\\\",\\\"schema_version\\\":2,\\\"trace_id\\\":\\\"\\\",\\\"warnings\\\":[{\\\"code\\\":\\\"title-ignored\\\",\\\"message\\\":\\\"--title 'Brand New' has no effect with an explicit path\\\"}]}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_bytes\":0,\"operation\":\"new\",\"outcome\":\"forecast\",\"path\":\"notes/mcp-brand-new.md\",\"schema_version\":2,\"trace_id\":\"\",\"warnings\":[{\"code\":\"title-ignored\",\"message\":\"--title 'Brand New' has no effect with an explicit path\"}]}},\"isError\":false}}\n"
       },
       "source": {
         "branch": "rewrite/0017",
@@ -339,9 +337,7 @@
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"vault.new\",\"arguments\":{\"path\":\"notes/mcp-brand-new.md\",\"title\":\"Brand New\"}}}"
       ],
       "suite": "mcp",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -396,7 +392,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"error\\\":{\\\"code\\\":\\\"target-not-found\\\",\\\"message\\\":\\\"no document matched path or stem: nonexistent-doc-xyz\\\"},\\\"frontmatter_changes\\\":[],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"refused\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"nonexistent-doc-xyz\\\",\\\"trace_id\\\":\\\"<TRACE_ID>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"error\":{\"code\":\"target-not-found\",\"message\":\"no document matched path or stem: nonexistent-doc-xyz\"},\"frontmatter_changes\":[],\"operation\":\"set\",\"outcome\":\"refused\",\"schema_version\":2,\"target\":\"nonexistent-doc-xyz\",\"trace_id\":\"<TRACE_ID>\"}},\"isError\":true}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"error\\\":{\\\"code\\\":\\\"target-not-found\\\",\\\"message\\\":\\\"no document matched path or stem: nonexistent-doc-xyz\\\"},\\\"frontmatter_changes\\\":[],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"refused\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"nonexistent-doc-xyz\\\",\\\"trace_id\\\":\\\"\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"error\":{\"code\":\"target-not-found\",\"message\":\"no document matched path or stem: nonexistent-doc-xyz\"},\"frontmatter_changes\":[],\"operation\":\"set\",\"outcome\":\"refused\",\"schema_version\":2,\"target\":\"nonexistent-doc-xyz\",\"trace_id\":\"\"}},\"isError\":true}}\n"
       },
       "source": {
         "branch": "rewrite/0017",
@@ -409,9 +405,7 @@
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"vault.set\",\"arguments\":{\"target\":\"nonexistent-doc-xyz\",\"field\":[\"title:X\"],\"confirm\":true}}}"
       ],
       "suite": "mcp",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -431,7 +425,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"frontmatter_changes\\\":[{\\\"field\\\":\\\"project\\\",\\\"new\\\":\\\"myproj\\\",\\\"old\\\":\\\"sample-project\\\",\\\"op\\\":\\\"set\\\"}],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"notes/alpha.md\\\",\\\"trace_id\\\":\\\"<TRACE_ID>\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"frontmatter_changes\":[{\"field\":\"project\",\"new\":\"myproj\",\"old\":\"sample-project\",\"op\":\"set\"}],\"operation\":\"set\",\"outcome\":\"forecast\",\"schema_version\":2,\"target\":\"notes/alpha.md\",\"trace_id\":\"<TRACE_ID>\"}},\"isError\":false}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"frontmatter_changes\\\":[{\\\"field\\\":\\\"project\\\",\\\"new\\\":\\\"myproj\\\",\\\"old\\\":\\\"sample-project\\\",\\\"op\\\":\\\"set\\\"}],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"notes/alpha.md\\\",\\\"trace_id\\\":\\\"\\\"}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"frontmatter_changes\":[{\"field\":\"project\",\"new\":\"myproj\",\"old\":\"sample-project\",\"op\":\"set\"}],\"operation\":\"set\",\"outcome\":\"forecast\",\"schema_version\":2,\"target\":\"notes/alpha.md\",\"trace_id\":\"\"}},\"isError\":false}}\n"
       },
       "requires_doc": "notes/alpha.md",
       "source": {
@@ -445,9 +439,7 @@
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"vault.set\",\"arguments\":{\"target\":\"alpha\",\"field\":[\"project:myproj\"]}}}"
       ],
       "suite": "mcp",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -467,7 +459,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"frontmatter_changes\\\":[{\\\"field\\\":\\\"bogus_field\\\",\\\"new\\\":\\\"x\\\",\\\"op\\\":\\\"set\\\"}],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"notes/alpha.md\\\",\\\"trace_id\\\":\\\"<TRACE_ID>\\\",\\\"warnings\\\":[{\\\"code\\\":\\\"unknown-field\\\",\\\"field\\\":\\\"bogus_field\\\",\\\"message\\\":\\\"field 'bogus_field' not declared in schema\\\"}]}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"frontmatter_changes\":[{\"field\":\"bogus_field\",\"new\":\"x\",\"op\":\"set\"}],\"operation\":\"set\",\"outcome\":\"forecast\",\"schema_version\":2,\"target\":\"notes/alpha.md\",\"trace_id\":\"<TRACE_ID>\",\"warnings\":[{\"code\":\"unknown-field\",\"field\":\"bogus_field\",\"message\":\"field 'bogus_field' not declared in schema\"}]}},\"isError\":false}}\n"
+        "stdout": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"norn\",\"version\":\"0.0.0\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"report\\\":{\\\"applied\\\":false,\\\"body_changed\\\":false,\\\"frontmatter_changes\\\":[{\\\"field\\\":\\\"bogus_field\\\",\\\"new\\\":\\\"x\\\",\\\"op\\\":\\\"set\\\"}],\\\"operation\\\":\\\"set\\\",\\\"outcome\\\":\\\"forecast\\\",\\\"schema_version\\\":2,\\\"target\\\":\\\"notes/alpha.md\\\",\\\"trace_id\\\":\\\"\\\",\\\"warnings\\\":[{\\\"code\\\":\\\"unknown-field\\\",\\\"field\\\":\\\"bogus_field\\\",\\\"message\\\":\\\"field 'bogus_field' not declared in schema\\\"}]}}\"}],\"structuredContent\":{\"report\":{\"applied\":false,\"body_changed\":false,\"frontmatter_changes\":[{\"field\":\"bogus_field\",\"new\":\"x\",\"op\":\"set\"}],\"operation\":\"set\",\"outcome\":\"forecast\",\"schema_version\":2,\"target\":\"notes/alpha.md\",\"trace_id\":\"\",\"warnings\":[{\"code\":\"unknown-field\",\"field\":\"bogus_field\",\"message\":\"field 'bogus_field' not declared in schema\"}]}},\"isError\":false}}\n"
       },
       "requires_doc": "notes/alpha.md",
       "source": {
@@ -481,9 +473,7 @@
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"vault.set\",\"arguments\":{\"target\":\"alpha\",\"field\":[\"bogus_field:x\"]}}}"
       ],
       "suite": "mcp",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [

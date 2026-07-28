@@ -16,8 +16,7 @@
       "id": "mutate-set-apply-records-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -303,8 +302,7 @@
       "id": "mutate-set-push-apply-json-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -356,7 +354,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"set\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"frontmatter_changes\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"\",\n  \"operation\": \"set\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"frontmatter_changes\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -369,9 +367,7 @@
         "line": "norn-legacy"
       },
       "suite": "mutate",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [

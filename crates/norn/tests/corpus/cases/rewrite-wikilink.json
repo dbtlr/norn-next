@@ -16,8 +16,7 @@
       "id": "mutate-rewrite-wikilink-apply-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -62,8 +61,7 @@
       "id": "wl-rewrite-wikilink-caret-stem-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -108,8 +106,7 @@
       "id": "wl-rewrite-wikilink-code-fence-shadow-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -154,8 +151,7 @@
       "id": "wl-rewrite-wikilink-padded-target-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -200,8 +196,7 @@
       "id": "wl-rewrite-wikilink-unrepresentable-refusal",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "refusal",

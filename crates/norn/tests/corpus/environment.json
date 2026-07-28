@@ -3,7 +3,8 @@
   "cwd": "the materialized fixture vault (no path flag in argv)",
   "description": "The environment every recorded case ran under. The caller's environment is cleared and rebuilt from this allowlist so nothing the host carries can reach a case.",
   "notes": [
-    "Recorded output is verbatim except for the placeholders above. Each is a property of the machine or the moment rather than of the invocation, so recording its literal value would pin a number that can never reproduce. Every case names the placeholders that fired on it in its own `volatile_masks` field.",
+    "Recorded output is verbatim except for the placeholders described under `placeholders`.",
+    "`{{VAULT_ROOT}}` in a case's `plan_template` is a different thing again, and deliberately spelled differently: it is an INPUT token the recording substituted for the vault path before invoking, where `<VAULT>` is an OUTPUT substitution applied after.",
     "The locale is pinned rather than forwarded: glyph selection reads LC_ALL -> LC_CTYPE -> LANG, so a forwarded host locale makes the recorded glyph set a property of the recording machine.",
     "HOME and the XDG bases point into a scratch tree owned by the run, so any registry, cache, config, socket or log a binary creates for itself is created fresh and discarded with the run.",
     "XDG_RUNTIME_DIR is a short temp dir: it holds an AF_UNIX socket path, and a long base overruns sun_path.",
@@ -14,10 +15,21 @@
     "TMPDIR"
   ],
   "placeholders": {
-    "<PLAN_HASH>": "a plan hash computed over the absolute vault root, so it tracks the temporary directory",
-    "<TIMESTAMP>": "a wall-clock stamp",
-    "<TRACE_ID>": "a telemetry id minted per invocation",
-    "<VAULT>": "the absolute path of the materialized fixture vault, in every spelling the platform reports"
+    "extraction_masks": {
+      "note": "Applied by the extraction itself, proven necessary by re-running the whole catalog twice and requiring byte equality. A case declares the ones that fired on it in its `volatile_masks` field. A mask fires only on a NONEMPTY value: an empty field is a fact about the invocation — a write-free path mints no telemetry id and computes no plan hash — so an empty value is recorded verbatim and the case declares no mask. The recording harness had its own whole-value substitutions for the telemetry id and the plan hash; they are not applied here, because erasing a value makes a minted-but-volatile id indistinguishable from one that was never minted. These masks replace them and keep the two apart.",
+      "values": {
+        "<PLAN_HASH>": "a plan hash computed over the absolute vault root, so it tracks the temporary directory",
+        "<TIMESTAMP>": "a wall-clock stamp",
+        "<TRACE_ID>": "a telemetry id minted per invocation"
+      }
+    },
+    "inherited_normalizations": {
+      "note": "Substitutions the recording harness applied before the extraction saw the bytes. A case declares the ones it carries in its `normalizations` field, never in `volatile_masks`.",
+      "values": {
+        "<VAULT>": "written by the `vault-root` normalization: the absolute path of the materialized fixture vault, in every spelling the platform reports"
+      }
+    },
+    "note": "Two kinds, and a case declares them in different fields. Do not read one as the other."
   },
   "removed": [
     "LANG",

@@ -21,8 +21,7 @@
       "id": "mutate-new-allowed-values-refusal-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "refusal",
@@ -61,8 +60,7 @@
       "id": "mutate-new-apply-records-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -254,7 +252,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"new\",\n  \"path\": \"notes/alpha.md\",\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"body_bytes\": 0,\n  \"error\": {\n    \"code\": \"destination-exists\",\n    \"message\": \"destination already exists (use --force to overwrite): notes/alpha.md\",\n    \"path\": \"notes/alpha.md\"\n  }\n}\n"
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"\",\n  \"operation\": \"new\",\n  \"path\": \"notes/alpha.md\",\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"body_bytes\": 0,\n  \"error\": {\n    \"code\": \"destination-exists\",\n    \"message\": \"destination already exists (use --force to overwrite): notes/alpha.md\",\n    \"path\": \"notes/alpha.md\"\n  }\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -268,9 +266,7 @@
         "line": "norn-legacy"
       },
       "suite": "mutate",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -296,7 +292,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"new\",\n  \"path\": \"notes/warn-doc.md\",\n  \"applied\": false,\n  \"outcome\": \"forecast\",\n  \"frontmatter_created\": [\n    {\n      \"field\": \"bogus\",\n      \"value\": \"x\",\n      \"source\": \"operator-flag\"\n    }\n  ],\n  \"body_bytes\": 0,\n  \"warnings\": [\n    {\n      \"code\": \"unknown-field\",\n      \"field\": \"bogus\",\n      \"message\": \"field 'bogus' not declared in schema\"\n    }\n  ]\n}\n"
+        "stdout": "{\n  \"schema_version\": 2,\n  \"trace_id\": \"\",\n  \"operation\": \"new\",\n  \"path\": \"notes/warn-doc.md\",\n  \"applied\": false,\n  \"outcome\": \"forecast\",\n  \"frontmatter_created\": [\n    {\n      \"field\": \"bogus\",\n      \"value\": \"x\",\n      \"source\": \"operator-flag\"\n    }\n  ],\n  \"body_bytes\": 0,\n  \"warnings\": [\n    {\n      \"code\": \"unknown-field\",\n      \"field\": \"bogus\",\n      \"message\": \"field 'bogus' not declared in schema\"\n    }\n  ]\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -309,9 +305,7 @@
         "line": "norn-legacy"
       },
       "suite": "mutate",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     }
   ],
   "command": "new",

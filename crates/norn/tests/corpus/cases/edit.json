@@ -17,8 +17,7 @@
       "id": "edit-apply-str-replace-section-zoo",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -64,8 +63,7 @@
       "id": "edit-atx-prefixed-heading-anchor-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -149,8 +147,7 @@
       "id": "edit-eof-heading-append-to-section-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -196,8 +193,7 @@
       "id": "edit-eof-heading-insert-after-heading-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -243,8 +239,7 @@
       "id": "edit-eof-heading-replace-section-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -298,7 +293,7 @@
         "exit_class": "ok",
         "exit_code": 0,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"edit\",\n  \"target\": \"notes/alpha.md\",\n  \"edits\": [\n    {\n      \"op\": \"delete_section\",\n      \"anchor\": \"heading=\\\"Section Two\\\"\",\n      \"matched\": true,\n      \"applied\": false\n    }\n  ],\n  \"body_changed\": true,\n  \"body_bytes_old\": 225,\n  \"body_bytes_new\": 174,\n  \"applied\": false,\n  \"outcome\": \"forecast\"\n}\n"
+        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"\",\n  \"operation\": \"edit\",\n  \"target\": \"notes/alpha.md\",\n  \"edits\": [\n    {\n      \"op\": \"delete_section\",\n      \"anchor\": \"heading=\\\"Section Two\\\"\",\n      \"matched\": true,\n      \"applied\": false\n    }\n  ],\n  \"body_changed\": true,\n  \"body_bytes_old\": 225,\n  \"body_bytes_new\": 174,\n  \"applied\": false,\n  \"outcome\": \"forecast\"\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -312,9 +307,7 @@
         "line": "norn-legacy"
       },
       "suite": "edit",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -412,7 +405,7 @@
         "exit_class": "refusal",
         "exit_code": 2,
         "stderr": "",
-        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"<TRACE_ID>\",\n  \"operation\": \"edit\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"edits\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
+        "stdout": "{\n  \"schema_version\": 1,\n  \"trace_id\": \"\",\n  \"operation\": \"edit\",\n  \"target\": \"no-such-doc-xyzzy\",\n  \"edits\": [],\n  \"body_changed\": false,\n  \"applied\": false,\n  \"outcome\": \"refused\",\n  \"error\": {\n    \"code\": \"target-not-found\",\n    \"message\": \"no document matched path or stem: no-such-doc-xyzzy\"\n  }\n}\n"
       },
       "recorded_tree_delta": {
         "added": [],
@@ -425,9 +418,7 @@
         "line": "norn-legacy"
       },
       "suite": "edit",
-      "volatile_masks": [
-        "<TRACE_ID>"
-      ]
+      "volatile_masks": []
     },
     {
       "argv": [
@@ -445,8 +436,7 @@
       "id": "edit-setext-insert-after-heading-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
@@ -492,8 +482,7 @@
       "id": "edit-setext-replace-section-diverge",
       "mutating": true,
       "normalizations": [
-        "vault-root",
-        "trace-id"
+        "vault-root"
       ],
       "recorded": {
         "exit_class": "ok",
