@@ -8,9 +8,33 @@
 //! pair, so there is no way to assert about a plan without naming the SQL it
 //! came from. A failure prints the statement for the same reason.
 //!
+//! The pairing earns its keep twice over: SQLite reports a plan in terms of
+//! the *aliases* the statement used, so `documents AS d` becomes `SCAN d`,
+//! and only the statement says what `d` is. The alias resolution here reads
+//! the SQL for exactly that.
+//!
+//! # What counts as unbounded
+//!
+//! A `SCAN` row reads its relation end to end, and it does so whether or not
+//! it reads through an index: `SCAN t USING COVERING INDEX i` visits one
+//! entry per row of `t`, which is the cost the bar is about. So **the scan
+//! bar fails on any scan of a table**, covering index included, unless the
+//! row's detail carries a constraint. Three forms are not table reads and do
+//! not fail it:
+//!
+//! - `SCAN t VIRTUAL TABLE INDEX 0:M1` — a virtual table consulted through
+//!   its own index specification, which is how an FTS5 `MATCH` is planned.
+//!   An *empty* specification (`0:`) constrains nothing, and that one is
+//!   unbounded.
+//! - `SCAN 2-ROW VALUES CLAUSE` — an inline list whose length is in the
+//!   statement, not in the data.
+//! - A scan of a co-routine or materialized subquery, whose own steps appear
+//!   as separate rows and are judged there.
+//!
 //! Nothing here opens a database. The rows are handed in by whoever ran the
 //! `EXPLAIN`, which is the store's own API.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// One row of `EXPLAIN QUERY PLAN`, in SQLite's shape.
@@ -19,6 +43,24 @@ pub struct PlanRow {
     pub id: i64,
     pub parent: i64,
     pub detail: String,
+}
+
+/// What a `SCAN` row reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScanTarget<'a> {
+    /// A named relation: a table, an alias for one, or the name of a
+    /// co-routine or materialized subquery.
+    Relation(&'a str),
+    /// A virtual table read through its own index, as
+    /// `VIRTUAL TABLE INDEX <number>:<specification>`. The specification is
+    /// the virtual table's own encoding of the constraints it was given; an
+    /// empty one means it was given none.
+    VirtualTable {
+        name: &'a str,
+        specification: &'a str,
+    },
+    /// An inline `VALUES` list. It names no relation.
+    ValuesClause,
 }
 
 impl PlanRow {
@@ -30,32 +72,95 @@ impl PlanRow {
         }
     }
 
-    /// The table this row scans, if it scans one.
+    /// What this row scans, if it scans anything.
     ///
-    /// A scan reads every row it is given. SQLite spells the older form
-    /// `SCAN TABLE t` and the current one `SCAN t`, and an alias follows as
-    /// `AS x`; both spellings and either form of alias name the same table.
-    pub fn scans(&self) -> Option<&str> {
-        target(&self.detail, "SCAN ")
+    /// SQLite spells the older form `SCAN TABLE t` and the current one
+    /// `SCAN t`. The name is whatever the statement called the relation, so
+    /// it is an alias wherever the statement used one; [`QueryPlan`] resolves
+    /// that against the SQL.
+    pub fn scan_target(&self) -> Option<ScanTarget<'_>> {
+        let rest = self.detail.strip_prefix("SCAN ")?;
+        let rest = rest.strip_prefix("TABLE ").unwrap_or(rest);
+        if rest.ends_with("VALUES CLAUSE") {
+            return Some(ScanTarget::ValuesClause);
+        }
+        let name = rest.split_whitespace().next()?;
+        let tail = rest[name.len()..].trim_start();
+        if let Some(specification) = tail.strip_prefix("VIRTUAL TABLE INDEX ") {
+            let specification = specification.split_once(':').map_or("", |(_, rest)| rest);
+            return Some(ScanTarget::VirtualTable {
+                name,
+                specification: specification.trim(),
+            });
+        }
+        Some(ScanTarget::Relation(name))
     }
 
-    /// The table this row searches, if it searches one. A search uses an
+    /// The relation this row scans, if it scans a named one. A `VALUES`
+    /// clause names nothing and reports `None`.
+    pub fn scans(&self) -> Option<&str> {
+        match self.scan_target()? {
+            ScanTarget::Relation(name) | ScanTarget::VirtualTable { name, .. } => Some(name),
+            ScanTarget::ValuesClause => None,
+        }
+    }
+
+    /// The relation this row searches, if it searches one. A search uses an
     /// index or a rowid to reach the rows it wants.
     pub fn searches(&self) -> Option<&str> {
-        target(&self.detail, "SEARCH ")
+        let rest = self.detail.strip_prefix("SEARCH ")?;
+        let rest = rest.strip_prefix("TABLE ").unwrap_or(rest);
+        rest.split_whitespace().next()
     }
 
     /// The index this row reads through, if it names one.
+    ///
+    /// An index SQLite built for this statement has no name; the row reads
+    /// `USING AUTOMATIC COVERING INDEX` and reports `None` here and `true`
+    /// from [`PlanRow::uses_automatic_index`]. So does a rowid lookup, which
+    /// reads `USING INTEGER PRIMARY KEY`.
     pub fn index(&self) -> Option<&str> {
         let (_, rest) = self.detail.split_once(" USING ")?;
         let rest = rest.strip_prefix("COVERING ").unwrap_or(rest);
         let rest = rest.strip_prefix("INDEX ")?;
-        Some(rest.split_whitespace().next().unwrap_or(rest))
+        let name = rest.split_whitespace().next().unwrap_or(rest);
+        (!name.starts_with('(')).then_some(name)
     }
 
-    /// Whether this row reads a whole table without an index.
-    pub fn is_full_scan(&self) -> bool {
-        self.scans().is_some() && self.index().is_none()
+    /// Whether this row reads through an index SQLite built for the
+    /// statement rather than one the schema declares.
+    pub fn uses_automatic_index(&self) -> bool {
+        self.detail.contains(" USING AUTOMATIC ")
+    }
+
+    /// The constraint the row was given, as SQLite prints it: the
+    /// parenthesised tail of the detail, such as `(stem=?)`.
+    pub fn constraint(&self) -> Option<&str> {
+        let open = self.detail.rfind('(')?;
+        let close = self.detail[open..].find(')')? + open;
+        Some(&self.detail[open..=close])
+    }
+
+    /// Whether this row reads its relation end to end.
+    ///
+    /// True for any scan of a named relation that carries no constraint,
+    /// index or no index, and for a virtual table asked for everything.
+    /// False for a `VALUES` clause and for a constrained virtual-table read.
+    pub fn is_unbounded_scan(&self) -> bool {
+        match self.scan_target() {
+            None | Some(ScanTarget::ValuesClause) => false,
+            Some(ScanTarget::VirtualTable { specification, .. }) => specification.is_empty(),
+            Some(ScanTarget::Relation(_)) => self.constraint().is_none(),
+        }
+    }
+
+    /// Whether this row reads a table's own rows without an index — the
+    /// weaker bar. A covering-index scan is not a table scan: it never
+    /// touches the table's own pages, and it is unbounded all the same.
+    pub fn is_table_scan(&self) -> bool {
+        matches!(self.scan_target(), Some(ScanTarget::Relation(_)))
+            && self.index().is_none()
+            && !self.uses_automatic_index()
     }
 }
 
@@ -70,15 +175,15 @@ impl fmt::Display for PlanRow {
 pub struct QueryPlan {
     sql: String,
     rows: Vec<PlanRow>,
+    aliases: BTreeMap<String, String>,
 }
 
 impl QueryPlan {
     /// Pair an emitted statement with the plan SQLite reported for it.
     pub fn new(sql: impl Into<String>, rows: Vec<PlanRow>) -> Self {
-        QueryPlan {
-            sql: sql.into(),
-            rows,
-        }
+        let sql = sql.into();
+        let aliases = aliases(&sql);
+        QueryPlan { sql, rows, aliases }
     }
 
     /// The statement the assertions are about.
@@ -90,32 +195,82 @@ impl QueryPlan {
         &self.rows
     }
 
-    /// Every row that reads a whole table without an index.
-    pub fn full_scans(&self) -> Vec<&PlanRow> {
-        self.rows.iter().filter(|row| row.is_full_scan()).collect()
+    /// The table a plan row's name refers to, resolved through the aliases
+    /// the statement declared. A name the reader cannot bind is its own
+    /// answer.
+    pub fn table_of<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map_or(name, String::as_str)
+    }
+
+    /// The names the statement's plan introduces for subqueries: a
+    /// co-routine or a materialized common table expression. A scan of one is
+    /// not a table read, and the subquery's own steps are separate rows.
+    fn subqueries(&self) -> BTreeSet<&str> {
+        self.rows
+            .iter()
+            .filter_map(|row| {
+                let detail = &row.detail;
+                detail
+                    .strip_prefix("CO-ROUTINE ")
+                    .or_else(|| detail.strip_prefix("MATERIALIZE "))
+            })
+            .map(str::trim)
+            .collect()
+    }
+
+    /// Every step that reads a relation end to end.
+    pub fn unbounded_steps(&self) -> Vec<&PlanRow> {
+        let subqueries = self.subqueries();
+        self.rows
+            .iter()
+            .filter(|row| row.is_unbounded_scan())
+            .filter(|row| !row.scans().is_some_and(|name| subqueries.contains(name)))
+            .collect()
+    }
+
+    /// Every step that reads a table's own rows without an index.
+    pub fn table_scans(&self) -> Vec<&PlanRow> {
+        let subqueries = self.subqueries();
+        self.rows
+            .iter()
+            .filter(|row| row.is_table_scan())
+            .filter(|row| !row.scans().is_some_and(|name| subqueries.contains(name)))
+            .collect()
     }
 
     /// **The scan bar.** No step of this plan reads `table` end to end.
     pub fn assert_no_full_scan_of(&self, table: &str) {
         let scans: Vec<&PlanRow> = self
-            .full_scans()
+            .unbounded_steps()
             .into_iter()
-            .filter(|row| row.scans() == Some(table))
+            .filter(|row| row.scans().map(|name| self.table_of(name)) == Some(table))
             .collect();
         assert!(
             scans.is_empty(),
-            "the plan scans `{table}` end to end: {}\nemitted SQL: {}",
+            "the plan reads `{table}` end to end: {}\nemitted SQL: {}",
             rows_display(&scans),
             self.sql
         );
     }
 
-    /// No step of this plan reads any table end to end.
+    /// No step of this plan reads any relation end to end.
     pub fn assert_no_full_scan(&self) {
-        let scans = self.full_scans();
+        let scans = self.unbounded_steps();
         assert!(
             scans.is_empty(),
-            "the plan scans a table end to end: {}\nemitted SQL: {}",
+            "the plan reads a relation end to end: {}\nemitted SQL: {}",
+            rows_display(&scans),
+            self.sql
+        );
+    }
+
+    /// The weaker bar: no step reads a table's own rows without an index. A
+    /// covering-index scan passes this and fails [`QueryPlan::assert_no_full_scan`].
+    pub fn assert_no_table_scan(&self) {
+        let scans = self.table_scans();
+        assert!(
+            scans.is_empty(),
+            "the plan reads a table without an index: {}\nemitted SQL: {}",
             rows_display(&scans),
             self.sql
         );
@@ -125,7 +280,9 @@ impl QueryPlan {
     /// scan, which is the difference an index makes.
     pub fn assert_searches(&self, table: &str) {
         assert!(
-            self.rows.iter().any(|row| row.searches() == Some(table)),
+            self.rows
+                .iter()
+                .any(|row| row.searches().map(|name| self.table_of(name)) == Some(table)),
             "the plan does not search `{table}`: {}\nemitted SQL: {}",
             rows_display(&self.rows.iter().collect::<Vec<_>>()),
             self.sql
@@ -168,11 +325,114 @@ fn rows_display(rows: &[&PlanRow]) -> String {
         .join("; ")
 }
 
-fn target<'a>(detail: &'a str, verb: &str) -> Option<&'a str> {
-    let rest = detail.strip_prefix(verb)?;
-    let rest = rest.strip_prefix("TABLE ").unwrap_or(rest);
-    let name = rest.split_whitespace().next()?;
-    Some(name)
+/// The alias-to-table bindings a statement declares, as `alias -> table`.
+///
+/// The reader takes the shape a builder emits: after `FROM` or `JOIN`, a bare
+/// table name, optionally followed by `AS alias` or by a bare alias. A schema
+/// qualifier is dropped, because SQLite reports the bare name. Its limits are
+/// exact and worth stating, because an alias it cannot bind is left to stand
+/// for itself rather than guessed at:
+///
+/// - A subquery or table-valued function in a `FROM` clause binds nothing;
+///   the reader stops at the `(` and resumes at the next `FROM` or `JOIN`.
+/// - A quoted identifier holding whitespace is not understood.
+/// - The reader does not scope aliases: a statement whose subquery reuses an
+///   outer alias for a different table gets one binding, the last one read.
+fn aliases(sql: &str) -> BTreeMap<String, String> {
+    const AFTER_A_TABLE: &[&str] = &[
+        "ON",
+        "USING",
+        "WHERE",
+        "GROUP",
+        "ORDER",
+        "LIMIT",
+        "HAVING",
+        "WINDOW",
+        "RETURNING",
+        "SET",
+        "VALUES",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+        "NATURAL",
+        "LEFT",
+        "RIGHT",
+        "FULL",
+        "INNER",
+        "OUTER",
+        "CROSS",
+        "JOIN",
+        "FROM",
+        "INDEXED",
+        "NOT",
+        "AS",
+        "SELECT",
+    ];
+
+    let mut bindings = BTreeMap::new();
+    let tokens = tokenize(sql);
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        index += 1;
+        if !token.eq_ignore_ascii_case("FROM") && !token.eq_ignore_ascii_case("JOIN") {
+            continue;
+        }
+        while let Some(&table) = tokens.get(index) {
+            if table == "(" || AFTER_A_TABLE.iter().any(|k| table.eq_ignore_ascii_case(k)) {
+                break;
+            }
+            index += 1;
+            let table = bare_name(table);
+            if let Some(&next) = tokens.get(index) {
+                let alias = if next.eq_ignore_ascii_case("AS") {
+                    index += 1;
+                    tokens.get(index).copied()
+                } else if next == "," || AFTER_A_TABLE.iter().any(|k| next.eq_ignore_ascii_case(k))
+                {
+                    None
+                } else {
+                    Some(next)
+                };
+                if let Some(alias) = alias {
+                    index += 1;
+                    bindings.insert(bare_name(alias).to_string(), table.to_string());
+                }
+            }
+            // A comma-separated `FROM` clause names another table.
+            match tokens.get(index) {
+                Some(&",") => index += 1,
+                _ => break,
+            }
+        }
+    }
+    bindings
+}
+
+/// The statement split into words, with `(`, `)` and `,` standing alone.
+fn tokenize(sql: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut rest = sql;
+    while !rest.is_empty() {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            break;
+        }
+        let start = rest.len() - trimmed.len();
+        let end = trimmed
+            .find(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
+            .unwrap_or(trimmed.len());
+        let end = if end == 0 { 1 } else { end };
+        tokens.push(&rest[start..start + end]);
+        rest = &rest[start + end..];
+    }
+    tokens
+}
+
+/// A name with its schema qualifier and its quoting stripped.
+fn bare_name(token: &str) -> &str {
+    let token = token.rsplit('.').next().unwrap_or(token);
+    token.trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']')
 }
 
 #[cfg(test)]
@@ -181,14 +441,15 @@ mod tests {
 
     /// Canned rows in the shapes SQLite reports them.
     fn plan(details: &[&str]) -> QueryPlan {
-        QueryPlan::new(
-            "SELECT path FROM documents WHERE stem = ?",
-            details
-                .iter()
-                .enumerate()
-                .map(|(i, detail)| PlanRow::new(i as i64 + 2, 0, *detail))
-                .collect(),
-        )
+        QueryPlan::new("SELECT path FROM documents WHERE stem = ?", rows(details))
+    }
+
+    fn rows(details: &[&str]) -> Vec<PlanRow> {
+        details
+            .iter()
+            .enumerate()
+            .map(|(i, detail)| PlanRow::new(i as i64 + 2, 0, *detail))
+            .collect()
     }
 
     #[test]
@@ -199,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scan_is_read_from_either_spelling_and_past_an_alias() {
+    fn a_scan_is_read_from_either_spelling() {
         assert_eq!(
             PlanRow::new(2, 0, "SCAN documents").scans(),
             Some("documents")
@@ -208,19 +469,151 @@ mod tests {
             PlanRow::new(2, 0, "SCAN TABLE documents").scans(),
             Some("documents")
         );
-        assert_eq!(
-            PlanRow::new(2, 0, "SCAN documents AS d").scans(),
-            Some("documents")
-        );
         assert_eq!(PlanRow::new(2, 0, "SEARCH documents").scans(), None);
     }
 
+    /// `SELECT stem FROM documents` against an index on `stem`. It never
+    /// touches the table, and it still visits one index entry per row.
     #[test]
-    fn a_scan_through_an_index_is_not_a_full_scan() {
+    fn a_covering_index_scan_is_unbounded_and_is_not_a_table_scan() {
         let row = PlanRow::new(2, 0, "SCAN documents USING COVERING INDEX documents_stem");
         assert_eq!(row.index(), Some("documents_stem"));
-        assert!(!row.is_full_scan());
-        assert!(PlanRow::new(2, 0, "SCAN documents").is_full_scan());
+        assert!(row.is_unbounded_scan());
+        assert!(!row.is_table_scan());
+
+        let plan = plan(&["SCAN documents USING COVERING INDEX documents_stem"]);
+        plan.assert_no_table_scan();
+        let failure = std::panic::catch_unwind({
+            let plan = plan.clone();
+            move || plan.assert_no_full_scan()
+        })
+        .expect_err("a covering-index scan is unbounded");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(message.contains("reads a relation end to end"), "{message}");
+    }
+
+    #[test]
+    fn a_plain_scan_is_both_unbounded_and_a_table_scan() {
+        let row = PlanRow::new(2, 0, "SCAN documents");
+        assert!(row.is_unbounded_scan());
+        assert!(row.is_table_scan());
+    }
+
+    /// `SELECT d.path FROM documents AS d WHERE d.stem = ?`: SQLite reports
+    /// the alias and nothing else, so only the statement says what `d` is.
+    #[test]
+    fn an_alias_resolves_to_the_table_the_statement_named() {
+        let scan = QueryPlan::new(
+            "SELECT d.path FROM documents AS d",
+            rows(&["SCAN d USING COVERING INDEX documents_path"]),
+        );
+        assert_eq!(scan.table_of("d"), "documents");
+        let failure = std::panic::catch_unwind({
+            let scan = scan.clone();
+            move || scan.assert_no_full_scan_of("documents")
+        })
+        .expect_err("an aliased scan of documents");
+        assert!(
+            failure
+                .downcast_ref::<String>()
+                .expect("a formatted assertion message")
+                .contains("reads `documents` end to end")
+        );
+
+        let search = QueryPlan::new(
+            "SELECT d.path FROM documents d WHERE d.stem = ?",
+            rows(&["SEARCH d USING INDEX documents_stem (stem=?)"]),
+        );
+        search.assert_searches("documents");
+        search.assert_no_full_scan();
+    }
+
+    #[test]
+    fn aliases_are_read_past_joins_commas_and_schema_qualifiers() {
+        let joined = QueryPlan::new(
+            "SELECT * FROM main.documents AS d JOIN links l ON l.source = d.id",
+            Vec::new(),
+        );
+        assert_eq!(joined.table_of("d"), "documents");
+        assert_eq!(joined.table_of("l"), "links");
+        assert_eq!(joined.table_of("documents"), "documents");
+
+        let listed = QueryPlan::new("SELECT * FROM documents d, links l, tags", Vec::new());
+        assert_eq!(listed.table_of("d"), "documents");
+        assert_eq!(listed.table_of("l"), "links");
+        assert_eq!(listed.table_of("tags"), "tags");
+
+        // An unaliased table binds nothing, and a subquery is not read.
+        let bare = QueryPlan::new(
+            "SELECT * FROM documents WHERE id IN (SELECT source FROM links)",
+            Vec::new(),
+        );
+        assert_eq!(bare.table_of("documents"), "documents");
+        assert_eq!(bare.table_of("links"), "links");
+    }
+
+    /// An FTS5 `MATCH` is planned as a virtual-table index scan. It is a
+    /// lookup, not a table read.
+    #[test]
+    fn a_constrained_virtual_table_scan_is_not_unbounded() {
+        let row = PlanRow::new(2, 0, "SCAN doc_fts VIRTUAL TABLE INDEX 0:M1");
+        assert_eq!(row.scans(), Some("doc_fts"));
+        assert!(!row.is_unbounded_scan());
+        QueryPlan::new(
+            "SELECT rowid FROM doc_fts WHERE doc_fts MATCH ?",
+            rows(&["SCAN doc_fts VIRTUAL TABLE INDEX 0:M1"]),
+        )
+        .assert_no_full_scan();
+    }
+
+    /// The same form with an empty specification is the virtual table asked
+    /// for everything, and that is unbounded.
+    #[test]
+    fn an_unconstrained_virtual_table_scan_is_unbounded() {
+        let row = PlanRow::new(2, 0, "SCAN doc_fts VIRTUAL TABLE INDEX 0:");
+        assert_eq!(row.scans(), Some("doc_fts"));
+        assert!(row.is_unbounded_scan());
+    }
+
+    #[test]
+    fn a_values_clause_names_no_table_and_is_not_unbounded() {
+        let row = PlanRow::new(2, 0, "SCAN 2-ROW VALUES CLAUSE");
+        assert_eq!(row.scans(), None);
+        assert_eq!(row.scan_target(), Some(ScanTarget::ValuesClause));
+        assert!(!row.is_unbounded_scan());
+        assert!(!row.is_table_scan());
+        QueryPlan::new(
+            "SELECT * FROM (VALUES (1),(2))",
+            rows(&["SCAN 2-ROW VALUES CLAUSE"]),
+        )
+        .assert_no_full_scan();
+    }
+
+    /// A co-routine's own steps are separate rows and are judged there, so
+    /// counting the scan of the co-routine as well would fail one plan twice.
+    #[test]
+    fn a_scan_of_a_co_routine_is_judged_through_its_own_steps() {
+        let plan = QueryPlan::new(
+            "SELECT * FROM (SELECT stem FROM documents GROUP BY stem) x",
+            rows(&[
+                "CO-ROUTINE x",
+                "SEARCH documents USING INDEX documents_stem (stem=?)",
+                "SCAN x",
+            ]),
+        );
+        plan.assert_no_full_scan();
+
+        let scanning = QueryPlan::new(
+            "SELECT * FROM (SELECT stem FROM documents GROUP BY stem) x",
+            rows(&[
+                "CO-ROUTINE x",
+                "SCAN documents USING COVERING INDEX documents_stem",
+                "SCAN x",
+            ]),
+        );
+        assert_eq!(scanning.unbounded_steps().len(), 1);
     }
 
     #[test]
@@ -228,6 +621,8 @@ mod tests {
         let row = PlanRow::new(3, 0, "SEARCH links USING INDEX links_target (target=?)");
         assert_eq!(row.searches(), Some("links"));
         assert_eq!(row.index(), Some("links_target"));
+        assert_eq!(row.constraint(), Some("(target=?)"));
+        assert!(!row.uses_automatic_index());
     }
 
     #[test]
@@ -235,6 +630,19 @@ mod tests {
         let row = PlanRow::new(3, 0, "SEARCH documents USING INTEGER PRIMARY KEY (rowid=?)");
         assert_eq!(row.searches(), Some("documents"));
         assert_eq!(row.index(), None);
+        assert!(!row.uses_automatic_index());
+    }
+
+    /// An index SQLite builds for one statement has no name, and saying it
+    /// uses none would be a different claim than the truth.
+    #[test]
+    fn an_automatic_index_is_reported_as_automatic_rather_than_as_none() {
+        let row = PlanRow::new(3, 0, "SEARCH b USING AUTOMATIC COVERING INDEX (x=?)");
+        assert_eq!(row.searches(), Some("b"));
+        assert_eq!(row.index(), None);
+        assert!(row.uses_automatic_index());
+        assert!(!row.is_table_scan());
+        assert!(!row.is_unbounded_scan());
     }
 
     #[test]
@@ -244,6 +652,7 @@ mod tests {
             "SEARCH links USING INDEX links_source (source=?)",
         ]);
         plan.assert_no_full_scan();
+        plan.assert_no_table_scan();
         plan.assert_no_full_scan_of("documents");
         plan.assert_searches("documents");
         plan.assert_uses_index("documents_stem");
@@ -251,9 +660,15 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "scans `documents` end to end")]
+    #[should_panic(expected = "reads `documents` end to end")]
     fn a_table_scan_fails_the_scan_bar() {
         plan(&["SCAN documents"]).assert_no_full_scan_of("documents");
+    }
+
+    #[test]
+    #[should_panic(expected = "reads a table without an index")]
+    fn a_table_scan_fails_the_weaker_bar_too() {
+        plan(&["SCAN documents"]).assert_no_table_scan();
     }
 
     #[test]
