@@ -40,11 +40,15 @@ jobs:
   # that it reproduces its tree, that the tree stays inside the calibration
   # envelope, and what the generation costs in peak memory and wall clock.
   #
-  # Two named slots remain, and both wait on the Layer 1 host rather than on
-  # machinery: fd growth, which needs a long-running process to grow them, and
-  # the nightly ~1h mixed load the flat-memory-slope requirement is judged
-  # over. The timeout below fits the work that runs now with runaway headroom;
-  # it is raised when the mixed load lands.
+  # Three named slots remain, each waiting on a subject rather than on
+  # machinery. Two arrive with the Layer 1 host: fd growth, which needs a
+  # long-running process to grow them, and the nightly ~1h mixed load the
+  # flat-memory-slope requirement is judged over. The third is the real pinned
+  # embedding model, which compiles only behind norn-embed's release/soak
+  # feature and so has no build to run in until that crate exists.
+  #
+  # The timeout below fits the work that runs now with runaway headroom; it is
+  # raised when the mixed load lands.
   soak:
     name: soak
     runs-on: ubuntu-latest
