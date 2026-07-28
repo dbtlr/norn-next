@@ -122,6 +122,7 @@ fn a_manifest_counts_what_the_tree_holds() {
 /// when the directory actually reports something new. The contract assertion
 /// runs either way, because it is the one that must not depend on the answer.
 #[test]
+#[allow(clippy::disallowed_methods)] // The case renames and re-reads the tree it generated.
 fn respelling_a_name_moves_the_walk_digest_and_not_the_contract_digest() {
     let profile = profile("small");
     let dir = scratch::fresh("respelling");
@@ -200,6 +201,7 @@ fn decompose(name: &str) -> String {
 }
 
 /// Every name the directory tree reports, sorted.
+#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
 fn reported_names(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -218,6 +220,7 @@ fn reported_names(dir: &Path) -> Vec<String> {
 }
 
 /// Generated documents whose file name is not pure ASCII.
+#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
 fn non_ascii_documents(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -262,6 +265,7 @@ const NFC_BODY: &[u8] = b"---\ntitle: Composed\n---\n";
 /// What is asserted is that the phenomenon is real here: the walk reports
 /// names, and reading a name back gives whichever body last landed under it.
 #[test]
+#[allow(clippy::disallowed_methods)] // The case writes both spellings itself and reads them back.
 fn a_name_written_in_one_normalization_form_is_the_filesystems_business() {
     let dir = scratch::fresh("normalization-forms");
     fs::create_dir_all(&dir).expect("creating a scratch directory");

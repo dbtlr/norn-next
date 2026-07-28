@@ -35,6 +35,7 @@ fn usage() -> String {
 /// This is only the sentinel guard: whether the target is a directory and
 /// whether it ends up empty are `generate`'s to enforce, and duplicating them
 /// here would put the precondition in two places.
+#[allow(clippy::disallowed_methods)] // The sentinel guard: it stats, lists and clears the target directory.
 fn prepare_target(out_dir: &Path) -> Result<(), String> {
     let meta = match fs::metadata(out_dir) {
         Ok(m) => m,
@@ -217,6 +218,7 @@ fn run() -> Result<String, (String, u8)> {
     }
 }
 
+#[allow(clippy::disallowed_macros)] // This command line reports what it generated and what it measured.
 fn main() -> ExitCode {
     match run() {
         Ok(text) => {

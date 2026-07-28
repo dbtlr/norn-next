@@ -516,6 +516,7 @@ fn scan(bytes: &[u8]) -> Scan {
 }
 
 /// Measure the shape of the tree rooted at `root`.
+#[allow(clippy::disallowed_methods)] // The probe reads the bytes it measures.
 pub fn measure(root: &Path) -> io::Result<VaultStats> {
     let mut stats = VaultStats::default();
     let mut sizes: Vec<u64> = Vec::new();
