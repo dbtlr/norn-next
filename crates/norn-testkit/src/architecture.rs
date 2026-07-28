@@ -1002,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn the_feature_matrix_reads_the_workspace_with_every_feature_on() {
+    fn the_feature_matrix_names_an_all_features_selection() {
         for selection in FEATURE_MATRIX {
             assert!(!selection.name.is_empty());
         }
