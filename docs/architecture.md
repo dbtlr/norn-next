@@ -19,14 +19,23 @@ from here land as individual ADRs at the layer where they bind — see
 ## Part I — The invariant spine
 
 Five invariants bind every layer. Each section below names its own gates where it has them:
-the per-PR memory benchmarks and soak trend line in §1, the churn and induced-failure suites
-in §3, the `EXPLAIN` and counter assertions in §4. Those gates arrive with the layers whose
-work they measure.
+the per-PR memory benchmarks and soak trend line in
+[the memory invariant](#1-the-memory-invariant), the architecture gate in
+[default-EXCLUDE](#2-default-exclude), the churn and induced-failure suites in
+[the heal ladder](#3-the-heal-ladder), and the `EXPLAIN` and counter assertions in
+[raw-SQL acceptance](#4-raw-sql-acceptance).
 
-Parts of §2 and §5 have no mechanical gate at all: whether an import earns admission, and
-whether a new capability is a second spelling of an existing one, are judgments made in
-review. That is a stated gap rather than an oversight — a review-held invariant rots
-quietly.
+A gate lands in the lane that can measure it, rather than at the layer it defends: the
+architecture gate runs from the first scaffold; the memory and counter bars arrive with the
+Layer 0 harness that instruments them; the churn, induced-failure and soak lanes arrive at
+Layer 2, over Layers 0 and 1; and the `EXPLAIN` bars arrive with the Layer 3 builders whose
+SQL they read.
+
+Parts of the spine have no mechanical gate at all. Within
+[default-EXCLUDE](#2-default-exclude), whether an unlisted import earns admission and
+whether recorded legacy behavior is good enough to activate are both review acts; and
+[one obvious path](#5-one-obvious-path) is review-held throughout. That is a stated gap
+rather than an oversight — a review-held invariant rots quietly.
 
 Where a gate exists, its lane depends on what it measures: **counters and structure gate per
 PR; clocks and trends live in the soak lane and never fail a pull request.**
@@ -282,16 +291,16 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
    scope is **vault requests**; the machine-local verbs (self-update, service lifecycle,
    `completions`, `manpage`) are the named exception class — they touch no vault and no
    database, and the absent edges are what makes that permanent.
-2. **`norn-host` drives the substrate; `norn-store` implements it.** Two separate claims,
-   about different things:
+2. **`norn-host` drives the substrate; `norn-store` implements it.** These are separate
+   claims, about different things:
    - **Driver calls live in `norn-store`.** No other crate's code opens a SQLite connection;
-     that is the lint's subject.
+     that is the lint's subject. The harness is no exception: `norn-testkit`'s `EXPLAIN` and
+     counter assertions run through `norn-store`'s own API, which exposes what they need, so
+     testkit opens nothing itself.
    - **Among product crates, `norn-host` alone links `norn-store` into a running process**,
      so in the shipped artifact one crate reaches the substrate. `norn-testkit` also depends
-     on `norn-store` — the harness asserts against the substrate directly — but it never
-     ships.
-
-   The host is likewise the plan executor: one applier, per invariant 4.
+     on `norn-store`, but it never ships.
+   - The host is likewise the plan executor: one applier, per invariant 4.
 3. **`norn-wire` has zero workspace dependencies and zero effects.** Nothing crosses the
    client/host seam that is not a wire type — no untyped JSON value, no JSON-in-a-string.
 4. **One plan vocabulary, one applier.** Mutation verbs and the repair planner both compile
@@ -325,9 +334,9 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
     anywhere else is a defect.
 11. **Machine-local state has one owner.** `norn-config` owns config-directory bytes —
     registry file, bearer token, endpoint conventions — and every read and write of them
-    flows through its API. Registry
-    *semantics* (the serving set and its mutation verbs) stay host-side; config owns shape
-    and storage. The shared dependency is not a channel: client–host coordination still
+    flows through its API. Registry *semantics* (the serving set and its mutation verbs)
+    stay host-side; config owns shape and storage. The shared dependency is not a channel:
+    client–host coordination still
     flows only over loopback HTTP. Config's API splits along that seam — the **registry
     surface is host-only**, which a crate edge cannot express and which therefore carries a
     named symbol lint, while the machine surface (endpoint discovery, token read) is
@@ -373,7 +382,9 @@ lints prove insufficient):
 
 One workspace-root `clippy.toml` holds the whole ruleset, because that configuration file
 does not merge per-crate. The crate that legitimately owns an effect carves it out with an
-explicit `#[allow]` **at the use site**, which doubles as an audit marker.
+explicit `#[allow]` **at the use site**, which doubles as an audit marker. Which tooling
+expresses these rules is an implementation detail of NORN-12, not a fixed part of this
+contract.
 
 Two rules carry a carve-out set. The tables below record the effect sites known today, and
 are kept accurate as effects are added — they are a map of where effects legitimately live,
@@ -390,7 +401,7 @@ table says.
 | `norn-config` | Config-directory bytes: registry file, bearer token |
 | `norn-embed` | The opt-in weight fetch and load |
 | `norn-host` | The one-shot legacy-cache janitor |
-| `norn-client` | Machine-local effects only: self-update binary replacement and service-unit install. Token generation at service install is the client's write too — boundary invariant 11 blesses the action — but the bytes go through `norn-config`'s API, so the config-directory site stays config's |
+| `norn-client` | Machine-local effects only: self-update binary replacement and service-unit install |
 | `norn-fixtures`, `norn-testkit` (dev) | Temp trees and harness scaffolding |
 
 Two notes on that table:
@@ -421,8 +432,6 @@ filesystem effect.
 Everything a person reads as *output* still goes through `norn-console`. The carve-outs
 cover machine-consumed byte streams only.
 
-Tooling choice is an implementation detail of NORN-12, not a fixed part of this contract.
-
 ### Enforcement posture
 
 Three postures are in play, and which one carries a given invariant changes as the lint set
@@ -436,12 +445,12 @@ grows:
   not a formality — a review-held invariant rots quietly.
 
 **This document carries no authoritative per-invariant ledger.** Where an invariant's own
-statement names what carries it — absent edges in 1, 12 and 13, the named symbol lint in 11,
-the filesystem table in 8 — that statement stands and is load-bearing. What does not exist
-here is the complete mapping: the authoritative invariant-to-mechanism ruleset lands with
-**NORN-12**, encoded as gate and lint code and documented there. Enforcement mechanics become
-true by being executable, and a prose ledger of them here would be a second, unexecuted
-spelling of that ruleset — drifting from the code
+statement names what carries it — absent edges in 1, 12 and 13, the SQLite lint in 2, the
+filesystem table in 8, the named symbol lint in 11 — that statement stands and is
+load-bearing. What does not exist here is the complete mapping: the authoritative
+invariant-to-mechanism ruleset lands with **NORN-12**, encoded as gate and lint code and
+documented there. Enforcement mechanics become true by being executable, and a prose ledger
+of them here would be a second, unexecuted spelling of that ruleset — drifting from the code
 the moment either moved.
 
 ---
