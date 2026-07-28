@@ -361,8 +361,12 @@ impl MatrixReading {
         Ok(MatrixReading { readings })
     }
 
-    /// A reading assembled from graphs already in hand.
-    pub fn from_readings(readings: Vec<(&'static str, WorkspaceGraph)>) -> Self {
+    /// A reading assembled from graphs already in hand, for exercising the
+    /// across-selection judgment without running cargo. Not a constructor the
+    /// gate offers: [`MatrixReading::read`] is the one that guarantees at
+    /// least one reading, which every accessor here relies on.
+    #[cfg(test)]
+    fn from_readings(readings: Vec<(&'static str, WorkspaceGraph)>) -> Self {
         MatrixReading { readings }
     }
 
