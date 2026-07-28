@@ -1,4 +1,8 @@
+# Machine-local editor/agent binding config: names a per-machine knowledge
+# store, so it is intentionally untracked and differs per checkout. Its sibling
+# .mimir.toml IS tracked, because the project binding is repo-durable.
 .atlas.toml
+
 .DS_Store
 /target
 *.local.md
