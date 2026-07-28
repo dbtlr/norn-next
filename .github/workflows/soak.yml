@@ -2,7 +2,7 @@
 #
 # The second tier of the two-tier CI posture: counters gate per PR (ci.yml),
 # clocks trend here. Everything time-dependent or long-running lives in this
-# lane — see docs/architecture.md and ADR 0001.
+# lane — see docs/architecture.md.
 #
 # Structure only. Filled by NORN-13 (instrumentation harness): wall-clock bars
 # and the peak-memory trend line, plus the >=5k-document profiles and the
@@ -10,16 +10,25 @@
 name: soak
 
 on:
-  schedule:
-    # Nightly, 04:00 UTC.
-    - cron: '0 4 * * *'
+  # The cron is deliberately commented out while this lane is a placeholder.
+  # Lockdown counts consecutive green soak runs, and a nightly run of a job
+  # that asserts nothing would manufacture that count out of nothing.
+  #
+  # NORN-13 uncomments it when the lane does real work. Two things to check at
+  # that point: GitHub disables schedules on repositories with no activity for
+  # 60 days, so activation must be verified rather than assumed; and the first
+  # green run under the real assertions is run one of five, not run six.
+  #
+  # schedule:
+  #   # Nightly, 04:00 UTC.
+  #   - cron: '0 4 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: soak-${{ github.workflow }}
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
@@ -27,8 +36,10 @@ jobs:
   # lane: zero counter violations, a flat memory slope, and no fd growth over a
   # nightly ~1h mixed load.
   soak:
-    name: soak
+    name: soak (placeholder — NORN-13)
     runs-on: ubuntu-latest
+    # Raised by NORN-13 to accommodate the ~1h mixed load.
+    timeout-minutes: 15
     steps:
       - name: Pending
         run: |

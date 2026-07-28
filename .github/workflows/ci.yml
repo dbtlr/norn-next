@@ -1,11 +1,13 @@
 # Per-PR gate lane.
 #
 # CI is two-tier: counters gate here, clocks trend in soak.yml. No wall-clock
-# pass/fail ever runs in this lane — see docs/architecture.md and ADR 0001.
+# pass/fail ever runs in this lane — see docs/architecture.md.
 #
 # The jobs below are structure only. Each is filled by the Layer 0 harness task
 # named in its comment; until then they pass trivially so the lane exists,
-# triggers, and is reviewable before it has teeth.
+# triggers, and is reviewable before it has teeth. Every job name carries a
+# "(placeholder — ...)" suffix so a green check cannot be over-read as a gate
+# that ran; the suffix drops when the real gate lands.
 name: ci
 
 on:
@@ -17,8 +19,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Superseded PR pushes are cancellable; gate runs on main are not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Filled by NORN-12 (drift-prevention harness): the architecture gate reads
@@ -26,8 +29,9 @@ jobs:
   # equals the allowlist in docs/architecture.md, under a pinned feature/target
   # matrix. Symbol-level rules escalate to lint tooling in the same task.
   architecture:
-    name: architecture gate
+    name: architecture gate (placeholder — NORN-12)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Pending
         run: |
@@ -38,8 +42,9 @@ jobs:
   # (size-independence pairs). All assertions are counts, never clocks, at a
   # ~2k-document realistic fixture profile.
   gates:
-    name: counter and plan gates
+    name: counter and plan gates (placeholder — NORN-12/13)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Pending
         run: |
@@ -48,12 +53,13 @@ jobs:
           echo "         EXPLAIN plans against the builder's emitted SQL;"
           echo "         size-independence pairs, expressed as counts."
 
-  # Filled by NORN-13 (instrumentation harness): peak memory at the ~2k-document
-  # profile. The trend line over time lives in the soak lane; this job is the
-  # per-PR bar.
+  # Filled by NORN-13 (instrumentation harness): peak memory at the
+  # ~2k-document profile. The trend line over time lives in the soak lane;
+  # this job is the per-PR bar.
   memory:
-    name: memory invariant
+    name: memory invariant (placeholder — NORN-13)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Pending
         run: |
