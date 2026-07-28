@@ -1,0 +1,62 @@
+# Per-PR gate lane.
+#
+# CI is two-tier: counters gate here, clocks trend in soak.yml. No wall-clock
+# pass/fail ever runs in this lane — see docs/architecture.md and ADR 0001.
+#
+# The jobs below are structure only. Each is filled by the Layer 0 harness task
+# named in its comment; until then they pass trivially so the lane exists,
+# triggers, and is reviewable before it has teeth.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Filled by NORN-12 (drift-prevention harness): the architecture gate reads
+  # `cargo metadata` and asserts the workspace normal-dependency graph exactly
+  # equals the allowlist in docs/architecture.md, under a pinned feature/target
+  # matrix. Symbol-level rules escalate to lint tooling in the same task.
+  architecture:
+    name: architecture gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pending
+        run: |
+          echo "Architecture gate lands with NORN-12."
+          echo "Asserts: workspace dependency allowlist, boundary lints."
+
+  # Filled by NORN-12 (counter and EXPLAIN assertions) and NORN-13
+  # (size-independence pairs). All assertions are counts, never clocks, at a
+  # ~2k-document realistic fixture profile.
+  gates:
+    name: counter and plan gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pending
+        run: |
+          echo "Counter and plan gates land with NORN-12 and NORN-13."
+          echo "Asserts: zero derivation counters on warm paths;"
+          echo "         EXPLAIN plans against the builder's emitted SQL;"
+          echo "         size-independence pairs, expressed as counts."
+
+  # Filled by NORN-13 (instrumentation harness): peak memory at the ~2k-document
+  # profile. The trend line over time lives in the soak lane; this job is the
+  # per-PR bar.
+  memory:
+    name: memory invariant
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pending
+        run: |
+          echo "Memory invariant gate lands with NORN-13."
+          echo "Asserts: peak memory is a function of the working set,"
+          echo "         not of vault size."
