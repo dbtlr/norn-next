@@ -127,23 +127,21 @@ fn respelling_a_name_moves_the_walk_digest_and_not_the_contract_digest() {
     let dir = scratch::fresh("respelling");
     let manifest = generate(&profile, 5, &dir).expect("generating a scratch tree");
 
-    let target = non_ascii_documents(&dir)
-        .pop()
-        .expect("the profile emitted no non-ASCII names, so this case proves nothing");
-    let respelled = target
-        .parent()
-        .expect("a generated document has a parent")
-        .join(decompose(
-            &target
-                .file_name()
-                .expect("a generated document has a name")
-                .to_string_lossy(),
-        ));
-    assert_ne!(
-        target.as_os_str().as_encoded_bytes(),
-        respelled.as_os_str().as_encoded_bytes(),
-        "the chosen name has no other spelling, so this case proves nothing"
-    );
+    // Not every non-ASCII name has a second spelling this test can produce —
+    // the decomposition table covers the Latin precomposed characters only —
+    // so the target is the first document whose name it actually changes.
+    let (target, respelled) = non_ascii_documents(&dir)
+        .into_iter()
+        .find_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let other = decompose(&name);
+            if other == name {
+                return None;
+            }
+            let respelled = path.parent()?.join(other);
+            Some((path, respelled))
+        })
+        .expect("the profile emitted no name the decomposition table can respell");
 
     let contents = fs::read(&target).expect("reading the document about to be renamed");
     let walked_before = digest::tree(&dir).expect("digesting a scratch tree");

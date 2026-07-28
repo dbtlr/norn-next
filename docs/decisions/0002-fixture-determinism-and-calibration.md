@@ -113,10 +113,10 @@ linked documents — moves a statistic clean out of range.
 stops reading it**, and that is a measured claim rather than an intention. A
 knob nothing fails over is decoration, and the way a knob becomes decoration is
 not malice — it is a field that quietly stops being consulted. So the check is
-run the way the failure happens: each of the twenty-two fields across the five
-knob types and the profile's own document count is mutated at its point of
-consumption, replaced by a constant, and the suite must go red. All
-twenty-two do, and no field is exempted.
+run the way the failure happens: each of the twenty-three fields — twenty-two
+across the five knob types, plus the profile's own document count — is mutated
+at its point of consumption, replaced by a constant, and the suite must go
+red. All twenty-three do, and no field is exempted.
 
 Most are caught by an envelope entry over a probe statistic. Three are caught
 by direct tests instead — where a document's links sit, whether document-free

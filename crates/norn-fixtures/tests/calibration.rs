@@ -80,18 +80,40 @@ fn the_body_distribution_is_long_tailed_rather_than_uniform() {
 
 #[test]
 fn the_probe_and_the_manifest_agree_on_the_tree() {
-    let (stats, manifest) = generate_and_measure("cal-agree", &profile("small"), 17);
-    assert_eq!(stats.documents as usize, manifest.documents);
-    assert_eq!(stats.directories as usize, manifest.directories);
-    assert_eq!(
-        (stats.documents + stats.non_markdown_files) as usize,
-        manifest.files
-    );
-    assert_eq!(stats.links as usize, manifest.links);
-    assert_eq!(
-        stats.largest_stem_class as usize,
-        manifest.largest_ambiguity_class
-    );
+    // The probe reads the tree back off disk; the manifest records what the
+    // generator emitted. Agreement — including the exact Markdown byte
+    // total — is the check that every emitted byte actually landed.
+    for (name, seed) in [
+        ("tiny", 3),
+        ("small", 17),
+        ("ambiguous", 5),
+        ("realistic", 7),
+    ] {
+        let label = format!("cal-agree-{name}");
+        let (stats, manifest) = generate_and_measure(&label, &profile(name), seed);
+        assert_eq!(
+            stats.documents as usize, manifest.documents,
+            "{name}: documents"
+        );
+        assert_eq!(
+            stats.directories as usize, manifest.directories,
+            "{name}: directories"
+        );
+        assert_eq!(
+            (stats.documents + stats.non_markdown_files) as usize,
+            manifest.files,
+            "{name}: files"
+        );
+        assert_eq!(stats.links as usize, manifest.links, "{name}: links");
+        assert_eq!(
+            stats.largest_stem_class as usize, manifest.largest_ambiguity_class,
+            "{name}: largest stem class"
+        );
+        assert_eq!(
+            stats.markdown_bytes as usize, manifest.markdown_bytes,
+            "{name}: the Markdown bytes on disk must equal the bytes the generator emitted"
+        );
+    }
 }
 
 #[test]
