@@ -12,9 +12,9 @@ Statuses: `accepted`, `proposed`, `deprecated`, `superseded by NNNN`.
 
 ## Index
 
-| ADR | Title | Status |
-|---|---|---|
-| [0001](0001-restart-decision-of-record.md) | Restart decision of record — blank-repo bottom-up rebuild under default-EXCLUDE, with the layer contracts, topology, test strata, and graduation gate | accepted |
+| ADR | Title | Status | Covers |
+|---|---|---|---|
+| [0001](0001-restart-decision-of-record.md) | Restart decision of record | accepted | The blank-repo bottom-up rebuild under default-EXCLUDE: standing laws, layer numbering, release gating, the three test strata, host topology, lockdown gates, the verb charter, mutations, repair and surfaces, and the graduation gate |
 
 ## Related
 
