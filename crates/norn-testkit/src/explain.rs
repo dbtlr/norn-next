@@ -22,10 +22,12 @@
 //! row's detail carries a constraint. Three forms are not table reads and do
 //! not fail it:
 //!
-//! - `SCAN t VIRTUAL TABLE INDEX 0:M1` — a virtual table consulted through
-//!   its own index specification, which is how an FTS5 `MATCH` is planned.
-//!   An *empty* specification (`0:`) constrains nothing, and that one is
-//!   unbounded.
+//! - `SCAN t VIRTUAL TABLE INDEX 1:` or `SCAN t VIRTUAL TABLE INDEX 0:M1` —
+//!   a virtual table consulted through its own index selection, which is how
+//!   an FTS5 `MATCH` or a table-valued function's argument is planned. The
+//!   pair is `idxNum:idxStr`, and either half being non-trivial bounds the
+//!   scan: a nonzero `idxNum` on its own, or a non-empty `idxStr` on its own.
+//!   Only the exact pair `0:` constrains nothing, and that one is unbounded.
 //! - `SCAN 2-ROW VALUES CLAUSE` — an inline list whose length is in the
 //!   statement, not in the data.
 //! - A scan of a co-routine or materialized subquery, whose own steps appear
@@ -52,11 +54,14 @@ pub enum ScanTarget<'a> {
     /// co-routine or materialized subquery.
     Relation(&'a str),
     /// A virtual table read through its own index, as
-    /// `VIRTUAL TABLE INDEX <number>:<specification>`. The specification is
-    /// the virtual table's own encoding of the constraints it was given; an
-    /// empty one means it was given none.
+    /// `VIRTUAL TABLE INDEX <idxNum>:<idxStr>`.
     VirtualTable {
         name: &'a str,
+        /// `idxNum`: the index the virtual table's module chose, by number.
+        /// Nonzero bounds the scan on its own, whatever `idxStr` says.
+        index_number: &'a str,
+        /// `idxStr`: the virtual table's own encoding of the constraints it
+        /// was given. Non-empty means it was given some.
         specification: &'a str,
     },
     /// An inline `VALUES` list. It names no relation.
@@ -86,10 +91,11 @@ impl PlanRow {
         }
         let name = rest.split_whitespace().next()?;
         let tail = rest[name.len()..].trim_start();
-        if let Some(specification) = tail.strip_prefix("VIRTUAL TABLE INDEX ") {
-            let specification = specification.split_once(':').map_or("", |(_, rest)| rest);
+        if let Some(spec) = tail.strip_prefix("VIRTUAL TABLE INDEX ") {
+            let (index_number, specification) = spec.split_once(':').unwrap_or((spec, ""));
             return Some(ScanTarget::VirtualTable {
                 name,
+                index_number: index_number.trim(),
                 specification: specification.trim(),
             });
         }
@@ -149,7 +155,11 @@ impl PlanRow {
     pub fn is_unbounded_scan(&self) -> bool {
         match self.scan_target() {
             None | Some(ScanTarget::ValuesClause) => false,
-            Some(ScanTarget::VirtualTable { specification, .. }) => specification.is_empty(),
+            Some(ScanTarget::VirtualTable {
+                index_number,
+                specification,
+                ..
+            }) => index_number == "0" && specification.is_empty(),
             Some(ScanTarget::Relation(_)) => self.constraint().is_none(),
         }
     }
@@ -678,6 +688,42 @@ mod tests {
         let row = PlanRow::new(2, 0, "SCAN doc_fts VIRTUAL TABLE INDEX 0:");
         assert_eq!(row.scans(), Some("doc_fts"));
         assert!(row.is_unbounded_scan());
+    }
+
+    /// A table-valued function is a virtual table whose module can pick a
+    /// plan by number alone, with no `idxStr` at all. A nonzero `idxNum`
+    /// bounds the scan on its own.
+    #[test]
+    fn a_virtual_table_bound_by_index_number_alone_is_not_unbounded() {
+        let row = PlanRow::new(2, 0, "SCAN json_each VIRTUAL TABLE INDEX 1:");
+        assert!(!row.is_unbounded_scan());
+        QueryPlan::new(
+            "SELECT value FROM json_each(?)",
+            rows(&["SCAN json_each VIRTUAL TABLE INDEX 1:"]),
+        )
+        .assert_no_full_scan();
+    }
+
+    /// Only the exact pair `0:` — no index number and no specification —
+    /// constrains nothing.
+    #[test]
+    fn a_virtual_table_scan_with_neither_index_number_nor_specification_is_unbounded() {
+        let row = PlanRow::new(2, 0, "SCAN documents_fts VIRTUAL TABLE INDEX 0:");
+        assert!(row.is_unbounded_scan());
+        let failure = std::panic::catch_unwind(|| {
+            QueryPlan::new(
+                "SELECT rowid FROM documents_fts",
+                rows(&["SCAN documents_fts VIRTUAL TABLE INDEX 0:"]),
+            )
+            .assert_no_full_scan()
+        })
+        .expect_err("an unconstrained virtual-table scan");
+        assert!(
+            failure
+                .downcast_ref::<String>()
+                .expect("a formatted assertion message")
+                .contains("reads a relation end to end")
+        );
     }
 
     #[test]
