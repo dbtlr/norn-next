@@ -13,6 +13,11 @@ suite that passes by agreeing with a recording, which converts an old
 program's accidents into this program's requirements. The gate below is what
 makes the difference operational rather than aspirational.
 
+> **Amended 2026-07-28** — one clause of this decision was replaced: a case no
+> longer depends on a generator reproducing its tree. The original wording is
+> left standing wherever it appears, each occurrence carrying the amendment
+> beneath it, and [Amendments](#amendments) records the change in full.
+
 ## The contract
 
 **Activation is per command, and the manifest is the record.** A command's
@@ -85,6 +90,15 @@ until the generator reproduces its recorded tree exactly. Without that, a
 difference in output reads as a defect in this program when it is drift in the
 generator.
 
+↳ **Amended 2026-07-28.** The first sentence stands and the rest is replaced.
+**A case materializes its tree from its own recording**, because the manifest
+now carries every entry's exact bytes — text verbatim, non-UTF-8 bytes
+base64-encoded — and no entry records a length in place of contents. The
+profile and seed are the recording's *name*, not an instruction to regenerate
+it, and no generator is in the path. The clause's original worry is not
+dropped but answered more directly: a generator that never runs cannot drift
+into a case's input.
+
 **Recordings hold placeholders where a value could not reproduce, and the two
 kinds are kept apart.** The extraction's own masks — a minted telemetry id, a
 root-dependent plan hash, a wall-clock stamp — are declared per case in
@@ -139,6 +153,11 @@ the verb charter answers.
   generator can reproduce and a composition root that does something; neither
   exists. The suite fails loudly naming both if a command is activated first.
 
+  ↳ **Amended 2026-07-28.** Executing a case needs its tree written out from
+  the recorded manifest and a composition root that does something. The first
+  is now only code to write — the bytes are all present — so the composition
+  root is the one thing genuinely missing, and the suite names that.
+
 ## Evidence
 
 - Mimir **NORN-a1** — the decisions taken before this repository existed,
@@ -155,3 +174,47 @@ the verb charter answers.
   environment file and in the corpus README — and an independent
   reimplementation from that prose reproduced the corpus byte for byte, which
   is the evidence the rules are stated completely.
+
+## Amendments
+
+### Amendment 1, 2026-07-28 — recorded cases materialize from their manifests
+
+**What changed.** The clause making activation wait on a generator reproducing
+a case's tree is withdrawn. In its place:
+
+- **A recorded case materializes its tree from its recorded manifest.** Every
+  entry carries its exact bytes, so writing each entry out at its path
+  reconstructs the tree the case ran on.
+- **The fixture generator binds its own profiles and nothing else.** It is not
+  asked to reproduce a recorded tree, and a difference between what it produces
+  and what a manifest records is not a defect in either.
+- **Activation therefore depends on the recorded manifests and the runner**,
+  and never on generator reproduction.
+
+**Why it changed.** The original clause rested on manifests being an incomplete
+record — a name plus a partial description, from which a tree could only be
+recovered by re-running the program that made it. That was true when the
+decision was taken: 11 of 422 entries carried a byte *length* where their
+contents belonged, one binary asset per manifest, so no manifest could
+reconstruct its own tree. Completing the record removes the reason for the
+clause rather than overruling it. The 11 entries were re-recorded from the
+recording pin, each verified byte-identical across two independent generations,
+and every entry now carries `content` or `content_base64`; recording a length
+is no longer a legal state, which the loader enforces at parse time.
+
+The clause's underlying worry — that a difference in output could read as a
+defect in this program when it is drift in a generator — is not dropped. It is
+answered more completely than the clause managed: a generator that is never
+consulted cannot drift into a case's input.
+
+**What it touched.** The two contract statements above, each amended in place;
+`crates/norn/tests/corpus/fixtures.json` and its note;
+`crates/norn/tests/corpus/README.md`; the `TreeEntry` and `FixtureManifest`
+types and the audit in `norn-testkit`; and the corpus suite's account of what
+activation still needs. **ADR 0002** states the generator side of the same
+contract.
+
+Nothing else in this decision changes. The corpus is still evidence with zero
+authority, activation is still the per-command approval act that judges whether
+recorded output is *good*, and no recording has gained any claim on what this
+program should do.

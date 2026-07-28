@@ -42,7 +42,7 @@ take one away.
 | `README.md` | This file. |
 | `cases/<command>.json` | The recorded invocations for one command — the unit of activation. |
 | `unseeded/<command>.json` | Recordings that reach a command with no behavior at the pin. Held apart so they are outside the activatable set by construction. |
-| `fixtures.json` | The input tree each `(profile, seed)` produced, file by file. |
+| `fixtures.json` | The input tree each `(profile, seed)` produced, file by file and byte for byte. |
 | `environment.json` | The environment every recording ran under, and what the placeholders in recorded output mean. |
 | `behavior-ledger.json` | Behavior rulings, attached to the commands whose cases they cover. |
 | `help-prose.json` | Per-command help prose. Rendered nowhere. |
@@ -119,11 +119,32 @@ have carried code across a boundary that only data may cross. The rules above
 are what carries, and they are sufficient: an implementation of them, run
 against the binary at the pin, reproduces this corpus byte for byte.
 
-## A case is only judgeable against its tree
+**One later recording pass, 2026-07-28.** The first pass recorded eleven files
+— one binary asset per fixture — by byte *length* rather than by contents,
+which left the manifests unable to rebuild their own trees. Those eleven were
+re-recorded from the same pin under the same boundary: the generator was built
+from the frozen checkout into a target directory outside it, each tree was
+generated twice, the asset's bytes were required to be identical across both
+runs, and only those bytes crossed. Every other entry was re-derived in the
+same pass and compared against what was already recorded — all 422 matched,
+with no file present in a tree that the manifest did not already name.
 
-`fixtures.json` exists because `(profile, seed)` does not determine a tree.
-The generator that produced these trees did not cross into this repository and
-is re-derived with different realism knobs, so **a command cannot be activated
-until the generator reproduces its cases' recorded trees exactly.** Without
-that, a difference in output reads as a defect in this program when it is
-drift in the generator.
+## A case is only judgeable against its tree, and the tree is here
+
+`fixtures.json` exists because `(profile, seed)` does not determine a tree. It
+is a **complete** record: every entry carries its exact bytes — text verbatim
+in `content`, non-UTF-8 bytes base64-encoded in `content_base64` — so a case
+materializes its tree by writing each entry out at its path.
+
+**No generator is in that path.** The profile and seed are the recording's
+name, not an instruction to regenerate it. The generator in this workspace did
+not produce these trees, is re-derived with different realism knobs, and binds
+only its own profiles; a difference between what it emits and what a manifest
+records is not a defect in either. Activation waits on the runner, never on
+generator reproduction.
+
+That completeness is enforced, not assumed. A file entry carries exactly one
+of its two content fields, base64 contents must decode and must decode to
+bytes that are *not* valid UTF-8 (text is recorded as text, so one file has one
+spelling), and an entry recording a byte *length* in place of contents does not
+parse at all. See [ADR 0001, Amendment 1](../../../../docs/decisions/0001-corpus-activation-gate.md#amendments).

@@ -6,4 +6,5 @@
 //! activation gating, and the suite it gates is an integration test in the
 //! `norn` bin package.
 
+pub mod base64;
 pub mod corpus;

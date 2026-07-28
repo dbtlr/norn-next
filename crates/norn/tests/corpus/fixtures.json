@@ -14,8 +14,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -151,8 +151,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -588,8 +588,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -735,8 +735,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -882,8 +882,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1049,8 +1049,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1191,8 +1191,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1393,8 +1393,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1595,8 +1595,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1797,8 +1797,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -1999,8 +1999,8 @@
           "path": ".norn/config.yaml"
         },
         {
+          "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==",
           "kind": "file",
-          "non_utf8_len": 67,
           "path": "Assets/pic.png"
         },
         {
@@ -2189,7 +2189,7 @@
       "seed": 4
     }
   ],
-  "note": "The input side of every recorded case: the vault tree each (profile, seed) produced at the pin, file by file. A case's recorded output is only judgeable against the tree it ran on, and the generator that produced these trees did not cross into this repository — it is re-derived with different realism knobs. A future generator reproduces a fixture when it emits exactly these paths with exactly these bytes; until it does, a recorded case cannot be activated, because a difference would read as a code defect when it is generator drift. Bytes rather than digests: the whole set is small enough to carry exactly, and an exact tree is its own reproduction contract.",
+  "note": "The input side of every recorded case: the vault tree each (profile, seed) produced at the pin, file by file and byte for byte. Every entry carries its exact contents — text as `content`, non-UTF-8 bytes base64-encoded as `content_base64` — so a case materializes its tree from this recording. The generator that produced these trees did not cross into this repository, and nothing here depends on it: (profile, seed) names a recording, it is not an instruction to regenerate one. A case's recorded output is only judgeable against the tree it ran on, and that tree is here.",
   "source": {
     "branch": "rewrite/0017",
     "commit": "76af2c3b",

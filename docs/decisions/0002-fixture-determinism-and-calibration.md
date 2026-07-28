@@ -33,9 +33,15 @@ The contract is that a given build reproduces itself; the gate is what keeps it
 so. A pool edit, a knob default or a change to the PRNG moves every tree, which
 is a review cost this contract makes visible rather than one it forbids.
 
-**The contract binds this crate's own profiles.** It makes no claim about a
-tree any other program produced, and this generator is not a reproduction
-mechanism for one.
+**The contract binds this crate's own profiles, and nothing else.** The
+coverage corpus does not depend on this generator and never will: its recorded
+manifests carry every entry's exact bytes, so a recorded case materializes its
+tree from its own recording, and the `(profile, seed)` a case names is a label
+on that recording rather than an instruction to regenerate it. **This generator
+is not asked to reproduce a recorded tree, and a difference between what it
+emits and what a manifest records is a defect in neither.** That is the
+positive form of the contract, and its corpus half is
+[ADR 0001, Amendment 1](0001-corpus-activation-gate.md#amendments).
 
 **Realism is five knobs, each a seeded draw, each documented on its own type.**
 
@@ -112,6 +118,9 @@ work belongs in the lane built for it.
   the contract binding a build rather than a version, and it is paid knowingly.
 - Realism is not asserted in prose. The claim is a set of numbers with reasons,
   and the gate is what makes it checkable.
+- The corpus and this generator are independent, and each is free to move.
+  Turning a knob cannot invalidate a recorded case, and re-recording a case
+  cannot constrain a knob.
 - Three things are deliberately absent, and their absence is recorded in the
   crate: no vault configuration file, because that contract does not exist yet
   and guessing at it would put an invented schema into every measurement tree;
