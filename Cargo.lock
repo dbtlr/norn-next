@@ -30,6 +30,9 @@ dependencies = [
 [[package]]
 name = "norn-fixtures"
 version = "0.0.0"
+dependencies = [
+ "norn-testkit",
+]
 
 [[package]]
 name = "norn-testkit"

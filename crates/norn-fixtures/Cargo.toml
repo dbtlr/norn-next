@@ -18,3 +18,12 @@ path = "src/main.rs"
 # against. The digest, the calendar arithmetic, the PRNG and the argument
 # parsing are all in-crate for that reason.
 [dependencies]
+
+# The measurement suite spawns this crate's own binary under the testkit's
+# process harness and reads the peak resident set the kernel accounted to it.
+# The edge is a development one and cycles back — the testkit names this
+# crate's profiles as the two scales of a size-independence pair — which is
+# why the allowlist does not describe it: dev edges cycle by construction and
+# the architecture gate reads and discards them.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }
