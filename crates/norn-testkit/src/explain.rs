@@ -196,9 +196,12 @@ impl QueryPlan {
     }
 
     /// The table a plan row's name refers to, resolved through the aliases
-    /// the statement declared. A name the reader cannot bind is its own
-    /// answer.
+    /// the statement declared. SQLite echoes a schema qualifier back in the
+    /// row (`SCAN main.documents`), so it is stripped here before the alias
+    /// lookup, the same as it is read off the SQL side. A name the reader
+    /// cannot bind is its own bare form.
     pub fn table_of<'a>(&'a self, name: &'a str) -> &'a str {
+        let name = bare_name(name);
         self.aliases.get(name).map_or(name, String::as_str)
     }
 
@@ -329,15 +332,23 @@ fn rows_display(rows: &[&PlanRow]) -> String {
 ///
 /// The reader takes the shape a builder emits: after `FROM` or `JOIN`, a bare
 /// table name, optionally followed by `AS alias` or by a bare alias. A schema
-/// qualifier is dropped, because SQLite reports the bare name. Its limits are
-/// exact and worth stating, because an alias it cannot bind is left to stand
-/// for itself rather than guessed at:
+/// qualifier is dropped here on the SQL side, and [`QueryPlan::table_of`]
+/// drops it again from the plan row's name — SQLite echoes the qualifier
+/// back as `SCAN main.documents` rather than reporting the bare name. Its
+/// limits are exact and worth stating, because an alias it cannot bind is
+/// left to stand for itself rather than guessed at:
 ///
 /// - A subquery or table-valued function in a `FROM` clause binds nothing;
 ///   the reader stops at the `(` and resumes at the next `FROM` or `JOIN`.
 /// - A quoted identifier holding whitespace is not understood.
 /// - The reader does not scope aliases: a statement whose subquery reuses an
-///   outer alias for a different table gets one binding, the last one read.
+///   outer alias for a different table poisons that alias rather than
+///   rebinding it — both bindings are dropped, and `table_of` falls back to
+///   the alias itself. So a scoped bar (`assert_no_full_scan_of`,
+///   `assert_searches`) neither greens the shadowed table nor blames the
+///   wrong one; it simply cannot vouch for either name once it is ambiguous.
+///   `assert_no_full_scan` is unscoped and judges every row by whether it
+///   scans at all, so it is the bar that still catches a shadowed scan.
 fn aliases(sql: &str) -> BTreeMap<String, String> {
     const AFTER_A_TABLE: &[&str] = &[
         "ON",
@@ -369,7 +380,8 @@ fn aliases(sql: &str) -> BTreeMap<String, String> {
         "SELECT",
     ];
 
-    let mut bindings = BTreeMap::new();
+    let mut bindings: BTreeMap<String, String> = BTreeMap::new();
+    let mut poisoned: BTreeSet<String> = BTreeSet::new();
     let tokens = tokenize(sql);
     let mut index = 0;
     while index < tokens.len() {
@@ -396,7 +408,8 @@ fn aliases(sql: &str) -> BTreeMap<String, String> {
                 };
                 if let Some(alias) = alias {
                     index += 1;
-                    bindings.insert(bare_name(alias).to_string(), table.to_string());
+                    let alias = bare_name(alias);
+                    bind(&mut bindings, &mut poisoned, alias, table);
                 }
             }
             // A comma-separated `FROM` clause names another table.
@@ -407,6 +420,34 @@ fn aliases(sql: &str) -> BTreeMap<String, String> {
         }
     }
     bindings
+}
+
+/// Record `alias -> table`, unless `alias` already names a different table.
+///
+/// A statement whose subquery reuses an outer alias for a different table —
+/// the shadowing shape SQL scoping allows — would otherwise get one binding,
+/// the last one read, and misattribute every row spelled with that alias to
+/// the wrong table. Poisoning it instead drops both bindings for good, so
+/// [`QueryPlan::table_of`] falls back to the alias itself.
+fn bind(
+    bindings: &mut BTreeMap<String, String>,
+    poisoned: &mut BTreeSet<String>,
+    alias: &str,
+    table: &str,
+) {
+    if poisoned.contains(alias) {
+        return;
+    }
+    match bindings.get(alias) {
+        Some(existing) if existing != table => {
+            bindings.remove(alias);
+            poisoned.insert(alias.to_string());
+        }
+        Some(_) => {}
+        None => {
+            bindings.insert(alias.to_string(), table.to_string());
+        }
+    }
 }
 
 /// The statement split into words, with `(`, `)` and `,` standing alone.
@@ -528,6 +569,68 @@ mod tests {
         );
         search.assert_searches("documents");
         search.assert_no_full_scan();
+    }
+
+    /// SQLite echoes a schema qualifier back into the plan row, not just the
+    /// alias, so a plan-row name has to be stripped of it too, the same as
+    /// the SQL side is.
+    #[test]
+    fn a_schema_qualified_scan_row_still_resolves_to_the_bare_table() {
+        let plan = QueryPlan::new(
+            "SELECT path FROM main.documents WHERE stem = ?",
+            rows(&["SCAN main.documents"]),
+        );
+        let failure = std::panic::catch_unwind({
+            let plan = plan.clone();
+            move || plan.assert_no_full_scan_of("documents")
+        })
+        .expect_err("a schema-qualified scan of documents");
+        assert!(
+            failure
+                .downcast_ref::<String>()
+                .expect("a formatted assertion message")
+                .contains("reads `documents` end to end")
+        );
+
+        QueryPlan::new(
+            "SELECT path FROM main.documents WHERE stem = ?",
+            rows(&["SEARCH main.documents USING INDEX documents_stem (stem=?)"]),
+        )
+        .assert_searches("documents");
+    }
+
+    /// A subquery that reuses an outer alias for a different table shadows
+    /// it, and SQLite reports both scans under the same name. Resolving to
+    /// whichever table was bound last would attribute an unbounded scan of
+    /// one table to the other; poisoning the alias instead leaves it
+    /// standing for itself.
+    #[test]
+    fn a_shadowed_alias_is_left_unresolved_rather_than_misattributed() {
+        let plan = QueryPlan::new(
+            "SELECT * FROM documents d WHERE EXISTS (SELECT 1 FROM links d WHERE d.source = 1)",
+            rows(&["SCAN d", "SCAN d"]),
+        );
+        // Not "documents" (the first binding) and not "links" (the last) --
+        // the alias stands for itself once it is ambiguous.
+        assert_eq!(plan.table_of("d"), "d");
+
+        // The scoped bar cannot vouch for `documents` once its alias is
+        // ambiguous: it neither wrongly greens it nor blames `links` for it.
+        plan.assert_no_full_scan_of("documents");
+
+        // The unscoped bar does not need to resolve the alias at all, and
+        // still catches the scan the scoped bar could not attribute.
+        let failure = std::panic::catch_unwind({
+            let plan = plan.clone();
+            move || plan.assert_no_full_scan()
+        })
+        .expect_err("an unbounded scan under a shadowed alias");
+        assert!(
+            failure
+                .downcast_ref::<String>()
+                .expect("a formatted assertion message")
+                .contains("reads a relation end to end")
+        );
     }
 
     #[test]
