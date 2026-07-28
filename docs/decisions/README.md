@@ -8,7 +8,7 @@ layer lands — not in advance, and never as one document covering everything. F
 `NNNN-slug.md`, numbered sequentially from `0001`. To add one, take the next number above
 the highest here and add its row to the index below.
 
-**Division of labour.** Cross-layer invariants and crate boundaries live in
+**Division of labour.** Cross-cutting invariants and crate boundaries live in
 [`../architecture.md`](../architecture.md), which governs them; decisions that bind at a
 single layer land here as ADRs. When a new ADR changes something the spine states, the spine
 is updated in the same change — it does not become stale with a footnote.
