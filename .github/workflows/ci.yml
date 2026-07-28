@@ -13,7 +13,8 @@
 #
 # A job whose name carries a "(placeholder — ...)" suffix is structure only:
 # it passes trivially so the lane exists, triggers, and is reviewable before
-# it has teeth, and it is filled by the harness task named in its comment.
+# it has teeth, and it is filled by whatever its comment names — a task where
+# one exists, and otherwise the layer that brings the missing subject.
 # The suffix drops when the real gate lands, so a green check on a job
 # without one is a gate that actually ran.
 name: ci
