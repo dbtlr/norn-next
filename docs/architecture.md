@@ -18,27 +18,15 @@ from here land as individual ADRs at the layer where they bind — see
 
 ## Part I — The invariant spine
 
-Five invariants bind every layer. Each section below names its own gates where it has them:
-the per-PR memory benchmarks and soak trend line in
-[the memory invariant](#1-the-memory-invariant), the architecture gate in
-[default-EXCLUDE](#2-default-exclude), the churn and induced-failure suites in
-[the heal ladder](#3-the-heal-ladder), and the `EXPLAIN` and counter assertions in
-[raw-SQL acceptance](#4-raw-sql-acceptance).
-
-A gate lands in the lane that can measure it, rather than at the layer it defends: the
-architecture gate runs from the first scaffold; the memory and counter bars arrive with the
-Layer 0 harness that instruments them; the churn, induced-failure and soak lanes arrive at
-Layer 2, over Layers 0 and 1; and the `EXPLAIN` bars arrive with the Layer 3 builders whose
-SQL they read.
-
-Parts of the spine have no mechanical gate at all. Within
-[default-EXCLUDE](#2-default-exclude), whether an unlisted import earns admission and
-whether recorded legacy behavior is good enough to activate are both review acts; and
-[one obvious path](#5-one-obvious-path) is review-held throughout. That is a stated gap
-rather than an oversight — a review-held invariant rots quietly.
+These invariants bind every layer. Each section below names its own gates where it has them,
+and marks the judgments that are review acts instead. When those gates arrive is stated by
+the [layer landing map](#layer-landing-map) and the workflow comments in
+`.github/workflows/`, not here.
 
 Where a gate exists, its lane depends on what it measures: **counters and structure gate per
-PR; clocks and trends live in the soak lane and never fail a pull request.**
+PR; clocks and trends live in the soak lane and never fail a pull request.** A review-held
+judgment has no lane at all, which is why each section says so where it applies — a
+review-held invariant rots quietly.
 
 ### 1. The memory invariant
 
@@ -70,6 +58,9 @@ rule.
   authority. Activation is an explicit approval act, per command, and it is a judgment
   about whether the behavior is *good* — never about whether it matches what shipped
   before.
+
+Only the middle one is gated. Admitting an import and activating recorded behavior are
+review acts with no mechanical check behind them.
 
 ### 3. The heal ladder
 
@@ -161,6 +152,9 @@ It binds concretely: one plan vocabulary and one applier; one document parser; o
 seam; one resolution grammar across every target surface; one invocation path to the host;
 one owner for machine-local state. Where a new capability looks like an existing one, the
 resolution is sharply bounded jobs — not two overlapping surfaces that each mostly work.
+
+No mechanical check carries this. Whether a change is a second spelling is a judgment made
+in review, and it stays that way until a rule can express it.
 
 ---
 
@@ -296,7 +290,7 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
    - **Driver calls live in `norn-store`.** No other crate's code opens a SQLite connection;
      that is the lint's subject. The harness is no exception: `norn-testkit`'s `EXPLAIN` and
      counter assertions run through `norn-store`'s own API, which exposes what they need, so
-     testkit opens nothing itself.
+     testkit opens no connection itself.
    - **Among product crates, `norn-host` alone links `norn-store` into a running process**,
      so in the shipped artifact one crate reaches the substrate. `norn-testkit` also depends
      on `norn-store`, but it never ships.
@@ -336,13 +330,12 @@ authoritative mapping of invariant to mechanism lands in code with NORN-12, not 
     registry file, bearer token, endpoint conventions — and every read and write of them
     flows through its API. Registry *semantics* (the serving set and its mutation verbs)
     stay host-side; config owns shape and storage. The shared dependency is not a channel:
-    client–host coordination still
-    flows only over loopback HTTP. Config's API splits along that seam — the **registry
-    surface is host-only**, which a crate edge cannot express and which therefore carries a
-    named symbol lint, while the machine surface (endpoint discovery, token read) is
-    shared. Token *generation* at service install is the client's action, executed through
-    that API — the client decides the write happens, `norn-config` performs it, and no second
-    byte-writer appears.
+    client–host coordination still flows only over loopback HTTP. Config's API splits along
+    that seam — the **registry surface is host-only**, which a crate edge cannot express and
+    which therefore carries a named symbol lint, while the machine surface (endpoint
+    discovery, token read) is shared. Token *generation* at service install is the client's
+    action, executed through that API — the client decides the write happens, `norn-config`
+    performs it, and no second byte-writer appears.
 12. **`norn-embed` is blind.** No `embed → store` and no `embed → fs` edge exists; the host
     mediates every vector write. Semantic search stays a query surface and never a
     correctness input, because the inference crate structurally cannot reach findings or
@@ -370,9 +363,10 @@ The gate lands with the Layer 0 drift-prevention harness (**NORN-12**) and runs 
 **from the first scaffold** — it is one of the first things the workspace gets, not
 something retrofitted once the graph is worth defending.
 
-Symbol-level rules the dependency graph cannot express **escalate to lint tooling**
-(clippy's `disallowed-types` / `disallowed-methods`, or custom lints if configuration-level
-lints prove insufficient):
+Symbol-level rules the dependency graph cannot express **escalate to lint tooling**. Which
+tooling expresses them is an implementation detail of NORN-12, not a fixed part of this
+contract — clippy's `disallowed-types` and `disallowed-methods` are the starting point, with
+custom lints if configuration-level lints prove insufficient. The rules:
 
 - no `serde_json::Value` crossing the wire seam
 - no SQLite connection opened outside `norn-store`
@@ -380,11 +374,10 @@ lints prove insufficient):
 - no `norn-config` registry-surface use outside `norn-host`
 - no direct stdout writes outside `norn-console`
 
-One workspace-root `clippy.toml` holds the whole ruleset, because that configuration file
-does not merge per-crate. The crate that legitimately owns an effect carves it out with an
-explicit `#[allow]` **at the use site**, which doubles as an audit marker. Which tooling
-expresses these rules is an implementation detail of NORN-12, not a fixed part of this
-contract.
+Where clippy carries the ruleset, one workspace-root `clippy.toml` holds all of it, because
+that configuration file does not merge per-crate. The crate that legitimately owns an effect
+carves it out with an explicit `#[allow]` **at the use site**, which doubles as an audit
+marker.
 
 Two rules carry a carve-out set. The tables below record the effect sites known today, and
 are kept accurate as effects are added — they are a map of where effects legitimately live,
