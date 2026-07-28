@@ -251,6 +251,7 @@ impl QueryPlan {
 
     /// **The scan bar.** No step of this plan reads `table` end to end.
     pub fn assert_no_full_scan_of(&self, table: &str) {
+        let table = bare_name(table);
         let scans: Vec<&PlanRow> = self
             .unbounded_steps()
             .into_iter()
@@ -290,6 +291,7 @@ impl QueryPlan {
     /// **The index bar.** The plan reaches `table` by a search rather than a
     /// scan, which is the difference an index makes.
     pub fn assert_searches(&self, table: &str) {
+        let table = bare_name(table);
         assert!(
             self.rows
                 .iter()
@@ -349,6 +351,7 @@ fn rows_display(rows: &[&PlanRow]) -> String {
 /// - A subquery or table-valued function in a `FROM` clause binds nothing;
 ///   the reader stops at the `(` and resumes at the next `FROM` or `JOIN`.
 /// - A quoted identifier holding whitespace is not understood.
+/// - A comment is not recognized; its words are read as SQL.
 /// - The reader does not scope aliases: a statement whose subquery reuses an
 ///   outer alias for a different table poisons that alias rather than
 ///   rebinding it — both bindings are dropped, and `table_of` falls back to
@@ -449,7 +452,7 @@ fn bind(
         return;
     }
     match bindings.get(alias) {
-        Some(existing) if existing != table => {
+        Some(existing) if !existing.eq_ignore_ascii_case(table) => {
             bindings.remove(alias);
             poisoned.insert(alias.to_string());
         }
@@ -477,7 +480,7 @@ fn tokenize(sql: &str) -> Vec<&str> {
             continue;
         }
         let end = rest
-            .find(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
+            .find(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',' || c == '\'')
             .unwrap_or(rest.len());
         let end = if end == 0 { 1 } else { end };
         tokens.push(&rest[..end]);
@@ -696,13 +699,25 @@ mod tests {
     /// A string literal is not SQL, even when its contents look like some:
     /// the words inside `' from links d '` name nothing.
     #[test]
-    fn a_string_literal_containing_sql_keywords_binds_no_alias() {
-        let plan = QueryPlan::new(
+    fn a_string_literal_is_not_read_as_sql() {
+        for sql in [
             "SELECT * FROM documents WHERE note = ' from links d '",
+            "SELECT * FROM documents WHERE note=' from links d '",
+            "SELECT * FROM documents WHERE note='it''s from links d '",
+        ] {
+            let plan = QueryPlan::new(sql, Vec::new());
+            assert_eq!(plan.table_of("d"), "d", "for: {sql}");
+            assert_eq!(plan.table_of("links"), "links", "for: {sql}");
+        }
+    }
+
+    #[test]
+    fn a_literal_hugging_an_operator_still_ends_the_preceding_word() {
+        let plan = QueryPlan::new(
+            "SELECT * FROM documents d WHERE note=' from links d '",
             Vec::new(),
         );
-        assert_eq!(plan.table_of("d"), "d");
-        assert_eq!(plan.table_of("links"), "links");
+        assert_eq!(plan.table_of("d"), "documents");
     }
 
     #[test]

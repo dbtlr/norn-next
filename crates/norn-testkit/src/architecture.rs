@@ -1123,13 +1123,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         for directory in [
             "crates/one",
+            "crates/one/nested",
             "crates/two",
             "crates/notacrate",
             "crates/tools/secret",
         ] {
             std::fs::create_dir_all(root.join(directory)).expect("a scratch tree");
         }
-        for directory in ["crates/one", "crates/two", "crates/tools/secret"] {
+        for directory in [
+            "crates/one",
+            "crates/one/nested",
+            "crates/two",
+            "crates/tools/secret",
+        ] {
             std::fs::write(root.join(directory).join("Cargo.toml"), b"[package]\n")
                 .expect("a manifest");
         }
