@@ -419,7 +419,9 @@ fn aliases(sql: &str) -> BTreeMap<String, String> {
                 if let Some(alias) = alias {
                     index += 1;
                     let alias = bare_name(alias);
-                    bind(&mut bindings, &mut poisoned, alias, table);
+                    if is_identifier(alias) {
+                        bind(&mut bindings, &mut poisoned, alias, table);
+                    }
                 }
             }
             // A comma-separated `FROM` clause names another table.
@@ -460,24 +462,66 @@ fn bind(
     }
 }
 
-/// The statement split into words, with `(`, `)` and `,` standing alone.
+/// The statement split into words, with `(`, `)` and `,` standing alone. A
+/// single-quoted string literal is read whole, quotes included, so a word
+/// inside one — `' from links d '`, say — is never mistaken for SQL.
 fn tokenize(sql: &str) -> Vec<&str> {
     let mut tokens = Vec::new();
     let mut rest = sql;
-    while !rest.is_empty() {
-        let trimmed = rest.trim_start();
-        if trimmed.is_empty() {
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
             break;
         }
-        let start = rest.len() - trimmed.len();
-        let end = trimmed
+        if let Some(literal) = string_literal(rest) {
+            tokens.push(literal);
+            rest = &rest[literal.len()..];
+            continue;
+        }
+        let end = rest
             .find(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
-            .unwrap_or(trimmed.len());
+            .unwrap_or(rest.len());
         let end = if end == 0 { 1 } else { end };
-        tokens.push(&rest[start..start + end]);
-        rest = &rest[start + end..];
+        tokens.push(&rest[..end]);
+        rest = &rest[end..];
     }
     tokens
+}
+
+/// The single-quoted SQL string literal starting at `s`, quotes included, if
+/// `s` starts with one. `''` inside it is the escaped quote, not the end.
+fn string_literal(s: &str) -> Option<&str> {
+    if !s.starts_with('\'') {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut end = 1;
+    while end < bytes.len() {
+        if bytes[end] == b'\'' {
+            if bytes.get(end + 1) == Some(&b'\'') {
+                end += 2;
+                continue;
+            }
+            return Some(&s[..=end]);
+        }
+        end += 1;
+    }
+    // An unterminated literal: take the rest rather than looping forever.
+    Some(s)
+}
+
+/// Whether `s` is a bare SQL identifier: a letter or underscore, then any
+/// number of letters, digits or underscores. A token the reader would
+/// otherwise treat as an alias but that fails this shape is punctuation the
+/// surrounding syntax left behind — a stray `)`, say — not a name the
+/// statement gave anything.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A name with its schema qualifier and its quoting stripped.
@@ -641,6 +685,26 @@ mod tests {
                 .expect("a formatted assertion message")
                 .contains("reads a relation end to end")
         );
+    }
+
+    /// A CTE's closing paren sits where an alias would, and is not one.
+    #[test]
+    fn a_closing_paren_after_a_cte_is_not_read_as_an_alias() {
+        let plan = QueryPlan::new("WITH x AS (SELECT 1 FROM t) SELECT * FROM x", Vec::new());
+        assert_eq!(plan.table_of("t"), "t");
+        assert_eq!(plan.table_of(")"), ")");
+    }
+
+    /// A string literal is not SQL, even when its contents look like some:
+    /// the words inside `' from links d '` name nothing.
+    #[test]
+    fn a_string_literal_containing_sql_keywords_binds_no_alias() {
+        let plan = QueryPlan::new(
+            "SELECT * FROM documents WHERE note = ' from links d '",
+            Vec::new(),
+        );
+        assert_eq!(plan.table_of("d"), "d");
+        assert_eq!(plan.table_of("links"), "links");
     }
 
     #[test]
