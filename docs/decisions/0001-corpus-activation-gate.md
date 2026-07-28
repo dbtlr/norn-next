@@ -1,12 +1,12 @@
 # 0001 — the coverage corpus is evidence, and activation is the approval act
 
 A corpus of recorded command invocations lives in `crates/norn/tests/corpus/`,
-beside the behavior rulings and help prose recorded with it. **It is evidence
-with zero authority.** A recording says what a program did once; it makes no
-claim about what this program should do. No recorded case runs until its
-command is activated, and activation is an explicit approval act that asks
-whether the recorded output is *good* — never whether this program reproduces
-it.
+beside the input trees they ran against, the behavior rulings, and the help
+prose recorded with them. **It is evidence with zero authority.** A recording
+says what a program did once; it makes no claim about what this program should
+do. No recorded case runs until its command is activated, and activation is an
+explicit approval act that asks whether the recorded output is *good* — never
+whether this program reproduces it.
 
 The corpus enters as data rather than as tests because the alternative is a
 suite that passes by agreeing with a recording, which converts an old
@@ -42,30 +42,70 @@ commands a class ruling sweeps are activated together.
 **Behavior rulings attach per command and are re-judged at activation.** A
 ruling becomes contract only on an affirmative judgment against the re-derived
 surface. A command the verb charter deletes takes its rulings with it, retired
-by a recorded ruling. The same ladder governs the help prose: a surviving
-command's prose is raw material, a modified command's prose is a starting
-point, and a deleted command's prose dies with it.
+by a recorded ruling. The help prose follows its own ladder, decided at the
+same moment: a command whose shape survives takes the recorded prose verbatim
+and then reviews it; a command whose shape changed uses it as a basis for
+iteration; a command it no longer fits regenerates from the voice standard;
+and a command that is deleted takes its prose with it.
 
-**The exit contract is tri-state**, and every recorded case carries its class:
+**Every command the binary had at the recording pin sits in exactly one of
+four categories.** The audit reconciles the set against the binary's own
+recorded command list, so a command cannot sit outside every category
+unnoticed:
 
-| Code | Class | Meaning |
-|---|---|---|
-| `0` | `ok` | The request succeeded. |
-| `1` | `operational` | A well-formed invocation that could not be carried out. |
-| `2` | `usage` | An argv the parser could not accept. |
+| Category | Meaning |
+|---|---|
+| `activatable` | Has recorded cases, and can be approved. |
+| `activated` | The subset of `activatable` whose cases run. Empty today. |
+| `unseeded` | Carries no behavior at the pin, so there is nothing to approve and no activation path exists. |
+| `unrecorded` | Has behavior at the pin, but no case exercises it, so its contract is authored with no evidence at all. Each entry states why. |
 
-The mutation commands specialize the failure split, keyed on whether any write
-landed: `2` is a `refusal` that left the vault untouched, and `1` is a
-`partial-apply`. The class is part of what activation judges — a command whose
-failures are classified wrongly is not activated by rewriting the recording.
+**Nine commands are unseeded:** `init`, `completions`, `cache`, `config`,
+`self-update`, `serve`, `service`, `audit`, `manpage`. Whether each should
+exist is a question for the verb charter, which derives the verb set from
+callers and jobs. The list is pinned in `norn-testkit` rather than read from
+the manifest, and the audit requires the manifest to name exactly those nine —
+so an unseeded command cannot be given an activation path by editing the
+manifest, which would otherwise be a two-line change.
 
-**Nine commands are unseeded and have no activation path at all:** `init`,
-`completions`, `cache`, `config`, `self-update`, `serve`, `service`, `audit`,
-`manpage`. They carry no behavior at the recording pin, so there is nothing to
-approve. Whether each should exist is a question for the verb charter, which
-derives the verb set from callers and jobs. The audit in
-`norn-testkit`'s corpus module refuses any corpus that offers one of them as
-activatable, so the list cannot be widened by editing the manifest.
+**One command is unrecorded:** `vault`. It has behavior at the pin and appears
+in the help catalog and in one ruling, but no case invokes it. Naming the gap
+is the point: its contract is authored from scratch.
+
+**A case is judgeable only against the tree it ran on.** Each case names a
+generator profile and seed, and `fixtures.json` records the tree each of those
+produced, file by file. The generator did not cross into this repository and
+is re-derived with different realism knobs, so a case cannot be activated
+until the generator reproduces its recorded tree exactly. Without that, a
+difference in output reads as a defect in this program when it is drift in the
+generator.
+
+**Recordings hold placeholders where a value could not reproduce, and the two
+kinds are kept apart.** The extraction's own masks — a minted telemetry id, a
+root-dependent plan hash, a wall-clock stamp — are declared per case in
+`volatile_masks`, and each was proven necessary by re-running the whole
+catalog and requiring byte equality. Substitutions the recording harness had
+already applied, such as the vault-root path, are declared separately in
+`normalizations`. A mask fires only on a nonempty value: an empty field is a
+fact about the invocation — a write-free path mints no telemetry id — so it is
+recorded verbatim and the case declares no mask.
+
+## What the recordings say about exit codes
+
+This is a property of the evidence, not a contract of this program. **The exit
+contract binds where the verb charter authors it**; what follows describes only
+the classification the recordings were made under, so a reader of a recorded
+`exit_class` knows what it meant.
+
+The recordings were classified tri-state: `0` success, `1` operational failure
+(a well-formed invocation that could not be carried out), `2` usage error (an
+argv the parser could not accept). One specialization applied to commands that
+write, keyed on whether any write landed: `2` was a refusal that left the vault
+untouched, `1` a partial apply. **That specialization took precedence over the
+usage class** — a writing command rejecting a malformed payload was recorded as
+a refusal, not a usage error, because the load-bearing fact was that nothing
+had been written. Whether any of this is right for this program is a question
+the verb charter answers.
 
 ## Consequences
 
@@ -75,12 +115,12 @@ activatable, so the list cannot be widened by editing the manifest.
 - **The corpus cannot grow authority by accident.** Cases enter the workspace
   as inert data files consumed by one loader; nothing renders the help prose,
   and nothing asserts against a ruling until its command is activated.
-- **Recordings hold placeholders, not machine facts.** Absolute vault paths,
-  minted telemetry ids, root-dependent plan hashes and wall-clock stamps are
-  replaced by named placeholders, and each case names the placeholders that
-  fired on it. Recording a value that cannot reproduce would pin noise.
-- **The runner is not built.** Executing a case needs a fixture vault from the
-  deterministic generator and a composition root that does something; neither
+- **A ruling can be stranded.** A ruling attached only to commands with no
+  activation path will never come up for judgment, so the harness reports that
+  set explicitly rather than letting it sit unread. `PD-134` is the whole set
+  today.
+- **The runner is not built.** Executing a case needs a fixture tree the
+  generator can reproduce and a composition root that does something; neither
   exists. The suite fails loudly naming both if a command is activated first.
 
 ## Evidence
@@ -90,7 +130,8 @@ activatable, so the list cannot be widened by editing the manifest.
   unseeded commands in prose and enumerates nine; the enumeration governs, and
   the list above is the corrected one.
 - The recording pin `76af2c3b` on branch `rewrite/0017` of the `norn-legacy`
-  line, cited by every corpus data file. 158 cases, 56 behavior rulings, and 45
-  help entries were recorded from it under the environment described in
-  `crates/norn/tests/corpus/environment.json`. Recording was a one-time act
-  performed in that checkout: only data crosses into this workspace.
+  line, cited by every corpus data file. 158 cases, 11 fixture trees, 56
+  behavior rulings, and 45 help entries were recorded from it under the
+  environment described in `crates/norn/tests/corpus/environment.json`.
+  Recording was a one-time act performed in that checkout: only data crosses
+  into this workspace.
