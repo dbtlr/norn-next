@@ -90,10 +90,25 @@ impl CounterSnapshot {
     }
 
     /// Where two snapshots disagree, one line each.
+    ///
+    /// Both snapshots carry the same counter names or that is itself the
+    /// first disagreement, on the same terms as [`CounterSnapshot::delta`]: a
+    /// counter one reading has and the other does not means the two readings
+    /// are of different things, and reading the missing one as zero would let
+    /// a renamed or dropped counter compare equal.
     pub fn differences(&self, other: &CounterSnapshot) -> Vec<String> {
         let mut problems = Vec::new();
-        let names: BTreeSet<&str> = self.names().chain(other.names()).collect();
-        for name in names {
+        let mine: BTreeSet<&str> = self.names().collect();
+        let theirs: BTreeSet<&str> = other.names().collect();
+        if mine != theirs {
+            let only_mine: Vec<&str> = mine.difference(&theirs).copied().collect();
+            let only_theirs: Vec<&str> = theirs.difference(&mine).copied().collect();
+            problems.push(format!(
+                "the two readings carry different counters: {only_mine:?} on one side only, \
+                 {only_theirs:?} on the other"
+            ));
+        }
+        for name in mine.intersection(&theirs) {
             let (mine, theirs) = (self.get(name), other.get(name));
             if mine != theirs {
                 problems.push(format!("`{name}`: {mine} against {theirs}"));
@@ -188,16 +203,32 @@ mod tests {
     #[test]
     fn equal_counts_compare_name_by_name() {
         let one = snapshot(&[("a", 2), ("b", 0)]);
-        one.assert_equal_counts(&snapshot(&[("a", 2)]), "a read");
+        one.assert_equal_counts(&snapshot(&[("a", 2), ("b", 0)]), "a read");
         assert_eq!(
-            one.differences(&snapshot(&[("a", 3)])),
+            one.differences(&snapshot(&[("a", 3), ("b", 0)])),
             vec!["`a`: 2 against 3".to_string()]
+        );
+    }
+
+    /// A counter one reading carries and the other does not is a difference,
+    /// never a zero. Reading it as zero is how a renamed or dropped counter
+    /// compares equal to the one it replaced.
+    #[test]
+    fn a_counter_present_in_one_run_only_is_a_difference() {
+        let differences = snapshot(&[("a", 1)]).differences(&snapshot(&[("a", 1), ("b", 0)]));
+        assert_eq!(
+            differences,
+            vec![
+                "the two readings carry different counters: [] on one side only, [\"b\"] on the \
+                 other"
+                    .to_string()
+            ]
         );
     }
 
     #[test]
     #[should_panic(expected = "counted differently across two runs")]
-    fn a_counter_present_in_one_run_only_is_a_difference() {
+    fn a_run_that_dropped_a_counter_fails_the_comparison() {
         snapshot(&[("a", 1)]).assert_equal_counts(&snapshot(&[("a", 1), ("b", 1)]), "a read");
     }
 }

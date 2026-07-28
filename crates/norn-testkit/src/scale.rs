@@ -51,9 +51,12 @@ impl<'a> SizeIndependencePair<'a> {
     /// Every way the pair fails to demonstrate size independence, one line
     /// each. A sound pair produces none.
     ///
-    /// The scale check is part of the assertion, not a precondition someone
-    /// remembered: two runs against equally large vaults agree about
-    /// everything and prove nothing about size.
+    /// The checks that the pair measured anything at all are part of the
+    /// assertion, not preconditions someone remembered. Two runs against
+    /// equally large vaults agree about everything and prove nothing about
+    /// size; a side with no counters compares against nothing; and counters
+    /// that are zero everywhere agree because nothing moved them, which is
+    /// the shape a mis-wired instrument takes.
     pub fn violations(&self) -> Vec<String> {
         let mut problems = Vec::new();
         let (small, large) = (self.small.profile, self.large.profile);
@@ -64,9 +67,22 @@ impl<'a> SizeIndependencePair<'a> {
                 self.operation, small.name, small.docs, large.name, large.docs
             ));
         }
-        if self.small.counters.is_empty() && self.large.counters.is_empty() {
+        for (scale, observation) in [("small", &self.small), ("large", &self.large)] {
+            if observation.counters.is_empty() {
+                problems.push(format!(
+                    "`{}` recorded no counters at the {scale} scale, so the pair compares nothing",
+                    self.operation
+                ));
+            }
+        }
+        if !self.small.counters.is_empty()
+            && !self.large.counters.is_empty()
+            && self.small.counters.nonzero().is_empty()
+            && self.large.counters.nonzero().is_empty()
+        {
             problems.push(format!(
-                "`{}` recorded no counters at either scale, so the pair compares nothing",
+                "`{}` counted zero for every counter at both scales, so nothing was measured and \
+                 the agreement is vacuous",
                 self.operation
             ));
         }
@@ -146,6 +162,38 @@ mod tests {
             "suffix resolve",
             ScaleObservation::new(&small, CounterSnapshot::new()),
             ScaleObservation::new(&large, CounterSnapshot::new()),
+        )
+        .assert_size_independent();
+    }
+
+    /// One side recording nothing is the shape a run that never reached its
+    /// instrument takes, and the counter comparison would have nothing to
+    /// disagree about.
+    #[test]
+    fn a_pair_with_one_empty_side_fails() {
+        let (small, large) = (profile("tiny"), profile("realistic"));
+        let problems = SizeIndependencePair::new(
+            "suffix resolve",
+            ScaleObservation::new(&small, counters(&[("rows_read", 4)])),
+            ScaleObservation::new(&large, CounterSnapshot::new()),
+        )
+        .violations();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("recorded no counters at the large scale")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "nothing was measured")]
+    fn a_pair_whose_counters_are_zero_everywhere_fails() {
+        let (small, large) = (profile("tiny"), profile("realistic"));
+        SizeIndependencePair::new(
+            "suffix resolve",
+            ScaleObservation::new(&small, counters(&[("rows_read", 0)])),
+            ScaleObservation::new(&large, counters(&[("rows_read", 0)])),
         )
         .assert_size_independent();
     }
