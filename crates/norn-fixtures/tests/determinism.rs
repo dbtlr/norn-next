@@ -1,5 +1,8 @@
-//! The determinism gate: the same `(profile, seed)` produces the same tree,
-//! byte for byte.
+//! The determinism gate: the same `(profile, seed)` produces the same emitted
+//! tree, byte for byte — the paths the generator writes and the bytes it
+//! writes at them. What a filesystem reports those paths to be called is
+//! outside the contract, and the case at the end of this file is where that
+//! boundary is exercised.
 //!
 //! Each case generates into a fresh directory, takes the contract digest, and
 //! deletes the tree before comparing — so two runs are compared through their
@@ -103,56 +106,104 @@ fn a_manifest_counts_what_the_tree_holds() {
     assert_eq!(largest_ambiguity_class, profile.ambiguity.k);
 }
 
-/// The contract digest is a property of the generator, not of the filesystem.
+/// Renaming a generated file to the other spelling of its own name moves the
+/// walk-based digest and cannot move the contract digest.
 ///
-/// Some filesystems store file names in a fixed Unicode normalization form and
-/// hand back a different spelling than the one written, so a digest whose path
-/// keys came from `readdir` would differ between two machines generating the
-/// same tree. This case demonstrates the separation directly: an NFD-spelled
-/// name is written into a finished tree, and afterwards
+/// This is the whole hazard on one axis. Nothing is added, removed or edited:
+/// one file keeps its bytes and changes only how its name is spelled, from a
+/// precomposed character to the combining sequence that means the same thing.
+/// A digest keyed on what `readdir` reports has to move; a digest keyed on the
+/// strings the generator emitted has nothing to move it, and the contract is
+/// stated over the second.
 ///
-/// - the contract digest of a fresh generation is unchanged, because it never
-///   asked the filesystem how anything is spelled, while
-/// - the walk-based diagnostic digest has moved, because it did.
-///
-/// The generated profile carries non-ASCII document names of its own, so the
-/// class of name at issue is in the tree either way.
+/// Whether the rename changes what the directory reports is the filesystem's
+/// decision — one that stores names in a fixed normalization form will have
+/// stored the same spelling before and after — so the walk assertion runs only
+/// when the directory actually reports something new. The contract assertion
+/// runs either way, because it is the one that must not depend on the answer.
 #[test]
-fn the_contract_digest_does_not_depend_on_what_the_filesystem_reports() {
+fn respelling_a_name_moves_the_walk_digest_and_not_the_contract_digest() {
     let profile = profile("small");
-    let dir = scratch::fresh("normalization");
-    let before = generate(&profile, 5, &dir).expect("generating a scratch tree");
-    let walked_before = digest::tree(&dir).expect("digesting a scratch tree");
+    let dir = scratch::fresh("respelling");
+    let manifest = generate(&profile, 5, &dir).expect("generating a scratch tree");
 
-    assert!(
-        non_ascii_document_count(&dir) > 0,
-        "the profile emitted no non-ASCII names, so this case proves nothing"
+    let target = non_ascii_documents(&dir)
+        .pop()
+        .expect("the profile emitted no non-ASCII names, so this case proves nothing");
+    let respelled = target
+        .parent()
+        .expect("a generated document has a parent")
+        .join(decompose(
+            &target
+                .file_name()
+                .expect("a generated document has a name")
+                .to_string_lossy(),
+        ));
+    assert_ne!(
+        target.as_os_str().as_encoded_bytes(),
+        respelled.as_os_str().as_encoded_bytes(),
+        "the chosen name has no other spelling, so this case proves nothing"
     );
 
-    fs::write(dir.join(NFD_NAME), NFD_BODY).expect("writing an NFD name");
+    let contents = fs::read(&target).expect("reading the document about to be renamed");
+    let walked_before = digest::tree(&dir).expect("digesting a scratch tree");
+    let names_before = reported_names(&dir);
 
-    let after = generate(&profile, 5, &scratch::fresh("normalization-again"))
-        .expect("generating a scratch tree");
+    fs::rename(&target, &respelled).expect("renaming to the other spelling");
+
+    let names_after = reported_names(&dir);
     let walked_after = digest::tree(&dir).expect("digesting a scratch tree");
+    let fresh = generate(&profile, 5, &scratch::fresh("respelling-again"))
+        .expect("generating a scratch tree");
 
     assert_eq!(
-        digest::hex(&before.tree_digest),
-        digest::hex(&after.tree_digest),
-        "the contract digest moved when only the directory's contents changed"
+        fs::read(&respelled).expect("reading the renamed document"),
+        contents,
+        "the rename changed the file's bytes, so this case is measuring the wrong thing"
     );
-    assert_ne!(
-        digest::hex(&walked_before),
-        digest::hex(&walked_after),
-        "the walk-based digest ignored files that were added to the tree"
+    assert_eq!(
+        digest::hex(&manifest.tree_digest),
+        digest::hex(&fresh.tree_digest),
+        "the contract digest disagreed with an untouched generation of the same pair"
     );
+    if names_before == names_after {
+        // The filesystem folded both spellings onto one stored name, so the
+        // walk has nothing to notice. The contract assertion above is the one
+        // that mattered, and it held.
+        eprintln!("this filesystem reports one spelling for both forms; walk check skipped");
+    } else {
+        assert_ne!(
+            digest::hex(&walked_before),
+            digest::hex(&walked_after),
+            "the directory reports a different name and the walk digest did not move"
+        );
+    }
 
     fs::remove_dir_all(&dir).expect("removing a scratch tree");
-    fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("normalization-again"))
+    fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("respelling-again"))
         .expect("removing a scratch tree");
 }
 
-fn non_ascii_document_count(dir: &Path) -> usize {
-    let mut count = 0;
+/// The decomposed spelling of the precomposed characters this crate's name
+/// pool emits. Deliberately a table of exactly those characters rather than a
+/// general normalizer: the crate holds no Unicode tables, and the test needs
+/// only the letters it actually writes.
+fn decompose(name: &str) -> String {
+    name.chars()
+        .flat_map(|c| match c {
+            '\u{fc}' => vec!['u', '\u{308}'],
+            '\u{e9}' => vec!['e', '\u{301}'],
+            '\u{ef}' => vec!['i', '\u{308}'],
+            '\u{f1}' => vec!['n', '\u{303}'],
+            '\u{f3}' => vec!['o', '\u{301}'],
+            other => vec![other],
+        })
+        .collect()
+}
+
+/// Every name the directory tree reports, sorted.
+fn reported_names(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
         for entry in fs::read_dir(&current).expect("reading a generated directory") {
@@ -160,12 +211,33 @@ fn non_ascii_document_count(dir: &Path) -> usize {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if !entry.file_name().to_string_lossy().is_ascii() {
-                count += 1;
+            }
+            out.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Generated documents whose file name is not pure ASCII.
+fn non_ascii_documents(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).expect("reading a generated directory") {
+            let entry = entry.expect("reading a generated directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if !entry.file_name().to_string_lossy().is_ascii()
+                && path.extension().is_some_and(|e| e == "md")
+            {
+                out.push(path);
             }
         }
     }
-    count
+    out.sort();
+    out
 }
 
 /// "cafe" followed by U+0301 COMBINING ACUTE ACCENT — the decomposed spelling
@@ -180,12 +252,14 @@ const NFC_BODY: &[u8] = b"---\ntitle: Composed\n---\n";
 /// How a name written in one normalization form comes back is the
 /// filesystem's business, and this case records that it is.
 ///
-/// Both spellings of one name are written into an empty directory. A
-/// byte-preserving filesystem then holds two files; a normalizing one holds
-/// one, because the second write landed on the first. **Neither outcome is
-/// asserted** — the platform decides, and that is exactly the point: a
-/// determinism contract stated over what a walk reports would inherit that
-/// decision, so this crate's contract is stated over what it emits instead.
+/// Both spellings of one name are written into an empty directory. Whether the
+/// directory then holds one file or two depends on whether the filesystem
+/// treats the two spellings as one name — and that is a separate question from
+/// whether it stores the bytes it was given, which is why the two cannot be
+/// read off each other. **Neither outcome is asserted** here: the platform
+/// decides, and that is exactly the point. A determinism contract stated over
+/// what a walk reports would inherit that decision, so this crate's contract
+/// is stated over what it emits instead.
 ///
 /// What is asserted is that the phenomenon is real here: the walk reports
 /// names, and reading a name back gives whichever body last landed under it.
@@ -223,9 +297,10 @@ fn a_name_written_in_one_normalization_form_is_the_filesystems_business() {
         );
     }
     if names.len() == 1 {
-        // A normalizing filesystem: the two spellings are one file, and the
-        // second write won. This is the case that would break a walk-keyed
-        // digest across machines.
+        // The filesystem treated the two spellings as one name, so the second
+        // write landed on the first. Which spelling it stored is its own
+        // business and is not asserted — only that one write won. This is the
+        // case that would break a walk-keyed digest across machines.
         assert_eq!(
             fs::read(dir.join(NFD_NAME)).expect("reading the surviving name"),
             NFC_BODY

@@ -3,13 +3,24 @@
 //! goes through [`scalar`], so a pool or naming change cannot silently emit a
 //! value that YAML reparses into something else.
 //!
-//! Bare, unambiguous values (alphanumerics, interior spaces, ISO datetimes)
-//! pass through byte for byte. Two classes are quoted and escaped: values
-//! carrying YAML-significant *characters*, and values whose characters are
-//! innocent but whose plain-scalar *resolution* is not a string — `null`,
-//! `no`, `0x1f`, `1e3`. The second class is the one that reads back as a
-//! different type rather than as a syntax error, so it is the one worth
-//! catching before a word pool grows an entry like `off`.
+//! Two classes are quoted and escaped: values carrying YAML-significant
+//! *characters*, and values whose characters are innocent but whose
+//! plain-scalar *resolution* is not a string — `null`, `no`, `0x1f`, `1e3`.
+//! The second class is the one that reads back as a different type rather than
+//! as a syntax error, so it is the one worth catching before a word pool grows
+//! an entry like `off`. Everything else passes through byte for byte.
+//!
+//! **Date and time shapes are a known, accepted exception.** A YAML 1.1
+//! parser resolves `2024-01-01` to a date and `12:30` to a sexagesimal
+//! integer; neither is quoted here, so a value of that shape reaching
+//! [`scalar`] would emit bare and could read back as a non-string. That is
+//! accepted rather than overlooked: no value any word pool holds has that
+//! shape, and the timestamps generated frontmatter carries are written
+//! directly rather than through this emitter, so nothing routed here is
+//! exposed today. Quoting them instead would put quotes around every emitted
+//! date the moment one *is* routed here, which is a worse default for a
+//! fixture meant to look like a hand-written document. If a pool ever grows a
+//! date-shaped value, this is the paragraph that has to change with it.
 
 /// Render `value` as a YAML scalar, quoting and escaping only when it carries
 /// YAML-significant characters.
@@ -160,8 +171,11 @@ mod tests {
 
     #[test]
     fn values_that_merely_look_numeric_stay_bare() {
-        // Each of these is a string to every YAML parser, and quoting them
-        // would be noise in the emitted frontmatter.
+        // Each of these emits bare. The date and datetime shapes are the known
+        // exception documented on this module: a YAML 1.1 parser resolves them
+        // to a timestamp rather than to a string, and they are left bare
+        // deliberately because nothing routed through this emitter has that
+        // shape.
         for v in [
             "2024-01-01",
             "2024-05-03T14:23:00Z",

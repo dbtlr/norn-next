@@ -11,8 +11,11 @@
 //!
 //! # The determinism contract
 //!
-//! **The same `(profile, seed)` produces the same tree, byte for byte, on
-//! every run and on every machine.** Concretely:
+//! **The same `(profile, seed)` produces the same emitted tree, byte for byte,
+//! on every run and on every machine** — the paths this crate writes and the
+//! bytes it writes at them. What a filesystem later reports those paths to be
+//! called is outside the statement, for the reason the next section gives.
+//! Concretely:
 //!
 //! - Every choice is drawn from a seeded generator, in a fixed order.
 //! - No clock, environment variable, path, locale or hash-map iteration order

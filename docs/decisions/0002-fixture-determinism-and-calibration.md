@@ -109,11 +109,29 @@ collections in general and narrow enough that the failure it exists to catch —
 a generator drifting back toward uniformly small, uniformly shallow, uniformly
 linked documents — moves a statistic clean out of range.
 
-**Every knob is constrained by something that fails when it stops
-manifesting.** A knob whose value can be edited to zero without a test noticing
-is decoration. Each rate the generator draws has either an envelope entry over
-a probe statistic that measures it, or a direct test over a fixed
-`(profile, seed)`.
+**Every knob field is constrained by something that fails when the generator
+stops reading it**, and that is a measured claim rather than an intention. A
+knob nothing fails over is decoration, and the way a knob becomes decoration is
+not malice — it is a field that quietly stops being consulted. So the check is
+run the way the failure happens: each of the twenty-two fields across the five
+knob types and the profile's own document count is mutated at its point of
+consumption, replaced by a constant, and the suite must go red. All
+twenty-two do, and no field is exempted.
+
+Most are caught by an envelope entry over a probe statistic. Three are caught
+by direct tests instead — where a document's links sit, whether document-free
+directories were created, and whether placement crowds the earlier directories
+— because naming those in a probe statistic would mean teaching a byte-reading
+meter this generator's own phrasing, which is the line the probe exists not to
+cross. The rest are caught by unit tests over the layout, clutter and link
+draws.
+
+**The same method covers the writer.** The generator holds its counts in memory
+and the probe reads them off disk, so requiring the two to agree on total
+Markdown bytes is what makes the write path checkable: replacing every
+document's contents on the way to disk, or truncating them, turns the suite
+red. Counts alone would not have — every document could be corrupted and each
+count would still match.
 
 ### Authored ranges, where the ratified wording said "measured artifact"
 

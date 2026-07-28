@@ -109,6 +109,32 @@ mod tests {
         assert!(binary < emitted.len(), "every clutter file is binary");
     }
 
+    /// The size cap is a knob, so the sizes drawn have to reach toward it.
+    /// Without this, a generator that emitted every attachment at the floor
+    /// would look identical to one honouring the cap.
+    #[test]
+    fn file_sizes_reach_toward_the_declared_cap() {
+        let mut rng = Rng::new(13);
+        let emitted = files(&mut rng, &SAMPLE, 2000, &dirs());
+        let largest = emitted.iter().map(|f| f.bytes.len()).max().unwrap_or(0);
+        let smallest = emitted.iter().map(|f| f.bytes.len()).min().unwrap_or(0);
+        assert!(
+            largest > SAMPLE.max_file_bytes / 2,
+            "the largest of {} files was {largest} bytes against a {} cap",
+            emitted.len(),
+            SAMPLE.max_file_bytes
+        );
+        assert!(
+            largest <= SAMPLE.max_file_bytes + 64,
+            "a file overshot the cap: {largest} against {}",
+            SAMPLE.max_file_bytes
+        );
+        assert!(
+            smallest < SAMPLE.max_file_bytes / 4,
+            "no small attachment was emitted; the smallest was {smallest} bytes"
+        );
+    }
+
     #[test]
     fn empty_directories_are_capped_at_the_pool() {
         let mut clutter = SAMPLE;

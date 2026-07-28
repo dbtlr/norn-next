@@ -57,6 +57,8 @@ pub struct VaultStats {
     pub document_bytes_p90: u64,
     pub document_bytes_max: u64,
     pub heading_lines: u64,
+    /// Documents carrying a level-one heading.
+    pub title_heading_documents: u64,
     pub links: u64,
     /// Links whose target name carries a `/` — the path-qualified spelling.
     pub path_qualified_links: u64,
@@ -69,6 +71,8 @@ pub struct VaultStats {
     pub spaced_name_documents: u64,
     /// Documents sitting at the tree root rather than inside a directory.
     pub root_documents: u64,
+    /// Non-Markdown files whose bytes are not valid UTF-8.
+    pub binary_files: u64,
     pub ambiguous_stem_classes: u64,
     pub largest_stem_class: u64,
 }
@@ -114,6 +118,16 @@ impl VaultStats {
         ratio(self.root_documents * 1000, self.documents)
     }
 
+    /// Documents opening a level-one heading, per mille of documents.
+    pub fn title_heading_documents_per_mille(&self) -> u64 {
+        ratio(self.title_heading_documents * 1000, self.documents)
+    }
+
+    /// Non-Markdown files that are not text, per mille of non-Markdown files.
+    pub fn binary_files_per_mille(&self) -> u64 {
+        ratio(self.binary_files * 1000, self.non_markdown_files)
+    }
+
     /// Non-Markdown files per mille of all files.
     pub fn non_markdown_files_per_mille(&self) -> u64 {
         ratio(
@@ -144,6 +158,7 @@ pub enum Stat {
     DocumentBytesP90,
     DocumentBytesMax,
     HeadingLinesPerMebibyte,
+    TitleHeadingDocumentsPerMille,
     LinksPerThousandDocuments,
     PathQualifiedLinksPerMille,
     AliasedLinksPerMille,
@@ -152,6 +167,7 @@ pub enum Stat {
     SpacedNameDocumentsPerMille,
     RootDocumentsPerMille,
     NonMarkdownFilesPerMille,
+    BinaryFilesPerMille,
     DocumentsPerThousandDirectories,
     MaxDirectoryDepth,
     AmbiguousStemClasses,
@@ -167,6 +183,7 @@ impl Stat {
             Stat::DocumentBytesP90 => "document_bytes_p90",
             Stat::DocumentBytesMax => "document_bytes_max",
             Stat::HeadingLinesPerMebibyte => "heading_lines_per_mebibyte",
+            Stat::TitleHeadingDocumentsPerMille => "title_heading_documents_per_mille",
             Stat::LinksPerThousandDocuments => "links_per_thousand_documents",
             Stat::PathQualifiedLinksPerMille => "path_qualified_links_per_mille",
             Stat::AliasedLinksPerMille => "aliased_links_per_mille",
@@ -175,6 +192,7 @@ impl Stat {
             Stat::SpacedNameDocumentsPerMille => "spaced_name_documents_per_mille",
             Stat::RootDocumentsPerMille => "root_documents_per_mille",
             Stat::NonMarkdownFilesPerMille => "non_markdown_files_per_mille",
+            Stat::BinaryFilesPerMille => "binary_files_per_mille",
             Stat::DocumentsPerThousandDirectories => "documents_per_thousand_directories",
             Stat::MaxDirectoryDepth => "max_directory_depth",
             Stat::AmbiguousStemClasses => "ambiguous_stem_classes",
@@ -190,6 +208,7 @@ impl Stat {
             Stat::DocumentBytesP90 => stats.document_bytes_p90,
             Stat::DocumentBytesMax => stats.document_bytes_max,
             Stat::HeadingLinesPerMebibyte => stats.heading_lines_per_mebibyte(),
+            Stat::TitleHeadingDocumentsPerMille => stats.title_heading_documents_per_mille(),
             Stat::LinksPerThousandDocuments => stats.links_per_thousand_documents(),
             Stat::PathQualifiedLinksPerMille => stats.path_qualified_links_per_mille(),
             Stat::AliasedLinksPerMille => stats.aliased_links_per_mille(),
@@ -198,6 +217,7 @@ impl Stat {
             Stat::SpacedNameDocumentsPerMille => stats.spaced_name_documents_per_mille(),
             Stat::RootDocumentsPerMille => stats.root_documents_per_mille(),
             Stat::NonMarkdownFilesPerMille => stats.non_markdown_files_per_mille(),
+            Stat::BinaryFilesPerMille => stats.binary_files_per_mille(),
             Stat::DocumentsPerThousandDirectories => stats.documents_per_thousand_directories(),
             Stat::MaxDirectoryDepth => stats.max_directory_depth,
             Stat::AmbiguousStemClasses => stats.ambiguous_stem_classes,
@@ -215,6 +235,7 @@ impl Stat {
             Stat::DocumentBytesP90,
             Stat::DocumentBytesMax,
             Stat::HeadingLinesPerMebibyte,
+            Stat::TitleHeadingDocumentsPerMille,
             Stat::LinksPerThousandDocuments,
             Stat::PathQualifiedLinksPerMille,
             Stat::AliasedLinksPerMille,
@@ -223,6 +244,7 @@ impl Stat {
             Stat::SpacedNameDocumentsPerMille,
             Stat::RootDocumentsPerMille,
             Stat::NonMarkdownFilesPerMille,
+            Stat::BinaryFilesPerMille,
             Stat::DocumentsPerThousandDirectories,
             Stat::MaxDirectoryDepth,
             Stat::AmbiguousStemClasses,
@@ -288,6 +310,14 @@ pub const CALIBRATION: &[Target] = &[
                finely that every paragraph carries a heading",
     },
     Target {
+        stat: Stat::TitleHeadingDocumentsPerMille,
+        min: 100,
+        max: 980,
+        why: "most documents repeat their title as a level-one heading and some \
+               do not, so a reader of raw bytes meets both the titled and the \
+               untitled shape",
+    },
+    Target {
         stat: Stat::LinksPerThousandDocuments,
         min: 3_000,
         max: 12_000,
@@ -345,6 +375,14 @@ pub const CALIBRATION: &[Target] = &[
         max: 350,
         why: "attachments, exports and editor state are a real share of the \
                files a walk pays for and the graph gains nothing from",
+    },
+    Target {
+        stat: Stat::BinaryFilesPerMille,
+        min: 150,
+        max: 800,
+        why: "attachments are a mix of text exports and real binaries; a tree \
+               whose every non-Markdown file decodes as text never exercises \
+               the branch a walk takes when one does not",
     },
     Target {
         stat: Stat::DocumentsPerThousandDirectories,
@@ -428,6 +466,7 @@ fn percentile(sorted: &[u64], p: u64) -> u64 {
 #[derive(Default)]
 struct Scan {
     headings: u64,
+    title_heading: bool,
     links: u64,
     path_qualified_links: u64,
     aliased_links: u64,
@@ -445,6 +484,9 @@ fn scan(bytes: &[u8]) -> Scan {
         let hashes = line.iter().take_while(|b| **b == b'#').count();
         if (1..=6).contains(&hashes) && line.get(hashes) == Some(&b' ') {
             out.headings += 1;
+            if hashes == 1 {
+                out.title_heading = true;
+            }
         }
         let mut cursor = 0;
         while cursor + 1 < line.len() {
@@ -488,6 +530,11 @@ pub fn measure(root: &Path) -> io::Result<VaultStats> {
         }
         let Some(stem) = node.rel.strip_suffix(".md") else {
             stats.non_markdown_files += 1;
+            // Text or not is a byte test — whether the bytes decode — never a
+            // question about what the file means.
+            if std::str::from_utf8(&fs::read(&node.path)?).is_err() {
+                stats.binary_files += 1;
+            }
             continue;
         };
         let leaf = stem.rsplit('/').next().unwrap_or(stem).to_string();
@@ -507,6 +554,9 @@ pub fn measure(root: &Path) -> io::Result<VaultStats> {
         stats.documents += 1;
         stats.markdown_bytes += bytes.len() as u64;
         stats.heading_lines += scanned.headings;
+        if scanned.title_heading {
+            stats.title_heading_documents += 1;
+        }
         stats.links += scanned.links;
         stats.path_qualified_links += scanned.path_qualified_links;
         stats.aliased_links += scanned.aliased_links;
@@ -548,6 +598,39 @@ mod tests {
             assert!(
                 !target.why.is_empty(),
                 "{} states no reason",
+                target.stat.name()
+            );
+        }
+    }
+
+    /// Every statistic the probe reports carries an envelope entry.
+    ///
+    /// Without this, adding a statistic and forgetting its target leaves a
+    /// number that is printed and never judged — which is how a knob comes to
+    /// manifest in trees while nothing fails when it stops.
+    #[test]
+    fn every_statistic_carries_a_target() {
+        let constrained: Vec<&str> = CALIBRATION.iter().map(|t| t.stat.name()).collect();
+        let unconstrained: Vec<&str> = Stat::all()
+            .iter()
+            .map(|s| s.name())
+            .filter(|name| !constrained.contains(name))
+            .collect();
+        assert!(
+            unconstrained.is_empty(),
+            "these statistics are reported and never judged: {unconstrained:?}"
+        );
+    }
+
+    /// And the other direction: a target naming a statistic the probe does not
+    /// report would be a range nothing is ever measured against.
+    #[test]
+    fn every_target_names_a_reported_statistic() {
+        let reported: Vec<&str> = Stat::all().iter().map(|s| s.name()).collect();
+        for target in CALIBRATION {
+            assert!(
+                reported.contains(&target.stat.name()),
+                "{} is constrained but not reported",
                 target.stat.name()
             );
         }
