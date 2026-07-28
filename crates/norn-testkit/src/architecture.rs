@@ -143,7 +143,7 @@ pub struct WorkspaceGraph {
     pub normal: BTreeSet<(String, String)>,
     pub build: BTreeSet<(String, String)>,
     /// Normal or build edges from a member to a local package the workspace
-    /// does not hold as a member, as `(from, path of the dependency)`.
+    /// does not hold as a member, as `(from, name of the dependency)`.
     pub unearned: BTreeSet<(String, String)>,
     /// Every feature a member declares, as `(crate, feature)`. Cargo lists an
     /// optional dependency's implicit feature here under the dependency's own
