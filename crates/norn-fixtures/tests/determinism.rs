@@ -48,7 +48,7 @@ fn every_per_pr_profile_reproduces_its_tree() {
 }
 
 #[test]
-#[ignore = "the >=5k-document profile is soak-lane work; NORN-13 activates it"]
+#[ignore = "soak-lane case: the >=5k profile is nightly work, not per-PR"]
 fn the_soak_profile_reproduces_its_tree() {
     let profile = profile("soak");
     let (first, _) = generate_and_digest("det-soak-a", &profile, 3);
