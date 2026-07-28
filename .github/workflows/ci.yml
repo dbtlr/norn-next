@@ -98,15 +98,28 @@ jobs:
           echo "Layer 3 (read builders): EXPLAIN plans against emitted SQL."
 
   # A real gate. It spawns the fixture generator under the testkit's process
-  # harness and holds the peak resident set the kernel accounted to that child
-  # to a checked-in ceiling, at the ~2k-document realistic profile. The bar is
-  # authored and moves only by a reviewed edit; the readings behind it are in
+  # harness and reads the peak resident set the kernel accounted to that child,
+  # then asserts two things about it at profiles under 5k documents: a
+  # checked-in ceiling at the ~2k-document realistic profile, and the ratio
+  # between the 300-document and ~2k-document profiles. The ratio is the sharp
+  # instrument — a ceiling passes anything that fits under it, and a ratio
+  # fails the moment two scales stop moving together. Both bars are authored
+  # and move only by a reviewed edit; the readings behind them are in
   # crates/norn-fixtures/tests/baselines/mod.rs.
+  #
+  # The cases live in this job alone. They are `#[ignore]`d with a
+  # `memory-lane case:` reason so the build job's workspace suite does not run
+  # them: a measurement running beside every other test measures those tests
+  # too, and "build and test" stays free of measurement. The step asks the
+  # target for its ignored cases wholesale, which is why the >=5k cases are a
+  # separate target (`memory_soak`) rather than a second reason in this one —
+  # otherwise this lane would run soak.yml's wall-clock assertion. The script
+  # is what makes that wholesale run fail when it ran nothing.
   #
   # The generator is the subject because it is the one that exists. norn-store
   # slots in at Layer 1, and its request paths become what this job measures;
-  # the ~5k scale and the peak-memory trend line stay in soak.yml, where a
-  # clock is legal to read.
+  # the >=5k scale and the recorded peak-memory readings stay in soak.yml,
+  # where a clock is legal to read.
   memory:
     name: memory invariant
     runs-on: ubuntu-latest
@@ -114,5 +127,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - name: Memory bar
-        run: cargo test --locked -p norn-fixtures --test memory
+      - name: Memory bars
+        run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1

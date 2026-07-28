@@ -6,25 +6,34 @@
 #
 # This lane runs the >=5k-document profile's work: the cases the per-PR suites
 # carry as `#[ignore]`d, and the measurements whose readings are the lane's
-# product. Each step runs a suite's ignored cases by kind rather than by name,
-# because a name filter that stops matching runs zero tests and reports
-# success.
+# product. Each step runs a suite's ignored cases by kind rather than by name.
+# That removes one hazard and not the other: a name filter that stops matching
+# runs zero tests and reports success, and selecting by kind removes the
+# name-typo spelling of it — but `--ignored` with nothing to match still exits
+# 0. What closes it is the pass-count assertion in .github/scripts/lane-suite.sh,
+# which every step below goes through.
 #
 # Every measurement is compared against a checked-in baseline in
 # crates/norn-fixtures/tests/baselines/mod.rs and recorded in the job summary.
-# The baselines are the trend's whole memory: peak memory is a ratchet, and the
-# wall clock is a sanity ceiling set where a run past it is broken rather than
-# slow. Nothing here fetches a history or consults a store.
+# The baselines are the trend's whole memory: nothing here fetches a history or
+# consults a store. What binds mechanically is the comparison — a reading past
+# a baseline fails the run. **Nothing enforces which direction a baseline
+# moves**: the readings are recorded per run, and the discipline that they
+# should only fall is review-held, carried by the baselines being a small,
+# frequently-read diff. A mechanized trend arrives with the Layer 2 lockdown
+# work, when this lane carries a host workload for a slope to be measured over.
 name: soak
 
 on:
   schedule:
     # Nightly, 04:00 UTC.
     #
-    # GitHub disables schedules on repositories with no activity for 60 days,
-    # so this lane running is a thing to check rather than assume. Lockdown
-    # counts five consecutive green runs of it, and the count starts at the
-    # first run under these assertions.
+    # Schedules and manual dispatch take effect only from the default branch:
+    # nothing in this file is exercisable on the pull request that adds it, and
+    # verifying that the lane runs at all is post-merge work.
+    #
+    # GitHub also disables schedules on repositories with no activity for 60
+    # days, so this lane running is a thing to check rather than assume.
     - cron: '0 4 * * *'
   workflow_dispatch:
 
@@ -47,6 +56,13 @@ jobs:
   # embedding model, which compiles only behind norn-embed's release/soak
   # feature and so has no build to run in until that crate exists.
   #
+  # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
+  # mixed load, showing zero counter violations, a flat memory slope, and no
+  # file-descriptor growth.** Three of those four terms have no subject yet, so
+  # the count does not start at the first green run of the assertions below: it
+  # starts when the lane asserts what lockdown counts. A green run of a lane
+  # that does not measure a term is not one of the five.
+  #
   # The timeout below fits the work that runs now with runaway headroom; it is
   # raised when the mixed load lands.
   soak:
@@ -57,8 +73,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Determinism at the soak profile
-        run: cargo test --locked -p norn-fixtures --test determinism -- --ignored
+        run: .github/scripts/lane-suite.sh norn-fixtures determinism
       - name: Calibration at the soak profile
-        run: cargo test --locked -p norn-fixtures --test calibration -- --ignored
+        run: .github/scripts/lane-suite.sh norn-fixtures calibration
+      # Single-threaded, so the recorded numbers are of a generation competing
+      # with nothing else this suite started.
       - name: Memory and wall clock at the soak profile
-        run: cargo test --locked -p norn-fixtures --test memory -- --ignored --nocapture
+        run: .github/scripts/lane-suite.sh norn-fixtures memory_soak --nocapture --test-threads=1
