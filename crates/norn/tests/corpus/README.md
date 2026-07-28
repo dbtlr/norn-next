@@ -116,9 +116,8 @@ The procedure is these rules, and this prose is where they live:
 **The one-time tool that performed the recording was deliberately not
 retained** — it belonged to the frozen checkout, and keeping it here would
 have carried code across a boundary that only data may cross. The rules above
-are what carries. They were independently reimplemented from this prose during
-review and reproduced this corpus byte for byte, which is the evidence they
-are stated completely rather than approximately.
+are what carries, and they are sufficient: an implementation of them, run
+against the binary at the pin, reproduces this corpus byte for byte.
 
 ## A case is only judgeable against its tree
 

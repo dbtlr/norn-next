@@ -151,20 +151,25 @@ pub struct Unrecorded {
 /// than per-command drift. A class ruling is recorded where it binds and the
 /// commands it sweeps are activated together.
 ///
-/// # The four categories
+/// # The three categories
 ///
-/// Every command the binary had at the pin falls in exactly one, and
-/// [`Corpus::audit`] reconciles the set against the recorded top-level help
-/// page so a command cannot go uncategorized:
+/// Every command the binary had at the pin falls in exactly one of these,
+/// and they are disjoint. [`Corpus::audit`] reconciles the set against the
+/// recorded top-level help page so a command cannot go uncategorized, and
+/// refuses one that appears in two:
 ///
 /// - **`activatable`** — has recorded cases, and can be approved.
-/// - **`activated`** — the subset of `activatable` whose cases run.
 /// - **`unseeded`** — carries no behavior at the pin, so there is nothing to
 ///   approve and no activation path exists. Whether the command should exist
 ///   is a question for the verb charter. Pinned by [`UNSEEDED_COMMANDS`].
 /// - **`unrecorded`** — has behavior at the pin, but no case exercises it.
 ///   Its contract is authored from scratch; the corpus offers it no
-///   evidence, and saying so is the point of the category.
+///   evidence, and saying so is the point of the category. Pinned by
+///   [`UNRECORDED_COMMANDS`].
+///
+/// `activated` is not a fourth category. It is the subset of `activatable`
+/// whose cases run, so a command must be activatable before it can be
+/// activated.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Activation {
