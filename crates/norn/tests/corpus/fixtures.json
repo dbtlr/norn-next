@@ -1,0 +1,2198 @@
+{
+  "fixture_count": 11,
+  "fixtures": [
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "not_a_real_section: true\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 26,
+      "profile": "bad-config",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Compass 33\n---\n\n## Open Questions\n\nThe same input always yields the same tree. Consistency matters more than speed.\n\n## Summary\n\nNothing here is left to chance. Consistency matters more than speed. Consistency matters more than speed.\n\n## Summary\n\nNothing here is left to chance.\n\n## References\n\nThe same input always yields the same tree. The garden grows slowly but surely. Small folders compound into a forest.\n\n\nLinks:\n\n- [[phases/opal-019]]\n",
+          "kind": "file",
+          "path": "garden/compass-033.md"
+        },
+        {
+          "content": "---\ntitle: Harbor 35\n---\n\n## References\n\nThe garden grows slowly but surely. This sentence exists to fill space deterministically. Nothing here is left to chance.\n\n## Context\n\nConsistency matters more than speed. A quiet observation worth recording. Consistency matters more than speed.\n\n## Notes\n\nConsistency matters more than speed.\n\n## Next Steps\n\nThis sentence exists to fill space deterministically. The seed determines every branch. The same input always yields the same tree.\n\n",
+          "kind": "file",
+          "path": "garden/grove/grove/harbor-035.md"
+        },
+        {
+          "content": "---\ntitle: Umber 55\ntype: note\nkind: note\ncreated: 2024-06-27T05:07:00Z\nmodified: 2024-07-14 21:46:00\n---\n\n## References\n\nSmall folders compound into a forest. Consistency matters more than speed. The seed determines every branch.\n\n## Notes\n\nThis sentence exists to fill space deterministically. Every path leads back to the hollow.\n\n",
+          "kind": "file",
+          "path": "garden/grove/grove/umber-055.md"
+        },
+        {
+          "content": "---\ntitle: Brook 7\n---\n\n## References\n\nNothing here is left to chance. Order is preserved from root to leaf.\n\n## Next Steps\n\nThis sentence exists to fill space deterministically. The seed determines every branch. The same input always yields the same tree.\n\n## Background\n\nConsistency matters more than speed. A quiet observation worth recording. A quiet observation worth recording.\n\n## Open Questions\n\nThe same input always yields the same tree. A quiet observation worth recording.\n\n\nLinks:\n\n- [[harbor-005|The same input]]\n- [[notes/orphan]]\n- [[notes/gamma]]\n",
+          "kind": "file",
+          "path": "garden/grove/meadow/brook-007.md"
+        },
+        {
+          "content": "---\ntitle: Cinder 10\ntype: note\nkind: note\ncreated: 2025-08-06T07:29:00Z\nmodified: 2025-08-13 04:39:00\n---\n\n## Background\n\nConsistency matters more than speed. This sentence exists to fill space deterministically. Small folders compound into a forest.\n\n## Context\n\nOrder is preserved from root to leaf. Consistency matters more than speed. Order is preserved from root to leaf.\n\n## Context\n\nSmall folders compound into a forest. Small folders compound into a forest.\n\n\nLinks:\n\n- [[garden/meadow/thicket/compass-003]]\n- [[drafts/a/draft-note]]\n",
+          "kind": "file",
+          "path": "garden/grove/meadow/cinder-010.md"
+        },
+        {
+          "content": "---\ntitle: Marrow 47\n---\n\n## References\n\nThe seed determines every branch.\n\n## Context\n\nA quiet observation worth recording. Order is preserved from root to leaf. The seed determines every branch.\n\n\nLinks:\n\n- [[garden/meadow/thicket/compass-003]]\n",
+          "kind": "file",
+          "path": "garden/grove/meadow/marrow-047.md"
+        },
+        {
+          "content": "---\ntitle: Wisp 57\n---\n\n## Findings\n\nA quiet observation worth recording. Consistency matters more than speed. This sentence exists to fill space deterministically.\n\n\nLinks:\n\n- [[vale-026]]\n- [[2025-01-15]]\n",
+          "kind": "file",
+          "path": "garden/grove/meadow/wisp-057.md"
+        },
+        {
+          "content": "---\ntitle: Cinder 40\ntype: note\nkind: note\ncreated: 2024-04-03T21:42:00Z\nmodified: 2024-04-14 16:02:00\n---\n\n## Background\n\nNothing here is left to chance. This sentence exists to fill space deterministically. Every path leads back to the hollow.\n\n\nLinks:\n\n- [[vale-026|A quiet observation]]\n- [[garden/meadow/zephyr-029]]\n",
+          "kind": "file",
+          "path": "garden/grove/thicket/cinder-040.md"
+        },
+        {
+          "content": "---\ntitle: Lantern 2\n---\n\n## Summary\n\nSmall folders compound into a forest. Every path leads back to the hollow. A quiet observation worth recording.\n\n## Open Questions\n\nThe same input always yields the same tree. Order is preserved from root to leaf.\n\n\nLinks:\n\n- [[task-001|The garden grows]]\n",
+          "kind": "file",
+          "path": "garden/grove/thicket/lantern-002.md"
+        },
+        {
+          "content": "---\ntitle: Quartz 9\ntype: note\nkind: note\ncreated: 2024-02-16T13:13:00Z\nmodified: 2024-03-16 17:20:00\n---\n\n## Summary\n\nEvery path leads back to the hollow. This sentence exists to fill space deterministically. The garden grows slowly but surely.\n\n\nLinks:\n\n- [[task-001|The seed determines]]\n",
+          "kind": "file",
+          "path": "garden/grove/thicket/quartz-009.md"
+        },
+        {
+          "content": "---\ntitle: Furrow 43\n---\n\n## Open Questions\n\nA quiet observation worth recording.\n\n## Overview\n\nThe same input always yields the same tree. Small folders compound into a forest.\n\n## Findings\n\nThis sentence exists to fill space deterministically.\n\n\nLinks:\n\n- [[meridian-038]]\n- [[ridge-006|Consistency matters more]]\n- [[garden/thicket/thicket/yarrow-028]]\n",
+          "kind": "file",
+          "path": "garden/meadow/furrow-043.md"
+        },
+        {
+          "content": "---\ntitle: Meridian 38\ntype: note\nkind: note\ncreated: 2024-01-09T21:59:00Z\nmodified: 2024-02-03 09:46:00\n---\n\n## Background\n\nOrder is preserved from root to leaf.\n\n## Summary\n\nOrder is preserved from root to leaf.\n\n## Open Questions\n\nSmall folders compound into a forest. Order is preserved from root to leaf. Order is preserved from root to leaf.\n\n",
+          "kind": "file",
+          "path": "garden/meadow/grove/meridian-038.md"
+        },
+        {
+          "content": "---\ntitle: Yarrow 58\n---\n\n## Details\n\nA quiet observation worth recording. Nothing here is left to chance.\n\n",
+          "kind": "file",
+          "path": "garden/meadow/grove/yarrow-058.md"
+        },
+        {
+          "content": "---\ntitle: Linden 16\ntype: note\nkind: note\ncreated: 2024-03-23T20:17:00Z\nmodified: 2024-04-21 08:49:00\n---\n\n## Notes\n\nNothing here is left to chance.\n\n## Background\n\nA quiet observation worth recording. Consistency matters more than speed.\n\n## Summary\n\nEvery path leads back to the hollow. This sentence exists to fill space deterministically. This sentence exists to fill space deterministically.\n\n",
+          "kind": "file",
+          "path": "garden/meadow/meadow/linden-016.md"
+        },
+        {
+          "content": "---\ntitle: Tundra 54\ntype: note\nkind: note\ncreated: 2025-01-10T21:46:00Z\nmodified: 2025-01-14 18:07:00\n---\n\n## Findings\n\nSmall folders compound into a forest.\n\n\nLinks:\n\n- [[ember-034]]\n",
+          "kind": "file",
+          "path": "garden/meadow/meadow/tundra-054.md"
+        },
+        {
+          "content": "---\ntitle: Compass 3\ntype: note\nkind: note\ncreated: 2024-08-06T20:15:00Z\nmodified: 2024-08-07 10:55:00\n---\n\n## Details\n\nThe garden grows slowly but surely. A quiet observation worth recording.\n\n## Background\n\nEvery path leads back to the hollow. The seed determines every branch.\n\n## Overview\n\nThe same input always yields the same tree. The seed determines every branch. Nothing here is left to chance.\n\n## Open Questions\n\nNothing here is left to chance. Small folders compound into a forest. Consistency matters more than speed.\n\n\nLinks:\n\n- [[alpha|Every path leads]]\n- [[task-001]]\n- [[rough|A quiet observation]]\n",
+          "kind": "file",
+          "path": "garden/meadow/thicket/compass-003.md"
+        },
+        {
+          "content": "---\ntitle: Meridian 8\ntype: note\nkind: note\ncreated: 2024-06-02T01:57:00Z\nmodified: 2024-06-05 05:37:00\n---\n\n## Context\n\nEvery path leads back to the hollow.\n\n\nLinks:\n\n- [[sprout-000|The garden grows]]\n- [[templates/broken-template]]\n",
+          "kind": "file",
+          "path": "garden/meadow/thicket/meridian-008.md"
+        },
+        {
+          "content": "---\ntitle: Ripple 22\n---\n\n## Open Questions\n\nA quiet observation worth recording. Order is preserved from root to leaf. The garden grows slowly but surely.\n\n## Overview\n\nConsistency matters more than speed. Small folders compound into a forest. Nothing here is left to chance.\n\n\nLinks:\n\n- [[rough]]\n",
+          "kind": "file",
+          "path": "garden/meadow/thicket/ripple-022.md"
+        },
+        {
+          "content": "---\ntitle: Tundra 24\n---\n\n## References\n\nSmall folders compound into a forest. The same input always yields the same tree. Consistency matters more than speed.\n\n## Findings\n\nA quiet observation worth recording. Small folders compound into a forest. A quiet observation worth recording.\n\n## References\n\nNothing here is left to chance.\n\n## Findings\n\nA quiet observation worth recording.\n\n\nLinks:\n\n- [[notes/ambi]]\n- [[sprout-000|Order is preserved]]\n",
+          "kind": "file",
+          "path": "garden/meadow/tundra-024.md"
+        },
+        {
+          "content": "---\ntitle: Zephyr 29\ntype: note\nkind: note\ncreated: 2024-10-06T02:25:00Z\nmodified: 2024-10-25 00:23:00\n---\n\n## Background\n\nThis sentence exists to fill space deterministically. The same input always yields the same tree. Small folders compound into a forest.\n\n## Summary\n\nEvery path leads back to the hollow. Order is preserved from root to leaf. Order is preserved from root to leaf.\n\n## Overview\n\nEvery path leads back to the hollow. Consistency matters more than speed. This sentence exists to fill space deterministically.\n\n",
+          "kind": "file",
+          "path": "garden/meadow/zephyr-029.md"
+        },
+        {
+          "content": "---\ntitle: Brook 37\ntype: note\nkind: note\ncreated: 2025-02-05T04:24:00Z\nmodified: 2025-02-22 09:49:00\n---\n\n## Open Questions\n\nConsistency matters more than speed. This sentence exists to fill space deterministically.\n\n## References\n\nThe seed determines every branch.\n\n## References\n\nThe garden grows slowly but surely. Nothing here is left to chance.\n\n\nLinks:\n\n- [[quill-021]]\n- [[tasks/beacon-012]]\n- [[hearth-014]]\n",
+          "kind": "file",
+          "path": "garden/thicket/brook-037.md"
+        },
+        {
+          "content": "---\ntitle: Nimbus 18\n---\n\n## Notes\n\nA quiet observation worth recording. This sentence exists to fill space deterministically. Order is preserved from root to leaf.\n\n## Open Questions\n\nSmall folders compound into a forest.\n\n",
+          "kind": "file",
+          "path": "garden/thicket/grove/nimbus-018.md"
+        },
+        {
+          "content": "---\ntitle: Marrow 17\ntype: note\nkind: note\ncreated: 2025-04-05T01:28:00Z\nmodified: 2025-04-12 21:19:00\n---\n\n## Context\n\nThe garden grows slowly but surely. Small folders compound into a forest.\n\n## Findings\n\nSmall folders compound into a forest. The seed determines every branch.\n\n## Summary\n\nSmall folders compound into a forest.\n\n\nLinks:\n\n- [[brook-007|Small folders compound]]\n",
+          "kind": "file",
+          "path": "garden/thicket/meadow/marrow-017.md"
+        },
+        {
+          "content": "---\ntitle: Quartz 39\ntype: note\nkind: note\ncreated: 2025-01-15T16:55:00Z\nmodified: 2025-02-13 06:24:00\n---\n\n## Background\n\nThis sentence exists to fill space deterministically. Nothing here is left to chance. Consistency matters more than speed.\n\n## Notes\n\nConsistency matters more than speed. Order is preserved from root to leaf.\n\n## Background\n\nSmall folders compound into a forest.\n\n## Next Steps\n\nA quiet observation worth recording. This sentence exists to fill space deterministically. Order is preserved from root to leaf.\n\n",
+          "kind": "file",
+          "path": "garden/thicket/meadow/quartz-039.md"
+        },
+        {
+          "content": "---\ntitle: Ridge 36\n---\n\n## Open Questions\n\nThis sentence exists to fill space deterministically.\n\n## Context\n\nThe garden grows slowly but surely. The same input always yields the same tree.\n\n\nLinks:\n\n- [[phases/acorn-001]]\n",
+          "kind": "file",
+          "path": "garden/thicket/meadow/ridge-036.md"
+        },
+        {
+          "content": "---\ntitle: Zephyr 59\ntype: note\nkind: note\ncreated: 2024-07-29T07:16:00Z\nmodified: 2024-08-21 04:53:00\n---\n\n## Context\n\nA quiet observation worth recording.\n\n## Details\n\nNothing here is left to chance.\n\n## Notes\n\nEvery path leads back to the hollow. The seed determines every branch. A quiet observation worth recording.\n\n",
+          "kind": "file",
+          "path": "garden/thicket/meadow/zephyr-059.md"
+        },
+        {
+          "content": "---\ntitle: Quill 21\n---\n\n## Overview\n\nThis sentence exists to fill space deterministically. The garden grows slowly but surely. The seed determines every branch.\n\n",
+          "kind": "file",
+          "path": "garden/thicket/quill-021.md"
+        },
+        {
+          "content": "---\ntitle: Ember 4\ntype: note\nkind: note\ncreated: 2024-01-26T16:11:00Z\nmodified: 2024-02-18 01:31:00\n---\n\n## Context\n\nThe seed determines every branch. The seed determines every branch.\n\n## Overview\n\nConsistency matters more than speed. Every path leads back to the hollow. Consistency matters more than speed.\n\n## Details\n\nOrder is preserved from root to leaf. Small folders compound into a forest.\n\n\nLinks:\n\n- [[index|The garden grows]]\n- [[lantern-002|This sentence exists]]\n",
+          "kind": "file",
+          "path": "garden/thicket/thicket/ember-004.md"
+        },
+        {
+          "content": "---\ntitle: Linden 46\ntype: note\nkind: note\ncreated: 2024-11-25T01:14:00Z\nmodified: 2024-12-02 01:19:00\n---\n\n## Summary\n\nThe seed determines every branch.\n\n\nLinks:\n\n- [[logs/2025-01-15]]\n- [[garden/meadow/furrow-043]]\n",
+          "kind": "file",
+          "path": "garden/thicket/thicket/linden-046.md"
+        },
+        {
+          "content": "---\ntitle: Opal 49\n---\n\n## Findings\n\nThe seed determines every branch. The same input always yields the same tree. Nothing here is left to chance.\n\n## References\n\nThe garden grows slowly but surely.\n\n\nLinks:\n\n- [[index]]\n- [[garden/meadow/thicket/compass-003]]\n- [[Wide Open Spaces|The seed determines]]\n",
+          "kind": "file",
+          "path": "garden/thicket/thicket/opal-049.md"
+        },
+        {
+          "content": "---\ntitle: Yarrow 28\ntype: note\nkind: note\ncreated: 2025-08-18T18:58:00Z\nmodified: 2025-08-18 23:34:00\n---\n\n## Open Questions\n\nThe seed determines every branch.\n\n## Context\n\nThe seed determines every branch. The garden grows slowly but surely.\n\n## References\n\nThis sentence exists to fill space deterministically. Nothing here is left to chance. Every path leads back to the hollow.\n\n## Next Steps\n\nEvery path leads back to the hollow. Small folders compound into a forest.\n\n\nLinks:\n\n- [[compass-003|Order is preserved]]\n",
+          "kind": "file",
+          "path": "garden/thicket/thicket/yarrow-028.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] resolves here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Acorn 1\ntype: phase\nstatus: done\n---\n\n## Next Steps\n\nThis sentence exists to fill space deterministically. Every path leads back to the hollow.\n\n## Context\n\nThe garden grows slowly but surely. Small folders compound into a forest.\n\n\nLinks:\n\n- [[cycle-a|The same input]]\n",
+          "kind": "file",
+          "path": "phases/acorn-001.md"
+        },
+        {
+          "content": "---\ntitle: Acorn 31\ntype: phase\nstatus: active\n---\n\n## References\n\nA quiet observation worth recording.\n\n\nLinks:\n\n- [[phase-one]]\n- [[linden-016|Every path leads]]\n",
+          "kind": "file",
+          "path": "phases/acorn-031.md"
+        },
+        {
+          "content": "---\ntitle: Beacon 42\ntype: phase\nstatus: active\n---\n\n## Overview\n\nThe garden grows slowly but surely. A quiet observation worth recording. Every path leads back to the hollow.\n\n## Overview\n\nThe garden grows slowly but surely. This sentence exists to fill space deterministically. This sentence exists to fill space deterministically.\n\n## Findings\n\nConsistency matters more than speed.\n\n\nLinks:\n\n- [[sable-023]]\n- [[meridian-038]]\n",
+          "kind": "file",
+          "path": "phases/beacon-042.md"
+        },
+        {
+          "content": "---\ntitle: Hearth 14\ntype: phase\nstatus: backlog\n---\n\n## Next Steps\n\nNothing here is left to chance. The seed determines every branch. Small folders compound into a forest.\n\n\nLinks:\n\n- [[acorn-001]]\n- [[notes/beta]]\n- [[sprout-000]]\n",
+          "kind": "file",
+          "path": "phases/hearth-014.md"
+        },
+        {
+          "content": "---\ntitle: Nimbus 48\ntype: phase\nstatus: done\n---\n\n## Overview\n\nThe same input always yields the same tree. The garden grows slowly but surely.\n\n## Next Steps\n\nThis sentence exists to fill space deterministically. Order is preserved from root to leaf. The garden grows slowly but surely.\n\n\nLinks:\n\n- [[notes/beta]]\n",
+          "kind": "file",
+          "path": "phases/nimbus-048.md"
+        },
+        {
+          "content": "---\ntitle: Opal 19\ntype: phase\nstatus: active\n---\n\n## Next Steps\n\nConsistency matters more than speed. A quiet observation worth recording. Order is preserved from root to leaf.\n\n\nLinks:\n\n- [[hearth-014|The seed determines]]\n- [[tasks/task-001]]\n",
+          "kind": "file",
+          "path": "phases/opal-019.md"
+        },
+        {
+          "content": "---\ntitle: Pebble 50\ntype: phase\nstatus: active\n---\n\n## References\n\nThis sentence exists to fill space deterministically.\n\n## References\n\nEvery path leads back to the hollow. The garden grows slowly but surely. The seed determines every branch.\n\n## Notes\n\nThis sentence exists to fill space deterministically. The garden grows slowly but surely. This sentence exists to fill space deterministically.\n\n## Findings\n\nThis sentence exists to fill space deterministically. Nothing here is left to chance.\n\n\nLinks:\n\n- [[garden/grove/meadow/cinder-010]]\n- [[tasks/task-002]]\n",
+          "kind": "file",
+          "path": "phases/pebble-050.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: Quill 51\ntype: phase\nstatus: active\n---\n\n## References\n\nNothing here is left to chance.\n\n## Background\n\nEvery path leads back to the hollow. A quiet observation worth recording. Small folders compound into a forest.\n\n## Next Steps\n\nThe garden grows slowly but surely.\n\n\nLinks:\n\n- [[harbor-035]]\n",
+          "kind": "file",
+          "path": "phases/quill-051.md"
+        },
+        {
+          "content": "---\ntitle: Ridge 6\ntype: phase\nstatus: active\n---\n\n## Overview\n\nThe seed determines every branch.\n\n## Findings\n\nThe seed determines every branch. Every path leads back to the hollow.\n\n\nLinks:\n\n- [[no-body]]\n- [[notes/orphan]]\n",
+          "kind": "file",
+          "path": "phases/ridge-006.md"
+        },
+        {
+          "content": "---\ntitle: Sable 23\ntype: phase\nstatus: active\n---\n\n## References\n\nOrder is preserved from root to leaf.\n\n\nLinks:\n\n- [[garden/grove/thicket/lantern-002]]\n",
+          "kind": "file",
+          "path": "phases/sable-023.md"
+        },
+        {
+          "content": "---\ntitle: Sprout 0\ntype: phase\nstatus: backlog\n---\n\n## Findings\n\nThe same input always yields the same tree. Every path leads back to the hollow. The seed determines every branch.\n\n\nLinks:\n\n- [[cycle-a]]\n- [[phase-one|A quiet observation]]\n- [[task-002]]\n",
+          "kind": "file",
+          "path": "phases/sprout-000.md"
+        },
+        {
+          "content": "---\ntitle: Sprout 30\ntype: phase\nstatus: done\n---\n\n## Open Questions\n\nEvery path leads back to the hollow.\n\n## Background\n\nSmall folders compound into a forest.\n\n## References\n\nThe seed determines every branch.\n\n\nLinks:\n\n- [[compass-003]]\n- [[garden/grove/meadow/brook-007]]\n",
+          "kind": "file",
+          "path": "phases/sprout-030.md"
+        },
+        {
+          "content": "---\ntitle: Vale 56\ntype: phase\nstatus: done\n---\n\n## Findings\n\nSmall folders compound into a forest. A quiet observation worth recording. This sentence exists to fill space deterministically.\n\n## Findings\n\nConsistency matters more than speed. Order is preserved from root to leaf. A quiet observation worth recording.\n\n## Background\n\nEvery path leads back to the hollow. Every path leads back to the hollow. Nothing here is left to chance.\n\n## Summary\n\nOrder is preserved from root to leaf. The garden grows slowly but surely. The seed determines every branch.\n\n\nLinks:\n\n- [[ripple-052|A quiet observation]]\n- [[brook-007]]\n",
+          "kind": "file",
+          "path": "phases/vale-056.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Beacon 12\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## References\n\nConsistency matters more than speed.\n\n",
+          "kind": "file",
+          "path": "tasks/beacon-012.md"
+        },
+        {
+          "content": "---\ntitle: Ember 34\ntype: task\nstatus: active\nparent: \"[[phase-one]]\"\n---\n\n## Summary\n\nThe garden grows slowly but surely. The seed determines every branch. The same input always yields the same tree.\n\n## References\n\nNothing here is left to chance. Small folders compound into a forest. The garden grows slowly but surely.\n\n\nLinks:\n\n- [[meridian-008|The seed determines]]\n- [[ambi|Consistency matters more]]\n- [[garden/thicket/grove/nimbus-018]]\n",
+          "kind": "file",
+          "path": "tasks/ember-034.md"
+        },
+        {
+          "content": "---\ntitle: Furrow 13\ntype: task\nstatus: done\nparent: \"[[phase-one]]\"\n---\n\n## Context\n\nOrder is preserved from root to leaf.\n\n## Background\n\nA quiet observation worth recording.\n\n## References\n\nThe seed determines every branch. Every path leads back to the hollow.\n\n\nLinks:\n\n- [[broken-template]]\n- [[lantern-002]]\n",
+          "kind": "file",
+          "path": "tasks/furrow-013.md"
+        },
+        {
+          "content": "---\ntitle: Harbor 5\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Details\n\nThe same input always yields the same tree.\n\n## Summary\n\nOrder is preserved from root to leaf. Small folders compound into a forest. Consistency matters more than speed.\n\n## Notes\n\nThe garden grows slowly but surely.\n\n## Summary\n\nThe garden grows slowly but surely. Nothing here is left to chance. Order is preserved from root to leaf.\n\n\nLinks:\n\n- [[drafts/a/draft-note]]\n- [[garden/thicket/thicket/ember-004]]\n",
+          "kind": "file",
+          "path": "tasks/harbor-005.md"
+        },
+        {
+          "content": "---\ntitle: Hearth 44\ntype: task\nstatus: active\nparent: \"[[phase-one]]\"\n---\n\n## Overview\n\nThe same input always yields the same tree. Nothing here is left to chance.\n\n## Summary\n\nOrder is preserved from root to leaf. Nothing here is left to chance.\n\n\nLinks:\n\n- [[tasks/kestrel-015]]\n- [[cinder-040|Order is preserved]]\n",
+          "kind": "file",
+          "path": "tasks/hearth-044.md"
+        },
+        {
+          "content": "---\ntitle: Kestrel 15\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Open Questions\n\nNothing here is left to chance.\n\n\nLinks:\n\n- [[compass-003|Consistency matters more]]\n- [[tasks/task-002]]\n- [[Über Notiz|A quiet observation]]\n",
+          "kind": "file",
+          "path": "tasks/kestrel-015.md"
+        },
+        {
+          "content": "---\ntitle: Kestrel 45\ntype: task\nstatus: done\nparent: \"[[phase-one]]\"\n---\n\n## References\n\nConsistency matters more than speed. The garden grows slowly but surely.\n\n\nLinks:\n\n- [[rough]]\n- [[furrow-013|Every path leads]]\n",
+          "kind": "file",
+          "path": "tasks/kestrel-045.md"
+        },
+        {
+          "content": "---\ntitle: Lantern 32\ntype: task\nstatus: done\nparent: \"[[phase-one]]\"\n---\n\n## Summary\n\nNothing here is left to chance.\n\n## References\n\nSmall folders compound into a forest.\n\n\nLinks:\n\n- [[Wide Open Spaces|A quiet observation]]\n",
+          "kind": "file",
+          "path": "tasks/lantern-032.md"
+        },
+        {
+          "content": "---\ntitle: Orchard 11\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Open Questions\n\nThe garden grows slowly but surely.\n\n## Summary\n\nA quiet observation worth recording. The seed determines every branch. Order is preserved from root to leaf.\n\n## Background\n\nEvery path leads back to the hollow. Consistency matters more than speed. This sentence exists to fill space deterministically.\n\n",
+          "kind": "file",
+          "path": "tasks/orchard-011.md"
+        },
+        {
+          "content": "---\ntitle: Orchard 41\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Findings\n\nOrder is preserved from root to leaf. This sentence exists to fill space deterministically.\n\n\nLinks:\n\n- [[tasks/beacon-012]]\n",
+          "kind": "file",
+          "path": "tasks/orchard-041.md"
+        },
+        {
+          "content": "---\ntitle: Pebble 20\ntype: task\nstatus: active\nparent: \"[[phase-one]]\"\n---\n\n## Notes\n\nSmall folders compound into a forest. The garden grows slowly but surely. This sentence exists to fill space deterministically.\n\n## References\n\nEvery path leads back to the hollow. Nothing here is left to chance. The same input always yields the same tree.\n\n\nLinks:\n\n- [[logs/scratch/rough]]\n- [[phases/sprout-000]]\n- [[orphan]]\n",
+          "kind": "file",
+          "path": "tasks/pebble-020.md"
+        },
+        {
+          "content": "---\ntitle: Ripple 52\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Details\n\nA quiet observation worth recording. Nothing here is left to chance. Consistency matters more than speed.\n\n",
+          "kind": "file",
+          "path": "tasks/ripple-052.md"
+        },
+        {
+          "content": "---\ntitle: Sable 53\ntype: task\nstatus: done\nparent: \"[[phase-one]]\"\n---\n\n## Summary\n\nSmall folders compound into a forest. This sentence exists to fill space deterministically.\n\n## Background\n\nA quiet observation worth recording. Every path leads back to the hollow. The garden grows slowly but surely.\n\n",
+          "kind": "file",
+          "path": "tasks/sable-053.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: Umber 25\ntype: task\nstatus: active\nparent: \"[[phase-one]]\"\n---\n\n## Overview\n\nThis sentence exists to fill space deterministically. Consistency matters more than speed.\n\n## Overview\n\nSmall folders compound into a forest. The seed determines every branch.\n\n\nLinks:\n\n- [[draft-note]]\n- [[notes/keep/kept]]\n- [[cycle-a]]\n",
+          "kind": "file",
+          "path": "tasks/umber-025.md"
+        },
+        {
+          "content": "---\ntitle: Vale 26\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Context\n\nA quiet observation worth recording.\n\n\nLinks:\n\n- [[2025-01-15]]\n",
+          "kind": "file",
+          "path": "tasks/vale-026.md"
+        },
+        {
+          "content": "---\ntitle: Wisp 27\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\n## Notes\n\nNothing here is left to chance. Every path leads back to the hollow. Consistency matters more than speed.\n\n## Overview\n\nEvery path leads back to the hollow. The garden grows slowly but surely.\n\n## Findings\n\nThe seed determines every branch.\n\n## Notes\n\nConsistency matters more than speed. Consistency matters more than speed.\n\n\nLinks:\n\n- [[orchard-011]]\n",
+          "kind": "file",
+          "path": "tasks/wisp-027.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 86,
+      "profile": "clean",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\n# only a comment, no keys\n---\n\nBody under a comment-only frontmatter block.\n",
+          "kind": "file",
+          "path": "shapes/comment-block.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\nnull\n---\n\nBody under a bare-null frontmatter block.\n",
+          "kind": "file",
+          "path": "shapes/null-block.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 28,
+      "profile": "mutate-edge",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: EOF Heading Doc\n---\n\n## Tail",
+          "kind": "file",
+          "path": "shapes/eof-heading.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Setext Doc\n---\n\nAlpha\n-----\n\nBody under alpha.\n\n## Beta\n\nBody under beta.\n",
+          "kind": "file",
+          "path": "shapes/setext.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 28,
+      "profile": "section-edge",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "﻿---\ntitle: BOM Doc\ntype: bomkind\n---\n\nThe oracle reads this as frontmatter-less.\n",
+          "kind": "file",
+          "path": "edge/bom-doc.md"
+        },
+        {
+          "content": "---\ntitle: Code Anchor\n---\n\nA block id that lives only inside a fenced code block:\n\n```\n^blkincode\n```\n\nNothing outside the fence defines that id.\n",
+          "kind": "file",
+          "path": "edge/code-anchor.md"
+        },
+        {
+          "content": "---\ntitle: Code Linker\n---\n\nPoints at a code-fenced block id: [[code-anchor#^blkincode]].\n",
+          "kind": "file",
+          "path": "edge/code-linker.md"
+        },
+        {
+          "content": "---\ntitle: URL Block Target\n---\n\nA paragraph that carries a block id. ^blk1\n",
+          "kind": "file",
+          "path": "edge/url-block-target.md"
+        },
+        {
+          "content": "---\ntitle: URL Decode Linker\n---\n\nPercent-encoded hash in the path: [hashpath](note%23draft.md).\n\nBlock reference on a Markdown link: [blk](url-block-target.md#^blk1).\n",
+          "kind": "file",
+          "path": "edge/url-decode-linker.md"
+        },
+        {
+          "content": "---\ntitle: URL Scheme Linker\n---\n\nScheme links: [tel](tel:+15551234), [file](file:///etc/hosts),\n[proto](//example.com/x), [drive](C:/Users/x/n.md), [mixed](hTTp://example.com).\n",
+          "kind": "file",
+          "path": "edge/url-scheme-linker.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 32,
+      "profile": "text-edge",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Tags Elementwise\ntags: [a]\n---\n\nBody under a valid single-element tags array.\n",
+          "kind": "file",
+          "path": "shapes/validate-edge/tags-elementwise.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 27,
+      "profile": "validate-edge",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Caret Target\n---\n\nCaret target body.\n",
+          "kind": "file",
+          "path": "wl/a^b.md"
+        },
+        {
+          "content": "---\ntitle: Caret Src\n---\n\nSee [[a^b]] here.\n",
+          "kind": "file",
+          "path": "wl/caret-src.md"
+        },
+        {
+          "content": "---\ntitle: Embed Src\n---\n\nSee ![[embed-target|Display]] here.\n",
+          "kind": "file",
+          "path": "wl/embed-src.md"
+        },
+        {
+          "content": "---\ntitle: Embed Target\n---\n\nEmbed target body.\n",
+          "kind": "file",
+          "path": "wl/embed-target.md"
+        },
+        {
+          "content": "---\ntitle: Fence Src\n---\n\n```\n[[fence-target]]\n```\n\nReal prose [[fence-target]] link.\n",
+          "kind": "file",
+          "path": "wl/fence-src.md"
+        },
+        {
+          "content": "---\ntitle: Fence Target\n---\n\nFence target body.\n",
+          "kind": "file",
+          "path": "wl/fence-target.md"
+        },
+        {
+          "content": "---\ntitle: Padded Src\n---\n\nSee [[ padded-target ]] here.\n",
+          "kind": "file",
+          "path": "wl/padded-src.md"
+        },
+        {
+          "content": "---\ntitle: Padded Target\n---\n\nPadded target body.\n",
+          "kind": "file",
+          "path": "wl/padded-target.md"
+        },
+        {
+          "content": "---\ntitle: Redirect Target\n---\n\nRedirect target body.\n",
+          "kind": "file",
+          "path": "wl/redirect-target.md"
+        },
+        {
+          "content": "---\ntitle: Spaced Alias Src\n---\n\nSee [[spaced-target | Display Name]] here.\n",
+          "kind": "file",
+          "path": "wl/spaced-alias-src.md"
+        },
+        {
+          "content": "---\ntitle: Spaced Target\n---\n\nSpaced target body.\n",
+          "kind": "file",
+          "path": "wl/spaced-target.md"
+        },
+        {
+          "content": "---\ntitle: Unrepr Src\n---\n\nSee [[unrepr-target]] here.\n",
+          "kind": "file",
+          "path": "wl/unrepr-src.md"
+        },
+        {
+          "content": "---\ntitle: Unrepr Target\n---\n\nUnrepresentable-rename target body.\n",
+          "kind": "file",
+          "path": "wl/unrepr-target.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 39,
+      "profile": "wikilink-edge",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "# No Frontmatter\n\nThis document has no frontmatter block at all, so it fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "broken/no-frontmatter.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed quote starts here\ntype: note\nstatus: draft\n---\n\nMalformed frontmatter — never closes the opening quote.\n",
+          "kind": "file",
+          "path": "broken/parse-fail.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi Bare\ntype: note\nkind: note\n---\n\nBare, ambiguous: [[duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi-bare.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Bad Parent\ntype: note\nkind: note\nparent: \"[[alpha]]\"\n---\n\n`parent` resolves to a note, not a phase — frontmatter-reference-type.\n",
+          "kind": "file",
+          "path": "notes/bad-parent.md"
+        },
+        {
+          "content": "---\ntitle: Bad Types\ntype: note\nkind: note\ncreated: not-a-date\ndue: 2025-13-45\ntags: [ok, 7]\nproject: this-is-a-very-long-project-name-that-exceeds-the-limit\n---\n\nSeveral field-type-invalid findings plus one frontmatter-exceeds-max-length.\n",
+          "kind": "file",
+          "path": "notes/bad-types.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Dangling Parent\ntype: note\nkind: note\nparent: \"[[missing-phase]]\"\n---\n\n`parent` does not resolve at all — stays a link-* finding, not reference-type.\n",
+          "kind": "file",
+          "path": "notes/dangling-parent.md"
+        },
+        {
+          "content": "---\ntitle: Dead End\ntype: note\nkind: note\n---\n\nBroken links: [[does-not-exist]] and [missing](nope.md).\n",
+          "kind": "file",
+          "path": "notes/dead-end.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Has Legacy\nlegacy: old\n---\n\nCarries `legacy` outside the `notes/keep/**` carve-out — frontmatter-forbidden-field.\n",
+          "kind": "file",
+          "path": "notes/has-legacy.md"
+        },
+        {
+          "content": "---\ntitle: Into Ignored\ntype: note\nkind: note\n---\n\nLinks into a files.ignore'd target: [[hidden-away]].\n",
+          "kind": "file",
+          "path": "notes/into-ignored.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Missing Kind\ntype: note\n---\n\n`type: note` with no `kind` — frontmatter-required-field-missing.\n",
+          "kind": "file",
+          "path": "notes/missing-kind.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\n---\n\nEmpty frontmatter block — fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "shapes/empty-block.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Stray Task\ntype: task\nstatus: backlog\n---\n\nA task document at the vault root, outside `tasks/**` and `phases/**` — document-misrouted.\n",
+          "kind": "file",
+          "path": "stray-task.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: Task Bad Status\ntype: task\nstatus: legacy\n---\n\n`status: legacy` is not an allowed value — value-not-allowed.\n",
+          "kind": "file",
+          "path": "tasks/task-bad-status.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 39,
+      "profile": "zoo",
+      "seed": 1
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "# No Frontmatter\n\nThis document has no frontmatter block at all, so it fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "broken/no-frontmatter.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed quote starts here\ntype: note\nstatus: draft\n---\n\nMalformed frontmatter — never closes the opening quote.\n",
+          "kind": "file",
+          "path": "broken/parse-fail.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi Bare\ntype: note\nkind: note\n---\n\nBare, ambiguous: [[duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi-bare.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Bad Parent\ntype: note\nkind: note\nparent: \"[[alpha]]\"\n---\n\n`parent` resolves to a note, not a phase — frontmatter-reference-type.\n",
+          "kind": "file",
+          "path": "notes/bad-parent.md"
+        },
+        {
+          "content": "---\ntitle: Bad Types\ntype: note\nkind: note\ncreated: not-a-date\ndue: 2025-13-45\ntags: [ok, 7]\nproject: this-is-a-very-long-project-name-that-exceeds-the-limit\n---\n\nSeveral field-type-invalid findings plus one frontmatter-exceeds-max-length.\n",
+          "kind": "file",
+          "path": "notes/bad-types.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Dangling Parent\ntype: note\nkind: note\nparent: \"[[missing-phase]]\"\n---\n\n`parent` does not resolve at all — stays a link-* finding, not reference-type.\n",
+          "kind": "file",
+          "path": "notes/dangling-parent.md"
+        },
+        {
+          "content": "---\ntitle: Dead End\ntype: note\nkind: note\n---\n\nBroken links: [[does-not-exist]] and [missing](nope.md).\n",
+          "kind": "file",
+          "path": "notes/dead-end.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Has Legacy\nlegacy: old\n---\n\nCarries `legacy` outside the `notes/keep/**` carve-out — frontmatter-forbidden-field.\n",
+          "kind": "file",
+          "path": "notes/has-legacy.md"
+        },
+        {
+          "content": "---\ntitle: Into Ignored\ntype: note\nkind: note\n---\n\nLinks into a files.ignore'd target: [[hidden-away]].\n",
+          "kind": "file",
+          "path": "notes/into-ignored.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Missing Kind\ntype: note\n---\n\n`type: note` with no `kind` — frontmatter-required-field-missing.\n",
+          "kind": "file",
+          "path": "notes/missing-kind.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\n---\n\nEmpty frontmatter block — fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "shapes/empty-block.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Stray Task\ntype: task\nstatus: backlog\n---\n\nA task document at the vault root, outside `tasks/**` and `phases/**` — document-misrouted.\n",
+          "kind": "file",
+          "path": "stray-task.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: Task Bad Status\ntype: task\nstatus: legacy\n---\n\n`status: legacy` is not an allowed value — value-not-allowed.\n",
+          "kind": "file",
+          "path": "tasks/task-bad-status.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 39,
+      "profile": "zoo",
+      "seed": 2
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "# No Frontmatter\n\nThis document has no frontmatter block at all, so it fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "broken/no-frontmatter.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed quote starts here\ntype: note\nstatus: draft\n---\n\nMalformed frontmatter — never closes the opening quote.\n",
+          "kind": "file",
+          "path": "broken/parse-fail.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi Bare\ntype: note\nkind: note\n---\n\nBare, ambiguous: [[duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi-bare.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Bad Parent\ntype: note\nkind: note\nparent: \"[[alpha]]\"\n---\n\n`parent` resolves to a note, not a phase — frontmatter-reference-type.\n",
+          "kind": "file",
+          "path": "notes/bad-parent.md"
+        },
+        {
+          "content": "---\ntitle: Bad Types\ntype: note\nkind: note\ncreated: not-a-date\ndue: 2025-13-45\ntags: [ok, 7]\nproject: this-is-a-very-long-project-name-that-exceeds-the-limit\n---\n\nSeveral field-type-invalid findings plus one frontmatter-exceeds-max-length.\n",
+          "kind": "file",
+          "path": "notes/bad-types.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Dangling Parent\ntype: note\nkind: note\nparent: \"[[missing-phase]]\"\n---\n\n`parent` does not resolve at all — stays a link-* finding, not reference-type.\n",
+          "kind": "file",
+          "path": "notes/dangling-parent.md"
+        },
+        {
+          "content": "---\ntitle: Dead End\ntype: note\nkind: note\n---\n\nBroken links: [[does-not-exist]] and [missing](nope.md).\n",
+          "kind": "file",
+          "path": "notes/dead-end.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Has Legacy\nlegacy: old\n---\n\nCarries `legacy` outside the `notes/keep/**` carve-out — frontmatter-forbidden-field.\n",
+          "kind": "file",
+          "path": "notes/has-legacy.md"
+        },
+        {
+          "content": "---\ntitle: Into Ignored\ntype: note\nkind: note\n---\n\nLinks into a files.ignore'd target: [[hidden-away]].\n",
+          "kind": "file",
+          "path": "notes/into-ignored.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Missing Kind\ntype: note\n---\n\n`type: note` with no `kind` — frontmatter-required-field-missing.\n",
+          "kind": "file",
+          "path": "notes/missing-kind.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\n---\n\nEmpty frontmatter block — fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "shapes/empty-block.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Stray Task\ntype: task\nstatus: backlog\n---\n\nA task document at the vault root, outside `tasks/**` and `phases/**` — document-misrouted.\n",
+          "kind": "file",
+          "path": "stray-task.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: Task Bad Status\ntype: task\nstatus: legacy\n---\n\n`status: legacy` is not an allowed value — value-not-allowed.\n",
+          "kind": "file",
+          "path": "tasks/task-bad-status.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 39,
+      "profile": "zoo",
+      "seed": 3
+    },
+    {
+      "entries": [
+        {
+          "content": "norn-fixtures generated vault — safe to delete\n",
+          "kind": "file",
+          "path": ".norn-fixture-vault"
+        },
+        {
+          "content": "links:\n  alias_field: aliases\n\nfiles:\n  ignore:\n    - \"ignored/**\"\n    - \"**/*.tmp\"\n\nvalidate:\n  ignore:\n    - \"templates/**\"\n    - \"drafts/{a,b}/**\"\n  required_frontmatter:\n    - title\n  rules:\n    - name: typed-note\n      match:\n        path: \"**/*.md\"\n        frontmatter:\n          type: note\n      required_frontmatter:\n        - kind\n      field_types:\n        created: datetime\n        modified: datetime\n        due: date\n        tags: list_of_strings\n        parent: wikilink\n        related: wikilink_or_list\n        project: { type: string, max_length: 32, indexed: true }\n        summary: { type: text }\n        internal: { indexed: true }\n      field_references:\n        parent:\n          target_type: [phase]\n      frontmatter_defaults:\n        kind: note\n        created: \"{{now}}\"\n        title: \"{{title|titlecase}}\"\n\n    - name: task-rule\n      match:\n        frontmatter:\n          type: [task, phase]\n      required_frontmatter:\n        - status\n      allowed_values:\n        status: [backlog, active, done]\n      allowed_paths:\n        - \"tasks/**/*.md\"\n        - \"phases/**/*.md\"\n      field_references:\n        parent:\n          target_type: [phase]\n\n    - name: no-legacy\n      match:\n        path: \"notes/**\"\n      exclude:\n        path: \"notes/keep/**\"\n      forbidden_frontmatter:\n        - legacy\n\n    - name: dated-log\n      match:\n        path: \"logs/**\"\n        path_not: \"logs/scratch/**\"\n      field_types:\n        when: date\n\n    - name: unindexed\n      match:\n        path: \"**/*.md\"\n      field_types:\n        scratch: { type: string, indexed: false }\n\n    - name: validate-edge\n      match:\n        path: \"shapes/validate-edge/**\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n\nrepair:\n  rules:\n    - name: fix-task-status\n      match:\n        code: value-not-allowed\n        rule: task-rule\n        field: status\n        actual_value: legacy\n      set_frontmatter:\n        field: status\n        value: backlog\n\n    - name: remove-legacy\n      match:\n        code: frontmatter-forbidden-field\n        field: legacy\n      remove_frontmatter:\n        field: legacy\n\n    - name: add-kind\n      match:\n        code: frontmatter-required-field-missing\n        rule: typed-note\n        field: kind\n      add_frontmatter:\n        field: kind\n        value: note\n\n    - name: route-tasks\n      match:\n        code: document-misrouted\n        rule: task-rule\n      move_document:\n        to_directory: \"tasks/\"\n\nindex:\n  auto: true\n\ncache:\n  retention: 30d\n  prune: manual\n\ntemplates:\n  date_format: \"YYYY-MM-DD\"\n  time_format: \"HH:mm\"\n",
+          "kind": "file",
+          "path": ".norn/config.yaml"
+        },
+        {
+          "kind": "file",
+          "non_utf8_len": 67,
+          "path": "Assets/pic.png"
+        },
+        {
+          "content": "---\ntitle: Wide Open Spaces\n---\n\nA document with spaces in its filename.\n",
+          "kind": "file",
+          "path": "Wide Open Spaces.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate Two\n---\n\nThe second of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "archive2/duplicate.md"
+        },
+        {
+          "content": "# No Frontmatter\n\nThis document has no frontmatter block at all, so it fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "broken/no-frontmatter.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed quote starts here\ntype: note\nstatus: draft\n---\n\nMalformed frontmatter — never closes the opening quote.\n",
+          "kind": "file",
+          "path": "broken/parse-fail.md"
+        },
+        {
+          "content": "---\ntitle: Draft Note\n---\n\nUnder the `drafts/{a,b}/**` validate.ignore alternation.\n",
+          "kind": "file",
+          "path": "drafts/a/draft-note.md"
+        },
+        {
+          "content": "---\ntitle: Hidden Away\n---\n\nExcluded from the graph entirely via files.ignore: ignored/**.\n",
+          "kind": "file",
+          "path": "ignored/hidden-away.md"
+        },
+        {
+          "content": "---\ntitle: Index\n---\n\n# Index\n\nHub linking to the zoo:\n\n- [[alpha]]\n- [[beta]]\n- [[gamma]]\n- [[phase-one]]\n- [[task-001]]\n- [[task-002]]\n- [[Über Notiz]]\n- [[Wide Open Spaces]]\n",
+          "kind": "file",
+          "path": "index.md"
+        },
+        {
+          "content": "---\ntitle: Log 2025-01-15\nwhen: 2025-01-15\n---\n\nA dated log entry.\n",
+          "kind": "file",
+          "path": "logs/2025-01-15.md"
+        },
+        {
+          "content": "---\ntitle: Rough Notes\n---\n\nUnder the `logs/scratch/**` carve-out — `when` may be omitted here.\n",
+          "kind": "file",
+          "path": "logs/scratch/rough.md"
+        },
+        {
+          "content": "---\ntitle: Alpha\ntype: note\nkind: note\ncreated: 2024-01-01T09:00:00Z\nmodified: 2024-02-01 10:30:00\ndue: 2024-03-01\ntags: [alpha, sample]\nparent: \"[[phase-one]]\"\nrelated: \"[[beta]]\"\nproject: sample-project\nsummary: A short summary of alpha, unbounded in length.\ninternal: true\nzip: \"07030\"\n---\n\n# Alpha\n\nAn introductory paragraph for the alpha fixture document.\n\n## Section One\n\nContent belonging to section one.\n\n## Section Two\n\nContent belonging to section two.\n\n## Section Three\n\nContent belonging to section three.\n",
+          "kind": "file",
+          "path": "notes/alpha.md"
+        },
+        {
+          "content": "---\ntitle: Ambi Bare\ntype: note\nkind: note\n---\n\nBare, ambiguous: [[duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi-bare.md"
+        },
+        {
+          "content": "---\ntitle: Ambi\n---\n\nPath-qualified, unambiguous: [[notes/duplicate]].\n",
+          "kind": "file",
+          "path": "notes/ambi.md"
+        },
+        {
+          "content": "---\ntitle: Bad Parent\ntype: note\nkind: note\nparent: \"[[alpha]]\"\n---\n\n`parent` resolves to a note, not a phase — frontmatter-reference-type.\n",
+          "kind": "file",
+          "path": "notes/bad-parent.md"
+        },
+        {
+          "content": "---\ntitle: Bad Types\ntype: note\nkind: note\ncreated: not-a-date\ndue: 2025-13-45\ntags: [ok, 7]\nproject: this-is-a-very-long-project-name-that-exceeds-the-limit\n---\n\nSeveral field-type-invalid findings plus one frontmatter-exceeds-max-length.\n",
+          "kind": "file",
+          "path": "notes/bad-types.md"
+        },
+        {
+          "content": "---\ntitle: Beta\ntype: note\nkind: note\naliases: [bee]\n---\n\n# Beta\n\nEvery link shape, exercised once each:\n\n- Stem: [[alpha]]\n- Path-qualified: [[notes/alpha]]\n- Aliased: [[alpha|the first note]]\n- Heading anchor: [[alpha#Section One]]\n- Markdown relative: [alpha](alpha.md)\n- Attachment embed: ![pic](../Assets/pic.png)\n",
+          "kind": "file",
+          "path": "notes/beta.md"
+        },
+        {
+          "content": "---\ntitle: Cycle A\n---\n\nPoints to [[cycle-b]].\n",
+          "kind": "file",
+          "path": "notes/cycle-a.md"
+        },
+        {
+          "content": "---\ntitle: Cycle B\n---\n\nPoints to [[cycle-c]].\n",
+          "kind": "file",
+          "path": "notes/cycle-b.md"
+        },
+        {
+          "content": "---\ntitle: Cycle C\n---\n\nPoints to [[cycle-a]], closing the cycle.\n",
+          "kind": "file",
+          "path": "notes/cycle-c.md"
+        },
+        {
+          "content": "---\ntitle: Dangling Parent\ntype: note\nkind: note\nparent: \"[[missing-phase]]\"\n---\n\n`parent` does not resolve at all — stays a link-* finding, not reference-type.\n",
+          "kind": "file",
+          "path": "notes/dangling-parent.md"
+        },
+        {
+          "content": "---\ntitle: Dead End\ntype: note\nkind: note\n---\n\nBroken links: [[does-not-exist]] and [missing](nope.md).\n",
+          "kind": "file",
+          "path": "notes/dead-end.md"
+        },
+        {
+          "content": "---\ntitle: Duplicate One\n---\n\nThe first of two documents sharing the stem `duplicate`.\n",
+          "kind": "file",
+          "path": "notes/duplicate.md"
+        },
+        {
+          "content": "---\ntitle: Gamma\ntype: note\nkind: note\n---\n\nAlias resolution: [[beta]] and [[bee]] both resolve here. Self-link: [[gamma]].\n",
+          "kind": "file",
+          "path": "notes/gamma.md"
+        },
+        {
+          "content": "---\ntitle: Has Legacy\nlegacy: old\n---\n\nCarries `legacy` outside the `notes/keep/**` carve-out — frontmatter-forbidden-field.\n",
+          "kind": "file",
+          "path": "notes/has-legacy.md"
+        },
+        {
+          "content": "---\ntitle: Into Ignored\ntype: note\nkind: note\n---\n\nLinks into a files.ignore'd target: [[hidden-away]].\n",
+          "kind": "file",
+          "path": "notes/into-ignored.md"
+        },
+        {
+          "content": "---\ntitle: Kept\ntype: note\nkind: note\nlegacy: true\n---\n\nCarries `legacy: true` legally — inside the `notes/keep/**` carve-out.\n",
+          "kind": "file",
+          "path": "notes/keep/kept.md"
+        },
+        {
+          "content": "---\ntitle: Missing Kind\ntype: note\n---\n\n`type: note` with no `kind` — frontmatter-required-field-missing.\n",
+          "kind": "file",
+          "path": "notes/missing-kind.md"
+        },
+        {
+          "content": "---\ntitle: Orphan\n---\n\nNo links in or out.\n",
+          "kind": "file",
+          "path": "notes/orphan.md"
+        },
+        {
+          "content": "---\ntitle: Phase One\ntype: phase\nstatus: active\n---\n\nThe phase fixture, targeted by `field_references` and `allowed_paths`.\n",
+          "kind": "file",
+          "path": "phases/phase-one.md"
+        },
+        {
+          "content": "---\n---\n\nEmpty frontmatter block — fails the global `title` requirement.\n",
+          "kind": "file",
+          "path": "shapes/empty-block.md"
+        },
+        {
+          "content": "---\ntitle: No Body\n---\n",
+          "kind": "file",
+          "path": "shapes/no-body.md"
+        },
+        {
+          "content": "---\ntitle: Stray Task\ntype: task\nstatus: backlog\n---\n\nA task document at the vault root, outside `tasks/**` and `phases/**` — document-misrouted.\n",
+          "kind": "file",
+          "path": "stray-task.md"
+        },
+        {
+          "content": "---\ntitle: Task One\ntype: task\nstatus: backlog\nparent: \"[[phase-one]]\"\n---\n\nA task with a valid `field_references` parent.\n",
+          "kind": "file",
+          "path": "tasks/task-001.md"
+        },
+        {
+          "content": "---\ntitle: Task Two\ntype: task\nstatus: done\nrelated: [\"[[task-001]]\"]\n---\n\nA task with `related` as a list of wikilinks.\n",
+          "kind": "file",
+          "path": "tasks/task-002.md"
+        },
+        {
+          "content": "---\ntitle: Task Bad Status\ntype: task\nstatus: legacy\n---\n\n`status: legacy` is not an allowed value — value-not-allowed.\n",
+          "kind": "file",
+          "path": "tasks/task-bad-status.md"
+        },
+        {
+          "content": "---\ntitle: \"Unclosed template title\ntype: note\n---\n\nExempt via validate.ignore: templates/**.\n",
+          "kind": "file",
+          "path": "templates/broken-template.md"
+        },
+        {
+          "content": "---\ntitle: Über Notiz\n---\n\nA document with a unicode filename.\n",
+          "kind": "file",
+          "path": "Über Notiz.md"
+        }
+      ],
+      "entry_count": 39,
+      "profile": "zoo",
+      "seed": 4
+    }
+  ],
+  "note": "The input side of every recorded case: the vault tree each (profile, seed) produced at the pin, file by file. A case's recorded output is only judgeable against the tree it ran on, and the generator that produced these trees did not cross into this repository — it is re-derived with different realism knobs. A future generator reproduces a fixture when it emits exactly these paths with exactly these bytes; until it does, a recorded case cannot be activated, because a difference would read as a code defect when it is generator drift. Bytes rather than digests: the whole set is small enough to carry exactly, and an exact tree is its own reproduction contract.",
+  "source": {
+    "branch": "rewrite/0017",
+    "commit": "76af2c3b",
+    "line": "norn-legacy"
+  }
+}

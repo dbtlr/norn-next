@@ -4,7 +4,7 @@
     "commit": "76af2c3b",
     "line": "norn-legacy"
   },
-  "note": "The gate. A command's recorded cases run when its name appears in `activated`, and not otherwise; adding a name is an approval act that judges whether the recorded output is good. The `unseeded` commands carry no behavior at the pin and have no activation path at all \u2014 their disposition belongs to the verb charter. See docs/decisions/0001-corpus-activation-gate.md.",
+  "note": "The gate. A command's recorded cases run when its name appears in `activated`, and not otherwise; adding a name is an approval act that judges whether the recorded output is good. Four categories, and every command with prose or rulings at the pin falls in exactly one: `activatable` has cases and can be approved; `unseeded` carries no behavior at the pin, so there is nothing to approve and no activation path exists; `unrecorded` has behavior but no case exercises it. See docs/decisions/0001-corpus-activation-gate.md.",
   "activated": [],
   "activatable": [
     "apply",
@@ -33,6 +33,12 @@
     "self-update",
     "serve",
     "service"
+  ],
+  "unrecorded": [
+    {
+      "command": "vault",
+      "reason": "the registry namespace is a late addition at the pin; the case catalog covers it only indirectly, through the top-level help page and one behavior ruling, so no invocation of it was recorded"
+    }
   ],
   "case_total": 158
 }
