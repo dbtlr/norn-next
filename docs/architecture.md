@@ -244,8 +244,7 @@ Thirteen invariants, held by two different mechanisms. **Five (1, 7, 12, 13, and
 dependency half of 3) are held by the absence of an edge**, which makes their violation a
 compile error rather than a review finding. The rest escalate to lint tooling, adopted as
 each invariant becomes real; a few — notably 3 and 11 — are held partly by each. The
-[enforcement section](#enforcement--the-graph-is-a-gated-contract-not-a-convention) states
-which mechanism carries what.
+enforcement section below states which mechanism carries what.
 
 1. **`norn-client` never depends on `norn-store`, `norn-host`, or `norn-serve`.**
    Always-routed is therefore true by construction: no client-side code path can open a
