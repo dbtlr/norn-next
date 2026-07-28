@@ -7,3 +7,6 @@
 /target
 *.local.md
 *.local.json
+
+# In-repo worktree checkouts (worktrunk layout)
+/.worktrees/
