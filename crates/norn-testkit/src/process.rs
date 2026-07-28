@@ -19,13 +19,21 @@
 //!   in whichever suite happens to be running.
 //! - **The child's peak resident set is measured**, by waiting on it through
 //!   `wait4` and reading the kernel's own accounting rather than sampling.
+//!   The measurement covers the child this harness spawned and every
+//!   descendant *that child waited on*, which is what `wait4` accounts for. A
+//!   grandchild the child forked and left running is invisible to it, so a
+//!   subject that measures itself by detaching a worker measures nothing.
 //!
 //! The sandbox is removed when it drops, so a suite leaves nothing behind;
 //! what a run said is in its [`Outcome`], not in a file to go looking for.
+//!
+//! **This module is unix-only.** The wait-and-account call is `wait4` and the
+//! status decoding is the unix one; there is no Windows path and none is
+//! pretended.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -138,12 +146,20 @@ impl Drop for Sandbox {
     }
 }
 
+/// How much of a run's output is read into memory, by default.
+///
+/// A run that prints without bound is a run under test, not a reason for the
+/// process measuring it to die. Output past this is left in the sandbox file
+/// and reported as truncated.
+pub const DEFAULT_CAPTURE_LIMIT: u64 = 8 * 1024 * 1024;
+
 /// One process to run under a sandbox.
 pub struct Run<'a> {
     sandbox: &'a Sandbox,
     program: PathBuf,
     args: Vec<OsString>,
     environment: BTreeMap<String, OsString>,
+    capture_limit: u64,
 }
 
 impl<'a> Run<'a> {
@@ -154,7 +170,14 @@ impl<'a> Run<'a> {
             program: program.into(),
             args: Vec::new(),
             environment: sandbox.environment(),
+            capture_limit: DEFAULT_CAPTURE_LIMIT,
         }
+    }
+
+    /// Read at most `bytes` of each stream into the [`Outcome`].
+    pub fn capture_limit(mut self, bytes: u64) -> Self {
+        self.capture_limit = bytes;
+        self
     }
 
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
@@ -201,11 +224,15 @@ impl<'a> Run<'a> {
             .spawn()?;
 
         let (status, peak_rss_bytes) = wait_for(child)?;
+        let (stdout, stdout_truncated) = capture(&out_path, self.capture_limit)?;
+        let (stderr, stderr_truncated) = capture(&err_path, self.capture_limit)?;
         Ok(Outcome {
             status,
             peak_rss_bytes,
-            stdout: std::fs::read(&out_path)?,
-            stderr: std::fs::read(&err_path)?,
+            stdout,
+            stdout_truncated,
+            stderr,
+            stderr_truncated,
         })
     }
 }
@@ -220,10 +247,17 @@ pub enum RunStatus {
 /// What a run did, and what it cost.
 pub struct Outcome {
     pub status: RunStatus,
-    /// The child's peak resident set, in bytes, as the kernel accounted it.
+    /// The child's peak resident set, in bytes, as the kernel accounted it:
+    /// the spawned process and every descendant it waited on, and nothing it
+    /// left running.
     pub peak_rss_bytes: u64,
     pub stdout: Vec<u8>,
+    /// Whether the child wrote more to stdout than the capture limit, so what
+    /// is here is a prefix.
+    pub stdout_truncated: bool,
     pub stderr: Vec<u8>,
+    /// Whether the child wrote more to stderr than the capture limit.
+    pub stderr_truncated: bool,
 }
 
 impl Outcome {
@@ -248,9 +282,12 @@ impl Outcome {
 /// Wait on `child` through `wait4`, so its exit and its resource accounting
 /// are read in one call.
 ///
-/// The child is reaped here and nowhere else: nothing calls `wait` on it
-/// afterwards, because the process is already gone and its identifier is free
-/// for the kernel to hand to somebody else.
+/// **On the success path the child is reaped here and nowhere else**: nothing
+/// calls `wait` on it afterwards, because the process is already gone and its
+/// identifier is free for the kernel to hand to somebody else. On every
+/// failure path the reverse holds — `wait4` did not reap, so the child is
+/// killed and waited on before the error goes back, and a run that failed to
+/// be measured does not leave a process behind.
 fn wait_for(child: std::process::Child) -> io::Result<(RunStatus, u64)> {
     let pid = child.id() as libc::pid_t;
     let mut status: libc::c_int = 0;
@@ -262,15 +299,34 @@ fn wait_for(child: std::process::Child) -> io::Result<(RunStatus, u64)> {
         if waited == pid {
             break;
         }
+        // `errno` says nothing except where the call reported failure, so it
+        // is only read at -1. Asked to wait without `WNOHANG` for one pid,
+        // `wait4` returns that pid or -1; anything else is a contract this
+        // code does not understand and will not guess at.
+        if waited != -1 {
+            return Err(reaping(
+                child,
+                io::Error::other(format!(
+                    "`wait4` on pid {pid} returned {waited}, which is neither the child nor a \
+                     failure"
+                )),
+            ));
+        }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+            return Err(reaping(child, error));
         }
     }
+    // Exit and signal are decided by asking, not by elimination: a status
+    // that is neither is a status this code has no reading for.
     let outcome = if libc::WIFEXITED(status) {
         RunStatus::Exited(libc::WEXITSTATUS(status))
-    } else {
+    } else if libc::WIFSIGNALED(status) {
         RunStatus::Signaled(libc::WTERMSIG(status))
+    } else {
+        return Err(io::Error::other(format!(
+            "pid {pid} reported wait status {status:#x}, which is neither an exit nor a signal"
+        )));
     };
     let max_rss = usage.ru_maxrss.max(0) as u64;
     Ok((
@@ -283,6 +339,25 @@ fn wait_for(child: std::process::Child) -> io::Result<(RunStatus, u64)> {
     ))
 }
 
+/// Kill and reap a child that `wait4` did not, and hand back the error that
+/// says why.
+fn reaping(mut child: std::process::Child, error: io::Error) -> io::Error {
+    let _ = child.kill();
+    let _ = child.wait();
+    error
+}
+
+/// Read at most `limit` bytes of `path`, and say whether there were more.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the run's own output files.
+fn capture(path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > limit;
+    bytes.truncate(limit as usize);
+    Ok((bytes, truncated))
+}
+
 fn ignore_missing(error: io::Error) -> io::Result<()> {
     if error.kind() == io::ErrorKind::NotFound {
         Ok(())
@@ -293,6 +368,8 @@ fn ignore_missing(error: io::Error) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn sandbox(label: &str) -> Sandbox {
@@ -320,6 +397,21 @@ mod tests {
             lines.next(),
             Some(sandbox.root().join("home").to_string_lossy().as_ref())
         );
+    }
+
+    /// The allowlist is the contract, so the environment is exactly it plus
+    /// `PATH` — a variable added to one and not the other would make the
+    /// constant a description of nothing.
+    #[test]
+    fn a_runs_environment_is_the_allowlist_and_path_and_nothing_else() {
+        let sandbox = sandbox("allowlist");
+        let environment = sandbox.environment();
+        let names: BTreeSet<&str> = environment.keys().map(String::as_str).collect();
+        let mut expected: BTreeSet<&str> = ISOLATED_VARIABLES.iter().copied().collect();
+        if std::env::var_os("PATH").is_some() {
+            expected.insert("PATH");
+        }
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -392,6 +484,27 @@ mod tests {
         let sandbox = sandbox("signal");
         let outcome = shell(&sandbox, "kill -TERM $$");
         assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGTERM));
+    }
+
+    /// A child that prints without bound is a subject under test. The
+    /// process measuring it reads a prefix and says so, rather than growing
+    /// to match.
+    #[test]
+    fn a_runs_output_is_captured_up_to_a_limit() {
+        let sandbox = sandbox("capture");
+        let outcome = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", "head -c 4096 /dev/zero | tr '\\0' 'a'"])
+            .capture_limit(64)
+            .wait()
+            .expect("running a shell");
+        outcome.assert_success();
+        assert_eq!(outcome.stdout.len(), 64);
+        assert!(outcome.stdout_truncated);
+        assert!(!outcome.stderr_truncated);
+
+        let short = shell(&sandbox, "printf hello");
+        assert_eq!(short.stdout_text(), "hello");
+        assert!(!short.stdout_truncated);
     }
 
     #[test]
