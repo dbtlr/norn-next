@@ -32,27 +32,34 @@ fn text_bytes(rng: &mut Rng, size: usize) -> Vec<u8> {
     text.into_bytes()
 }
 
-/// Draw the clutter files a profile asks for, placed across `dirs`.
-pub fn files(rng: &mut Rng, clutter: &Clutter, docs: usize, dirs: &[String]) -> Vec<ClutterFile> {
-    let count = docs * clutter.files_per_thousand_docs as usize / 1000;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let stem = format!("{}-{i:04}", rng.pick(CLUTTER_STEMS));
-        let size = rng.between(200, clutter.max_file_bytes.max(200));
-        let (extension, bytes) = if rng.per_mille(clutter.binary_per_mille) {
-            let (extension, magic) = *rng.pick(BINARY_CLUTTER);
-            (extension, binary_bytes(rng, magic, size))
-        } else {
-            (*rng.pick(TEXT_CLUTTER), text_bytes(rng, size))
-        };
-        let path = if dirs.is_empty() {
-            format!("{stem}.{extension}")
-        } else {
-            format!("{}/{stem}.{extension}", rng.pick(dirs))
-        };
-        out.push(ClutterFile { path, bytes });
-    }
-    out
+/// How many clutter files a profile asks for at `docs` documents.
+pub fn count(clutter: &Clutter, docs: usize) -> usize {
+    docs * clutter.files_per_thousand_docs as usize / 1000
+}
+
+/// Draw clutter file number `index`, placed across `dirs`.
+///
+/// **One file at a time, because the caller writes each one before drawing the
+/// next.** A profile's clutter runs to tens of megabytes, and a draw that
+/// handed back the whole set at once would make the generator's peak memory a
+/// function of the tree's total bytes rather than of its largest single file.
+/// Drawing in index order consumes the same values in the same sequence, so
+/// the emitted tree is the one the determinism contract names.
+pub fn draw(rng: &mut Rng, clutter: &Clutter, index: usize, dirs: &[String]) -> ClutterFile {
+    let stem = format!("{}-{index:04}", rng.pick(CLUTTER_STEMS));
+    let size = rng.between(200, clutter.max_file_bytes.max(200));
+    let (extension, bytes) = if rng.per_mille(clutter.binary_per_mille) {
+        let (extension, magic) = *rng.pick(BINARY_CLUTTER);
+        (extension, binary_bytes(rng, magic, size))
+    } else {
+        (*rng.pick(TEXT_CLUTTER), text_bytes(rng, size))
+    };
+    let path = if dirs.is_empty() {
+        format!("{stem}.{extension}")
+    } else {
+        format!("{}/{stem}.{extension}", rng.pick(dirs))
+    };
+    ClutterFile { path, bytes }
 }
 
 /// The directories a profile asks for that hold no documents. Position
@@ -74,6 +81,14 @@ mod tests {
 
     fn dirs() -> Vec<String> {
         vec!["notes".to_string(), "notes/drafts".to_string()]
+    }
+
+    /// The whole set a profile asks for, drawn the way the generator draws it.
+    /// A test holding every file at once is fine; the generator does not.
+    fn files(rng: &mut Rng, clutter: &Clutter, docs: usize, dirs: &[String]) -> Vec<ClutterFile> {
+        (0..count(clutter, docs))
+            .map(|index| draw(rng, clutter, index, dirs))
+            .collect()
     }
 
     #[test]

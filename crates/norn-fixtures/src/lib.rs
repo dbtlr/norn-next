@@ -387,7 +387,11 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
         writer.write(&placed.path, content.as_bytes())?;
     }
 
-    for file in clutter::files(&mut rng, &profile.clutter, plan.len(), &dirs) {
+    // Drawn and written one at a time. Clutter is the largest thing a profile
+    // emits by volume, and holding the set would put the tree's total bytes in
+    // memory at once.
+    for index in 0..clutter::count(&profile.clutter, plan.len()) {
+        let file = clutter::draw(&mut rng, &profile.clutter, index, &dirs);
         writer.write(&file.path, &file.bytes)?;
     }
 
