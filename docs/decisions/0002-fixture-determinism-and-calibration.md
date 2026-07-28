@@ -11,6 +11,20 @@ tree has to be **reproducible**, or a measurement compares two different
 worlds; and it has to be **realistic**, or the measurement is precise about a
 world nobody lives in.
 
+> **Amended 2026-07-28** — the memory bars and the soak lane are built, and
+> the crate has acquired a development dependency. Three passages below carry
+> that clause: the sentence above, the leaf statement in **The contract**, and
+> the soak-lane statement beside it. Each is left standing as written with the
+> amendment beneath it. The guarantees the decision is about are unchanged.
+
+↳ **Amended 2026-07-28.** The memory bars and the soak lane exist:
+`.github/workflows/soak.yml` runs this crate's ≥5k determinism, calibration
+and memory cases nightly, and `.github/workflows/ci.yml`'s memory job runs the
+sub-5k memory bars per pull request. The counter gates and plan assertions are
+still placeholders, waiting on `norn-store` and the Layer 3 read builders.
+[ADR 0004](0004-two-tier-measurement-and-authored-baselines.md) records what
+those lanes assert and how their baselines are held.
+
 ## The contract
 
 **The same `(profile, seed)` produces the same emitted tree, byte for byte, on
@@ -176,12 +190,26 @@ arithmetic, the PRNG and the argument parsing are in-crate, because a generator
 that links a parser, a hasher or a random-number crate would inherit that
 crate's version drift into every tree measured against it.
 
+↳ **Amended 2026-07-28.** The claim is a **normal-dependency** claim, and as
+such it stands: nothing this crate builds or ships links anything. It has one
+development dependency, on `norn-testkit`, because the memory bars spawn this
+crate's own binary and `CARGO_BIN_EXE_norn-fixtures` is set only for
+integration tests of the package that defines the binary — so the suite has to
+live here. A dev edge reaches no generated tree, and the architecture gate
+reads and discards dev edges because they cycle by construction.
+
 **The largest profile's runs belong to the soak lane.** The determinism and
 calibration cases for the ≥5k profile are `#[ignore]`d with their reason
 stated, and the lane that will adopt them is a placeholder today. The split is
 by kind, not by stopwatch: the per-PR lane runs the profiles the per-PR gates
 are to measure against, and a ≥5k profile is the other lane's work whatever it
 costs to run.
+
+↳ **Amended 2026-07-28.** The lane is no longer a placeholder. The soak
+workflow (`.github/workflows/soak.yml`) runs those cases nightly, selecting
+them by kind rather than by name and failing when none of them ran. The split
+is unchanged, and now has a second application: the memory cases divide the
+same way, with the sub-5k bars in the per-PR lane and the ≥5k ones here.
 
 ## Consequences
 

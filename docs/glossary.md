@@ -77,9 +77,6 @@ contract turns on the distinctions below.
   by a reviewed edit. It is the trend's whole memory: nothing fetches a history and nothing
   compares a run to what a previous run happened to record, so a drift fails rather than
   quietly becoming the new normal.
-- **Ratchet** — an authored baseline whose only argument-free direction is down. Lowering a
-  peak-memory ceiling needs no case made for it; raising one is a claim that the subject now
-  costs more, made in a diff.
 - **Sanity ceiling** — a wall-clock bar set where a run past it is broken rather than slow.
   It lives in the soak lane, it gates nothing on a pull request, and the number it produces
   — the recorded duration — is worth more than the pass.

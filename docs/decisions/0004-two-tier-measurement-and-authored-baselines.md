@@ -17,11 +17,22 @@ needed before it could be practised.
 bytes compared against a fixed number of bytes is the same kind of
 assertion as a counter reading: it does not move because a runner was
 busy. The per-PR memory job spawns the generator as a child, reads the peak
-resident set the kernel accounted to it, and holds it to a ceiling at the
-~2k-document profile. Nothing in that lane reads a clock. The
-`timeout-minutes` on those jobs are not an exception — a timeout is a
-runaway guard, set loose enough that a job approaching it is broken rather
-than slow.
+resident set the kernel accounted to it, and asserts two things: a ceiling
+at the ~2k-document profile, and the ratio between the 300-document profile
+and the ~2k one. Nothing in that lane reads a clock. The `timeout-minutes`
+on those jobs are not an exception — a timeout is a runaway guard, set
+loose enough that a job approaching it is broken rather than slow.
+
+**The per-PR lane carries a flatness pair of its own, because a ceiling is
+the blunter instrument.** A ceiling passes anything that fits under it, so
+it can only be set where it forbids the shape it was authored against — and
+a shape that costs the tree's total bytes is only expensive at a large
+tree. A ratio between two scales fails the moment the scales stop moving
+together, and needs neither of them to be large. The pair the per-PR lane
+runs is `ambiguous` against `realistic`: 300 documents against 2000, with
+35x of clutter between them, and both under 5k so both are this lane's work
+by kind. The ratio is a count like the ceiling is — a number of bytes over
+a number of bytes — so nothing about putting it here reads a clock.
 
 **A wall-clock bar in the soak lane is a sanity ceiling, not a gate on
 speed.** A hosted runner's throughput varies by more than any regression
@@ -40,7 +51,15 @@ rather than re-decided. The consequence is paid rather than dodged: the
 in the per-PR lane, and it is a soak case anyway. Splitting on lane
 discipline keeps the rule from drifting every time a machine gets faster,
 and it is what the spine means by putting the flat-slope requirement in the
-scheduled lane.
+scheduled lane. The per-PR lane gets the sharp instrument by using scales
+it already owns rather than by borrowing a soak profile.
+
+**A lane runs a whole test target, so lane membership is a target
+boundary.** A step asks a suite for its ignored cases wholesale and cannot
+ask for some of them, so two lanes' cases in one binary means each lane
+runs both. The memory cases are therefore two targets — one per lane —
+rather than two `#[ignore]` reasons in one, which is what keeps the soak
+wall-clock assertion out of the per-PR lane.
 
 **A trend's memory is a checked-in baseline, and nothing else.** No
 artifact history is fetched, no external store is consulted, and no run
@@ -53,17 +72,22 @@ ADR 0002's authored-envelope stance carried from tree shape to runtime
 cost, and it is the same discipline in both places: **a number moves when
 somebody changes it in a diff, with the grounds beside it.**
 
-**Peak-memory baselines are ratchets; the wall-clock one is not.** Lowering
-a memory ceiling needs no new argument. Raising one is a claim that the
-subject now costs more, made in the open. The wall clock has no ratchet
-because it has no trend worth defending against a runner's variance — its
-recorded readings are the trend, and the ceiling only says the run
-happened.
+**What binds is the comparison; the direction a baseline travels is
+review-held.** A reading past a baseline fails the run — that much is
+mechanical. Nothing forbids raising the baseline afterwards. Lowering one
+needs no new argument; raising one is a claim that the subject now costs
+more, and what asks for that claim is a reviewer reading a small, dull,
+frequently-read diff. This is named as review-held rather than left implied,
+because a review-held invariant rots quietly. **The mechanized version
+arrives with the Layer 2 lockdown work**, when this lane carries a host
+workload and a memory slope over a nightly mixed load becomes a thing a run
+can measure rather than a thing a diff asserts.
 
-**Every soak reading is written where a person will find it.** Each
-measurement appends its numbers to the run's job summary as well as to the
-log. A green lane that leaves no number behind is a pass with nothing
-behind it, and the lane exists for the numbers.
+**Every reading is written where a person will find it.** Each measurement,
+in either lane, appends its numbers to the run's job summary as well as to
+the log. A green lane that leaves no number behind is a pass with nothing
+behind it, and the readings are what the downward discipline is exercised
+against.
 
 **A bar's subject is whatever exists; the slot names what will hold it.**
 The generator carries the first memory bar because it is the only subject
@@ -78,39 +102,60 @@ Layer 3 read builders — because
 machinery lands early, the bars land with their subjects.
 
 **A measurement that measured nothing fails.** Each memory case requires
-the generator's own report to carry the profile's document count before the
-cost is read, and the two-scale pair fails when either side reported no
-peak at all. A cheap reading from a run that did no work is the failure
-mode a cost bar is most likely to have and least likely to notice.
+the generator's own report to carry the profile's document count — parsed
+as a number, so `6000 documents` is not satisfied by `16000 documents` —
+before the cost is read, and a flatness pair fails when either side
+reported no peak at all. A cheap reading from a run that did no work is the
+failure mode a cost bar is most likely to have and least likely to notice.
 
-**A soak step selects cases by kind, not by name.** A test-name filter that
-stops matching runs zero tests and reports success, so each step asks a
-suite for its ignored cases instead of naming them. The `#[ignore]` reason
-is what says which lane a case belongs to, and it is the only place that
-says it.
+**A lane step asserts that cases ran, and selects them by kind rather than
+by name.** These are two mechanisms against one hazard, and only the first
+closes it. Selecting by kind — asking a suite for its ignored cases instead
+of naming them — removes the spelling where a mistyped name filter matches
+nothing; it does not help at all when the cases themselves are gone,
+because `--ignored` with nothing to match still exits 0. So every lane step
+goes through one script that captures the run's output, gates on its exit
+status, and then requires a `test result: ok` line reporting at least one
+pass. **The pass-count assertion is what closes the hazard**, and it is one
+script rather than a block copied into each step so that it cannot close it
+in three places and not the fourth.
+
+**A lane's `#[ignore]` reason is checked, not merely conventional.** The
+reason is what says which lane a case belongs to, so an `#[ignore =
+"flaky"]` added for a local reason would be silently adopted by whichever
+lane runs its suite and would face a bar nobody meant it to face. A test in
+the fixtures suite reads the crate's own test sources and requires every
+ignore reason to open with a sanctioned lane prefix.
 
 ## Consequences
 
 - Nothing measures a wall clock on a pull request, so a slow runner never
   fails one. The cost is that a genuine slowdown is visible only the next
   night, in a recorded number rather than a red check.
-- A regression in peak memory fails the per-PR lane at the ~2k profile and
-  the soak lane at both scales. The two-scale ratio is the sharper of the
-  two instruments: a ceiling passes anything that fits under it, and a
-  ratio fails the moment the scales stop moving together.
+- A generation whose cost is the tree's total bytes fails the per-PR lane
+  twice over: past the ~2k ceiling, and past the 300-versus-2k ratio bar.
+  Both were checked against that shape rather than reasoned about — the
+  ceiling holds it out by about 5% at its narrowest reading and the ratio by
+  better than 1.5x, which is why the pair is the instrument the claim rests
+  on and the ceiling is the coarse guard beside it.
 - The baselines file is a small, dull, frequently-read diff. That is the
   intended shape: recalibrating runtime cost is an act somebody performs,
-  the way recalibrating tree shape already is.
+  the way recalibrating tree shape already is. It is also the whole of the
+  downward discipline, which is why that discipline is named review-held
+  above rather than described as a mechanism.
 - **Writing the first bar changed its subject.** The generator drew every
   clutter file a profile asked for before writing any of them, so its peak
-  was the tree's total bytes — about 55 MiB at the ≥5k profile against
+  was the tree's total bytes — about 52–55 MiB at the ≥5k profile against
   about 5 MiB once each file is written as it is drawn. A bar authored
   against the earlier shape would have been a bar on a defect, and the
-  flatness claim it was meant to carry would have been false: the ratio
-  across the two scales was 5.7 and is now about 1.5.
-- The soak lane's assertions are new, so the five consecutive green runs
-  that lockdown counts start at the first run under them. An earlier green
-  run of a lane that asserted nothing is not one of the five.
+  flatness claim it was meant to carry would have been false: the ≥5k-to-2k
+  ratio was 5.6–6.2 and is now 1.32–1.71.
+- Lockdown counts five consecutive green runs of the soak lane over a
+  nightly ~1h mixed load, showing zero counter violations, a flat memory
+  slope and no file-descriptor growth. Three of those terms have no subject
+  in this workspace yet, so the count does not start at the first green run
+  of the assertions this decision adds: it starts when the lane asserts what
+  lockdown counts.
 - The schedule is a thing to verify rather than assume: hosted schedules
   are disabled on repositories with no activity for sixty days, and a lane
   that silently stopped running looks exactly like a lane with nothing to
@@ -136,11 +181,23 @@ says it.
   accounting when the child is waited on rather than sampled — and the
   source of the rule that machinery lands before its bars.
 - The baselines are set from readings of the pinned toolchain's unoptimized
-  build on two platforms, both recorded beside the values: the ~2k profile
-  peaks at about 3.0 MiB on linux and 4.3 MiB on macOS, the ≥5k profile at
-  about 4.7 and 6.2, and the ≥5k generation bills about 3.2 seconds on
-  either. The ceilings sit well above the higher reading of each pair,
-  because a bar that flakes teaches people to rerun rather than to look.
+  build on two architectures, both named beside the values: **linux-arm64**
+  under docker and **macos-arm64** natively, 6 to 8 runs per profile per
+  architecture. The bands are 2.79–3.11 and 3.80–4.16 MiB at the ~2k
+  profile, 4.55–4.76 and 5.48–5.89 MiB at the ≥5k profile, and 3.19–3.54 and
+  3.58–3.61 seconds for the ≥5k generation's wall clock. The ceilings sit
+  well above the higher band, because a bar that flakes teaches people to
+  rerun rather than to look. **The CI runner is x86_64-glibc, which is
+  unmeasured** until the first `ubuntu-latest` run; the headroom is what
+  covers an allocator these readings do not describe, and the first run
+  there is what turns two readings into three.
+- The bars were checked against the shape they forbid rather than against
+  argument alone. A build holding its clutter set peaks at 8.40–8.67 MiB on
+  linux-arm64 and 9.50–9.73 MiB on macos-arm64 at the ~2k profile, against
+  an 8 MiB ceiling; its 300-versus-2k ratio is 3.12–3.70 against a 2.0 bar,
+  and its ≥5k-to-2k ratio 5.60–6.17 against a 2.2 bar.
 - The zero-test hazard is not hypothetical: a mistyped name filter passed
-  in under a second having run nothing, which is what moved the workflow
-  steps off name filters.
+  in under a second having run nothing. That moved the workflow steps off
+  name filters, which was necessary and not sufficient — `--ignored`
+  matching nothing exits 0 just as quietly, and the pass-count assertion is
+  what makes the step fail.
