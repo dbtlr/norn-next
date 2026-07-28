@@ -8,11 +8,11 @@
 # enough that a job approaching it is broken rather than slow. Performance
 # clocks — the bars that fail when a number drifts — live in soak.yml.
 #
-# The jobs below are structure only. Each is filled by the harness task named
-# in its comment; until then they pass trivially so the lane exists,
-# triggers, and is reviewable before it has teeth. Every job name carries a
-# "(placeholder — ...)" suffix so a green check cannot be over-read as a gate
-# that ran; the suffix drops when the real gate lands.
+# A job whose name carries a "(placeholder — ...)" suffix is structure only:
+# it passes trivially so the lane exists, triggers, and is reviewable before
+# it has teeth, and it is filled by the harness task named in its comment.
+# The suffix drops when the real gate lands, so a green check on a job
+# without one is a gate that actually ran.
 name: ci
 
 on:
@@ -29,6 +29,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # A real gate, not a placeholder: the workspace compiles and its tests pass.
+  # The corpus suite is dormant — no command is activated — so this job builds
+  # and runs in seconds; what it asserts is that the workspace holds together
+  # and that the corpus data is structurally sound.
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain comes from rust-toolchain.toml, which rustup honors.
+      - name: Show toolchain
+        run: |
+          rustc --version
+          cargo --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace
+
   # Filled by NORN-12 (drift-prevention harness): the architecture gate reads
   # `cargo metadata` and asserts the workspace normal-dependency graph exactly
   # equals the allowlist in docs/architecture.md, under a pinned feature/target
