@@ -41,15 +41,18 @@
 //! against the re-derived surface. A command the verb charter deletes takes
 //! its rulings with it.
 //!
-//! # The four categories
+//! # The three categories
 //!
-//! Every command the binary had at the recording pin sits in exactly one
-//! category, and [`corpus_is_structurally_sound`] reconciles the set against
-//! the recorded top-level help page so none can go uncategorized:
-//! `activatable` (has cases), `activated` (its cases run), `unseeded` (no
-//! behavior at the pin, so no activation path), and `unrecorded` (behavior
-//! at the pin, but no case exercises it — its contract is authored with no
-//! evidence at all).
+//! Every command the binary had at the recording pin sits in exactly one of
+//! three disjoint categories — `activatable` (has cases), `unseeded` (no
+//! behavior at the pin, so no activation path) and `unrecorded` (behavior at
+//! the pin, but no case exercises it, so its contract is authored with no
+//! evidence at all). [`corpus_is_structurally_sound`] reconciles the set
+//! against the recorded top-level help page so none can go uncategorized, and
+//! refuses a command that appears in two.
+//!
+//! `activated` is not a fourth category: it is the subset of `activatable`
+//! whose cases run.
 //!
 //! # What activation still needs
 //!
@@ -82,11 +85,13 @@ fn corpus() -> Corpus {
     Corpus::load(&dir).unwrap_or_else(|e| panic!("the corpus did not load: {e}"))
 }
 
-/// The data set holds together: the gate cannot be bypassed, the unseeded
-/// list matches the one the harness pins, every command the binary listed
-/// sits in a category, no case went missing, every case is filed under the
-/// command its own argv selects, every exit class agrees with its code, and
-/// every ruling, prose entry and fixture reference names something real.
+/// The data set holds together: the gate cannot be bypassed, the unseeded and
+/// unrecorded lists match the ones the harness pins, every command the binary
+/// listed sits in exactly one category, no case went missing, every case is
+/// filed under the command its own argv selects, every exit class agrees with
+/// its code and with the mutation specialization, every placeholder in a
+/// recording is declared and every declaration appears, and every ruling,
+/// prose entry and fixture reference names something real.
 #[test]
 fn corpus_is_structurally_sound() {
     let problems = corpus().audit();

@@ -39,9 +39,33 @@ pub const UNSEEDED_COMMANDS: &[&str] = &[
     "service",
 ];
 
+/// The commands that had behavior at the recording pin but that no case
+/// exercises.
+///
+/// Pinned for the same reason as [`UNSEEDED_COMMANDS`]: without it, hiding a
+/// command here would be a way to take it off the activatable list without
+/// anyone noticing its cases stopped being reachable.
+pub const UNRECORDED_COMMANDS: &[&str] = &["vault"];
+
 /// Global options that consume the token after them as their value, so that
 /// value is never mistaken for the command.
 pub const VALUE_TAKING_GLOBALS: &[&str] = &["-C", "--cwd", "--color", "--vault"];
+
+/// The placeholders the extraction writes in place of a value that varies
+/// run to run. A case declares the ones that fired on it in its
+/// `volatile_masks`, and the placeholder is also the declared name.
+pub const EXTRACTION_MASKS: &[&str] = &["<PLAN_HASH>", "<TIMESTAMP>", "<TRACE_ID>"];
+
+/// The recording harness's substitutions that this corpus keeps, as
+/// `(declared name, placeholder written into the bytes)`. Exactly one: the
+/// vault's absolute path is a property of the temporary directory the run
+/// created, so recording it would pin a value that cannot reproduce.
+///
+/// Every other harness substitution was a comparison device — it erased a
+/// value or deleted a line the binary really emitted, to make two programs'
+/// outputs comparable — and none is applied, because each destroys
+/// information a recording exists to carry.
+pub const INHERITED_NORMALIZATIONS: &[(&str, &str)] = &[("vault-root", "<VAULT>")];
 
 /// The activation unit a bare top-level invocation belongs to. Not a
 /// command: the top-level page is its own surface, so it is named rather
@@ -241,6 +265,25 @@ pub struct TreeEntry {
     pub non_utf8_len: Option<usize>,
 }
 
+impl TreeEntry {
+    /// Why this entry does not describe a tree node, if it does not. A file
+    /// carries exactly one of its two content fields; a directory carries
+    /// neither, because an empty directory has nothing to hold.
+    pub fn malformed(&self) -> Option<&'static str> {
+        match (self.kind, &self.content, self.non_utf8_len) {
+            (TreeEntryKind::File, Some(_), None) | (TreeEntryKind::File, None, Some(_)) => None,
+            (TreeEntryKind::File, Some(_), Some(_)) => {
+                Some("a file carries either its contents or a non-UTF-8 length, never both")
+            }
+            (TreeEntryKind::File, None, None) => {
+                Some("a file carries neither its contents nor a non-UTF-8 length")
+            }
+            (TreeEntryKind::EmptyDir, None, None) => None,
+            (TreeEntryKind::EmptyDir, _, _) => Some("an empty directory carries no content"),
+        }
+    }
+}
+
 /// What a mutating invocation did to the vault tree.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -341,6 +384,25 @@ pub struct Case {
     /// For a mutating case, what the invocation did to the vault tree.
     #[serde(default)]
     pub recorded_tree_delta: Option<TreeDelta>,
+}
+
+impl Case {
+    /// Every byte this case recorded: what came back, and what the
+    /// invocation left in the vault. A substitution is declared against the
+    /// whole recording, not one channel of it.
+    pub fn recorded_text(&self) -> String {
+        let mut text = String::new();
+        text.push_str(&self.recorded.stdout);
+        text.push_str(&self.recorded.stderr);
+        if let Some(delta) = &self.recorded_tree_delta {
+            for entry in delta.added.iter().chain(delta.modified.iter()) {
+                if let Some(content) = &entry.content {
+                    text.push_str(content);
+                }
+            }
+        }
+        text
+    }
 }
 
 /// Every case recorded for one command.
@@ -477,6 +539,9 @@ pub enum CorpusError {
         first: PathBuf,
         second: PathBuf,
     },
+    /// Two manifests claim the same fixture. Every case naming it would be
+    /// judged against whichever one a lookup happened to reach.
+    DuplicateFixture { fixture: FixtureRef },
 }
 
 impl fmt::Display for CorpusError {
@@ -498,8 +563,23 @@ impl fmt::Display for CorpusError {
                 first.display(),
                 second.display()
             ),
+            CorpusError::DuplicateFixture { fixture } => {
+                write!(f, "two manifests claim fixture `{fixture}`")
+            }
         }
     }
+}
+
+/// Refuse a fixture set in which two manifests claim one `(profile, seed)`.
+fn require_unique_fixtures(fixtures: &Fixtures) -> Result<(), CorpusError> {
+    let mut seen: BTreeSet<FixtureRef> = BTreeSet::new();
+    for manifest in &fixtures.fixtures {
+        let reference = manifest.fixture_ref();
+        if !seen.insert(reference.clone()) {
+            return Err(CorpusError::DuplicateFixture { fixture: reference });
+        }
+    }
+    Ok(())
 }
 
 impl std::error::Error for CorpusError {}
@@ -521,9 +601,11 @@ pub struct Corpus {
 impl Corpus {
     /// Load every corpus file under `dir`.
     pub fn load(dir: &Path) -> Result<Self, CorpusError> {
+        let fixtures: Fixtures = read_json(&dir.join("fixtures.json"))?;
+        require_unique_fixtures(&fixtures)?;
         Ok(Corpus {
             activation: read_json(&dir.join("activation.json"))?,
-            fixtures: read_json(&dir.join("fixtures.json"))?,
+            fixtures,
             ledger: read_json(&dir.join("behavior-ledger.json"))?,
             help: read_json(&dir.join("help-prose.json"))?,
             activatable: read_command_dir(&dir.join("cases"))?,
@@ -684,6 +766,25 @@ impl Corpus {
             .map(|entry| entry.command.as_str())
             .collect();
 
+        let pinned_unrecorded: BTreeSet<&str> = UNRECORDED_COMMANDS.iter().copied().collect();
+        for missing in pinned_unrecorded.difference(&unrecorded) {
+            problems.push(format!(
+                "manifest omits `{missing}` from `unrecorded`, which the harness pins as \
+                 unrecorded"
+            ));
+        }
+        for extra in unrecorded.difference(&pinned_unrecorded) {
+            problems.push(format!(
+                "manifest names `{extra}` unrecorded, which the harness does not pin as unrecorded"
+            ));
+        }
+        for both in declared.intersection(&unrecorded) {
+            problems.push(format!(
+                "manifest lists `{both}` as both unseeded and unrecorded; the categories are \
+                 disjoint"
+            ));
+        }
+
         for command in &self.activation.activatable {
             if !with_cases.contains(command.as_str()) {
                 problems.push(format!(
@@ -714,10 +815,15 @@ impl Corpus {
             }
         }
         for command in &self.activation.activated {
-            if !with_cases.contains(command.as_str()) {
-                problems.push(format!(
+            match self.activatable.get(command.as_str()) {
+                None => problems.push(format!(
                     "manifest activates `{command}`, which has no activatable case file"
-                ));
+                )),
+                Some(group) if group.cases.is_empty() => problems.push(format!(
+                    "manifest activates `{command}`, whose case list is empty — activating \
+                     nothing is indistinguishable from leaving it dormant"
+                )),
+                Some(_) => {}
             }
         }
         for command in self.unseeded.keys() {
@@ -817,11 +923,43 @@ impl Corpus {
                         case.recorded.exit_class.code()
                     ));
                 }
+                // The mutation specialization the classification asserts: on
+                // a command that writes, the failure classes are keyed on
+                // whether a write landed, so the usage class cannot appear
+                // there at all.
+                if case.mutating && case.recorded.exit_class == ExitClass::Usage {
+                    problems.push(format!(
+                        "case `{}` writes and is classified `Usage`; on a command that writes, \
+                         exit 2 is a refusal — nothing was written",
+                        case.id
+                    ));
+                }
+                if case.mutating
+                    && case.recorded.exit_code == 2
+                    && case.recorded.exit_class != ExitClass::Refusal
+                {
+                    problems.push(format!(
+                        "case `{}` writes and exited 2, which is a refusal, but is classified \
+                         `{:?}`",
+                        case.id, case.recorded.exit_class
+                    ));
+                }
+                self.audit_substitutions(case, problems);
                 if !recorded_fixtures.contains(&case.fixture) {
                     problems.push(format!(
                         "case `{}` runs against fixture `{}`, whose tree is not recorded",
                         case.id, case.fixture
                     ));
+                }
+                if let Some(delta) = &case.recorded_tree_delta {
+                    for entry in delta.added.iter().chain(delta.modified.iter()) {
+                        if let Some(problem) = entry.malformed() {
+                            problems.push(format!(
+                                "case `{}` tree delta entry `{}`: {problem}",
+                                case.id, entry.path
+                            ));
+                        }
+                    }
                 }
                 if case.mutating != case.recorded_tree_delta.is_some() {
                     problems.push(format!(
@@ -858,6 +996,84 @@ impl Corpus {
                     manifest.fixture_ref(),
                     manifest.entry_count,
                     manifest.entries.len()
+                ));
+            }
+            for entry in &manifest.entries {
+                if let Some(problem) = entry.malformed() {
+                    problems.push(format!(
+                        "fixture `{}` entry `{}`: {problem}",
+                        manifest.fixture_ref(),
+                        entry.path
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Every substitution that appears in a case's recorded bytes is
+    /// declared, and every declaration appears — in both directions, and
+    /// only against the names the harness knows.
+    ///
+    /// A declaration naming a substitution the reader cannot find teaches
+    /// nothing; a substitution the reader can find but that is not declared
+    /// is worse, because it reads as output the program produced.
+    fn audit_substitutions(&self, case: &Case, problems: &mut Vec<String>) {
+        let text = case.recorded_text();
+
+        for declared in &case.volatile_masks {
+            if !EXTRACTION_MASKS.contains(&declared.as_str()) {
+                problems.push(format!(
+                    "case `{}` declares mask `{declared}`, which is not one the extraction writes",
+                    case.id
+                ));
+            }
+        }
+        for placeholder in EXTRACTION_MASKS {
+            let present = text.contains(placeholder);
+            let declared = case.volatile_masks.iter().any(|m| m == placeholder);
+            if present && !declared {
+                problems.push(format!(
+                    "case `{}` carries `{placeholder}` in its recorded bytes but does not declare \
+                     it",
+                    case.id
+                ));
+            }
+            if declared && !present {
+                problems.push(format!(
+                    "case `{}` declares mask `{placeholder}`, which appears nowhere in its \
+                     recorded bytes",
+                    case.id
+                ));
+            }
+        }
+
+        for declared in &case.normalizations {
+            if !INHERITED_NORMALIZATIONS
+                .iter()
+                .any(|(name, _)| name == declared)
+            {
+                problems.push(format!(
+                    "case `{}` declares normalization `{declared}`, which is not one this corpus \
+                     keeps",
+                    case.id
+                ));
+            }
+        }
+        for (name, placeholder) in INHERITED_NORMALIZATIONS {
+            let present = text.contains(placeholder);
+            let declared = case.normalizations.iter().any(|n| n == name);
+            if present && !declared {
+                problems.push(format!(
+                    "case `{}` carries `{placeholder}` in its recorded bytes but does not declare \
+                     `{name}`",
+                    case.id
+                ));
+            }
+            if declared && !present {
+                problems.push(format!(
+                    "case `{}` declares `{name}`, but `{placeholder}` appears nowhere in its \
+                     recorded bytes",
+                    case.id
                 ));
             }
         }
@@ -987,7 +1203,9 @@ mod tests {
             plan_vault_root_token: None,
             requires_doc: None,
             requires_code: None,
-            normalizations: vec!["vault-root".into()],
+            // Declared where a substitution changed bytes, so a case whose
+            // recording carries no placeholder declares nothing.
+            normalizations: Vec::new(),
             volatile_masks: Vec::new(),
             recorded: Recorded {
                 stdout: String::new(),
@@ -1418,6 +1636,193 @@ mod tests {
         corpus.activation.activated.push("find".into());
         assert_eq!(corpus.activated_cases().len(), 1);
         assert!(corpus.dormant_cases().is_empty());
+    }
+
+    // --- the masking invariant the recording procedure establishes -------
+
+    #[test]
+    fn an_undeclared_mask_in_the_bytes_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0]
+            .recorded
+            .stdout = "plan_hash: <PLAN_HASH>\n".into();
+        audit_mentions(
+            &corpus,
+            "carries `<PLAN_HASH>` in its recorded bytes but does not declare",
+        );
+    }
+
+    #[test]
+    fn a_mask_declared_but_absent_from_the_bytes_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0].volatile_masks =
+            vec!["<TRACE_ID>".into()];
+        audit_mentions(&corpus, "which appears nowhere in its recorded bytes");
+    }
+
+    #[test]
+    fn an_invented_mask_name_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0].volatile_masks =
+            vec!["<INVENTED>".into()];
+        audit_mentions(&corpus, "which is not one the extraction writes");
+    }
+
+    #[test]
+    fn an_invented_normalization_name_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0].normalizations =
+            vec!["self-update-command-row".into()];
+        audit_mentions(&corpus, "which is not one this corpus keeps");
+    }
+
+    #[test]
+    fn an_undeclared_vault_substitution_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0]
+            .recorded
+            .stdout = "reading <VAULT>/a.md\n".into();
+        audit_mentions(&corpus, "but does not declare `vault-root`");
+    }
+
+    #[test]
+    fn a_vault_declaration_with_no_placeholder_is_caught() {
+        let mut corpus = sound();
+        corpus.activatable.get_mut("find").unwrap().cases[0].normalizations =
+            vec!["vault-root".into()];
+        audit_mentions(
+            &corpus,
+            "but `<VAULT>` appears nowhere in its recorded bytes",
+        );
+    }
+
+    #[test]
+    fn a_mask_that_fires_only_in_a_tree_delta_still_counts_as_present() {
+        let mut corpus = sound();
+        let case = &mut corpus.activatable.get_mut("find").unwrap().cases[0];
+        case.mutating = true;
+        case.volatile_masks = vec!["<TRACE_ID>".into()];
+        case.recorded_tree_delta = Some(TreeDelta {
+            added: vec![TreeEntry {
+                path: "note.md".into(),
+                kind: TreeEntryKind::File,
+                content: Some("trace: <TRACE_ID>\n".into()),
+                non_utf8_len: None,
+            }],
+            removed: Vec::new(),
+            modified: Vec::new(),
+        });
+        assert_eq!(corpus.audit(), Vec::<String>::new());
+    }
+
+    // --- categories ------------------------------------------------------
+
+    #[test]
+    fn a_narrowed_unrecorded_list_is_caught() {
+        let mut corpus = sound();
+        corpus.activation.unrecorded.clear();
+        audit_mentions(&corpus, "which the harness pins as unrecorded");
+    }
+
+    /// Hiding an activatable command in `unrecorded` would take its cases
+    /// off the gate without anyone noticing they stopped being reachable.
+    #[test]
+    fn hiding_an_activatable_command_in_unrecorded_is_caught() {
+        let mut corpus = sound();
+        corpus.activation.activatable.clear();
+        corpus.activation.unrecorded.push(Unrecorded {
+            command: "find".into(),
+            reason: "moved out of sight".into(),
+        });
+        audit_mentions(&corpus, "which the harness does not pin as unrecorded");
+    }
+
+    #[test]
+    fn a_command_in_both_unseeded_and_unrecorded_is_caught() {
+        let mut corpus = sound();
+        corpus.activation.unrecorded.push(Unrecorded {
+            command: "service".into(),
+            reason: "because".into(),
+        });
+        audit_mentions(
+            &corpus,
+            "as both unseeded and unrecorded; the categories are disjoint",
+        );
+    }
+
+    #[test]
+    fn activating_a_command_with_an_empty_case_list_is_caught() {
+        let mut corpus = sound();
+        corpus.activation.activatable.push("count".into());
+        corpus.activation.activated.push("count".into());
+        corpus
+            .activatable
+            .insert("count".into(), group("count", Vec::new()));
+        audit_mentions(&corpus, "whose case list is empty");
+    }
+
+    // --- the mutation specialization -------------------------------------
+
+    #[test]
+    fn a_mutating_case_classified_usage_is_caught() {
+        let mut corpus = sound();
+        let case = &mut corpus.activatable.get_mut("find").unwrap().cases[0];
+        case.mutating = true;
+        case.recorded_tree_delta = Some(TreeDelta {
+            added: Vec::new(),
+            removed: Vec::new(),
+            modified: Vec::new(),
+        });
+        case.recorded.exit_code = 2;
+        case.recorded.exit_class = ExitClass::Usage;
+        audit_mentions(&corpus, "on a command that writes, exit 2 is a refusal");
+    }
+
+    // --- fixture integrity -----------------------------------------------
+
+    #[test]
+    fn a_fixture_file_carrying_both_content_and_a_length_is_caught() {
+        let mut corpus = sound();
+        corpus.fixtures.fixtures[0].entries[0].non_utf8_len = Some(4);
+        audit_mentions(&corpus, "never both");
+    }
+
+    #[test]
+    fn a_fixture_file_carrying_neither_is_caught() {
+        let mut corpus = sound();
+        corpus.fixtures.fixtures[0].entries[0].content = None;
+        audit_mentions(
+            &corpus,
+            "carries neither its contents nor a non-UTF-8 length",
+        );
+    }
+
+    #[test]
+    fn a_fixture_directory_carrying_content_is_caught() {
+        let mut corpus = sound();
+        corpus.fixtures.fixtures[0].entries[0].kind = TreeEntryKind::EmptyDir;
+        audit_mentions(&corpus, "an empty directory carries no content");
+    }
+
+    #[test]
+    fn two_manifests_claiming_one_fixture_are_refused() {
+        let corpus = sound();
+        let mut fixtures = corpus.fixtures;
+        fixtures.fixtures.push(fixtures.fixtures[0].clone());
+        fixtures.fixture_count = 2;
+        let message = match require_unique_fixtures(&fixtures) {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!("a duplicate fixture must be refused"),
+        };
+        assert!(
+            message.contains("two manifests claim fixture `clean:1`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn distinct_fixtures_are_accepted() {
+        assert!(require_unique_fixtures(&sound().fixtures).is_ok());
     }
 
     #[test]
