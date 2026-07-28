@@ -1,3 +1,5 @@
 .atlas.toml
 .DS_Store
 /target
+*.local.md
+*.local.json
