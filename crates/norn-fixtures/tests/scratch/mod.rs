@@ -15,7 +15,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use norn_fixtures::probe::VaultStats;
-use norn_fixtures::{Manifest, Profile, digest, generate, probe};
+use norn_fixtures::{Manifest, Profile, generate, probe};
 
 /// A fresh, empty, non-hidden directory named `label`.
 pub fn fresh(label: &str) -> PathBuf {
@@ -30,13 +30,16 @@ pub fn fresh(label: &str) -> PathBuf {
     dir
 }
 
-/// Generate, digest the whole tree, then delete it.
+/// Generate, take the contract digest, then delete the tree.
+///
+/// The digest comes off the manifest rather than off a walk of the result:
+/// the contract is stated over what the generator emits, and a walk would key
+/// on whatever spelling the filesystem hands back.
 pub fn generate_and_digest(label: &str, profile: &Profile, seed: u64) -> ([u8; 32], Manifest) {
     let dir = fresh(label);
     let manifest = generate(profile, seed, &dir).expect("generating a scratch tree");
-    let tree = digest::tree(&dir).expect("digesting a scratch tree");
     fs::remove_dir_all(&dir).expect("removing a scratch tree");
-    (tree, manifest)
+    (manifest.tree_digest, manifest)
 }
 
 /// Generate, measure the tree's shape, then delete it.

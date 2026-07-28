@@ -30,22 +30,41 @@ pub fn draw(rng: &mut Rng, density: &LinkDensity, plan: &[Placed], index: usize)
     let mut markup = Vec::with_capacity(count);
     let mut dangling = 0;
     for slot in 0..count {
-        if plan.len() < 2 || rng.per_mille(density.dangling_per_mille) {
+        // Every link draws the same three times, in the same order, whether or
+        // not it resolves. A dangling link that is always a bare stem would be
+        // a structurally distinct shape, and the path-qualified and aliased
+        // spellings are exactly the resolution paths worth exercising against
+        // a target that is not there.
+        let missing = plan.len() < 2 || rng.per_mille(density.dangling_per_mille);
+        let path_qualified = rng.per_mille(density.path_qualified_per_mille);
+        let aliased = rng.per_mille(density.aliased_per_mille);
+
+        let name = if missing {
             dangling += 1;
-            markup.push(format!("[[absent-{index:05}-{slot}]]"));
-            continue;
-        }
-        let mut target = rng.range(plan.len());
-        if target == index {
-            target = (target + 1) % plan.len();
-        }
-        let target = &plan[target];
-        let name = if rng.per_mille(density.path_qualified_per_mille) {
-            &target.link_path
+            let stem = format!("absent-{index:05}-{slot}");
+            match (path_qualified, plan.is_empty()) {
+                // A missing target is more useful when it names a real
+                // directory: the folder exists, the document in it does not.
+                (true, false) => match plan[rng.range(plan.len())].link_path.rsplit_once('/') {
+                    Some((dir, _)) => format!("{dir}/{stem}"),
+                    None => stem,
+                },
+                _ => stem,
+            }
         } else {
-            &target.stem
+            let mut target = rng.range(plan.len());
+            if target == index {
+                target = (target + 1) % plan.len();
+            }
+            let target = &plan[target];
+            if path_qualified {
+                target.link_path.clone()
+            } else {
+                target.stem.clone()
+            }
         };
-        if rng.per_mille(density.aliased_per_mille) {
+
+        if aliased {
             let display = rng.pick(TAILS);
             markup.push(format!("[[{name}|{display}]]"));
         } else {
@@ -106,6 +125,45 @@ mod tests {
         for index in 0..64 {
             assert!(draw(&mut rng, &density, &plan, index).markup.len() <= 5);
         }
+    }
+
+    /// A dangling link is not a shape of its own: it draws the same form
+    /// choices every other link does.
+    #[test]
+    fn dangling_links_take_every_form_a_resolvable_link_takes() {
+        let plan = sample_plan();
+        let density = LinkDensity {
+            mean_per_doc: 8,
+            max_per_doc: 16,
+            dangling_per_mille: 1000,
+            path_qualified_per_mille: 500,
+            aliased_per_mille: 500,
+            trailing_list_per_mille: 0,
+        };
+        let mut rng = Rng::new(37);
+        let mut path_qualified = 0;
+        let mut aliased = 0;
+        let mut bare = 0;
+        let mut total = 0;
+        for index in 0..200 {
+            for link in draw(&mut rng, &density, &plan, index).markup {
+                assert!(link.contains("absent-"), "expected a dangling link: {link}");
+                total += 1;
+                if link.contains('/') {
+                    path_qualified += 1;
+                }
+                if link.contains('|') {
+                    aliased += 1;
+                }
+                if !link.contains('/') && !link.contains('|') {
+                    bare += 1;
+                }
+            }
+        }
+        assert!(total > 100, "the sample drew too few links to judge");
+        assert!(path_qualified > 0, "no dangling link was path-qualified");
+        assert!(aliased > 0, "no dangling link carried display text");
+        assert!(bare > 0, "no dangling link was a bare stem");
     }
 
     #[test]

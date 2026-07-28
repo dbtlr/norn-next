@@ -1,13 +1,17 @@
-//! SHA-256 and the tree digest built on it.
-//!
-//! The determinism contract is stated over trees, so it needs a value that
-//! stands for a whole tree. [`tree`] produces one: it walks every node in
-//! sorted relative-path order and absorbs each node's path, kind and bytes
-//! with an explicit length prefix, so no rearrangement of names or contents
-//! can produce the same digest by concatenating differently.
+//! SHA-256, and a tree digest for comparing two arbitrary directories.
 //!
 //! The hash is implemented here rather than pulled in because this crate is a
 //! zero-dependency leaf. It is exercised against the published test vectors.
+//!
+//! # This is not where the determinism contract lives
+//!
+//! [`tree`] walks a directory and digests what it finds, which means its path
+//! keys are the names the filesystem hands back. On a filesystem that stores
+//! names in a fixed Unicode normalization form, those are not the names that
+//! were written. The contract digest is [`crate::Manifest::tree_digest`],
+//! built at emission from the generator's own strings; the crate docs explain
+//! why. Use [`tree`] to ask what is in a directory, never to ask whether a
+//! generation reproduced.
 
 use std::fs;
 use std::io;
@@ -155,13 +159,14 @@ pub fn hex(digest: &[u8; 32]) -> String {
     out
 }
 
-/// The digest of a whole directory tree: every node's relative path, kind and
-/// contents, in sorted path order.
+/// The digest of a directory tree **as the filesystem reports it**: every
+/// node's relative path, kind and contents, in sorted path order.
 ///
-/// Two trees share a digest exactly when they hold the same relative paths,
-/// the same directories, and the same file bytes. File mode, ownership and
-/// timestamps are deliberately outside it — they are properties of the run,
-/// not of the tree.
+/// Two trees share a digest exactly when the filesystem reports the same
+/// relative paths, the same directories, and the same file bytes. Mode,
+/// ownership and timestamps are outside it — they are properties of the run,
+/// not of the tree. Filename *spelling* is inside it, which is what makes this
+/// a diagnostic rather than the determinism contract: see the module docs.
 pub fn tree(root: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     for node in tree::walk(root)? {

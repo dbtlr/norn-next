@@ -73,9 +73,10 @@ pub struct LinkDensity {
     /// Per-mille of emitted links naming a target that does not exist.
     pub dangling_per_mille: u32,
     /// Per-mille of emitted links written path-qualified rather than as a
-    /// bare stem.
+    /// bare stem. Drawn for every link, resolvable or not.
     pub path_qualified_per_mille: u32,
     /// Per-mille of emitted links carrying display text (`[[target|text]]`).
+    /// Drawn for every link, resolvable or not.
     pub aliased_per_mille: u32,
     /// Per-mille of a document's links gathered into a trailing list rather
     /// than sitting inline in a paragraph.
@@ -325,7 +326,7 @@ pub const PROFILES: &[Profile] = &[
         purpose: "the ~2k-document measurement profile the per-PR gates assert against",
         docs: 2_000,
         body: REALISTIC_BODY,
-        ambiguity: Ambiguity { classes: 20, k: 3 },
+        ambiguity: Ambiguity { classes: 20, k: 6 },
         links: REALISTIC_LINKS,
         dirs: DirShape {
             top_level: 10,
@@ -344,7 +345,7 @@ pub const PROFILES: &[Profile] = &[
         purpose: "the >=5k-document profile the scheduled soak lane runs",
         docs: 6_000,
         body: REALISTIC_BODY,
-        ambiguity: Ambiguity { classes: 24, k: 5 },
+        ambiguity: Ambiguity { classes: 24, k: 8 },
         links: LinkDensity {
             mean_per_doc: 8,
             max_per_doc: 40,
@@ -385,6 +386,60 @@ impl Profile {
     /// Every profile name, in the table's order.
     pub fn names() -> Vec<&'static str> {
         PROFILES.iter().map(|p| p.name).collect()
+    }
+
+    /// Why this profile cannot be generated from, if it cannot.
+    ///
+    /// The shipped table is checked against this in its own test, so these are
+    /// not runtime surprises. They exist because a profile is a plain struct
+    /// a caller can build: a hand-built one asking for zero directories used
+    /// to reach a panic deep in placement, and an actionable refusal at the
+    /// door is the better failure.
+    pub fn validate(&self) -> Result<(), String> {
+        let name = self.name;
+        if self.docs == 0 {
+            return Err(format!(
+                "profile `{name}`: docs is 0, so there is no tree to generate"
+            ));
+        }
+        if self.dirs.top_level == 0 {
+            return Err(format!(
+                "profile `{name}`: dirs.top_level is 0, so there is nowhere to place a document; \
+                 at least one top-level directory is required"
+            ));
+        }
+        if self.body.length.is_empty() {
+            return Err(format!(
+                "profile `{name}`: body.length is empty, so no body length can be drawn"
+            ));
+        }
+        let weight: u32 = self.body.length.iter().map(|b| b.weight_per_mille).sum();
+        if weight != 1000 {
+            return Err(format!(
+                "profile `{name}`: body.length weights sum to {weight} per mille, not 1000"
+            ));
+        }
+        for bucket in self.body.length {
+            if bucket.max_bytes < bucket.min_bytes {
+                return Err(format!(
+                    "profile `{name}`: a body.length bucket runs backwards ({}..{})",
+                    bucket.min_bytes, bucket.max_bytes
+                ));
+            }
+        }
+        if self.body.bytes_per_heading == 0 {
+            return Err(format!(
+                "profile `{name}`: body.bytes_per_heading is 0, so heading emission cannot advance"
+            ));
+        }
+        if self.ambiguity.classes * self.ambiguity.k > self.docs {
+            return Err(format!(
+                "profile `{name}`: ambiguity claims {} of {} documents",
+                self.ambiguity.classes * self.ambiguity.k,
+                self.docs
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -457,6 +512,54 @@ mod tests {
                 profile.ambiguity.classes <= AMBIGUOUS_STEMS.len(),
                 "{} asks for more ambiguity classes than the stem pool holds",
                 profile.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_shipped_profile_validates() {
+        for profile in Profile::all() {
+            assert_eq!(profile.validate(), Ok(()), "{}", profile.name);
+        }
+    }
+
+    #[test]
+    fn a_profile_with_no_directories_is_refused_by_name() {
+        let mut profile = Profile::by_name("tiny").expect("tiny profile");
+        profile.dirs.top_level = 0;
+        let problem = profile
+            .validate()
+            .expect_err("zero directories must be refused");
+        assert!(problem.contains("dirs.top_level"), "{problem}");
+        assert!(problem.contains("tiny"), "{problem}");
+    }
+
+    #[test]
+    fn a_profile_whose_weights_do_not_sum_is_refused() {
+        const SKEWED: &[LengthBucket] = &[LengthBucket {
+            weight_per_mille: 900,
+            min_bytes: 100,
+            max_bytes: 200,
+        }];
+        let mut profile = Profile::by_name("tiny").expect("tiny profile");
+        profile.body.length = SKEWED;
+        let problem = profile
+            .validate()
+            .expect_err("a short weight sum must be refused");
+        assert!(problem.contains("900 per mille"), "{problem}");
+    }
+
+    #[test]
+    fn the_calibrated_profiles_carry_classes_past_the_candidate_bound() {
+        // A bounded candidate list carries five entries. A class of five or
+        // fewer never meets the bound, so a measurement against it cannot
+        // show truncation happening.
+        for name in ["realistic", "soak"] {
+            let profile = Profile::by_name(name).unwrap_or_else(|| panic!("{name} profile"));
+            assert!(
+                profile.ambiguity.k > 5,
+                "{name} carries k={}, which never reaches the candidate bound",
+                profile.ambiguity.k
             );
         }
     }

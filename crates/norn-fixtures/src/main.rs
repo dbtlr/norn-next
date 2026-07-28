@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use norn_fixtures::probe::{self, CALIBRATION, Stat};
-use norn_fixtures::{Profile, SENTINEL_CONTENT, SENTINEL_FILE, digest, generate};
+use norn_fixtures::{Profile, SENTINEL_CONTENT, SENTINEL_FILE, generate};
 
 fn usage() -> String {
     let mut out = String::from(
@@ -79,6 +79,7 @@ fn prepare_target(out_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
 struct GenerateArgs {
     out_dir: PathBuf,
     profile: String,
@@ -90,19 +91,33 @@ fn parse_generate(argv: &[String]) -> Result<GenerateArgs, String> {
     let mut profile: Option<String> = None;
     let mut seed: u64 = 0;
 
+    let mut seed_seen = false;
     let mut i = 0;
     while i < argv.len() {
         match argv[i].as_str() {
             "--profile" => {
+                if profile.is_some() {
+                    return Err("--profile given more than once".to_string());
+                }
                 i += 1;
                 profile = Some(argv.get(i).ok_or("--profile requires a value")?.clone());
             }
             "--seed" => {
+                if seed_seen {
+                    return Err("--seed given more than once".to_string());
+                }
+                seed_seen = true;
                 i += 1;
                 let value = argv.get(i).ok_or("--seed requires a value")?;
                 seed = value
                     .parse::<u64>()
                     .map_err(|_| format!("--seed value is not a valid u64: {value}"))?;
+            }
+            // A flag-shaped token never becomes the output directory. Silently
+            // treating a misspelled flag as a path is how a command ends up
+            // generating into a directory called `--porfile`.
+            other if other.starts_with('-') => {
+                return Err(format!("unknown flag: {other}"));
             }
             other if out_dir.is_none() => out_dir = Some(PathBuf::from(other)),
             other => return Err(format!("unexpected argument: {other}")),
@@ -129,12 +144,11 @@ fn run_generate(argv: &[String]) -> Result<String, (String, u8)> {
     prepare_target(&args.out_dir).map_err(|e| (e, 1))?;
     let manifest = generate(&profile, args.seed, &args.out_dir)
         .map_err(|e| (format!("generation failed: {e}"), 1))?;
-    let digest = digest::tree_hex(&args.out_dir)
-        .map_err(|e| (format!("cannot digest the generated tree: {e}"), 1))?;
 
     Ok(format!(
-        "{}\ntree {digest}\n-> {}",
+        "{}\ntree {}\n-> {}",
         manifest.summary_line(),
+        manifest.tree_hex(),
         args.out_dir.display()
     ))
 }
@@ -213,5 +227,95 @@ fn main() -> ExitCode {
             eprintln!("norn-fixtures: {message}");
             ExitCode::from(code)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    #[test]
+    fn a_well_formed_invocation_parses() {
+        let parsed = parse_generate(&args(&["out", "--profile", "small", "--seed", "9"]))
+            .expect("a well-formed invocation parses");
+        assert_eq!(parsed.out_dir, PathBuf::from("out"));
+        assert_eq!(parsed.profile, "small");
+        assert_eq!(parsed.seed, 9);
+    }
+
+    #[test]
+    fn the_seed_defaults_to_zero() {
+        let parsed =
+            parse_generate(&args(&["out", "--profile", "small"])).expect("the seed is optional");
+        assert_eq!(parsed.seed, 0);
+    }
+
+    /// A flag-shaped token is a usage error, never an output directory. The
+    /// alternative is generating a tree into a directory named after a typo.
+    #[test]
+    fn a_flag_shaped_token_never_becomes_the_output_directory() {
+        for token in ["--porfile", "-p", "--"] {
+            let problem = parse_generate(&args(&[token, "--profile", "small"]))
+                .expect_err("a flag-shaped token must be refused");
+            assert!(problem.contains(token), "{problem}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_flag_is_refused_rather_than_silently_last_wins() {
+        let problem = parse_generate(&args(&[
+            "out",
+            "--profile",
+            "small",
+            "--profile",
+            "realistic",
+        ]))
+        .expect_err("a repeated --profile must be refused");
+        assert!(
+            problem.contains("--profile given more than once"),
+            "{problem}"
+        );
+
+        let problem = parse_generate(&args(&[
+            "out",
+            "--profile",
+            "small",
+            "--seed",
+            "1",
+            "--seed",
+            "2",
+        ]))
+        .expect_err("a repeated --seed must be refused");
+        assert!(problem.contains("--seed given more than once"), "{problem}");
+    }
+
+    #[test]
+    fn a_flag_without_its_value_is_refused() {
+        assert!(parse_generate(&args(&["out", "--profile"])).is_err());
+        assert!(parse_generate(&args(&["out", "--profile", "small", "--seed"])).is_err());
+    }
+
+    #[test]
+    fn a_seed_that_is_not_a_number_is_refused() {
+        let problem = parse_generate(&args(&["out", "--profile", "small", "--seed", "later"]))
+            .expect_err("a non-numeric seed must be refused");
+        assert!(problem.contains("not a valid u64"), "{problem}");
+    }
+
+    #[test]
+    fn a_second_positional_argument_is_refused() {
+        let problem = parse_generate(&args(&["out", "elsewhere", "--profile", "small"]))
+            .expect_err("a second output directory must be refused");
+        assert!(problem.contains("elsewhere"), "{problem}");
+    }
+
+    #[test]
+    fn the_required_arguments_are_required() {
+        assert!(parse_generate(&args(&["--profile", "small"])).is_err());
+        assert!(parse_generate(&args(&["out"])).is_err());
     }
 }

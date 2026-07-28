@@ -7,8 +7,9 @@
 //! it never resolves a link, never decides what a frontmatter field means,
 //! never honours a code fence or an escape. A heading is a line whose first
 //! bytes are one to six `#` followed by a space; a link is an occurrence of
-//! `[[`. Document syntax has an owner elsewhere in the workspace, and a
-//! second interpretation of it here would be a second grammar. What the probe
+//! `[[`, and its spelling is whether the bytes up to the next `]]` carry a
+//! `/` or a `|`. Document syntax has an owner elsewhere in the workspace, and
+//! a second interpretation of it here would be a second grammar. What the probe
 //! measures instead is shape — how many files, how big, how deep, how densely
 //! cross-referenced — which is exactly what "realistic" is a claim about.
 //!
@@ -57,7 +58,17 @@ pub struct VaultStats {
     pub document_bytes_max: u64,
     pub heading_lines: u64,
     pub links: u64,
+    /// Links whose target name carries a `/` — the path-qualified spelling.
+    pub path_qualified_links: u64,
+    /// Links whose target carries display text after a `|`.
+    pub aliased_links: u64,
     pub linkless_documents: u64,
+    /// Documents whose file name is not pure ASCII.
+    pub non_ascii_named_documents: u64,
+    /// Documents whose file name carries an interior space.
+    pub spaced_name_documents: u64,
+    /// Documents sitting at the tree root rather than inside a directory.
+    pub root_documents: u64,
     pub ambiguous_stem_classes: u64,
     pub largest_stem_class: u64,
 }
@@ -73,9 +84,34 @@ impl VaultStats {
         ratio(self.links * 1000, self.documents)
     }
 
+    /// Path-qualified links, per mille of links.
+    pub fn path_qualified_links_per_mille(&self) -> u64 {
+        ratio(self.path_qualified_links * 1000, self.links)
+    }
+
+    /// Links carrying display text, per mille of links.
+    pub fn aliased_links_per_mille(&self) -> u64 {
+        ratio(self.aliased_links * 1000, self.links)
+    }
+
     /// Documents carrying no links at all, per mille of documents.
     pub fn linkless_documents_per_mille(&self) -> u64 {
         ratio(self.linkless_documents * 1000, self.documents)
+    }
+
+    /// Documents whose name is not pure ASCII, per mille of documents.
+    pub fn non_ascii_named_documents_per_mille(&self) -> u64 {
+        ratio(self.non_ascii_named_documents * 1000, self.documents)
+    }
+
+    /// Documents whose name carries a space, per mille of documents.
+    pub fn spaced_name_documents_per_mille(&self) -> u64 {
+        ratio(self.spaced_name_documents * 1000, self.documents)
+    }
+
+    /// Documents at the tree root, per mille of documents.
+    pub fn root_documents_per_mille(&self) -> u64 {
+        ratio(self.root_documents * 1000, self.documents)
     }
 
     /// Non-Markdown files per mille of all files.
@@ -109,7 +145,12 @@ pub enum Stat {
     DocumentBytesMax,
     HeadingLinesPerMebibyte,
     LinksPerThousandDocuments,
+    PathQualifiedLinksPerMille,
+    AliasedLinksPerMille,
     LinklessDocumentsPerMille,
+    NonAsciiNamedDocumentsPerMille,
+    SpacedNameDocumentsPerMille,
+    RootDocumentsPerMille,
     NonMarkdownFilesPerMille,
     DocumentsPerThousandDirectories,
     MaxDirectoryDepth,
@@ -127,7 +168,12 @@ impl Stat {
             Stat::DocumentBytesMax => "document_bytes_max",
             Stat::HeadingLinesPerMebibyte => "heading_lines_per_mebibyte",
             Stat::LinksPerThousandDocuments => "links_per_thousand_documents",
+            Stat::PathQualifiedLinksPerMille => "path_qualified_links_per_mille",
+            Stat::AliasedLinksPerMille => "aliased_links_per_mille",
             Stat::LinklessDocumentsPerMille => "linkless_documents_per_mille",
+            Stat::NonAsciiNamedDocumentsPerMille => "non_ascii_named_documents_per_mille",
+            Stat::SpacedNameDocumentsPerMille => "spaced_name_documents_per_mille",
+            Stat::RootDocumentsPerMille => "root_documents_per_mille",
             Stat::NonMarkdownFilesPerMille => "non_markdown_files_per_mille",
             Stat::DocumentsPerThousandDirectories => "documents_per_thousand_directories",
             Stat::MaxDirectoryDepth => "max_directory_depth",
@@ -145,7 +191,12 @@ impl Stat {
             Stat::DocumentBytesMax => stats.document_bytes_max,
             Stat::HeadingLinesPerMebibyte => stats.heading_lines_per_mebibyte(),
             Stat::LinksPerThousandDocuments => stats.links_per_thousand_documents(),
+            Stat::PathQualifiedLinksPerMille => stats.path_qualified_links_per_mille(),
+            Stat::AliasedLinksPerMille => stats.aliased_links_per_mille(),
             Stat::LinklessDocumentsPerMille => stats.linkless_documents_per_mille(),
+            Stat::NonAsciiNamedDocumentsPerMille => stats.non_ascii_named_documents_per_mille(),
+            Stat::SpacedNameDocumentsPerMille => stats.spaced_name_documents_per_mille(),
+            Stat::RootDocumentsPerMille => stats.root_documents_per_mille(),
             Stat::NonMarkdownFilesPerMille => stats.non_markdown_files_per_mille(),
             Stat::DocumentsPerThousandDirectories => stats.documents_per_thousand_directories(),
             Stat::MaxDirectoryDepth => stats.max_directory_depth,
@@ -165,7 +216,12 @@ impl Stat {
             Stat::DocumentBytesMax,
             Stat::HeadingLinesPerMebibyte,
             Stat::LinksPerThousandDocuments,
+            Stat::PathQualifiedLinksPerMille,
+            Stat::AliasedLinksPerMille,
             Stat::LinklessDocumentsPerMille,
+            Stat::NonAsciiNamedDocumentsPerMille,
+            Stat::SpacedNameDocumentsPerMille,
+            Stat::RootDocumentsPerMille,
             Stat::NonMarkdownFilesPerMille,
             Stat::DocumentsPerThousandDirectories,
             Stat::MaxDirectoryDepth,
@@ -239,11 +295,49 @@ pub const CALIBRATION: &[Target] = &[
                a star and not a clique",
     },
     Target {
+        stat: Stat::PathQualifiedLinksPerMille,
+        min: 100,
+        max: 500,
+        why: "both link spellings are in real use: a bare stem leans on \
+               resolution, a path-qualified target bypasses it, and a tree \
+               carrying only one never exercises the other",
+    },
+    Target {
+        stat: Stat::AliasedLinksPerMille,
+        min: 100,
+        max: 550,
+        why: "display text is ordinary in prose, and it is the case where the \
+               text a reader sees and the target a tool resolves differ",
+    },
+    Target {
         stat: Stat::LinklessDocumentsPerMille,
-        min: 0,
+        min: 20,
         max: 250,
-        why: "isolated documents exist and are a minority; a tree with none \
-               never exercises the no-neighbours path",
+        why: "isolated documents exist and are a minority. The floor is the \
+               load-bearing half: a tree where every document links somewhere \
+               never exercises the no-neighbours path at all",
+    },
+    Target {
+        stat: Stat::NonAsciiNamedDocumentsPerMille,
+        min: 15,
+        max: 200,
+        why: "collections are written in more than one language, and a \
+               non-ASCII file name is where path handling, normalization and \
+               stem indexing are actually tested",
+    },
+    Target {
+        stat: Stat::SpacedNameDocumentsPerMille,
+        min: 15,
+        max: 200,
+        why: "file names with spaces are normal in a human-curated collection \
+               and are the ones that break naive quoting and tokenizing",
+    },
+    Target {
+        stat: Stat::RootDocumentsPerMille,
+        min: 10,
+        max: 250,
+        why: "some documents never get filed. A tree whose every document sits \
+               in a directory misses the shallowest path case",
     },
     Target {
         stat: Stat::NonMarkdownFilesPerMille,
@@ -273,10 +367,13 @@ pub const CALIBRATION: &[Target] = &[
     },
     Target {
         stat: Stat::LargestStemClass,
-        min: 2,
+        min: 6,
         max: 64,
-        why: "at least one name repeats often enough that resolving it bare is a \
-               genuine choice among candidates",
+        why: "a finding carries a bounded head of five candidates, so a class of \
+               five or fewer fits inside the bound and never shows it \
+               truncating. The floor sits above the bound deliberately: a \
+               profile measured by the gates has to meet the truncating case, \
+               not merely approach it",
     },
 ];
 
@@ -327,18 +424,53 @@ fn percentile(sorted: &[u64], p: u64) -> u64 {
     sorted[index]
 }
 
-/// Count heading lines and `[[` occurrences in one document's bytes.
-fn scan(bytes: &[u8]) -> (u64, u64) {
-    let mut headings = 0;
-    let mut links = 0;
+/// What one document's bytes carry: heading lines, and each link's spelling.
+#[derive(Default)]
+struct Scan {
+    headings: u64,
+    links: u64,
+    path_qualified_links: u64,
+    aliased_links: u64,
+}
+
+/// Count heading lines and wikilink spellings in one document's bytes.
+///
+/// A link runs from `[[` to the next `]]` on the same line. Inside it, a `/`
+/// means the target was written path-qualified and a `|` means it carries
+/// display text — both byte tests over the span, never an interpretation of
+/// what the target resolves to.
+fn scan(bytes: &[u8]) -> Scan {
+    let mut out = Scan::default();
     for line in bytes.split(|b| *b == b'\n') {
         let hashes = line.iter().take_while(|b| **b == b'#').count();
         if (1..=6).contains(&hashes) && line.get(hashes) == Some(&b' ') {
-            headings += 1;
+            out.headings += 1;
         }
-        links += line.windows(2).filter(|w| w == b"[[").count() as u64;
+        let mut cursor = 0;
+        while cursor + 1 < line.len() {
+            if &line[cursor..cursor + 2] != b"[[" {
+                cursor += 1;
+                continue;
+            }
+            let open = cursor + 2;
+            let close = (open..line.len().saturating_sub(1))
+                .find(|i| &line[*i..*i + 2] == b"]]")
+                .unwrap_or(line.len());
+            let span = &line[open..close.min(line.len())];
+            out.links += 1;
+            if span.contains(&b'/') {
+                out.path_qualified_links += 1;
+            }
+            if span.contains(&b'|') {
+                out.aliased_links += 1;
+            }
+            // Advance past the opener, not past the span: the link count stays
+            // a count of `[[` occurrences, so an unclosed opener cannot
+            // swallow the links that follow it.
+            cursor = open;
+        }
     }
-    (headings, links)
+    out
 }
 
 /// Measure the shape of the tree rooted at `root`.
@@ -358,16 +490,27 @@ pub fn measure(root: &Path) -> io::Result<VaultStats> {
             stats.non_markdown_files += 1;
             continue;
         };
-        let stem = stem.rsplit('/').next().unwrap_or(stem).to_string();
-        *stems.entry(stem).or_insert(0) += 1;
+        let leaf = stem.rsplit('/').next().unwrap_or(stem).to_string();
+        if !leaf.is_ascii() {
+            stats.non_ascii_named_documents += 1;
+        }
+        if leaf.contains(' ') {
+            stats.spaced_name_documents += 1;
+        }
+        if !node.rel.contains('/') {
+            stats.root_documents += 1;
+        }
+        *stems.entry(leaf).or_insert(0) += 1;
 
         let bytes = fs::read(&node.path)?;
-        let (headings, links) = scan(&bytes);
+        let scanned = scan(&bytes);
         stats.documents += 1;
         stats.markdown_bytes += bytes.len() as u64;
-        stats.heading_lines += headings;
-        stats.links += links;
-        if links == 0 {
+        stats.heading_lines += scanned.headings;
+        stats.links += scanned.links;
+        stats.path_qualified_links += scanned.path_qualified_links;
+        stats.aliased_links += scanned.aliased_links;
+        if scanned.links == 0 {
             stats.linkless_documents += 1;
         }
         sizes.push(bytes.len() as u64);
@@ -430,14 +573,38 @@ mod tests {
 
     #[test]
     fn headings_are_counted_by_their_leading_bytes() {
-        let (headings, _) = scan(b"# One\n## Two\n###### Six\n####### Seven\n#NoSpace\ntext\n");
-        assert_eq!(headings, 3);
+        let scanned = scan(b"# One\n## Two\n###### Six\n####### Seven\n#NoSpace\ntext\n");
+        assert_eq!(scanned.headings, 3);
     }
 
     #[test]
     fn links_are_counted_by_occurrence() {
-        let (_, links) = scan(b"see [[a]] and [[b|c]]\nno link here\n[[d]]\n");
-        assert_eq!(links, 3);
+        let scanned = scan(b"see [[a]] and [[b|c]]\nno link here\n[[d]]\n");
+        assert_eq!(scanned.links, 3);
+    }
+
+    #[test]
+    fn link_spellings_are_counted_inside_their_own_span() {
+        let scanned =
+            scan(b"[[bare]] [[dir/sub/qualified]] [[aliased|shown]] [[dir/both|shown]]\n");
+        assert_eq!(scanned.links, 4);
+        assert_eq!(scanned.path_qualified_links, 2);
+        assert_eq!(scanned.aliased_links, 2);
+    }
+
+    /// A slash or a bar outside a link belongs to the prose, not to a target.
+    #[test]
+    fn text_around_a_link_does_not_count_as_a_spelling() {
+        let scanned = scan(b"a/b | c [[bare]] d/e | f\n");
+        assert_eq!(scanned.links, 1);
+        assert_eq!(scanned.path_qualified_links, 0);
+        assert_eq!(scanned.aliased_links, 0);
+    }
+
+    #[test]
+    fn an_unclosed_link_does_not_swallow_the_next_one() {
+        let scanned = scan(b"[[open and [[closed]]\n");
+        assert_eq!(scanned.links, 2);
     }
 
     #[test]

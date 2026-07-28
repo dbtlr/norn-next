@@ -13,10 +13,11 @@ suite that passes by agreeing with a recording, which converts an old
 program's accidents into this program's requirements. The gate below is what
 makes the difference operational rather than aspirational.
 
-> **Amended 2026-07-28** — one clause of this decision was replaced: a case no
-> longer depends on a generator reproducing its tree. The original wording is
-> left standing wherever it appears, each occurrence carrying the amendment
-> beneath it, and [Amendments](#amendments) records the change in full.
+> **Amended 2026-07-28** — a case no longer depends on a generator reproducing
+> its tree. Two passages below carry that clause: the fixture statement in
+> **The contract**, and the runner entry under **Consequences**. Both are left
+> standing as written, each with the amendment beneath it, and
+> [Amendments](#amendments) records the change in full.
 
 ## The contract
 
@@ -207,12 +208,22 @@ defect in this program when it is drift in a generator — is not dropped. It is
 answered more completely than the clause managed: a generator that is never
 consulted cannot drift into a case's input.
 
-**What it touched.** The two contract statements above, each amended in place;
+**What it touched.** The two passages above, each amended in place;
 `crates/norn/tests/corpus/fixtures.json` and its note;
-`crates/norn/tests/corpus/README.md`; the `TreeEntry` and `FixtureManifest`
-types and the audit in `norn-testkit`; and the corpus suite's account of what
-activation still needs. **ADR 0002** states the generator side of the same
-contract.
+`crates/norn/tests/corpus/README.md`; and, in `norn-testkit`, the `TreeEntry`
+and `FixtureManifest` types, the audit, a new strict base64 codec, and
+`TreeEntry::malformed`, whose return type widened from a fixed reason to a
+described one so a decode failure can say what was wrong with it. The corpus
+suite's account of what activation still needs changed with them. **ADR 0002**
+states the generator side of the same contract.
+
+The base64 codec is hand-written for the reason the rest of this workspace's
+small primitives are: the requirement is narrow and strict — canonical
+encoding, so one byte sequence has exactly one spelling and a manifest cannot
+acquire two recordings of the same file — and a harness crate taking a
+dependency to meet it would buy version surface instead of certainty. It is
+exercised against the published vectors and round-tripped over every byte
+value.
 
 Nothing else in this decision changes. The corpus is still evidence with zero
 authority, activation is still the per-command approval act that judges whether

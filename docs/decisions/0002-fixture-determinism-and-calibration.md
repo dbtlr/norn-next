@@ -2,17 +2,19 @@
 
 Measurement needs a subject that does not move. `norn-fixtures` is that
 subject: a deterministic Markdown-vault generator that turns a named profile
-and a seed into a tree of documents, and nothing else into anything. Counters,
-plan assertions, memory bars, resolution behaviour and the soak lane all
-measure against trees it produces, so two properties are load-bearing at once —
-the tree has to be **reproducible**, or a measurement compares two different
+and a seed into a tree of documents, and nothing else into anything. The
+counter gates, plan assertions, memory bars and soak lane that will measure
+against its trees are not built yet — they are placeholders in the workflow
+files, filled by their own tasks — so this decision is about what the
+generator guarantees to whatever measures it, and the guarantees are two: the
+tree has to be **reproducible**, or a measurement compares two different
 worlds; and it has to be **realistic**, or the measurement is precise about a
 world nobody lives in.
 
 ## The contract
 
-**The same `(profile, seed)` produces the same tree, byte for byte, on every
-run and on every machine.** Four commitments carry it:
+**The same `(profile, seed)` produces the same emitted tree, byte for byte, on
+every run and on every machine.** Four commitments carry it:
 
 - Every choice is a draw from a seeded generator, in a fixed order.
 - No clock, environment variable, path, locale or hash-map iteration order
@@ -22,11 +24,27 @@ run and on every machine.** Four commitments carry it:
   between platforms.
 - Profiles are compile-time constants, so the pair really is the whole input.
 
-`digest::tree` reduces a whole tree to one value — every node's relative path,
-kind and bytes, absorbed length-framed in sorted path order — and the
-determinism suite generates each named profile twice into fresh directories and
-requires the digests to agree. **That gate is green before anything depends on
-this crate.**
+The manifest's tree digest reduces a whole generation to one value — every
+emitted path and every written byte, absorbed length-framed in sorted path
+order — and the determinism suite generates each named profile twice into
+fresh directories and requires the digests to agree. **That gate is green
+before anything depends on this crate.**
+
+**The contract is byte-identity of what the generator *emits*, not of what a
+filesystem later reports.** The scope is not a hedge; it is the one place the
+two can genuinely differ. Some filesystems store file names in a fixed Unicode
+normalization form and hand back a spelling other than the one written, so a
+name written NFC returns NFD — equivalent character for character, different
+byte for byte. The digest therefore never asks: it is built while the tree is
+written, from the path strings the generator chose. Normalizing the names read
+back is the alternative repair and the worse one here, because correct
+canonical composition needs the full Unicode decomposition, combining-class and
+composition-exclusion tables, which a zero-dependency dev crate should neither
+hand-roll nor pretend to keep current. Two consequences follow and are named
+rather than fixed: a generated name may sit on disk in a different form than it
+was written in, and a wikilink may disagree in form with the file it names —
+a real hazard for anything resolving links against directory entries, which a
+tree carrying non-ASCII names deliberately exposes.
 
 **Changing the generator changes the trees it produces, and that is allowed.**
 The contract is that a given build reproduces itself; the gate is what keeps it
@@ -44,6 +62,12 @@ positive form of the contract, and its corpus half is
 [ADR 0001, Amendment 1](0001-corpus-activation-gate.md#amendments).
 
 **Realism is five knobs, each a seeded draw, each documented on its own type.**
+The ratified list named seven dials; five is the same set, consolidated where a
+dial was not independent. Document count is the profile's own `docs` field
+rather than a knob — it is the profile's scale, and every other knob is a rate
+or a shape measured against it — and heading density is a field of body shape,
+because headings punctuate a body and their spacing is meaningless without its
+length. Nothing was dropped.
 
 | Knob | What it dials | Why it is a knob |
 |---|---|---|
@@ -66,10 +90,15 @@ reaching 70 KiB, and the mean is asserted as arithmetic rather than left to
 prose.
 
 **Profiles are data, and the table is the whole set.** `tiny` and `small` are
-scaffolding; `ambiguous` carries classes past the point a bounded candidate
+scaffolding; `ambiguous` carries classes far past the point a bounded candidate
 list must truncate; `realistic` is the ~2k-document profile the per-PR gates
-measure against; `soak` is the ≥5k-document profile the scheduled lane runs. A
-profile is added by editing the table, which arrives as a reviewable diff.
+are to measure against; `soak` is the ≥5k-document profile the scheduled lane
+is to run. A profile is added by editing the table, which arrives as a
+reviewable diff.
+
+Both measured profiles carry ambiguity classes **larger than the five-candidate
+bound a finding holds**. A class of five or fewer fits inside the bound and so
+never shows it truncating, which would leave the bound asserted and unmet.
 
 **Calibration is an authored envelope, checked in, with its reasoning beside
 it.** The probe reports a tree's shape statistics; `probe::CALIBRATION` states
@@ -79,6 +108,36 @@ particular collection, and each is deliberately wide enough to describe
 collections in general and narrow enough that the failure it exists to catch —
 a generator drifting back toward uniformly small, uniformly shallow, uniformly
 linked documents — moves a statistic clean out of range.
+
+**Every knob is constrained by something that fails when it stops
+manifesting.** A knob whose value can be edited to zero without a test noticing
+is decoration. Each rate the generator draws has either an envelope entry over
+a probe statistic that measures it, or a direct test over a fixed
+`(profile, seed)`.
+
+### Authored ranges, where the ratified wording said "measured artifact"
+
+The ratified decision described calibration as a stats probe run against a real
+collection, yielding checked-in generic parameters. **The probe is built and
+runs against any directory, including a real collection; the checked-in ranges
+are authored rather than measured**, and the departure is deliberate on three
+grounds.
+
+The first is availability: no calibration parameters existed at the recording
+pin to carry forward — the frozen generator had no probe and no parameter set,
+which was verified before this was written, so there was nothing to import and
+the choice was authoring or measuring from scratch. The second is
+shippability: the collections available to measure are private, and a range
+derived from one embeds a provenance the repository cannot show, cannot
+justify in review, and cannot let anyone reproduce. The third is that authored
+ranges are what the ratified wording asked for anyway — it called for *generic*
+parameters, and a range measured from one particular collection is the
+specific thing, not the generic one.
+
+What the probe preserves is the property that mattered: recalibration stays a
+deliberate, reviewable act. Measuring a real collection and replacing a range
+with what it says is one command and one diff, and the `why` field is where the
+grounds go.
 
 **Recalibration is a deliberate act.** The probe runs against any directory, a
 real collection included, so replacing an authored range with a measured one is
@@ -96,28 +155,36 @@ generator knows them and no byte-level reading can recover them.
 
 **The crate is a leaf with no dependencies at all.** The digest, the calendar
 arithmetic, the PRNG and the argument parsing are in-crate, because a generator
-that links a parser, a hasher or a random-number crate inherits that crate's
-version drift into the trees every gate measures against.
+that links a parser, a hasher or a random-number crate would inherit that
+crate's version drift into every tree measured against it.
 
-**The largest profile's runs are soak-lane work.** The determinism and
+**The largest profile's runs belong to the soak lane.** The determinism and
 calibration cases for the ≥5k profile are `#[ignore]`d with their reason
-stated; the per-PR lane runs the smaller profiles and the ~2k one. Long-running
-work belongs in the lane built for it.
+stated, and the lane that will adopt them is a placeholder today. The split is
+by kind, not by stopwatch: the per-PR lane runs the profiles the per-PR gates
+are to measure against, and a ≥5k profile is the other lane's work whatever it
+costs to run.
 
 ## Consequences
 
-- Anything that measures against a fixture tree names it by `(profile, seed)`
-  and gets the same subject every time, which is what makes a counter
-  assertion or a memory bar a statement about the program rather than about the
-  day.
+- Anything that comes to measure against a fixture tree can name it by
+  `(profile, seed)` and get the same subject every time, which is what will
+  make a counter assertion or a memory bar a statement about the program rather
+  than about the day.
 - A pool edit or distribution tweak that quietly shrinks documents fails the
   calibration gate instead of silently flattering every benchmark downstream.
+- A knob that stops manifesting fails a test rather than going quiet, so the
+  realism claim degrades loudly or not at all.
 - The envelope can only move by an edit somebody reads, so "we recalibrated"
   is never something that happened without anyone deciding it.
 - Every generated tree changes when the generator changes. That is the price of
   the contract binding a build rather than a version, and it is paid knowingly.
 - Realism is not asserted in prose. The claim is a set of numbers with reasons,
   and the gate is what makes it checkable.
+- The contract's scope is honest about the filesystem, which costs something:
+  the digest proves the generator emitted the same tree, not that two machines'
+  disks hold byte-identical names. That is the true statement, and the weaker
+  one only looked stronger.
 - The corpus and this generator are independent, and each is free to move.
   Turning a knob cannot invalidate a recorded case, and re-recording a case
   cannot constrain a knob.
@@ -140,6 +207,20 @@ work belongs in the lane built for it.
   vocabulary, determinism re-proven before anything depends on the crate, the
   body-size gap fixed by the knob work, and a mined sweep of the frozen line's
   recorded defects and irritations against the imported shape.
+- The same inventory lists a fixed document set alongside the generator. **It
+  carried, and it carried as data rather than as source**: those documents are
+  in the coverage corpus as recorded input trees, byte for byte, and the
+  manifests holding them were completed to byte-exactness alongside this work
+  (ADR 0001, Amendment 1). What did not carry is the generator code that
+  emitted them, together with the per-document finding codes it declared —
+  severed under the first condition, because a code is an assertion about what
+  a program should conclude and this crate makes none.
+- **The digest, the calendar arithmetic, the PRNG and the base64 codec are
+  hand-written** rather than taken from crates that do them well. The reason is
+  the leaf constraint above, and the requirements are narrow enough to meet:
+  each is exercised against published test vectors, and the base64 decoder is
+  additionally strict and canonical, so one byte sequence has exactly one
+  spelling and a recorded tree cannot acquire two encodings of the same file.
 - The copy itself: the seeded PRNG, the calendar arithmetic, the YAML scalar
   emitter and the sentinel guard are carried from `norn-fixtures` at pin
   `76af2c3b` on branch `rewrite/0017` of the `norn-legacy` line — about 290 of

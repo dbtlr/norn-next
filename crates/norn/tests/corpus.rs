@@ -166,9 +166,9 @@ fn unseeded_commands_have_no_activation_path() {
     );
 }
 
-/// Every case's input tree is recorded, so activation has something to hold
-/// a future generator to. A case whose fixture tree went unrecorded could
-/// never be judged: a difference in output would be unattributable.
+/// Every case names a tree that is recorded. A case whose fixture tree went
+/// unrecorded could never be judged — there would be nothing to materialize
+/// it from, and a difference in output would be unattributable.
 #[test]
 fn every_case_has_a_recorded_input_tree() {
     let corpus = corpus();
@@ -198,23 +198,25 @@ fn every_case_has_a_recorded_input_tree() {
 #[test]
 fn every_recorded_entry_reconstructs_its_bytes() {
     let corpus = corpus();
+    let mut entries = 0;
     let mut files = 0;
+    let mut directories = 0;
     let mut binary = 0;
     for manifest in &corpus.fixtures.fixtures {
         for entry in &manifest.entries {
-            let bytes = entry
-                .bytes()
-                .unwrap_or_else(|problem| {
-                    panic!(
-                        "fixture `{}` entry `{}` does not reconstruct: {problem}",
-                        manifest.fixture_ref(),
-                        entry.path
-                    )
-                })
-                .unwrap_or_else(|| {
-                    // A directory entry; nothing to count.
-                    Vec::new()
-                });
+            entries += 1;
+            let reconstructed = entry.bytes().unwrap_or_else(|problem| {
+                panic!(
+                    "fixture `{}` entry `{}` does not reconstruct: {problem}",
+                    manifest.fixture_ref(),
+                    entry.path
+                )
+            });
+            let Some(bytes) = reconstructed else {
+                directories += 1;
+                continue;
+            };
+            files += 1;
             if entry.content_base64.is_some() {
                 assert!(
                     std::str::from_utf8(&bytes).is_err(),
@@ -224,10 +226,16 @@ fn every_recorded_entry_reconstructs_its_bytes() {
                 );
                 binary += 1;
             }
-            files += 1;
         }
     }
-    assert_eq!(files, 422, "the recorded entry total moved");
+    // Counted apart, so a directory entry appearing in a future recording
+    // shows up as one rather than inflating the file total.
+    assert_eq!(entries, 422, "the recorded entry total moved");
+    assert_eq!(files, 422, "the recorded file total moved");
+    assert_eq!(
+        directories, 0,
+        "a recorded manifest gained a directory entry"
+    );
     assert_eq!(binary, 11, "the recorded binary-entry total moved");
 }
 
