@@ -26,16 +26,20 @@ program reproduces it. A recording that is not good is retired by a recorded
 ruling and the command's contract is authored fresh.
 
 `activation.json` sorts every command the binary had at the pin into one of
-four categories, and the audit reconciles that set against the binary's own
-recorded command list so none can go uncategorized. The nine `unseeded`
-commands are additionally pinned in the harness, so no manifest edit can give
-one an activation path.
+three disjoint categories — `activatable`, `unseeded`, `unrecorded` — and the
+audit reconciles that set against the binary's own recorded command list so
+none can go uncategorized, and refuses any command that appears in two.
+`activated` is not a fourth category: it is the subset of `activatable` whose
+cases run. Both the `unseeded` and `unrecorded` lists are additionally pinned
+in the harness, so no manifest edit can give a command an activation path or
+take one away.
 
 ## The files
 
 | File | What it holds |
 |---|---|
 | `activation.json` | The gate: which commands run, which could, which never can, and which have no evidence at all. |
+| `README.md` | This file. |
 | `cases/<command>.json` | The recorded invocations for one command — the unit of activation. |
 | `unseeded/<command>.json` | Recordings that reach a command with no behavior at the pin. Held apart so they are outside the activatable set by construction. |
 | `fixtures.json` | The input tree each `(profile, seed)` produced, file by file. |
@@ -48,7 +52,8 @@ can sit here.
 
 ## Three kinds of substitution, deliberately spelled differently
 
-Recorded text is verbatim apart from these, and conflating them loses
+**Recorded text is verbatim apart from the four placeholders below.** There
+are no others, and conflating the mechanisms that produce them loses
 information.
 
 1. **`<TRACE_ID>`, `<PLAN_HASH>`, `<TIMESTAMP>` — extraction masks.** Applied
@@ -58,9 +63,23 @@ information.
    field is a fact about the invocation — a write-free path mints no telemetry
    id and computes no plan hash — so it is recorded verbatim and the case
    declares no mask.
-2. **`<VAULT>` — an inherited normalization.** The recording harness replaced
-   the vault's absolute path before the extraction saw the bytes. A case
-   declares it in `normalizations`, never in `volatile_masks`.
+2. **`<VAULT>` — the one inherited normalization.** The recording harness
+   replaced the vault's absolute path before the extraction saw the bytes,
+   and that substitution is kept because the path is a property of the
+   temporary directory the run created. A case declares it in
+   `normalizations`, never in `volatile_masks`.
+
+   It is applied to **every** invocation but declared only by the cases whose
+   recordings actually carry `<VAULT>` — a declaration naming a substitution
+   the reader cannot find teaches nothing. The audit holds both directions:
+   the placeholder appears if and only if it is declared.
+
+   The harness's other substitutions are **not** applied. Each was a
+   comparison device — it erased a value or deleted a line that one program
+   emitted and another did not — and each destroys information a recording
+   exists to carry. Three were dropped: the two that erased a telemetry id and
+   a plan hash, and one that deleted the `self-update` row from the top-level
+   command list, a row the binary really emits.
 3. **`{{VAULT_ROOT}}` — an input token.** It appears in a case's
    `plan_template`, not in recorded output: the recording substituted the
    vault path for it *before* invoking. It is spelled unlike the other two on
@@ -79,6 +98,27 @@ Paths in `behavior-ledger.json` — `source_file`, and each ruling's
 `source_decision` — point inside the recording checkout, **not this
 repository**. The two namespaces overlap, so reading one as a local path
 resolves to the wrong document.
+
+## How these recordings were made
+
+The procedure is these rules, and this prose is where they live:
+
+- the environment in `environment.json`, cleared and rebuilt from a two-name
+  allowlist;
+- the four placeholders above, with the nonempty rule for masks and the
+  changed-bytes rule for declarations;
+- the fixture vault as the process working directory, shared per fixture for
+  a reading case and fresh per case for a writing one;
+- a two-run byte-equality gate: the whole catalog is recorded twice and the
+  runs must be identical, which is what proves a mask necessary rather than
+  merely plausible.
+
+**The one-time tool that performed the recording was deliberately not
+retained** — it belonged to the frozen checkout, and keeping it here would
+have carried code across a boundary that only data may cross. The rules above
+are what carries. They were independently reimplemented from this prose during
+review and reproduced this corpus byte for byte, which is the evidence they
+are stated completely rather than approximately.
 
 ## A case is only judgeable against its tree
 

@@ -49,16 +49,19 @@ iteration; a command it no longer fits regenerates from the voice standard;
 and a command that is deleted takes its prose with it.
 
 **Every command the binary had at the recording pin sits in exactly one of
-four categories.** The audit reconciles the set against the binary's own
-recorded command list, so a command cannot sit outside every category
-unnoticed:
+three disjoint categories.** The audit reconciles the set against the binary's
+own recorded command list, so a command cannot sit outside every category
+unnoticed, and it refuses a command that appears in two:
 
 | Category | Meaning |
 |---|---|
 | `activatable` | Has recorded cases, and can be approved. |
-| `activated` | The subset of `activatable` whose cases run. Empty today. |
 | `unseeded` | Carries no behavior at the pin, so there is nothing to approve and no activation path exists. |
 | `unrecorded` | Has behavior at the pin, but no case exercises it, so its contract is authored with no evidence at all. Each entry states why. |
+
+`activated` is not a fourth category. It is the subset of `activatable` whose
+cases run — empty today — and a command must be activatable before it can be
+activated.
 
 **Nine commands are unseeded:** `init`, `completions`, `cache`, `config`,
 `self-update`, `serve`, `service`, `audit`, `manpage`. Whether each should
@@ -70,7 +73,9 @@ manifest, which would otherwise be a two-line change.
 
 **One command is unrecorded:** `vault`. It has behavior at the pin and appears
 in the help catalog and in one ruling, but no case invokes it. Naming the gap
-is the point: its contract is authored from scratch.
+is the point: its contract is authored from scratch. This list is pinned in
+the harness too, for the same reason — otherwise moving a command here would
+quietly take its cases off the gate.
 
 **A case is judgeable only against the tree it ran on.** Each case names a
 generator profile and seed, and `fixtures.json` records the tree each of those
@@ -84,11 +89,22 @@ generator.
 kinds are kept apart.** The extraction's own masks — a minted telemetry id, a
 root-dependent plan hash, a wall-clock stamp — are declared per case in
 `volatile_masks`, and each was proven necessary by re-running the whole
-catalog and requiring byte equality. Substitutions the recording harness had
-already applied, such as the vault-root path, are declared separately in
-`normalizations`. A mask fires only on a nonempty value: an empty field is a
-fact about the invocation — a write-free path mints no telemetry id — so it is
-recorded verbatim and the case declares no mask.
+catalog and requiring byte equality. The one substitution kept from the
+recording harness, the vault-root path, is declared separately in
+`normalizations`. There are no others: a harness substitution that erased a
+value or deleted a line the binary really emitted existed to make two
+programs' outputs comparable, and each destroys information a recording exists
+to carry, so none is applied.
+
+Two rules make a declaration mean something, and the audit enforces both in
+both directions. **A mask fires only on a nonempty value**: an empty field is
+a fact about the invocation — a write-free path mints no telemetry id — so it
+is recorded verbatim and the case declares no mask. And **a substitution is
+declared where it changed bytes, not where it was applied**: the vault-root
+substitution runs on every invocation but is declared only by the cases whose
+recordings carry `<VAULT>`. A placeholder in the bytes with no declaration
+reads as output the program produced; a declaration with no placeholder points
+at nothing.
 
 ## What the recordings say about exit codes
 
@@ -134,4 +150,8 @@ the verb charter answers.
   behavior rulings, and 45 help entries were recorded from it under the
   environment described in `crates/norn/tests/corpus/environment.json`.
   Recording was a one-time act performed in that checkout: only data crosses
-  into this workspace.
+  into this workspace, and the tool that performed it was deliberately not
+  retained. What carries instead is the procedure, written down in that
+  environment file and in the corpus README — and an independent
+  reimplementation from that prose reproduced the corpus byte for byte, which
+  is the evidence the rules are stated completely.
