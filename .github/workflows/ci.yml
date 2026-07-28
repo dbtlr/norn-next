@@ -51,17 +51,19 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
-  # The architecture gate: it reads `cargo metadata` and asserts the workspace
-  # normal-dependency graph against the allowlist in docs/architecture.md,
-  # under the pinned feature matrix, and holds the invariant-to-mechanism
-  # mapping to the boundary lints configured in clippy.toml. The lints
-  # themselves bind in the build job, where clippy runs.
+  # The architecture gate: it reads `cargo metadata` once per entry in the
+  # pinned feature matrix and asserts the workspace normal-dependency graph
+  # against the allowlist in docs/architecture.md; it asserts the transcribed
+  # allowlist and crate list against the tables in that document; it refuses a
+  # local crate the workspace does not hold as a member; and it holds the
+  # invariant-to-mechanism mapping to the boundary lints configured in
+  # clippy.toml. The lints themselves bind in the build job, where clippy runs.
   architecture:
     name: architecture gate
     runs-on: ubuntu-latest
@@ -70,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Gate
-        run: cargo test -p norn-testkit --test architecture
+        run: cargo test --locked -p norn-testkit --test architecture
 
   # Filled by NORN-13: size-independence pairs, and the counter and EXPLAIN
   # bars over the read builders that arrive with norn-store. The machinery
@@ -90,9 +92,12 @@ jobs:
           echo "         EXPLAIN plans against the builder's emitted SQL;"
           echo "         size-independence pairs, expressed as counts."
 
-  # Filled by NORN-13 (instrumentation harness): peak memory at the
-  # ~2k-document profile. The trend line over time lives in the soak lane;
-  # this job is the per-PR bar.
+  # Filled by NORN-13: peak memory at the ~2k-document profile. The
+  # instrumentation it is written with — the sandboxed spawn and the
+  # peak-resident-set reading taken from the kernel when the child is waited
+  # on — is in norn-testkit (process.rs); what is missing is the subject and
+  # the bar. The trend line over time lives in the soak lane; this job is the
+  # per-PR bar.
   memory:
     name: memory invariant (placeholder — NORN-13)
     runs-on: ubuntu-latest
