@@ -383,9 +383,10 @@ filesystem effect.
 | `norn-console` | The render seam; this is the rule's home, not a carve-out |
 | `norn-client` stdio-MCP shim | JSON-RPC frames are the protocol; they cannot route through a record renderer |
 | `norn-client` `completions` and `manpage` | Generated artifacts consumed by other programs, not rendered records |
+| `norn-fixtures` (dev) | Its command line reports what it generated and what it measured. Routing a dev generator's output through the product's render seam would give a leaf a dependency the allowlist forbids |
 
 Everything a person reads as *output* still goes through `norn-console`. The carve-outs
-cover machine-consumed byte streams only.
+cover machine-consumed byte streams and the dev crates' own command lines only.
 
 ### Enforcement posture
 
