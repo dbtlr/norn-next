@@ -2,14 +2,14 @@
 
 The durable decisions that govern `norn`. Status and date describe the decision itself, not the implementation task or the date this index was edited.
 
-| ADR | Status | Date | Decision |
-|---|---|---|---|
-| [0001](0001-corpus-activation-gate.md) | Accepted | 2026-07-27 | The coverage corpus is evidence with zero authority; explicit approval activates a command only after judging its behavior independently. |
-| [0002](0002-fixture-determinism-and-calibration.md) | Accepted | 2026-07-28 | Fixture identity is build-scoped and covers the paths and bytes emitted by the generator, not filesystem-normalized readback. |
-| [0003](0003-boundary-enforcement-harness.md) | Accepted | 2026-07-28 | The authoritative invariant-to-enforcement mapping is executable and checked in both directions. |
-| [0004](0004-two-tier-measurement-and-authored-baselines.md) | Accepted | 2026-07-27 | CI lanes divide by evidence kind: stable structure may gate pull requests; clocks and trends belong to soak. |
-| [0005](0005-regression-stratum.md) | Accepted | 2026-07-28 | Unbound regression obligations live as one case per property in a registry that names each case's earliest binding venue. |
-| [0006](0006-recorded-inputs-are-self-contained.md) | Accepted | 2026-07-28 | Recorded corpus inputs carry their own exact bytes and never depend on fixture regeneration. |
-| [0007](0007-authored-measurement-thresholds.md) | Accepted | 2026-07-28 | Measurement thresholds are authored constraints changed by reviewed edits, never self-derived from observations. |
-| [0008](0008-present-crate-dependency-equality.md) | Accepted | 2026-07-28 | Exact dependency equality applies to normal edges between crates currently present in the earned workspace. |
-| [0009](0009-regression-properties-not-recordings.md) | Accepted | 2026-07-27 | Regression behavior is verified with present-tense properties, structural assertions, and counters rather than recorded-byte equality. |
+| ADR | Title | Status | Date | Rationale |
+|---|---|---|---|---|
+| [0001](0001-corpus-activation-gate.md) | The coverage corpus has zero authority | Accepted | 2026-07-27 | Treating historical recordings as expected tests would silently turn legacy mistakes into requirements. |
+| [0002](0002-fixture-determinism-and-calibration.md) | Fixture identity is build-scoped | Accepted | 2026-07-28 | Generator revisions may intentionally move a tree, while filesystem normalization is outside generator behavior. |
+| [0003](0003-boundary-enforcement-harness.md) | Invariant-enforcement authority is executable | Accepted | 2026-07-28 | A prose enforcement ledger can drift from the mechanisms that actually carry each invariant. |
+| [0004](0004-two-tier-measurement-and-authored-baselines.md) | CI lanes divide by evidence kind | Accepted | 2026-07-27 | Evidence keeps the same owner when machine speed or observed runtime changes. |
+| [0005](0005-regression-stratum.md) | Unbound regression obligations live in a registry | Accepted | 2026-07-28 | Obligations must survive before their subjects exist without pretending they are already tested. |
+| [0006](0006-recorded-inputs-are-self-contained.md) | Recorded corpus inputs are self-contained | Accepted | 2026-07-28 | Recorded evidence must remain judgeable as the independent fixture generator evolves. |
+| [0007](0007-authored-measurement-thresholds.md) | Measurement thresholds are authored constraints | Accepted | 2026-07-28 | A measurement-derived threshold would ratify drift and depend on history that may disappear. |
+| [0008](0008-present-crate-dependency-equality.md) | Dependency equality is restricted to present crates | Accepted | 2026-07-28 | The target crate map must stay ahead of implementation without requiring unearned edges or permitting stale ones. |
+| [0009](0009-regression-properties-not-recordings.md) | Regression behavior is expressed as properties | Accepted | 2026-07-27 | Recorded-byte equality cannot reveal behavioral shape, scope, or cost. |

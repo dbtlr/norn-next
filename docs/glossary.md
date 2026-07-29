@@ -16,12 +16,11 @@ _Avoid_: Note, file (when the distinction matters)
 User-authored rules defining the valid structure and values of vault documents.
 _Avoid_: Doctrine, schema (unqualified)
 
-**Store schema**:
-The internal structure and version of Norn's rebuildable derived state.
-_Avoid_: Schema (unqualified), vault schema
-
 **Derived state**:
 Rebuildable state computed from vault documents. It is never the source of truth.
+
+**Trust state**:
+The explicit assessment of whether a vault entry's derived state may safely answer requests.
 
 **Vault registration**:
 Inclusion of a vault in the host's durable serving set. A vault included in that set is a registered vault.
@@ -52,15 +51,16 @@ The set of vault documents satisfying the same resolution target when that targe
 
 ## Engineering language
 
+**Store schema**:
+The internal structure and version of Norn's rebuildable derived state.
+_Avoid_: Schema (unqualified), vault schema
+
 **Vault entry**:
 The host's runtime state for one attached vault, including the resources and trust state used to serve it.
 
 **Vault attachment**:
 The lifecycle that associates a vault with a vault entry and establishes trustworthy derived state before requests are served.
 _Avoid_: Attach (as a noun)
-
-**Trust state**:
-The explicit assessment of whether a vault entry's derived state may safely answer requests.
 
 **Coverage corpus**:
 Historical command invocations carried as inert input and output evidence with no authority over Norn's behavior.
