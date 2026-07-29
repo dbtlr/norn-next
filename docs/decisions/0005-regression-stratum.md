@@ -10,7 +10,7 @@ losing them**.
 
 This decision records the third test stratum: a registry of named regression
 cases, entering as data, each stating what must be true rather than what once
-went wrong. `crates/norn/tests/regression/registry.json` holds 96 of them.
+went wrong. `crates/norn/tests/regression/registry.json` holds 97 of them.
 Four are carried by tests today. The rest are obligations with an address.
 
 ## The contract
@@ -154,7 +154,7 @@ its property is a judgment, made when the binding edit is reviewed.
   out to be assertable at layer 1 is a mis-filing, and the correction is an
   ordinary edit. Nothing depends on the venue being right in advance; what
   depends on it is that the case is not lost while the answer is unknown.
-- **96 is not a floor.** A defect found in this line joins the registry as a
+- **97 is not a floor.** A defect found in this line joins the registry as a
   case with a venue of 0 and a binding, because a defect that has a subject
   has no reason to be dormant.
 

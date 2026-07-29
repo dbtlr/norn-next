@@ -556,6 +556,17 @@
       }
     },
     {
+      "name": "barriers-fail-closed",
+      "kind": "defect-class",
+      "venue": 2,
+      "property": "A barrier fails closed. A change to one is tested in the direction that would let something through, not only in the direction that would refuse too much: trading a spurious refusal for a silent miss trades a safe failure for a dangerous one.",
+      "sources": ["NRN-266", "norn-legacy engineering learnings"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no barrier exists to fail either way."
+      }
+    },
+    {
       "name": "cache-entries-are-owned-and-reclaimed",
       "kind": "defect-class",
       "venue": 2,

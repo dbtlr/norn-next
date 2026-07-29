@@ -41,7 +41,7 @@ use norn_testkit::regression::{BindingStatus, Kind, MANDATORY_CASES, Registry};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 96;
+const CASE_TOTAL: usize = 97;
 
 /// The cases carried by tests today, by name.
 ///
