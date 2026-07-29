@@ -64,7 +64,7 @@ asks whether a recording is *good*. Here, binding asserts that a property is
 *carried* — and the audit is what stops that from being a claim nobody
 checked.
 
-**The registry's contract is pinned by digest, and edits move it.** The case
+**Every case's contract is pinned by digest, and edits move it.** The case
 total catches a deletion; it does not catch a deletion followed by a
 replacement, a property gutted to a word, a citation swapped for another, a
 venue quietly re-laned or a binding shrunk from four carriers to one. One
