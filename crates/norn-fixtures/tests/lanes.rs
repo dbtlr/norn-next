@@ -212,6 +212,32 @@ fn every_ignored_case_names_the_lane_that_adopts_it() {
     );
 }
 
+/// The prefixes [`LANE_BY_FILE_STEM`] binds files to and the prefixes
+/// `norn-testkit`'s regression machinery recognizes as lane adoption are one
+/// set spelled twice on purpose — each crate's guard reads its own constant.
+/// This test is the containment: a prefix added, removed, or respelled on one
+/// side fails here instead of drifting.
+#[test]
+fn lane_prefixes_agree_with_testkit() {
+    let mut here: Vec<&str> = LANE_BY_FILE_STEM
+        .iter()
+        .map(|(_, prefix)| *prefix)
+        .collect();
+    here.sort_unstable();
+    here.dedup();
+
+    let mut recognized = norn_testkit::regression::LANE_IGNORE_PREFIXES.to_vec();
+    recognized.sort_unstable();
+
+    assert_eq!(
+        here, recognized,
+        "LANE_BY_FILE_STEM's distinct prefixes and norn-testkit's LANE_IGNORE_PREFIXES have \
+         drifted. The two constants are deliberate duplicates — each crate's guard reads its \
+         own — so a lane added, removed, or respelled in one lands in the other in the same \
+         diff."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
