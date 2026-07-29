@@ -60,7 +60,7 @@ const CASE_TOTAL: usize = 101;
 /// it, so an edit anywhere in the registry fails this until somebody updates
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the corpus's contract digest applied to a registry.
-const CONTRACT_DIGEST: &str = "6a7f19324689352c54dcb8f4c14be148d92eb871de382c67c424f96feac4992a";
+const CONTRACT_DIGEST: &str = "6f8efffe57f6e67ab6695272fa25640aeb82db8b695892301b225b3cb2d193ca";
 
 /// The cases carried by tests today, by name.
 ///

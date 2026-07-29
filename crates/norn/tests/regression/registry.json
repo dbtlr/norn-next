@@ -1136,8 +1136,8 @@
       "name": "rendering-survives-the-terminal-it-lands-in",
       "kind": "defect-class",
       "venue": 6,
-      "property": "Meaningful emphasis never depends on a faint attribute alone, which renders as the default colour on common terminals, and table shape does not depend on the terminal declining to soft-wrap a long cell.",
-      "sources": ["norn-legacy engineering learnings"],
+      "property": "Meaningful emphasis never depends on a faint attribute alone, which renders as the default colour on common terminals, and table shape does not depend on the terminal declining to soft-wrap a long cell. Styling comes from one render seam every verb goes through, so no verb renders plain where its siblings render styled, and the decision to style at all is a function of the stream rather than of which verb wrote to it.",
+      "sources": ["norn-legacy engineering learnings", "frozen NRN board sweep"],
       "binding": {
         "status": "dormant",
         "reason": "there is no render seam and nothing writes to a terminal."
