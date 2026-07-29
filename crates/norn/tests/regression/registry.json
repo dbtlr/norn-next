@@ -114,7 +114,7 @@
       "kind": "defect-class",
       "venue": 0,
       "property": "Every harness invocation runs under isolated cache and state homes supplied by a shared helper rather than by per-test discipline, and inherits nothing else: a run's environment is the allowlist and the path, every isolated variable points inside that run's own sandbox, two sandboxes share no directory, and a sandbox is gone when it drops. Per-test discipline in place of the shared helper is the shape this forbids: it is what leaves 27 test files one missing variable away from deleting a real operator's state.",
-      "sources": ["NRN-462", "NRN-478", "NRN-481", "NRN-531", "norn-legacy engineering learnings"],
+      "sources": ["NRN-462", "NRN-478", "NRN-481", "norn-legacy engineering learnings"],
       "binding": {
         "status": "bound",
         "tests": [
@@ -147,7 +147,8 @@
         "status": "bound",
         "tests": [
           "crates/norn-testkit/src/process.rs::a_run_past_its_deadline_is_killed_and_reported_as_timed_out",
-          "crates/norn-testkit/src/process.rs::a_run_that_ends_inside_its_deadline_reports_its_own_status"
+          "crates/norn-testkit/src/process.rs::a_run_that_ends_inside_its_deadline_reports_its_own_status",
+          "crates/norn-testkit/src/process.rs::a_run_that_kills_itself_inside_its_deadline_is_not_a_timeout"
         ]
       }
     },
@@ -358,6 +359,17 @@
       "binding": {
         "status": "dormant",
         "reason": "no serializer exists to hold to a round trip."
+      }
+    },
+    {
+      "name": "harness-condition-waits-have-deadlines",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "A harness wait on a condition carries a deadline: it either observes the condition or fails naming the bound it passed, rather than polling for as long as the run lasts.",
+      "sources": ["NRN-324"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing in the harness waits on a condition. The first substrate-layer wait is the subject, and the primitive that bounds it arrives with that consumer."
       }
     },
     {
@@ -1164,7 +1176,8 @@
       "property": "A suite's reference moves with the suite: an installed binary ahead of a pinned reference reports skew rather than turning the suite red.",
       "sources": ["NRN-348"],
       "binding": {
-        "status": "dormant"
+        "status": "dormant",
+        "reason": "no suite runs against an installed binary: the `norn` binary is a stub with no version to pin a reference to. The first suite that compares against one is the subject."
       }
     }
   ]

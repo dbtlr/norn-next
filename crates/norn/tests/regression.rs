@@ -52,7 +52,7 @@ use norn_testkit::regression::{BindingStatus, Kind, Registry, TestIndex};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 103;
+const CASE_TOTAL: usize = 104;
 
 /// The whole registry's contract, as one value.
 ///
@@ -61,7 +61,7 @@ const CASE_TOTAL: usize = 103;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "e82ef0fb767260a4ee2af020d68813073017501d4d1455347e97c4d0cfce40d9";
+const CONTRACT_DIGEST: &str = "45117408ae0903bfaf083d8e2430a218e6d0ef0942e516c8e98b4d54158cef0f";
 
 /// The cases carried by tests today, by name.
 ///

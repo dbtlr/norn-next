@@ -23,13 +23,18 @@
 //!   descendant *that child waited on*, which is what `wait4` accounts for. A
 //!   grandchild the child forked and left running is invisible to it, so a
 //!   subject that measures itself by detaching a worker measures nothing.
-//! - **No wait on a child is unbounded.** Every run carries a deadline; the
-//!   wait polls for the child's end, and at the deadline it kills the child,
-//!   reaps it, and reports [`RunStatus::TimedOut`] naming the bound it passed.
-//!   A subject that hangs costs its run's deadline rather than the runner's
-//!   own timeout. The kill goes to the child this harness spawned; a
-//!   grandchild that child left running is the subject's to account for, here
-//!   as everywhere else in this module.
+//! - **The measured wait is bounded.** Every run carries a deadline; the wait
+//!   polls for the child's end, and at the deadline it kills the child, reaps
+//!   it, and reports [`RunStatus::TimedOut`] naming the bound it passed. A
+//!   subject that hangs costs its run's deadline rather than the runner's own
+//!   timeout. What the deadline bounds is the polling wait: the reap that
+//!   follows a kill blocks, because `SIGKILL` is not the child's to catch and
+//!   the kernel is what ends it, and a kill the kernel refused leaves the reap
+//!   after it with nothing to bound it. The kill goes to the child this
+//!   harness spawned, so a grandchild that child left running outlives the run
+//!   and finishes under pid 1 — the accepted cost of signalling one process
+//!   rather than a group, and the same reason that grandchild is absent from
+//!   the accounting.
 //!
 //! The sandbox is removed when it drops, so a suite leaves nothing behind;
 //! what a run said is in its [`Outcome`], not in a file to go looking for.
@@ -166,8 +171,9 @@ pub const DEFAULT_CAPTURE_LIMIT: u64 = 8 * 1024 * 1024;
 /// A child that never finishes is a subject under test, not a reason for the
 /// suite measuring it to wait on the runner's own timeout to decide. At this
 /// bound the harness kills the child it spawned and reports
-/// [`RunStatus::TimedOut`]. A run with more work than this to do says so with
-/// [`Run::deadline`]; asking for no bound at all is not offered.
+/// [`RunStatus::TimedOut`]. A run with more work than this to do names its own
+/// bound with [`Run::deadline`]. Every run has one: this is what a run that
+/// says nothing gets, and there is no constructor that leaves it unset.
 pub const DEFAULT_WAIT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// How long the harness waits before asking about the child again: the first
@@ -285,7 +291,9 @@ pub enum RunStatus {
     ///
     /// This is reported for an end the harness caused and for no other. A
     /// child that exited or took a signal of its own reports that, however
-    /// close to the bound it was.
+    /// close to the bound it was. The one end that cannot be told apart is a
+    /// `SIGKILL` from somewhere else landing on the child in the moment the
+    /// harness sent its own, which reads as the timeout.
     TimedOut {
         /// The deadline the run was given, which is the bound it passed.
         after: Duration,
@@ -347,16 +355,16 @@ struct Ended {
 /// **The deadline observes; it does not preempt.** A status the child produced
 /// is the status reported, including one produced between the last poll and
 /// the kill: [`RunStatus::TimedOut`] is reported for the harness's own
-/// `SIGKILL` and for nothing else. A child that ends by taking a `SIGKILL`
-/// from somewhere else at that moment is not distinguishable from the one the
-/// harness sent, and reads as the timeout.
+/// `SIGKILL` and for nothing else.
 ///
 /// **On the success path the child is reaped here and nowhere else**: nothing
 /// calls `wait` on it afterwards, because the process is already gone and its
-/// identifier is free for the kernel to hand to somebody else. On every
-/// failure path the reverse holds — `wait4` did not reap, so the child is
-/// killed and waited on before the error goes back, and a run that failed to
-/// be measured does not leave a process behind.
+/// identifier is free for the kernel to hand to somebody else. Where `wait4`
+/// did not reap — it failed, or the kill before it failed — the child is
+/// killed and waited on through [`reaping`] before the error goes back, so a
+/// run that failed to be measured leaves no process behind. The one failure
+/// that comes after a reap is a status this code has no reading for, and it
+/// takes that path for the same reason: the child is already gone.
 fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunStatus, u64)> {
     let pid = child.id() as libc::pid_t;
     let started = Instant::now();
@@ -388,15 +396,10 @@ fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunSt
             }
             match waited(pid, 0) {
                 Ok(Some(ended)) => (ended, true),
-                Ok(None) => {
-                    return Err(reaping(
-                        child,
-                        io::Error::other(format!(
-                            "`wait4` on pid {pid} answered that the child is still running, which \
-                             is not an answer a wait without `WNOHANG` gives"
-                        )),
-                    ));
-                }
+                // A zero is the answer `WNOHANG` asks for, and this wait does
+                // not ask for it, so it is a return this code has no reading
+                // for like any other.
+                Ok(None) => return Err(reaping(child, unexpected(pid, 0))),
                 Err(error) => return Err(reaping(child, error)),
             }
         }
@@ -418,9 +421,11 @@ fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunSt
     ))
 }
 
-/// One `wait4` on `pid`, retried through interruption. `None` is `WNOHANG`
-/// reporting a child that is still running, which is the only way this
-/// answers without reaping.
+/// One `wait4` on `pid`, retried through interruption.
+///
+/// `None` is a zero return: `wait4` reporting the child still running, which
+/// is the answer `WNOHANG` asks for and the only one that does not reap. What
+/// it means where nothing asked for it is the caller's to say.
 fn waited(pid: libc::pid_t, flags: libc::c_int) -> io::Result<Option<Ended>> {
     loop {
         let mut status: libc::c_int = 0;
@@ -431,23 +436,28 @@ fn waited(pid: libc::pid_t, flags: libc::c_int) -> io::Result<Option<Ended>> {
         if waited == pid {
             return Ok(Some(Ended { status, usage }));
         }
-        if waited == 0 && flags & libc::WNOHANG != 0 {
+        if waited == 0 {
             return Ok(None);
         }
         // `errno` says nothing except where the call reported failure, so it
         // is only read at -1. Asked about one pid, `wait4` returns that pid,
-        // zero where `WNOHANG` finds it still running, or -1; anything else is
-        // a contract this code does not understand and will not guess at.
+        // zero, or -1; anything else is a contract this code does not
+        // understand and will not guess at.
         if waited != -1 {
-            return Err(io::Error::other(format!(
-                "`wait4` on pid {pid} returned {waited}, which is neither the child nor a failure"
-            )));
+            return Err(unexpected(pid, waited));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
     }
+}
+
+/// The error for a `wait4` return this code has no reading for.
+fn unexpected(pid: libc::pid_t, returned: libc::pid_t) -> io::Error {
+    io::Error::other(format!(
+        "`wait4` on pid {pid} returned {returned}, which is neither the child nor a failure"
+    ))
 }
 
 /// What a raw wait status says the child did.
@@ -468,6 +478,12 @@ fn decoded(pid: libc::pid_t, status: libc::c_int) -> io::Result<RunStatus> {
 
 /// Kill and reap a child that `wait4` did not, and hand back the error that
 /// says why.
+///
+/// **This is called only where the reap did not happen**, and it holds only
+/// there: the wait it makes is `std::process::Child`'s own, which asks about a
+/// pid the kernel is free to reuse the moment something else reaps it. Reached
+/// after a reap, it would be a question about whatever process holds that
+/// number now.
 fn reaping(mut child: std::process::Child, error: io::Error) -> io::Error {
     let _ = child.kill();
     let _ = child.wait();
@@ -638,7 +654,7 @@ mod tests {
     /// made from outside the wait: the run has a thread of its own and the
     /// test holds a bound of its own, generous enough that nothing but a
     /// missing deadline reaches it. A harness that stopped ending runs fails
-    /// here by name in a second, not by hanging until the runner decides.
+    /// here by name at that bound, not by hanging until the runner decides.
     ///
     /// The failing path leaves the thread and the sleeping child behind. A
     /// leaked sleeper on a run that is already failing is worth an assertion
@@ -664,13 +680,20 @@ mod tests {
             let _ = sender.send((outcome, started.elapsed()));
         });
 
-        let (outcome, elapsed) = receiver.recv_timeout(BOUND).unwrap_or_else(|_| {
-            panic!(
+        // The two ways this channel fails apart: the bound passing is the
+        // defect under test, and a sender that is gone is the run's own thread
+        // having died, which says nothing about the deadline.
+        let (outcome, elapsed) = match receiver.recv_timeout(BOUND) {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
                 "the wait did not return within {BOUND:?}: a run given a {DEADLINE:?} deadline is \
                  still waiting on a child that sleeps for an hour, so the deadline is not ending \
                  the run"
-            )
-        });
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the thread running the child ended without reporting, so it panicked")
+            }
+        };
         let outcome = outcome.expect("waiting on a run");
         assert_eq!(outcome.status, RunStatus::TimedOut { after: DEADLINE });
         assert!(
@@ -679,8 +702,8 @@ mod tests {
         );
         assert!(
             elapsed < BOUND / 6,
-            "ending the run cost {elapsed:?}, which is the test's own bound rather than the \
-             deadline"
+            "ending the run cost {elapsed:?}, which is nowhere near the {DEADLINE:?} it was given \
+             and within reach of the {BOUND:?} this test holds"
         );
         // What the child wrote before it hung is a file, so the timeout hands
         // it back, and the accounting is the kernel's own as of the kill.
@@ -703,6 +726,21 @@ mod tests {
             .wait()
             .expect("running a shell");
         assert_eq!(outcome.status, RunStatus::Exited(7));
+    }
+
+    /// `SIGKILL` is the signal the deadline sends, and a child that takes one
+    /// of its own inside its bound still ended itself. Reading the signal
+    /// alone — rather than the signal on a run this harness killed — is what
+    /// would report this run as timed out.
+    #[test]
+    fn a_run_that_kills_itself_inside_its_deadline_is_not_a_timeout() {
+        let sandbox = sandbox("self-killed");
+        let outcome = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", "kill -KILL $$"])
+            .deadline(Duration::from_secs(10))
+            .wait()
+            .expect("running a shell");
+        assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGKILL));
     }
 
     #[test]
