@@ -37,8 +37,13 @@ The invariant is *measured*, not asserted:
 
 - Per-PR CI asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks.
-- The scheduled soak lane carries the peak-memory trend line, whose only permitted
-  direction is down, plus a flat-slope requirement over a nightly mixed load.
+- The scheduled soak lane records the peak-memory reading each run and bars it
+  against an authored baseline. The baseline moves only by a reviewed edit,
+  and the downward direction of that movement is review-held rather than
+  mechanized — nothing here fails a raised baseline, so this is a place this
+  section's own rule applies: a review-held invariant rots quietly. The
+  mechanized form, a flat-slope requirement over a nightly mixed load, arrives
+  with the Layer 2 lockdown work.
 
 Superlinear payloads are defects, and bounded ones stay bounded on the wire and at rest
 alike — see the [bounded candidate head of 5](#the-crates) in the `norn-wire` membership
