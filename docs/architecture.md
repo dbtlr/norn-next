@@ -23,9 +23,11 @@ them, and marks the judgments that are review acts instead. When a gate arrives 
 document's concern; the comments in `.github/workflows/` are the in-repo operational marker.
 
 Where a gate exists, its lane depends on what it measures: **counters and structure gate per
-PR; clocks and trends live in the soak lane and never fail a pull request.** A review-held
-judgment has no lane at all, which is why each section says so where it applies — a
-review-held invariant rots quietly.
+PR; clocks and trends live in the soak lane and never fail a pull request.** [ADR
+0004](decisions/0004-two-tier-measurement-and-authored-baselines.md) records why evidence
+kind, rather than observed runtime, owns that division. A review-held judgment has no lane
+at all, which is why each section says so where it applies — a review-held invariant rots
+quietly.
 
 ### 1. The memory invariant
 
@@ -38,12 +40,13 @@ The invariant is *measured*, not asserted:
 - Per-PR CI asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks.
 - The scheduled soak lane records the peak-memory reading each run and bars it
-  against an authored baseline. The baseline moves only by a reviewed edit,
-  and the downward direction of that movement is review-held rather than
-  mechanized — nothing here fails a raised baseline, so this is a place this
-  section's own rule applies: a review-held invariant rots quietly. The
-  mechanized form, a flat-slope requirement over a nightly mixed load, arrives
-  with the Layer 2 lockdown work.
+  against an authored baseline. Under [ADR
+  0007](decisions/0007-authored-measurement-thresholds.md), the baseline moves
+  only by a reviewed edit, and the downward direction of that movement is
+  review-held rather than mechanized — nothing here fails a raised baseline,
+  so this is a place this section's own rule applies: a review-held invariant
+  rots quietly. The mechanized form, a flat-slope requirement over a nightly
+  mixed load, arrives with the Layer 2 lockdown work.
 
 Superlinear payloads are defects, and bounded ones stay bounded on the wire and at rest
 alike — see the [bounded candidate head of 5](#the-crates) in the `norn-wire` membership
@@ -63,12 +66,12 @@ restores trust. Three rungs, cheapest first:
 
 Vault files are never the thing being healed; they are the source of truth. The ladder
 splits across the two effect seams: tree-walking rungs orchestrate through `norn-fs`,
-database-side rungs (schema fingerprint, rebuild-from-zero) live in `norn-store`. A rung
+database-side rungs (store schema fingerprint, rebuild-from-zero) live in `norn-store`. A rung
 may be subdivided; a fourth escape hatch may not be added.
 
 **Rung 3 has two triggers, with different lifetimes.**
 
-- **A DDL change during development.** Schema version is pinned at **1** and does not move
+- **A DDL change during development.** Store schema version is pinned at **1** and does not move
   through the pre-release build. A DDL edit is detected as a fingerprint mismatch in the
   meta table and resolved by rebuilding from zero, consuming no version numbers. This is
   the development-time path and it exists because version numbers are worth more than the
@@ -77,7 +80,7 @@ may be subdivided; a fourth escape hatch may not be added.
   release.
 
 At the first release, version 1 freezes as the first migratable baseline. From then on the
-**migrations pillar is the schema-evolution path**, and rebuild-from-zero narrows to the
+**migrations pillar is the store schema evolution path**, and rebuild-from-zero narrows to the
 second trigger alone.
 
 **Every rung is reached by a test, across two suites.**
@@ -96,7 +99,7 @@ following:
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
-| Stale schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a schema that is damaged rather than merely out of date. |
+| Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
 **Refusal is resolution.** Rung 3's second trigger reads "any state the lower rungs cannot
 resolve", and a transient environmental failure does not qualify. When the disk is full or a
@@ -111,7 +114,7 @@ code path with its own behavior.
 
 ### 3. Raw-SQL acceptance
 
-**The schema is the domain model at rest.** Reads compile wire params to SQL and let SQLite
+**The store schema is the domain model at rest.** Reads compile wire params to SQL and let SQLite
 answer. There is no repository tier and no domain-object hydration between the query and
 the rows.
 
@@ -165,12 +168,12 @@ contract.
 | Crate | Owns | Earned by |
 |---|---|---|
 | `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
-| `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, wikilink syntax, `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a schema facet in `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
+| `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, wikilink syntax, `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a vault schema facet enforced through `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
 | `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, and the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware). Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
-| `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, and the read builders (wire params → emitted SQL). Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — schema and queries co-evolve or they drift. |
+| `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, and the read builders (wire params → emitted SQL). Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned against `(model id, version)` — pinning is required, and how it is done is the substrate design pass's question. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-config` | **Machine-local state, one owner** — config-directory layout, the registry file read/write, the bearer token read/write, host endpoint discovery conventions, weights-directory location. Never touches a vault. | The one state surface both sides of the client/host seam must read — the serving side to authenticate, the client to find the host at all. Hand-sharing that convention in two crates is a drift class on a security-relevant file. |
-| `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault doctrine config (bytes via `norn-fs`, pinned at attach), the worker pool (the one applier, mutation planners, the repair planner, embedding workers), and the first-run janitor. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes; its one direct effect is the one-shot legacy-cache janitor. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
+| `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault schema bytes (read via `norn-fs`, pinned at attach), the worker pool (the one applier, mutation planners, the repair planner, embedding workers), and the first-run janitor. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes; its one direct effect is the one-shot legacy-cache janitor. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
 | `norn-mcp` | **MCP semantics, no transport** — derives tool schemas from `norn-wire`, translates MCP requests to wire params and wire reports to MCP responses. Pure functions, unit-testable like `norn-text`. | The derived-renderings owner for the MCP surface; protocol shape quarantined from both orchestration and plumbing. |
 | `norn-serve` | **The HTTP surface** — the serving socket, routing, auth middleware (bearer verification via `norn-config`), and whatever accretes above the protocol later (TLS when a real remote consumer exists, rate limits, request logging). Routes to `norn-mcp`, dispatches wire types to `norn-host`. | The serving effect seam; it keeps HTTP-layer growth out of the orchestrator. |
 | `norn-console` | **The CLI presentation kit** — clap *extensions*, never clap re-implementations; render conventions (palette and colors, records display, table/list projection, error-output envelope); input conventions (stdin handling, confirm prompts). **norn-agnostic**: generic over record types via traits, with no dependency on any other workspace crate. | Single source of truth for how output looks and input behaves, plus a standalone future — it is designed for extraction as an independent reusable crate. |
@@ -320,8 +323,11 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
 
 The edge set above is asserted by an **architecture gate in `norn-testkit`**: a per-PR test
 that reads `cargo metadata` and asserts the workspace **normal-dependency** graph is
-*exactly equal* to the allowlist above, evaluated under a pinned feature and target matrix
-(default features plus the release feature set; the platform watcher backend per target).
+*exactly equal* to the allowlist above, restricted to crates currently present and evaluated
+under pinned default and all-features selections. When a workspace crate first declares a
+target-specific dependency, the matrix also gains a pinned `--filter-platform` selection
+for that target. [ADR 0008](decisions/0008-present-crate-dependency-equality.md) records why
+exact equality is restricted to crates currently present.
 
 - A forbidden edge fails.
 - **A new edge not deliberately added to the allowlist also fails.** Absence from the table
@@ -411,7 +417,8 @@ filesystem table in 8, the named symbol lint in 11 — that statement stands and
 load-bearing. What does not exist here is the complete mapping: **the authoritative mapping
 is the harness's code, not this document.** Enforcement mechanics become true by being
 executable, and a prose ledger of them here would be a second, unexecuted spelling of that
-ruleset — drifting from the code the moment either moved.
+ruleset — drifting from the code the moment either moved. See [ADR
+0003](decisions/0003-boundary-enforcement-harness.md).
 
 ---
 
