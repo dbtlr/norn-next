@@ -17,8 +17,9 @@
 //! `venue` is the first layer at which a real test can bind the property:
 //! 0 the harness, 1 the substrate, 2 the lockdown, 3 queries, 4 mutations,
 //! 5 repair, 6 surfaces. A case binds when its venue lands, and binding it is
-//! a deliberate edit naming the tests that carry it — there is no attribute
-//! to remove and no environment variable to set.
+//! a deliberate edit naming the tests that carry it. Flipping the status alone
+//! fails: a bound case with no tests is a problem, and every test it does name
+//! is held to a function cargo compiled into the target the reference gives.
 //!
 //! Layer 0 is the layer that exists, so a case whose venue is 0 is bindable
 //! against the harness as it stands. Leaving one dormant is therefore a
@@ -31,24 +32,43 @@
 //! It judges no property. A property is judged by the test that binds it, and
 //! until then the registry says only that the obligation is named, cited, and
 //! assigned to a layer. What the audit does hold is the record: names unique,
-//! properties and citations present, the mandatory set exactly the one the
-//! harness pins, and every bound case naming a test that really exists.
+//! properties present and distinct, citations shaped like citations, the
+//! mandatory set exactly the one the harness pins, and every bound case naming
+//! a test cargo really compiled into the suite.
+//!
+//! # The digest is the ratchet
+//!
+//! [`CONTRACT_DIGEST`] is one value over every case's whole contract. The
+//! total catches a deletion; the digest catches everything a
+//! deletion-and-replacement would hide — a property gutted to a word, a
+//! citation swapped, a venue re-laned, a binding shrunk. Any registry edit
+//! moves it, and moving it means editing a constant here, in the same diff,
+//! where a reviewer reads it.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_testkit::regression::{BindingStatus, Kind, MANDATORY_CASES, Registry};
+use norn_testkit::regression::{BindingStatus, Kind, Registry, TestIndex};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
 const CASE_TOTAL: usize = 101;
+
+/// The whole registry's contract, as one value.
+///
+/// Read from a reviewed diff, not derived: every field of every case goes into
+/// it, so an edit anywhere in the registry fails this until somebody updates
+/// the constant, which is the moment the edit becomes a thing a reviewer
+/// looked at. This is the corpus's contract digest applied to a registry.
+const CONTRACT_DIGEST: &str = "6a7f19324689352c54dcb8f4c14be148d92eb871de382c67c424f96feac4992a";
 
 /// The cases carried by tests today, by name.
 ///
 /// Pinned rather than counted, because which four are bound is the whole
 /// claim: these are the ones whose subject — the harness itself — already
 /// exists. A case that stops being carried has to leave this list to pass,
-/// which is a diff a reviewer reads.
+/// which is a diff a reviewer reads. Compared as a set, because the order
+/// cases sit in the file is the file's business.
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
     "fixtures-carry-real-content-volume",
@@ -70,15 +90,25 @@ fn registry() -> Registry {
     Registry::load(&path).unwrap_or_else(|e| panic!("the registry did not load: {e}"))
 }
 
-/// The record holds together: every case is named once in kebab-case, states
-/// a property and cites at least one source, sits at a venue the scale names,
-/// and carries a binding that says something true — a bound case names tests
-/// that exist in the workspace and declare themselves with `#[test]`, and a
-/// dormant case names none and explains itself where its venue already
-/// exists. The mandatory set is exactly the one the harness pins.
+/// The record holds together: every case is named once in kebab-case, states a
+/// property no other case states and cites sources shaped like citations, sits
+/// at a venue the scale names, and carries a binding that says something true
+/// — a bound case names tests whose files resolve exactly as spelled, which
+/// declare themselves with `#[test]`, and which cargo compiled into the target
+/// the reference names — and a dormant case names none and explains itself
+/// where its venue already exists. The mandatory set is exactly the one the
+/// harness pins.
+///
+/// Asking cargo what compiled is what makes this a claim about the suite that
+/// runs rather than about the text of a file: one `--list` pair per cited
+/// target, which is three targets across two packages today.
 #[test]
 fn the_registry_is_structurally_sound() {
-    let problems = registry().audit(&workspace_root());
+    let registry = registry();
+    let root = workspace_root();
+    let tests = TestIndex::from_cargo(&root, registry.cited_targets())
+        .unwrap_or_else(|e| panic!("the cited targets' tests could not be listed: {e}"));
+    let problems = registry.audit(&root, &tests);
     assert!(
         problems.is_empty(),
         "the registry is not structurally sound:\n  {}",
@@ -86,30 +116,20 @@ fn the_registry_is_structurally_sound() {
     );
 }
 
-/// The five ratified classes are present by name.
+/// The contract every case states is the one that was reviewed.
 ///
-/// The audit reconciles the registry's `mandatory` flags against the harness
-/// list; this states the list itself, so that dropping a ratified class takes
-/// an edit in two files and reads as what it is in both.
+/// The other pins in this file each hold one field: the total holds how many
+/// cases there are, the bound list holds which are carried, the harness holds
+/// which are mandatory. This holds all of them at once, and everything else a
+/// case says — so an edit that keeps the count, the bound set and the
+/// mandatory flags while rewriting what a case actually promises fails here.
 #[test]
-fn the_mandatory_cases_are_carried_by_name() {
-    let registry = registry();
-    let carried: BTreeSet<&str> = registry
-        .cases
-        .iter()
-        .filter(|case| case.mandatory)
-        .map(|case| case.name.as_str())
-        .collect();
-    for name in MANDATORY_CASES {
-        assert!(
-            carried.contains(name),
-            "`{name}` is ratified and the registry does not carry it"
-        );
-    }
+fn the_contract_digest_is_the_reviewed_one() {
     assert_eq!(
-        carried.len(),
-        MANDATORY_CASES.len(),
-        "the registry carries a mandatory case the harness does not pin"
+        registry().contract_digest(),
+        CONTRACT_DIGEST,
+        "the registry's contract moved. Every field of every case feeds this digest, so read the \
+         diff before taking the new value: a deliberate edit updates CONTRACT_DIGEST beside it."
     );
 }
 
@@ -143,11 +163,12 @@ fn the_case_total_is_pinned() {
 #[test]
 fn the_bound_cases_are_the_ones_the_harness_already_carries() {
     let registry = registry();
-    let bound: Vec<&str> = registry
+    let bound: BTreeSet<&str> = registry
         .bound_cases()
         .map(|case| case.name.as_str())
         .collect();
-    assert_eq!(bound, BOUND_CASES, "the set of bound cases moved");
+    let pinned: BTreeSet<&str> = BOUND_CASES.iter().copied().collect();
+    assert_eq!(bound, pinned, "the set of bound cases moved");
 }
 
 /// Every venue on the scale is accounted for, and layer 0 is the only one

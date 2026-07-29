@@ -27,6 +27,7 @@ pub mod corpus;
 pub mod counters;
 pub mod explain;
 pub mod invariants;
+mod json;
 #[cfg(unix)]
 pub mod process;
 pub mod regression;

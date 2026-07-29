@@ -1172,15 +1172,18 @@ impl Corpus {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // Reads the corpus files this module loads.
+/// [`crate::json::read_json`], with its failure named the way this module's
+/// callers already match on.
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, CorpusError> {
-    let text = std::fs::read_to_string(path).map_err(|source| CorpusError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    serde_json::from_str(&text).map_err(|source| CorpusError::Parse {
-        path: path.to_path_buf(),
-        source,
+    crate::json::read_json(path).map_err(|error| match error {
+        crate::json::JsonError::Read(source) => CorpusError::Read {
+            path: path.to_path_buf(),
+            source,
+        },
+        crate::json::JsonError::Parse(source) => CorpusError::Parse {
+            path: path.to_path_buf(),
+            source,
+        },
     })
 }
 
