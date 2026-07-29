@@ -14,13 +14,24 @@
       "name": "a-measurement-lane-proves-it-measured",
       "kind": "enforcement-class",
       "venue": 0,
-      "property": "A measurement lane fails when it measured nothing. A step selecting its cases by kind asserts a non-zero pass count, and every case's lane assignment is bound to the file it sits in, so a case renamed, re-laned or deleted fails its step instead of reporting green having run nothing.",
+      "property": "A case's lane assignment is bound to the file it sits in, not to a set of sanctioned spellings, so a case renamed or re-laned fails the guard instead of being adopted by a lane nobody meant to run it. An ignore shape the guard cannot parse fails rather than passing through, and the guard fails when it checked nothing.",
       "sources": ["NORN-13", "NRN-a59", "NRN-472"],
       "binding": {
         "status": "bound",
         "tests": [
           "crates/norn-fixtures/tests/lanes.rs::every_ignored_case_names_the_lane_that_adopts_it"
         ]
+      }
+    },
+    {
+      "name": "a-measurement-step-asserts-a-nonzero-pass-count",
+      "kind": "enforcement-class",
+      "venue": 0,
+      "property": "A step that selects its cases by kind rather than by name asserts a non-zero pass count, so a filter that matches nothing fails the step instead of reporting green having run nothing. A lane whose only evidence is that its runner exited zero has measured nothing and says so.",
+      "sources": ["NORN-13", "NRN-a59", "NRN-472"],
+      "binding": {
+        "status": "dormant",
+        "reason": "its carrier is a workflow script, and a test reference in this file is a workspace-relative source file and a `#[test]` function in it — a grammar that cannot name a CI step."
       }
     },
     {
@@ -55,6 +66,7 @@
         "status": "bound",
         "tests": [
           "crates/norn-fixtures/tests/calibration.rs::the_gate_profile_stays_inside_the_envelope",
+          "crates/norn-fixtures/tests/calibration.rs::the_soak_profile_stays_inside_the_envelope",
           "crates/norn-fixtures/tests/calibration.rs::the_body_distribution_is_long_tailed_rather_than_uniform"
         ]
       }
@@ -101,7 +113,7 @@
       "name": "harness-runs-under-isolated-state-roots",
       "kind": "defect-class",
       "venue": 0,
-      "property": "Every harness invocation runs under isolated cache and state homes supplied by a shared helper rather than by per-test discipline, and inherits nothing else: a run's environment is the allowlist and the path, every isolated variable points inside that run's own sandbox, two sandboxes share no directory, and a sandbox is gone when it drops. Per-test discipline is what left 27 test files able to delete a real operator's state.",
+      "property": "Every harness invocation runs under isolated cache and state homes supplied by a shared helper rather than by per-test discipline, and inherits nothing else: a run's environment is the allowlist and the path, every isolated variable points inside that run's own sandbox, two sandboxes share no directory, and a sandbox is gone when it drops. Per-test discipline in place of the shared helper is the shape this forbids: it is what leaves 27 test files one missing variable away from deleting a real operator's state.",
       "sources": ["NRN-462", "NRN-478", "NRN-481", "norn-legacy engineering learnings"],
       "binding": {
         "status": "bound",
@@ -118,11 +130,22 @@
       "name": "harness-self-check-is-not-immune-to-contamination",
       "kind": "enforcement-class",
       "venue": 0,
-      "property": "A harness's own self-check is subject to the contamination it exists to detect. Traffic a harness generates is isolated from any resident service by construction, and a contaminated run fails the self-check rather than attributing divergence to the subject: one contaminated output region produced 44 phantom drifts and 7x wall clock under a self-check that stayed green.",
+      "property": "A harness's own self-check is subject to the contamination it exists to detect. Traffic a harness generates is isolated from any resident service by construction, and a contaminated run fails the self-check rather than attributing divergence to the subject: one contaminated output region reads as 44 phantom drifts and 7x wall clock, and a self-check that stays green through it is the shape this forbids.",
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
         "reason": "there is no resident service to contaminate and no comparison harness to check itself; the class binds with the first harness that generates its own traffic."
+      }
+    },
+    {
+      "name": "harness-waits-have-deadlines-and-steps-report-their-own-outcome",
+      "kind": "defect-class",
+      "venue": 0,
+      "property": "A harness wait carries a deadline: a wait on a child or on a condition either observes what it waits for or fails naming it, so no run hangs until the runner's own timeout decides for it. A step's verdict is its work's verdict — a downstream reader closing a pipe does not fail a step whose work already succeeded — and a suite's reference moves with the suite, so an installed binary ahead of a pinned reference reports skew rather than turning the suite red.",
+      "sources": ["NRN-324", "NRN-348", "NRN-366", "NRN-531"],
+      "binding": {
+        "status": "dormant",
+        "reason": "there is no deadline mechanism to bind against: the process harness waits on a child through a blocking `wait4` with no timeout, and nothing waits on a condition at all. The step-outcome and reference-skew clauses have no long-running child and no installed-binary suite to run against."
       }
     },
     {
@@ -145,6 +168,17 @@
       "binding": {
         "status": "dormant",
         "reason": "there is no request surface to enroll; the roster binds with the first one."
+      }
+    },
+    {
+      "name": "output-normalization-is-provably-complete",
+      "kind": "enforcement-class",
+      "venue": 0,
+      "property": "A comparison or recording harness proves its normalization and masking set complete rather than asserting it: two runs of one invocation are byte-equal after masking, so a run-varying field nobody masked fails the harness instead of riding inside a ledgered divergence and inflating its extent. A mask keyed to one serialization form is incomplete by construction — a trace-identifier needle written as compact JSON matches nothing in pretty-printed output. Run-varying fields, trace identifiers and generation timestamps among them, are masked; they are never recorded as divergence.",
+      "sources": ["NORN-10", "NORN-14"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the corpus audit carries the declared-versus-observed half — every mask and normalization a case declares appears in its recorded bytes, and every one present in the bytes is declared, in both directions and only against names the harness knows — but the two-run byte-equality gate does not exist: the corpus reads recordings and records none, so the gate binds with the first recording or comparison run this line performs."
       }
     },
     {
@@ -217,7 +251,7 @@
       "name": "compiled-work-happens-once-per-generation",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A pure function of a longer-lived input is computed once per that input's lifetime: compiled matchers once per request rather than once per row, compiled config and predicate field types once per config generation, field-universe knowledge as owner-lifetime state or an indexed lookup. Per-row and per-request compile counters are zero, and two spellings of one query carry equal derivation counters.",
+      "property": "A pure function of a longer-lived input is computed once per that input's lifetime: compiled matchers once per request rather than once per row, compiled config and predicate field types once per config generation, field-universe knowledge as owner-lifetime state or an indexed lookup. An owner-lifetime resource is acquired once per generation in the same way: no request opens a telemetry file handle of its own, and no request probes owner metadata with a select of its own. Per-row and per-request compile, open and parse counters are zero, and two spellings of one query carry equal derivation counters.",
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
@@ -240,7 +274,7 @@
       "kind": "defect-class",
       "venue": 1,
       "property": "Warm cost and warm counters for reads and for mutations are independent of vault size: the same commands costing 2.5 ms on a 10-document tree and 11.3 to 238.3 ms on a 1593-document one measure vault size, not work. Per-operation cost is a function of the changed set plus its link neighborhood, and a size-independence pair fails the build when an operation's counters track the tree.",
-      "sources": ["NORN-a1", "NRN-a60", "NRN-a58", "NRN-a63", "NRN-154", "NRN-155", "NRN-156", "NRN-523", "NRN-533"],
+      "sources": ["NORN-a1", "NRN-a60", "NRN-a58", "NRN-a63", "NRN-154", "NRN-155", "NRN-156", "NRN-83", "NRN-275", "NRN-413", "NRN-523", "NRN-533", "NRN-158", "NRN-109", "NRN-526", "NRN-534", "NRN-535"],
       "binding": {
         "status": "dormant",
         "reason": "the size-independence pair has no request to run; the helper exists and the subject does not."
@@ -272,7 +306,7 @@
       "name": "each-file-is-read-once-per-build",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A build reads each source file exactly once — the file-read counter for a build equals the file count — and hashing does not buy a second read. Read plus parse was 58% of a 565 ms cold build with every file read twice.",
+      "property": "A build reads each source file exactly once — the file-read counter for a build equals the file count — and hashing does not buy a second read. Reading every file twice is the shape this forbids: under it read plus parse is 58% of a 565 ms cold build.",
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
@@ -305,7 +339,7 @@
       "name": "frontmatter-roundtrip-or-refuse",
       "kind": "defect-class",
       "venue": 1,
-      "property": "Every emitted scalar and key re-parses to exactly the intended value in its actual context — block or flow, value or key position — verified by re-parse rather than by a denylist of shapes. A write not provably round-trip-safe refuses, and no write leaves frontmatter unparseable: one flow-sequence item containing a comma became two items, and one containing a bracket made every field in the block vanish from every query.",
+      "property": "Every emitted scalar and key re-parses to exactly the intended value in its actual context — block or flow, value or key position — verified by re-parse rather than by a denylist of shapes. A write not provably round-trip-safe refuses, and no write leaves frontmatter unparseable: an emission judged by a denylist of shapes is the shape this forbids, and under it a flow-sequence item containing a comma becomes two items while one containing a bracket makes every field in the block vanish from every query.",
       "sources": ["NRN-118", "NRN-141", "NRN-142"],
       "binding": {
         "status": "dormant",
@@ -373,7 +407,7 @@
       "kind": "defect-class",
       "venue": 1,
       "property": "An edit addressed at one field or one section changes exactly those bytes: comments, blank lines, key order, quote style and line terminators outside the span are byte-preserved, and a removal never orphans a continuation line or absorbs a neighbouring field. Section and heading addressing resolves on line boundaries for every accepted heading form, including setext and a heading at end of file with no trailing newline, and the same resolver serves reads and writes.",
-      "sources": ["NRN-128", "NRN-434", "NRN-143", "NRN-133", "NRN-141", "NRN-166", "NRN-137", "NRN-437", "NRN-164"],
+      "sources": ["NRN-128", "NRN-434", "NRN-143", "NRN-133", "NRN-141", "NRN-166", "NRN-137", "NRN-437"],
       "binding": {
         "status": "dormant",
         "reason": "no byte-span locator or splice path exists."
@@ -468,10 +502,21 @@
       }
     },
     {
+      "name": "relative-time-and-locale-resolve-against-a-declared-basis",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "A relative date word resolves against a declared time zone rather than against whichever basis its call site reached for: `today` names the same day boundary in a filter, in a default and in a rendered field, and the zone it resolved in is stated wherever the word is accepted. The locale governing collation and case folding is chosen by a stated precedence over its inputs, so two surfaces reading one environment order and fold identically.",
+      "sources": ["frozen NRN board sweep"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no date-word resolver and no locale-sensitive comparison exists to declare a basis for."
+      }
+    },
+    {
       "name": "statements-are-prepared-once",
       "kind": "defect-class",
       "venue": 1,
-      "property": "Prepared statements are cached per connection, and the compilation counter per request is a bounded constant independent of row count. Statement compilation was ~32 ms of a 139 ms insert phase, and a per-document loader compiled ~12,700 statements per mutation.",
+      "property": "Prepared statements are cached per connection, and the compilation counter per request is a bounded constant independent of row count. A per-document loader is the shape this forbids: it compiles ~12,700 statements per mutation, and statement compilation is ~32 ms of a 139 ms insert phase.",
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
@@ -570,7 +615,7 @@
       "name": "cache-entries-are-owned-and-reclaimed",
       "kind": "defect-class",
       "venue": 2,
-      "property": "A derived-state entry is owned by its creator and reclaimed with it; maintenance never runs on the request path; eviction re-validates its classification under the same lock it deletes with; and harness traffic is isolated by construction. Unreclaimed entries reached 61,103 entries and 8.0 GB, and a prune billed inline blocked one command for over two minutes.",
+      "property": "A derived-state entry is owned by its creator and reclaimed with it; maintenance never runs on the request path; eviction re-validates its classification under the same lock it deletes with; and harness traffic is isolated by construction. An ambient sweep or a long derivation emits a liveness signal past a duration or count threshold, so 75 seconds of silence behind a backlog is a failure rather than a wait. Entries nobody reclaims and a prune billed to a request are the shapes this forbids: they reach 61,103 entries and 8.0 GB, and they block one command for over two minutes.",
       "sources": ["NRN-46", "NRN-305", "NRN-287", "NRN-482", "NRN-480", "NRN-522", "NRN-29", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
@@ -636,7 +681,7 @@
       "name": "poisoned-state-self-heals-and-writes-are-never-ambiguous",
       "kind": "defect-class",
       "venue": 2,
-      "property": "Initial creation of derived state is exclusive, and any poisoned handle — missing database, descriptor exhaustion, corruption, a recovered lock still refusing — is detected and rebuilt without operator intervention. Every write resolves to applied or not applied: never may-have-applied, never landing after the client's verdict. A liveness verdict derives from observed progress and is never issued for a request the server completed.",
+      "property": "Initial creation of derived state is exclusive, and any poisoned handle — missing database, descriptor exhaustion, corruption, a recovered lock still refusing — is detected and rebuilt without operator intervention. Every write resolves to applied or not applied: never may-have-applied, never landing after the client's verdict. The client learns within bounded time which of the two it was, and a legitimate long rebuild is distinguishable from an indefinite hang rather than presenting as one. A liveness verdict derives from observed progress and is never issued for a request the server completed.",
       "sources": ["NRN-323", "NRN-325", "NRN-337", "NRN-465", "NRN-483", "NRN-s29", "NRN-55", "norn-legacy annoyances log", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
@@ -669,7 +714,7 @@
       "name": "reads-are-not-blocked-by-writes",
       "kind": "defect-class",
       "venue": 2,
-      "property": "A read's wait is bounded and reported, and an in-flight write does not serialize the read surface. One session mutex held across a blocking round trip made a 40-second apply block every concurrent read for 40 seconds with no diagnostic.",
+      "property": "A read's wait is bounded and reported, and an in-flight write does not serialize the read surface. One session mutex held across a blocking round trip is the shape this forbids: under it a 40-second apply blocks every concurrent read for 40 seconds with no diagnostic.",
       "sources": ["NRN-530", "NRN-55"],
       "binding": {
         "status": "dormant",
@@ -802,7 +847,7 @@
       "kind": "defect-class",
       "mandatory": true,
       "venue": 3,
-      "property": "The field universe is exact — schema keys united with observed keys — and the diagnostic is a biconditional: a request component is reported unsatisfiable exactly when it is unsatisfiable. An unknown sort, column or predicate key never silently degrades a result, a malformed glob is never swallowed into a zero-match answer, and a missing named section is a distinguishable miss rather than a silent whole-document substitution. The diagnostic reaches every surface, and the exit code distinguishes not-fully-satisfiable from satisfiable-with-zero-matches, which stays success.",
+      "property": "The field universe is exact — schema keys united with observed keys — and the diagnostic is a biconditional: a request component is reported unsatisfiable exactly when it is unsatisfiable. An unknown sort, column or predicate key never silently degrades a result, a malformed glob is never swallowed into a zero-match answer, a path filter that cannot match by construction — a bare directory where the grammar matches globs — is reported rather than answered with a silent empty set, and a missing named section is a distinguishable miss rather than a silent whole-document substitution. The diagnostic reaches every surface, and the exit code distinguishes not-fully-satisfiable from satisfiable-with-zero-matches, which stays success.",
       "sources": ["NRN-s14", "NRN-367", "NRN-374", "NRN-428", "NRN-427", "NRN-44", "NRN-392", "NRN-452", "NRN-399", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
@@ -813,7 +858,7 @@
       "name": "cascade-preserves-link-syntax",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A rewritten link preserves every syntactic component except the target — embed marker, alias, anchor, block reference. Rewriting is occurrence-addressed rather than first-match, and only unambiguously resolving occurrences are rewritten; the rest are skipped and named. One prefix miss turned a transclusion with an alias into a plain link while reporting three backlinks rewritten.",
+      "property": "A rewritten link preserves every syntactic component except the target — embed marker, alias, anchor, block reference. Rewriting is occurrence-addressed rather than first-match, and only unambiguously resolving occurrences are rewritten; the rest are skipped and named. A raw prefix strip is the shape this forbids: one prefix miss turns a transclusion with an alias into a plain link while the report claims three backlinks rewritten.",
       "sources": ["NRN-431", "NRN-484", "NRN-129", "NRN-249"],
       "binding": {
         "status": "dormant",
@@ -908,7 +953,7 @@
       "sources": ["NRN-430", "NRN-474", "NRN-475", "NRN-37", "NRN-390", "NRN-119"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no constraint engine and no write path to hold to one verdict."
+        "reason": "there is no constraint engine and no write path to hold to one verdict; the write path is the last engine this property needs, which is why it binds a layer below the element-versus-collection rule."
       }
     },
     {
@@ -937,7 +982,7 @@
       "name": "write-through-the-composed-post-state",
       "kind": "defect-class",
       "venue": 4,
-      "property": "A mutation's commit consumes the bytes and parsed post-state the mutation composed: filesystem reads per touched file within a mutation request are zero, and content hashes are computed at most once. One single-field write re-read and re-hashed its own changed file three times.",
+      "property": "A mutation's commit consumes the bytes and parsed post-state the mutation composed: filesystem reads per touched file within a mutation request are zero, and content hashes are computed at most once. Re-reading what the mutation just composed is the shape this forbids: it costs one single-field write three reads and three hashes of its own changed file.",
       "sources": ["NRN-a59", "NRN-a63"],
       "binding": {
         "status": "dormant",
@@ -963,7 +1008,7 @@
       "sources": ["NRN-127", "NRN-429", "NRN-474", "NRN-496", "NRN-498", "NRN-476"],
       "binding": {
         "status": "dormant",
-        "reason": "no validator, mutator or repair planner exists to agree."
+        "reason": "no validator, mutator or repair planner exists to agree; the repair planner's compare-and-swap precondition is the last engine this property needs, which is why it binds a layer above the one-verdict rule."
       }
     },
     {
@@ -1015,7 +1060,7 @@
       "kind": "defect-class",
       "venue": 6,
       "property": "Every surfaced flag is structurally required to reach a behavior seam, or it is rejected: a flag that parses and plumbs nowhere is impossible rather than merely absent. An escape-hatch flag zeroes the counter of the work it claims to skip; explicit-versus-explicit conflicts refuse; last-operation-wins is uniform wherever override is the semantics; a shared guardrail flag behaves identically across sibling verbs; no grammar shape can panic; and help prose and grammar agree by generation.",
-      "sources": ["NORN-a1", "NRN-a62", "NRN-537", "NRN-500", "NRN-246", "NRN-165", "NRN-331", "NRN-458", "NRN-313", "NRN-417", "NRN-477", "NRN-284", "NRN-153"],
+      "sources": ["NORN-a1", "NRN-a62", "NRN-537", "NRN-500", "NRN-s16", "NRN-246", "NRN-165", "NRN-331", "NRN-458", "NRN-313", "NRN-417", "NRN-477", "NRN-284", "NRN-153"],
       "binding": {
         "status": "dormant",
         "reason": "there is no grammar and no behavior seam for a flag to reach."
@@ -1058,8 +1103,8 @@
       "name": "help-states-the-contract-nothing-else",
       "kind": "defect-class",
       "venue": 6,
-      "property": "User-facing help states the present-tense contract only: no provenance, no internal notes, no task identifiers, no flags that do not exist. Documented interfaces are generated from or asserted against the live grammar and tool catalog in both directions, so a functional flag missing from its command's help fails as loudly as a documented flag missing from the grammar.",
-      "sources": ["NRN-171", "NRN-491", "NRN-35", "NRN-193", "NRN-335", "NRN-505", "NRN-461", "NRN-454", "norn-legacy engineering learnings"],
+      "property": "User-facing help states the present-tense contract only: no provenance, no internal notes, no task identifiers, no flags that do not exist. Documented interfaces are generated from or asserted against the live grammar and tool catalog in both directions, so a functional flag missing from its command's help fails as loudly as a documented flag missing from the grammar. An argument form the grammar refuses is stated in the help of the argument that refuses it, and an argument rejected for its form is reported as rejected rather than left unaddressable: a heading operation that refuses a `#`-prefixed heading while its help says nothing about hashes leaves a real heading with no spelling that reaches it.",
+      "sources": ["NRN-171", "NRN-491", "NRN-35", "NRN-193", "NRN-335", "NRN-505", "NRN-461", "NRN-454", "NRN-164", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
         "reason": "there is no help surface and no grammar to generate it from."
