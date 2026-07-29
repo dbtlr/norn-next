@@ -168,9 +168,10 @@ ignore reason to open with a sanctioned lane prefix.
 
 - [`architecture.md`](../architecture.md) states the invariant spine's
   memory invariant and the lane rule this decision practises: per-PR CI
-  asserts peak memory at a realistic ~2k profile; the scheduled lane
-  carries the trend line and the flat-slope requirement. That document
-  governs; this one records how the rule is met.
+  asserts peak memory at a realistic ~2k profile; the scheduled lane bars
+  each run's reading against the authored baseline, with the baseline's
+  downward movement review-held until the Layer 2 flat-slope requirement
+  mechanizes it. That document governs; this one records how the rule is met.
 - [ADR 0002](0002-fixture-determinism-and-calibration.md) is where the
   authored-envelope stance and the by-kind lane split come from, and where
   the generator's determinism contract makes a repeated measurement a
