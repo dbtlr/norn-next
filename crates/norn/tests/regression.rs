@@ -52,7 +52,7 @@ use norn_testkit::regression::{BindingStatus, Kind, Registry, TestIndex};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 101;
+const CASE_TOTAL: usize = 104;
 
 /// The whole registry's contract, as one value.
 ///
@@ -61,11 +61,11 @@ const CASE_TOTAL: usize = 101;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "6f8efffe57f6e67ab6695272fa25640aeb82db8b695892301b225b3cb2d193ca";
+const CONTRACT_DIGEST: &str = "45117408ae0903bfaf083d8e2430a218e6d0ef0942e516c8e98b4d54158cef0f";
 
 /// The cases carried by tests today, by name.
 ///
-/// Pinned rather than counted, because which four are bound is the whole
+/// Pinned rather than counted, because which ones are bound is the whole
 /// claim: these are the ones whose subject — the harness itself — already
 /// exists. A case that stops being carried has to leave this list to pass,
 /// which is a diff a reviewer reads. Compared as a set, because the order
@@ -75,6 +75,7 @@ const BOUND_CASES: &[&str] = &[
     "fixtures-carry-real-content-volume",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
+    "harness-waits-have-deadlines",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -157,7 +158,7 @@ fn the_case_total_is_pinned() {
     );
 }
 
-/// The cases carried by tests today are exactly the four whose subject
+/// The cases carried by tests today are exactly the ones whose subject
 /// already exists. Everything else is dormant with its venue, so nothing is
 /// bound to a test that does not carry it.
 #[test]

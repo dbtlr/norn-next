@@ -93,10 +93,15 @@ pub fn generate(label: &str, name: &str) -> Reading {
     let out_dir: PathBuf = sandbox.work_dir().join("vault");
 
     let started = Instant::now();
+    // The wait's bound is the widest wall clock the lanes sharing this helper
+    // declare, so a generation the harness ends is one past every lane's
+    // budget. Whether a reading fits the lane's own ceiling is that lane's
+    // assertion, taken on the duration this returns.
     let outcome = Run::new(&sandbox, &generator)
         .arg("generate")
         .arg(&out_dir)
         .args(["--profile", name, "--seed", SEED])
+        .deadline(baselines::SOAK_WALL_CLOCK_CEILING)
         .wait()
         .expect("running the generator");
     let elapsed = started.elapsed();

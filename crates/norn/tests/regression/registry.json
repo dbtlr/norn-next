@@ -138,14 +138,18 @@
       }
     },
     {
-      "name": "harness-waits-have-deadlines-and-steps-report-their-own-outcome",
+      "name": "harness-waits-have-deadlines",
       "kind": "defect-class",
       "venue": 0,
-      "property": "A harness wait carries a deadline: a wait on a child or on a condition either observes what it waits for or fails naming it, so no run hangs until the runner's own timeout decides for it. A step's verdict is its work's verdict — a downstream reader closing a pipe does not fail a step whose work already succeeded — and a suite's reference moves with the suite, so an installed binary ahead of a pinned reference reports skew rather than turning the suite red.",
-      "sources": ["NRN-324", "NRN-348", "NRN-366", "NRN-531"],
+      "property": "A harness wait on a child carries a deadline: it either observes the child's end or kills the child, reaps it, and reports the timeout naming the bound it passed, so no run hangs until the runner's own timeout decides for it. A child that ends inside its bound reports what it did — the deadline observes, and never preempts.",
+      "sources": ["NRN-324"],
       "binding": {
-        "status": "dormant",
-        "reason": "there is no deadline mechanism to bind against: the process harness waits on a child through a blocking `wait4` with no timeout, and nothing waits on a condition at all. The step-outcome and reference-skew clauses have no long-running child and no installed-binary suite to run against."
+        "status": "bound",
+        "tests": [
+          "crates/norn-testkit/src/process.rs::a_run_past_its_deadline_is_killed_and_reported_as_timed_out",
+          "crates/norn-testkit/src/process.rs::a_run_that_ends_inside_its_deadline_reports_its_own_status",
+          "crates/norn-testkit/src/process.rs::a_run_that_kills_itself_inside_its_deadline_is_not_a_timeout"
+        ]
       }
     },
     {
@@ -212,6 +216,17 @@
       "binding": {
         "status": "dormant",
         "reason": "no derivation counter exists to move; the rule binds with the first one."
+      }
+    },
+    {
+      "name": "steps-report-their-own-outcome",
+      "kind": "defect-class",
+      "venue": 0,
+      "property": "A step's verdict is its work's verdict: a downstream reader closing a pipe does not fail a step whose work already succeeded.",
+      "sources": ["NRN-366"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no step pipes its output into a reader that can close early — there is no `tee` and no chain carrying a pipeline's earlier failure — so nothing can produce the outcome this forbids; the clause binds with the first step that has one."
       }
     },
     {
@@ -344,6 +359,17 @@
       "binding": {
         "status": "dormant",
         "reason": "no serializer exists to hold to a round trip."
+      }
+    },
+    {
+      "name": "harness-condition-waits-have-deadlines",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "A harness wait on a condition carries a deadline: it either observes the condition or fails naming the bound it passed, rather than polling for as long as the run lasts.",
+      "sources": ["NRN-324"],
+      "binding": {
+        "status": "dormant",
+        "reason": "nothing in the harness waits on a condition. The first substrate-layer wait is the subject, and the primitive that bounds it arrives with that consumer."
       }
     },
     {
@@ -1141,6 +1167,17 @@
       "binding": {
         "status": "dormant",
         "reason": "there is no render seam and nothing writes to a terminal."
+      }
+    },
+    {
+      "name": "suite-references-move-with-the-suite",
+      "kind": "defect-class",
+      "venue": 6,
+      "property": "A suite's reference moves with the suite: an installed binary ahead of a pinned reference reports skew rather than turning the suite red.",
+      "sources": ["NRN-348"],
+      "binding": {
+        "status": "dormant",
+        "reason": "no suite runs against an installed binary: the `norn` binary is a stub with no version to pin a reference to. The first suite that compares against one is the subject."
       }
     }
   ]
