@@ -164,8 +164,8 @@ Two mechanisms carry trust, and both are contract:
 
 - **The proactive watcher** — immediate detection, over a fidelity ladder across
   filesystems: native notification where the platform provides it. Warm trust is contracted
-  for local filesystems today; backend selection at registration is the carved rung for
-  coarser detection elsewhere. Its contract is directional — **over-report freely,
+  for local filesystems today; backend selection at registration is the carved extension
+  point for coarser detection elsewhere. Its contract is directional — **over-report freely,
   under-report never.** A redundant re-derivation costs work; a missed change costs a wrong
   answer, so every tuning choice biases toward the safe direction, and a lost-notification or
   overflow signal marks the entry untrusted for a rung-2 re-heal rather than being absorbed.
@@ -174,8 +174,9 @@ Two mechanisms carry trust, and both are contract:
   makes it no less a contract: an absent mechanism binds here for the same reason an absent
   crate does.
 
-Their pairing is what makes fidelity **empirical instead of asserted**: every drift a scan
-finds that the watcher missed is a counted defect, trended in the soak lane.
+Their pairing is what will make fidelity **empirical instead of asserted** rather than
+leaving it a review-held claim: once the scans run, every drift a scan finds that the
+watcher missed is a counted defect, trended in the soak lane.
 
 **Hash authority.** Only a content hash concludes "unchanged" — anywhere in the system. A
 stat fingerprint may prioritize work or raise suspicion; it may never conclude. The asymmetry
@@ -185,8 +186,8 @@ descriptor**, so the bytes hashed are provably the bytes read. Progressive verif
 changes *when* a hash happens, never *what* concludes.
 
 Fidelity telemetry and hash authority sit in different lanes. Detection-to-convergence is
-carried today by the [churn suite](#2-the-heal-ladder): its bar is convergence-to-equivalence
-with a from-scratch build, so a watcher that under-reports fails it. Fidelity telemetry —
+the [churn suite](#2-the-heal-ladder)'s bar: convergence-to-equivalence with a from-scratch
+build, so a watcher that under-reports fails it. Fidelity telemetry —
 scan-caught misses per run — is a **soak-lane trend** and never fails a pull request. Hash
 authority itself is **review-held**: no lint or suite yet forbids a stat comparison from
 reaching a conclusion, so the invariant holds by review until one binds it, which is exactly
@@ -535,8 +536,9 @@ disambiguating suffixes, and the findings pillar indexes full candidate enumerat
 wire's bounded head stays a head rather than becoming the query surface.
 
 The links table stores **syntactic facts only** — raw target, protocol, title, addressing
-mode, span — and resolution runs at query time through this one grammar, never materialized;
-a materialized projection could only ever arrive as keyed, invalidated derived state.
+mode, span — and resolution runs at query time through this one grammar; resolved edges are
+never stored, and a materialized projection could only ever arrive as keyed, invalidated
+derived state.
 Backlinks are an indexed suffix join over those facts. Two addressing modes share that fact
 shape, each true to its own standard: a wikilink target resolves as a suffix address, while
 an inline Markdown link target resolves as a relative filesystem path against the containing
