@@ -63,9 +63,10 @@ restores trust. Three rungs, cheapest first:
    the changed set. This is the warm steady state.
 2. **Full tree heal** — `attach = heal-then-ready`: add missing, update changed, prune
    deleted. "Update changed" is decided by a content hash, never by a stat comparison — see
-   [the trust model](#5-the-trust-model). Deliberately unoptimized, billed once to the first
-   request under a framed `Warming` progress display, and written to be resumable-friendly
-   so an interrupted heal costs repeated work rather than correctness.
+   [the trust model](#5-the-trust-model). Deliberately unoptimized, and billed once to the
+   first request under a framed `Warming` progress display. Its resumable-friendly shape is
+   carved for a later stat-prioritized, progressive-verification evolution; nothing measures
+   it today.
 3. **Rebuild from zero** — the derived database is discarded and rebuilt.
 
 Vault files are never the thing being healed; they are the source of truth. The ladder
@@ -162,30 +163,34 @@ detection fidelity is why that state is worth reading at all.
 Two mechanisms carry trust, and both are contract:
 
 - **The proactive watcher** — immediate detection, over a fidelity ladder across
-  filesystems: native notification where the platform provides it, coarser rungs where it
-  does not. Its contract is directional — **over-report freely, under-report never.** A
-  redundant re-derivation costs work; a missed change costs a wrong answer, so every tuning
-  choice biases toward the safe direction, and a lost-notification or overflow signal marks
-  the entry untrusted for a rung-2 re-heal rather than being absorbed.
+  filesystems: native notification where the platform provides it. Warm trust is contracted
+  for local filesystems today; backend selection at registration is the carved rung for
+  coarser detection elsewhere. Its contract is directional — **over-report freely,
+  under-report never.** A redundant re-derivation costs work; a missed change costs a wrong
+  answer, so every tuning choice biases toward the safe direction, and a lost-notification or
+  overflow signal marks the entry untrusted for a rung-2 re-heal rather than being absorbed.
 - **Background just-in-time drift scans** — idle-time, iterative, progressive
-  re-verification of derived state against the files. This mechanism arrives after the
-  lockdown layer, which makes it no less a contract: an absent mechanism binds here for the
-  same reason an absent crate does.
+  re-verification of derived state against the files. This mechanism is not built yet, which
+  makes it no less a contract: an absent mechanism binds here for the same reason an absent
+  crate does.
 
 Their pairing is what makes fidelity **empirical instead of asserted**: every drift a scan
 finds that the watcher missed is a counted defect, trended in the soak lane.
 
 **Hash authority.** Only a content hash concludes "unchanged" — anywhere in the system. A
-stat fingerprint may prioritize work or raise suspicion; it may never conclude, wherever the
-conclusion authorizes a destructive act or backs a trust claim. Reading and hashing a file is
-**one atomic act against one file descriptor**, so the bytes hashed are provably the bytes
-read. Progressive verification changes *when* a hash happens, never *what* concludes.
+stat fingerprint may prioritize work or raise suspicion; it may never conclude. The asymmetry
+is why: a false "unchanged" destroys work or backs a wrong answer, while a false "changed"
+costs a re-derivation. Reading and hashing a file is **one atomic act against one file
+descriptor**, so the bytes hashed are provably the bytes read. Progressive verification
+changes *when* a hash happens, never *what* concludes.
 
-The two halves sit in different lanes. Fidelity telemetry — scan-caught misses per run — is a
-**soak-lane trend** and never fails a pull request. Hash authority itself is **review-held**:
-no lint or suite yet forbids a stat comparison from reaching a conclusion, so the invariant
-holds by review until one binds it, which is exactly the case this part's own rule warns
-about — a review-held invariant rots quietly.
+Fidelity telemetry and hash authority sit in different lanes. Detection-to-convergence is
+carried today by the [churn suite](#2-the-heal-ladder): its bar is convergence-to-equivalence
+with a from-scratch build, so a watcher that under-reports fails it. Fidelity telemetry —
+scan-caught misses per run — is a **soak-lane trend** and never fails a pull request. Hash
+authority itself is **review-held**: no lint or suite yet forbids a stat comparison from
+reaching a conclusion, so the invariant holds by review until one binds it, which is exactly
+the case this part's own rule warns about — a review-held invariant rots quietly.
 
 ---
 
@@ -210,9 +215,9 @@ contract.
 |---|---|---|
 | `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
 | `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, wikilink syntax, `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a vault schema facet enforced through `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
-| `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-segments, redundant separators — so every consumer compares normalized identity instead of deriving its own. Watcher coverage for an entry is the vault root tree plus that entry's configured schema-source path. Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
+| `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-prefix, redundant separators — so every consumer compares normalized identity instead of deriving its own. Watcher coverage for an entry is the vault root tree plus that entry's configured schema-source path. Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
 | `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, and the read builders (wire params → emitted SQL). Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
-| `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch — download to a temp path, verify, atomic rename — so an unverified blob never appears under a name anything loads. Acquisition is eager, at the explicit enable act, never lazy inside a query. A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
+| `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch, so an unverified blob never appears under a name anything loads. A fetch failure or a digest mismatch refuses with a structured reason: semantic search stays un-enabled, and nothing else degrades. Acquisition is eager, at the explicit enable act, never lazy inside a query. A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-config` | **Machine-local state, one owner** — config-directory layout, the registry file read/write, the bearer token read/write, host endpoint discovery conventions, weights-directory location. Never touches a vault. | The one state surface both sides of the client/host seam must read — the serving side to authenticate, the client to find the host at all. Hand-sharing that convention in two crates is a drift class on a security-relevant file. |
 | `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault schema (resolved through the registry entry's schema-source — default: a path inside the vault — read via `norn-fs` as one atomic read-and-fingerprint act, and pinned at attach), the worker pool (the one applier, mutation planners, the repair planner, embedding workers), and the first-run janitor. The pinned schema is projected into the store's meta (bytes, fingerprint, generation) as derived state; the file remains its sole authority. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes; its one direct effect is the one-shot legacy-cache janitor. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
 | `norn-mcp` | **MCP semantics, no transport** — derives tool schemas from `norn-wire`, translates MCP requests to wire params and wire reports to MCP responses. Pure functions, unit-testable like `norn-text`. | The derived-renderings owner for the MCP surface; protocol shape quarantined from both orchestration and plumbing. |
@@ -531,7 +536,8 @@ wire's bounded head stays a head rather than becoming the query surface.
 
 The links table stores **syntactic facts only** — raw target, protocol, title, addressing
 mode, span — and resolution runs at query time through this one grammar, never materialized;
-backlinks are an indexed suffix join over those facts. Two addressing modes share that fact
+a materialized projection could only ever arrive as keyed, invalidated derived state.
+Backlinks are an indexed suffix join over those facts. Two addressing modes share that fact
 shape, each true to its own standard: a wikilink target resolves as a suffix address, while
 an inline Markdown link target resolves as a relative filesystem path against the containing
 document — vault-root-relative when the path is rooted, and containment-bounded either way.
