@@ -42,7 +42,7 @@ fn the_gate_profile_stays_inside_the_envelope() {
 }
 
 #[test]
-#[ignore = "the >=5k-document profile is soak-lane work; NORN-13 activates it"]
+#[ignore = "soak-lane case: the >=5k profile is nightly work, not per-PR"]
 fn the_soak_profile_stays_inside_the_envelope() {
     assert_calibrated("cal-soak", "soak", 3);
 }

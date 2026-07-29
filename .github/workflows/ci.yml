@@ -13,7 +13,8 @@
 #
 # A job whose name carries a "(placeholder — ...)" suffix is structure only:
 # it passes trivially so the lane exists, triggers, and is reviewable before
-# it has teeth, and it is filled by the harness task named in its comment.
+# it has teeth, and it is filled by whatever its comment names — a task where
+# one exists, and otherwise the layer that brings the missing subject.
 # The suffix drops when the real gate lands, so a green check on a job
 # without one is a gate that actually ran.
 name: ci
@@ -74,37 +75,57 @@ jobs:
       - name: Gate
         run: cargo test --locked -p norn-testkit --test architecture
 
-  # Filled by NORN-13: size-independence pairs, and the counter and EXPLAIN
-  # bars over the read builders that arrive with norn-store. The machinery
-  # they are written with — counter snapshots, the SQL-and-plan pairing, the
-  # scale pair — is in norn-testkit; what is missing is the subject. All
-  # assertions are counts, never clocks, at a ~2k-document realistic fixture
-  # profile.
+  # Still a placeholder, and waiting on subjects rather than on machinery. The
+  # machinery — counter snapshots, the SQL-and-plan pairing, the
+  # size-independence pair — is in norn-testkit already.
+  #
+  # The derivation counters and the read builders that emit the SQL arrive
+  # with norn-store, at Layer 1: that is what brings the zero-counter bar on
+  # warm paths and the size-independence pairs expressed as counts. The
+  # EXPLAIN bars arrive with the Layer 3 read builders, because a plan
+  # assertion is only worth anything against the statement a builder emitted.
+  # All of it is counts, never clocks, at the ~2k-document realistic profile.
   gates:
-    name: counter and plan gates (placeholder — NORN-13)
+    name: counter and plan gates (placeholder — Layers 1 and 3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Pending
         run: |
-          echo "Counter and plan gates land with NORN-13."
-          echo "Asserts: zero derivation counters on warm paths;"
-          echo "         EXPLAIN plans against the builder's emitted SQL;"
-          echo "         size-independence pairs, expressed as counts."
+          echo "Counter and plan gates land with their subjects."
+          echo "Layer 1 (norn-store): zero derivation counters on warm paths;"
+          echo "                      size-independence pairs, as counts."
+          echo "Layer 3 (read builders): EXPLAIN plans against emitted SQL."
 
-  # Filled by NORN-13: peak memory at the ~2k-document profile. The
-  # instrumentation it is written with — the sandboxed spawn and the
-  # peak-resident-set reading taken from the kernel when the child is waited
-  # on — is in norn-testkit (process.rs); what is missing is the subject and
-  # the bar. The trend line over time lives in the soak lane; this job is the
-  # per-PR bar.
+  # A real gate. It spawns the fixture generator under the testkit's process
+  # harness and reads the peak resident set the kernel accounted to that child,
+  # then asserts two things about it at profiles under 5k documents: a
+  # checked-in ceiling at the ~2k-document realistic profile, and the ratio
+  # between the 300-document and ~2k-document profiles. The ratio is the sharp
+  # instrument — a ceiling passes anything that fits under it, and a ratio
+  # fails the moment two scales stop moving together. Both bars are authored
+  # and move only by a reviewed edit; the readings behind them are in
+  # crates/norn-fixtures/tests/baselines/mod.rs.
+  #
+  # The cases live in this job alone. They are `#[ignore]`d with a
+  # `memory-lane case:` reason so the build job's workspace suite does not run
+  # them: a measurement running beside every other test measures those tests
+  # too, and "build and test" stays free of measurement. The step asks the
+  # target for its ignored cases wholesale, which is why the >=5k cases are a
+  # separate target (`memory_soak`) rather than a second reason in this one —
+  # otherwise this lane would run soak.yml's wall-clock assertion. The script
+  # is what makes that wholesale run fail when it ran nothing.
+  #
+  # The generator is the subject because it is the one that exists. norn-store
+  # slots in at Layer 1, and its request paths become what this job measures;
+  # the >=5k scale and the recorded peak-memory readings stay in soak.yml,
+  # where a clock is legal to read.
   memory:
-    name: memory invariant (placeholder — NORN-13)
+    name: memory invariant
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Pending
-        run: |
-          echo "Memory invariant gate lands with NORN-13."
-          echo "Asserts: peak memory is a function of the working set,"
-          echo "         not of vault size."
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Memory bars
+        run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1

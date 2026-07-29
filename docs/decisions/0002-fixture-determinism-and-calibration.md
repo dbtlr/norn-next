@@ -11,6 +11,21 @@ tree has to be **reproducible**, or a measurement compares two different
 worlds; and it has to be **realistic**, or the measurement is precise about a
 world nobody lives in.
 
+↳ **Amended 2026-07-28.** The memory bars and the soak lane exist:
+`.github/workflows/soak.yml` runs this crate's ≥5k determinism, calibration
+and memory cases nightly, and `.github/workflows/ci.yml`'s memory job runs the
+sub-5k memory bars per pull request. The counter gates and plan assertions are
+still placeholders, waiting on `norn-store` and the Layer 3 read builders.
+[ADR 0004](0004-two-tier-measurement-and-authored-baselines.md) records what
+those lanes assert and how their baselines are held.
+
+> **Amended 2026-07-28** — the memory bars and the soak lane are built, and
+> the crate has acquired a development dependency. Three passages carry that
+> clause: the placeholder claim in the paragraph above, the leaf statement in
+> **The contract**, and the soak-lane statement beside it. Each is left
+> standing as written, with its amendment attached where it sits, and
+> [Amendments](#amendments) records the change in full.
+
 ## The contract
 
 **The same `(profile, seed)` produces the same emitted tree, byte for byte, on
@@ -176,12 +191,26 @@ arithmetic, the PRNG and the argument parsing are in-crate, because a generator
 that links a parser, a hasher or a random-number crate would inherit that
 crate's version drift into every tree measured against it.
 
+↳ **Amended 2026-07-28.** The claim is a **normal-dependency** claim, and as
+such it stands: nothing this crate builds or ships links anything. It has one
+development dependency, on `norn-testkit`, because the memory bars spawn this
+crate's own binary and `CARGO_BIN_EXE_norn-fixtures` is set only for
+integration tests of the package that defines the binary — so the suite has to
+live here. A dev edge reaches no generated tree, and the architecture gate
+reads and discards dev edges because they cycle by construction.
+
 **The largest profile's runs belong to the soak lane.** The determinism and
 calibration cases for the ≥5k profile are `#[ignore]`d with their reason
 stated, and the lane that will adopt them is a placeholder today. The split is
 by kind, not by stopwatch: the per-PR lane runs the profiles the per-PR gates
 are to measure against, and a ≥5k profile is the other lane's work whatever it
 costs to run.
+
+↳ **Amended 2026-07-28.** The lane is no longer a placeholder. The soak
+workflow (`.github/workflows/soak.yml`) runs those cases nightly, selecting
+them by kind rather than by name and failing when none of them ran. The split
+is unchanged, and now has a second application: the memory cases divide the
+same way, with the sub-5k bars in the per-PR lane and the ≥5k ones here.
 
 ## Consequences
 
@@ -248,3 +277,44 @@ costs to run.
 - The calibration envelope is authored, and says so. Its provenance is this
   document and the `why` field of each entry, not a measurement of any
   collection.
+
+## Amendments
+
+### Amendment 1, 2026-07-28 — the memory bars and soak lane land, and the crate takes its first dependency
+
+**What changed.**
+
+- The per-PR memory job and the nightly soak lane, placeholders when this
+  decision was recorded, are built and running. `.github/workflows/soak.yml`
+  runs this crate's ≥5k determinism, calibration and memory cases nightly,
+  selecting them by kind and failing when none ran; `.github/workflows/ci.yml`'s
+  memory job runs the sub-5k memory bars per pull request. The counter gates
+  and plan assertions named in the same original sentence are still
+  placeholders, waiting on `norn-store` and the Layer 3 read builders.
+  [ADR 0004](0004-two-tier-measurement-and-authored-baselines.md) records what
+  the two lanes assert and how their baselines are held.
+- The leaf claim narrows from "no dependencies at all" to a normal-dependency
+  claim: nothing this crate builds or ships links anything, but it now carries
+  one development dependency, on `norn-testkit`.
+- The largest profile's soak-lane placement is no longer a placeholder either:
+  the soak workflow runs those cases nightly, and the split by kind — not by
+  stopwatch — now has a second application, dividing the memory cases the same
+  way the determinism and calibration cases already were.
+
+**Why it changed.** The memory bars need a live process to read a peak
+resident set from, and the only subject this workspace has is this crate's own
+binary. Reading it from an integration test requires spawning
+`CARGO_BIN_EXE_norn-fixtures`, which cargo sets only for integration tests of
+the package that defines the binary — so the bars, and the dev dependency on
+`norn-testkit` that runs them under a process harness, have to live here. A dev
+edge reaches no generated tree: it feeds no byte a `(profile, seed)` pair
+produces, so it does not touch the guarantees this decision is about, and the
+architecture gate reads and discards dev edges because they cycle by
+construction.
+
+**What it touched.** The three passages amended in place — the placeholder
+claim in the opening paragraph, the leaf statement in **The contract**, and the
+soak-lane statement beside it — plus `.github/workflows/ci.yml`,
+`.github/workflows/soak.yml`, `crates/norn-fixtures/tests/baselines/mod.rs`,
+and the crate's `Cargo.toml` dev-dependencies. [ADR 0004](0004-two-tier-measurement-and-authored-baselines.md)
+states the lane-assignment and baseline contract these mechanisms practise.

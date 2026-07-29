@@ -4,24 +4,37 @@
 # clocks trend here. Everything time-dependent or long-running lives in this
 # lane — see docs/architecture.md.
 #
-# Structure only. Filled by NORN-13 (instrumentation harness): wall-clock bars
-# and the peak-memory trend line, plus the >=5k-document profiles and the
-# nightly mixed load that the lockdown gate is judged against.
+# This lane runs the >=5k-document profile's work: the cases the per-PR suites
+# carry as `#[ignore]`d, and the measurements whose readings are the lane's
+# product. Each step runs a suite's ignored cases by kind rather than by name.
+# That removes one hazard and not the other: a name filter that stops matching
+# runs zero tests and reports success, and selecting by kind removes the
+# name-typo spelling of it — but `--ignored` with nothing to match still exits
+# 0. What closes it is the pass-count assertion in .github/scripts/lane-suite.sh,
+# which every step below goes through.
+#
+# Every measurement is compared against a checked-in baseline in
+# crates/norn-fixtures/tests/baselines/mod.rs and recorded in the job summary.
+# The baselines are the trend's whole memory: nothing here fetches a history or
+# consults a store. What binds mechanically is the comparison — a reading past
+# a baseline fails the run. **Nothing enforces which direction a baseline
+# moves**: the readings are recorded per run, and the discipline that they
+# should only fall is review-held, carried by the baselines being a small,
+# frequently-read diff. A mechanized trend arrives with the Layer 2 lockdown
+# work, when this lane carries a host workload for a slope to be measured over.
 name: soak
 
 on:
-  # The cron is deliberately commented out while this lane is a placeholder.
-  # Lockdown counts consecutive green soak runs, and a nightly run of a job
-  # that asserts nothing would manufacture that count out of nothing.
-  #
-  # NORN-13 uncomments it when the lane does real work. Two things to check at
-  # that point: GitHub disables schedules on repositories with no activity for
-  # 60 days, so activation must be verified rather than assumed; and the first
-  # green run under the real assertions is run one of five, not run six.
-  #
-  # schedule:
-  #   # Nightly, 04:00 UTC.
-  #   - cron: '0 4 * * *'
+  schedule:
+    # Nightly, 04:00 UTC.
+    #
+    # Schedules and manual dispatch take effect only from the default branch:
+    # nothing in this file is exercisable on the pull request that adds it, and
+    # verifying that the lane runs at all is post-merge work.
+    #
+    # GitHub also disables schedules on repositories with no activity for 60
+    # days, so this lane running is a thing to check rather than assume.
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 permissions:
@@ -32,19 +45,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Filled by NORN-13. Lockdown requires five consecutive green runs of this
-  # lane: zero counter violations, a flat memory slope, and no fd growth over a
-  # nightly ~1h mixed load.
+  # What the lane asserts today is the fixture generator at the >=5k profile:
+  # that it reproduces its tree, that the tree stays inside the calibration
+  # envelope, and what the generation costs in peak memory and wall clock.
+  #
+  # Three named slots remain, each waiting on a subject rather than on
+  # machinery. Two arrive with the Layer 1 host: fd growth, which needs a
+  # long-running process to grow them, and the nightly ~1h mixed load the
+  # flat-memory-slope requirement is judged over. The third is the real pinned
+  # embedding model, which compiles only behind norn-embed's release/soak
+  # feature and so has no build to run in until that crate exists.
+  #
+  # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
+  # mixed load, showing zero counter violations, a flat memory slope, and no
+  # file-descriptor growth.** Three of those four terms have no subject yet, so
+  # the count does not start at the first green run of the assertions below: it
+  # starts when the lane asserts what lockdown counts. A green run of a lane
+  # that does not measure a term is not one of the five.
+  #
+  # The timeout below fits the work that runs now with runaway headroom; it is
+  # raised when the mixed load lands.
   soak:
-    name: soak (placeholder — NORN-13)
+    name: soak
     runs-on: ubuntu-latest
-    # Raised by NORN-13 to accommodate the ~1h mixed load.
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - name: Pending
-        run: |
-          echo "Soak lane lands with NORN-13."
-          echo "Trends: wall-clock bars;"
-          echo "        peak-memory trend line (only goes down);"
-          echo "        fd growth over a nightly mixed load."
-          echo "Profiles: >=5k documents; real pinned embedding model."
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Determinism at the soak profile
+        run: .github/scripts/lane-suite.sh norn-fixtures determinism
+      - name: Calibration at the soak profile
+        run: .github/scripts/lane-suite.sh norn-fixtures calibration
+      # Single-threaded, so the recorded numbers are of a generation competing
+      # with nothing else this suite started.
+      - name: Memory and wall clock at the soak profile
+        run: .github/scripts/lane-suite.sh norn-fixtures memory_soak --nocapture --test-threads=1
