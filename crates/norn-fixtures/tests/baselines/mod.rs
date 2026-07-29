@@ -41,9 +41,10 @@ use std::time::Duration;
 /// Peak resident set the `realistic` profile's generation must stay under.
 ///
 /// Observed over 8 runs per architecture: **2.79–3.11 MiB on linux-arm64** and
-/// **3.80–4.16 MiB on macos-arm64**. The ceiling sits at roughly twice the
-/// higher band's top, because a bar that flakes teaches people to rerun rather
-/// than to look.
+/// **3.7–4.2 MiB on macos-arm64** — indicative bands from repeated local
+/// runs, not a fixed measurement, so a rerun lands near an edge rather than
+/// the middle. The ceiling sits at roughly twice the higher band's top,
+/// because a bar that flakes teaches people to rerun rather than to look.
 ///
 /// What it forbids is a generation whose cost is the tree's total bytes.
 /// Holding this profile's clutter set rather than writing each file as it is
@@ -106,12 +107,14 @@ pub const SOAK_TO_GATE_PEAK_RSS_PER_MILLE: u64 = 2_200;
 
 /// Wall clock the `soak` profile's generation must finish inside.
 ///
-/// A sanity ceiling, not a bar on speed: the generation bills **3.19–3.54 s on
-/// linux-arm64 and 3.58–3.61 s on macos-arm64** over 6 runs each, and this is
-/// roughly fifty times that. A hosted runner competing for a disk is slow in
-/// ways no regression is, so anything tight enough to catch a regression here
-/// would fail for reasons that are not about this repository. The number the
-/// lane exists to record is the measured duration in the job summary.
+/// A sanity ceiling, not a bar on speed: the generation bills roughly
+/// **3.2–3.7 s** locally, over 6 runs on each of linux-arm64 and macos-arm64,
+/// and this is roughly fifty times that. The band is indicative rather than a
+/// fixed measurement — a rerun lands near an edge rather than the middle — and
+/// a hosted runner competing for a disk is slower still, in ways no regression
+/// is, so anything tight enough to catch a regression here would fail for
+/// reasons that are not about this repository. The number the lane exists to
+/// record is the measured duration in the job summary.
 pub const SOAK_WALL_CLOCK_CEILING: Duration = Duration::from_secs(180);
 
 /// Bytes, rendered as mebibytes to two places.
