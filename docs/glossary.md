@@ -80,3 +80,30 @@ contract turns on the distinctions below.
 - **Sanity ceiling** — a wall-clock bar set where a run past it is broken rather than slow.
   It lives in the soak lane, it gates nothing on a pull request, and the number it produces
   — the recorded duration — is worth more than the pass.
+
+## The regression stratum
+
+Earned by [ADR 0005](decisions/0005-regression-stratum.md), whose contract turns on the
+distinctions below.
+
+- **Regression stratum** — the registry of defect classes carried forward from a previous
+  line, entering as data. It says what must be true; the coverage corpus says what a program
+  once did, and the two are separate instruments.
+- **Regression case** — one named entry: a falsifiable present-tense property, the records
+  it was mined from, a venue, and a binding. Checked by counters and structural assertions
+  over bytes, never by comparing bytes to a recording.
+- **Venue** — the *first* layer at which a real test can bind a case, on a fixed scale from
+  the harness to the surfaces. Not the layer that will finally own the property: several
+  bind at the substrate and are re-asserted above it, and the earliest is the one recorded
+  because it is when the debt comes due.
+- **Bound** — carried by tests the entry names, which the audit holds to functions that
+  really exist. Its opposite is dormant, and the move between them is a deliberate edit —
+  there is no attribute to remove. A dormant case at the venue that already exists states
+  why it is still dormant.
+- **Positive control** — a case describing a shape that already satisfied the doctrine, kept
+  so a later change cannot quietly lose it. A registry of defects alone gives a change
+  nothing to be measured against.
+- **Enforcement class** — a case about how enforcement itself failed: a guard bound to SQL
+  nobody executed, a budget redefined by a document, a comment claiming a cost shape nothing
+  checked. Its subject is how tests are written, which is why every one of them sits at the
+  harness layer.
