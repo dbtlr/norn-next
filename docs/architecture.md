@@ -11,7 +11,9 @@ The design passes that derived this content are recorded as Mimir artifacts: **N
 (the decisions taken before this repository existed) and **NORN-a4** (the crate-boundary
 pass). Those are evidence about how the shape was reached, consultable and citable; they are
 not authority. Where they and this document differ, this document governs. Decisions taken
-from here land as individual ADRs where their decision binds — see
+from here are recorded as ADRs only when they pass the admission bar in
+[`AGENTS.md`](../AGENTS.md); implementation cadence creates no documentation obligation.
+The qualifying durable rationale is indexed in
 [`decisions/README.md`](decisions/README.md).
 
 ---
@@ -488,9 +490,6 @@ builder with its own `EXPLAIN` bar and index support. Candidates emit as minimal
 disambiguating suffixes, and the findings pillar indexes full candidate enumeration so the
 wire's bounded head stays a head rather than becoming the query surface.
 
-The grammar's own ADR belongs to the verb charter, where it binds; until that lands, the
-paragraph above is the working shape.
-
 **Derivation — attach, heal, watch.** Pure host composition. Cold attach walks
 `fs.walk → text.parse → store.upsert`. Warm operation is watcher facts from `norn-fs`
 driving scoped `norn-store` increments; the heal ladder splits across the same two seams
@@ -544,10 +543,11 @@ Two contracts inside that flow carry weight:
 
 - **This document** — the invariant spine, the crate map and its membership rules, the
   dependency allowlist, the boundary invariants, and the runtime topology and flows.
-- [`decisions/`](decisions/) — the ADRs, indexed in
-  [`decisions/README.md`](decisions/README.md). An ADR is written where its decision binds;
-  this document holds what is cross-cutting.
-- [`glossary.md`](glossary.md) — domain terms, added as the contracts that need them land.
+- [`decisions/`](decisions/) — qualifying durable decisions and their rationale, indexed in
+  [`decisions/README.md`](decisions/README.md). Admission and lifecycle are governed by
+  [`AGENTS.md`](../AGENTS.md); task evidence and current system contracts live elsewhere.
+- [`glossary.md`](glossary.md) — canonical project-specific language, organized by concept
+  rather than by the task, ADR, or contract that introduced it.
 - `.github/workflows/` — the two CI lanes: counters gate per PR, clocks trend in soak. The
   job comments are the in-repo marker for which gate is filled and which is still a
   placeholder.
