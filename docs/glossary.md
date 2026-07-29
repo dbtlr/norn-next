@@ -1,109 +1,96 @@
 # Glossary
 
-The domain terms of `norn`, and what each one means here specifically.
+Canonical language for `norn`. Product language names concepts visible in the system's behavior; engineering language names project-specific concepts used to build and verify it.
 
-**Terms enter with the contracts that earn them** — a term is added when a landed contract
-depends on the distinction it draws, not in advance of one. Where a term is not here,
-[`architecture.md`](architecture.md) carries the vocabulary in context, and
-[`decisions/`](decisions/README.md) does the same as each ADR lands.
+## Product language
 
-## The coverage corpus
+**Vault**:
+A directory tree of Markdown files that Norn treats as durable source truth; other files may coexist without becoming vault documents.
+_Avoid_: Collection
 
-Earned by [ADR 0001](decisions/0001-corpus-activation-gate.md), whose contract turns on the
-distinctions below.
+**Vault document**:
+A Markdown file in a vault whose authored frontmatter and body are part of the source truth.
+_Avoid_: Note, file (when the distinction matters)
 
-- **Coverage corpus** — recorded command invocations carried from a frozen line as inert
-  data: argv in, bytes and an exit class out, against a recorded input tree. Evidence with
-  zero authority; it never states what this program should do.
-- **Activation** — the approval act that lets one command's recorded cases run. It judges
-  whether the recorded output is *good* against the surface being re-derived, never whether
-  this program reproduces the recording.
-- **Activatable** — a command that has recorded cases and so can be approved. Not the same
-  as running: the manifest's `activated` list, not this category, decides that.
-- **Unseeded** — a command that carried no behavior at the recording pin. There is nothing
-  to approve and no activation path exists; whether it should exist at all is the verb
-  charter's question.
-- **Unrecorded** — a command that had behavior at the pin but that no case exercises. Its
-  contract is authored with no evidence, and the category exists to say so out loud.
-- **Exit class** — how a recording's exit code was classified when it was made: success,
-  operational failure, usage error, or — on a command that writes — a refusal that left the
-  vault untouched, or a partial apply. A property of the evidence; this program's exit
-  contract is authored with the verb charter.
+**Vault schema**:
+User-authored rules defining the valid structure and values of vault documents.
+_Avoid_: Doctrine, schema (unqualified)
 
-## Fixture generation
+**Derived state**:
+Rebuildable state computed from vault documents. It is never the source of truth.
 
-Earned by [ADR 0002](decisions/0002-fixture-determinism-and-calibration.md), whose contract
-turns on the distinctions below.
+**Trust state**:
+The explicit assessment of whether a vault entry's derived state may safely answer requests.
 
-- **Fixture profile** — a named, compile-time constant naming a document count and one
-  setting per realism knob. With a seed it is the *whole* input to generation, which is what
-  makes a generated tree reproducible; a setting reachable from outside the pair would break
-  that.
-- **Realism knob** — one dial of how closely a generated tree resembles a real collection:
-  body length, ambiguity classes, link density, directory shape, non-Markdown clutter. Each
-  is a seeded draw, so turning one changes the tree without making it unpredictable.
-- **Ambiguity class** — a set of documents sharing one file-name stem in different
-  directories. Its size is **`k`**: resolving the bare stem names all `k`, so a class larger
-  than a bounded candidate list is what proves the bound truncates rather than merely fits.
-- **Calibration envelope** — the checked-in ranges a generated tree's shape statistics are
-  expected to land in, each carrying its reasoning. Authored rather than measured, and moved
-  only by a reviewed edit — which is what makes recalibration a deliberate act rather than
-  something a generator does to itself.
+**Vault registration**:
+Inclusion of a vault in the host's durable serving set. A vault included in that set is a registered vault.
 
-## Boundary enforcement
+**Plan**:
+A declarative proposed vault mutation, including its intended effects and the conditions under which they remain safe.
 
-Earned by [ADR 0003](decisions/0003-boundary-enforcement-harness.md), whose contract turns
-on the distinctions below.
+**Forecast**:
+A report of what a plan would do against a particular observed vault state.
 
-- **Architecture gate** — the per-PR test that reads the workspace dependency graph and
-  holds it to the allowlist: every observed edge permitted, every permitted edge between two
-  present crates observed, every member a crate the map names.
-- **Edge-held** — carried by an edge the allowlist withholds, so a violation cannot compile.
-- **Lint-held** — carried by a symbol-level rule the dependency graph cannot express, with
-  the crates that legitimately own the effect carving it out at the use site.
-- **Review-held** — carried by a judgment a person makes, because no rule expresses it yet.
-  Named as such rather than left implied: a review-held invariant rots quietly.
-- **Pending rule** — a named lint rule whose subject does not exist yet, recorded in the
-  mapping so that configuring it is a deliberate edit rather than a discovery.
-- **Size-independence pair** — one operation run against two fixture profiles of different
-  scale, with the counters compared name by name. Counts, never clocks.
+**Refusal**:
+A resolved outcome in which Norn performs no requested mutation because safety, trust, or preconditions are not satisfied.
+_Avoid_: Error, failure (when the distinction matters)
 
-## Two-tier measurement
+**Finding**:
+A structured statement that vault state violates a rule or cannot be resolved unambiguously.
 
-Earned by [ADR 0004](decisions/0004-two-tier-measurement-and-authored-baselines.md), whose
-contract turns on the distinctions below.
+**Resolution target**:
+A document reference interpreted through one resolution grammar across every Norn surface.
+_Avoid_: Path, stem (when referring to the complete reference)
 
-- **Authored baseline** — a checked-in value a measurement is compared against, moved only
-  by a reviewed edit. It is the trend's whole memory: nothing fetches a history and nothing
-  compares a run to what a previous run happened to record, so a drift fails rather than
-  quietly becoming the new normal.
-- **Sanity ceiling** — a wall-clock bar set where a run past it is broken rather than slow.
-  It lives in the soak lane, it gates nothing on a pull request, and the number it produces
-  — the recorded duration — is worth more than the pass.
+**Resolution candidate**:
+A vault document that could satisfy a resolution target.
+_Avoid_: Candidate (unqualified)
 
-## The regression stratum
+**Ambiguity class**:
+The set of vault documents satisfying the same resolution target when that target does not identify exactly one document.
 
-Earned by [ADR 0005](decisions/0005-regression-stratum.md), whose contract turns on the
-distinctions below.
+## Engineering language
 
-- **Regression stratum** — the registry of defect classes carried forward from a previous
-  line, entering as data. It says what must be true; the coverage corpus says what a program
-  once did, and the two are separate instruments.
-- **Regression case** — one named entry: a falsifiable present-tense property, the records
-  it was mined from, a venue, and a binding. Checked by counters and structural assertions
-  over bytes, never by comparing bytes to a recording.
-- **Venue** — the *first* layer at which a real test can bind a case, on a fixed scale from
-  the harness to the surfaces. Not the layer that will finally own the property: several
-  bind at the substrate and are re-asserted above it, and the earliest is the one recorded
-  because it is when the debt comes due.
-- **Bound** — carried by tests the entry names, which the audit holds to functions that
-  really exist. Its opposite is dormant, and the move between them is a deliberate edit —
-  there is no attribute to remove. A dormant case at the venue that already exists states
-  why it is still dormant.
-- **Positive control** — a case describing a shape that already satisfied the doctrine, kept
-  so a later change cannot quietly lose it. A registry of defects alone gives a change
-  nothing to be measured against.
-- **Enforcement class** — a case about how enforcement itself failed: a guard bound to SQL
-  nobody executed, a budget redefined by a document, a comment claiming a cost shape nothing
-  checked. Its subject is how tests are written, which is why every one of them sits at the
-  harness layer.
+**Store schema**:
+The internal structure and version of Norn's rebuildable derived state.
+_Avoid_: Schema (unqualified), vault schema
+
+**Vault entry**:
+The host's runtime state for one attached vault, including the resources and trust state used to serve it.
+
+**Vault attachment**:
+The lifecycle that associates a vault with a vault entry and establishes trustworthy derived state before requests are served.
+_Avoid_: Attach (as a noun)
+
+**Coverage corpus**:
+Historical command invocations carried as inert input and output evidence with no authority over Norn's behavior.
+
+**Corpus activation**:
+The explicit human approval that permits one command's coverage-corpus cases to run after judging their recorded behavior independently.
+_Avoid_: Activation (unqualified)
+
+**Enforcement posture**:
+How a boundary invariant is currently carried: by a withheld dependency edge, an executable lint, or an explicit review judgment. A planned rule is not enforcement until it exists.
+
+**Review-held invariant**:
+An invariant carried by an explicit human judgment because no executable rule currently expresses it.
+
+**Size-independence pair**:
+The same operation run at two fixture scales with structural counters compared by name, demonstrating that cost does not grow with vault size.
+
+**Authored threshold**:
+A checked-in range, ceiling, or baseline changed only by a reviewed edit with stated grounds. Observations may justify changing it but never redefine it automatically.
+
+**Regression stratum**:
+The set of regression obligations retained from prior defects as properties that the current line must continue to satisfy.
+
+**Regression case**:
+One named, falsifiable property in the regression stratum. Multiple historical incidents may contribute provenance to the same case.
+
+**Binding venue**:
+The earliest system layer at which a real test can carry a regression case.
+_Avoid_: Venue (unqualified)
+
+**Regression binding**:
+The deliberate association of a regression case with the tests that carry its property. A case is dormant before that association and bound afterward.
+_Avoid_: Activation, bound (unqualified)

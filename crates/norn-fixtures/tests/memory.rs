@@ -7,7 +7,7 @@
 //! `ambiguous` profile and `realistic`, which is the sharper of the two: a
 //! ceiling passes anything that fits under it, and a ratio fails the moment
 //! two scales stop moving together. Both profiles are under 5k documents, so
-//! both are this lane's work under ADR 0002's by-kind split; the ≥5k profile's
+//! both are this lane's work under ADR 0004's by-kind split; the ≥5k profile's
 //! cases live in `memory_soak.rs`.
 //!
 //! **Every case here is `#[ignore]`d into the `memory-lane` lane**, and the CI

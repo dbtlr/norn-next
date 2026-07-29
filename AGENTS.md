@@ -8,6 +8,24 @@
 
 We use the `domain-modeling` skill for recording important decisions as well as glossary items. These can be found in the `docs/glossary.md` file and the `docs/decisions/` directory. An index of all decisions is maintained in `docs/decisions/README.md`, load this to get a high-level overview. These are load-bearing and should not be violated without a discussion with the user.
 
+## Durable records
+
+- Task annotations own task-specific implementation choices, completion evidence,
+  measurements, limitations, and follow-ups. Session logs own the broader work
+  narrative. Mechanism-specific contracts live beside their code, tests, or
+  workflows; `docs/architecture.md` owns the current cross-cutting system contract.
+- Create an ADR only when a decision is hard to reverse, surprising without its
+  rationale, and the result of a real trade-off. Write it when the decision is
+  made, before implementation or immediately when it crystallizes—not afterward
+  to justify task completion.
+- Accepted ADR content is immutable. A superseded ADR changes only its status and
+  link to the newly authoritative ADR.
+- Add a glossary term only for project-specific language future tasks must use
+  consistently. Keep definitions implementation-free and organize terms by
+  concept, never by the task or ADR that introduced them.
+- One ADR or glossary section landing with each task is a review smell. Stop and
+  verify that the task actually surfaced a durable decision or reusable term.
+
 ## How we work
 
 - **No broken windows.** If you find a bug or defect, even if you didn't cause it, it is now *your* responsibility to either fix it or file it. Work with the user to understand which is the right choice.

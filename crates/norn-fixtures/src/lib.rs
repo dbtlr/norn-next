@@ -6,8 +6,9 @@
 //! nothing the workspace produces, and has no opinion about what any of it
 //! means — a generated tree is a pile of Markdown, and everything that reads
 //! it is somebody else's code. That independence is why it can be trusted as a
-//! measuring stick: a generator that shared a parser, a walker or a schema
-//! with the system under test would measure the two together.
+//! measuring stick: a generator that shared a parser, a walker or a vault
+//! schema interpreter with the system under test would measure the two
+//! together.
 //!
 //! # The determinism contract
 //!
@@ -78,11 +79,12 @@
 //!
 //! ## The decision record
 //!
-//! [ADR 0002][adr] is the contract this crate makes real — the determinism
-//! statement above, the knob set, calibration as a deliberate act, and where
-//! the checked-in envelope comes from.
+//! [ADR 0002][identity] records the build-scoped identity contract this crate
+//! makes real. [ADR 0007][thresholds] records why the calibration envelope is
+//! authored and changed only by review.
 //!
-//! [adr]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0002-fixture-determinism-and-calibration.md
+//! [identity]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0002-fixture-determinism-and-calibration.md
+//! [thresholds]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0007-authored-measurement-thresholds.md
 //!
 //! # The five realism knobs
 //!
@@ -128,8 +130,8 @@
 //!
 //! - **No vault configuration file is written.** What configuration a vault
 //!   carries is a contract owned elsewhere and not yet made; guessing at it
-//!   here would put an invented schema into every measurement tree. When that
-//!   contract lands, emitting it becomes another knob.
+//!   here would put an invented vault schema into every measurement tree.
+//!   When that contract lands, emitting it becomes another knob.
 //! - **No expected findings, codes or tiers.** This crate states what it
 //!   generated, not what any program should conclude about it.
 //! - **No symbolic links, and no filesystem exotica.** They belong to the

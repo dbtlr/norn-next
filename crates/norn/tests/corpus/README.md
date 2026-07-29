@@ -147,4 +147,4 @@ That completeness is enforced, not assumed. A file entry carries exactly one
 of its two content fields, base64 contents must decode and must decode to
 bytes that are *not* valid UTF-8 (text is recorded as text, so one file has one
 spelling), and an entry recording a byte *length* in place of contents does not
-parse at all. See [ADR 0001, Amendment 1](../../../../docs/decisions/0001-corpus-activation-gate.md#amendments).
+parse at all. See [ADR 0006](../../../../docs/decisions/0006-recorded-inputs-are-self-contained.md).

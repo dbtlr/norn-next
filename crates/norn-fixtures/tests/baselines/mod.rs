@@ -22,12 +22,11 @@
 //! # Where the readings come from
 //!
 //! Every band below is the pinned toolchain's unoptimized build, peak resident
-//! set as the kernel accounted it to the generator process, on two
-//! architectures: **linux-arm64** under docker and **macos-arm64** natively.
-//! The CI runner is `ubuntu-latest`, which is **x86_64-glibc — unmeasured
-//! until the first run there**; the ceilings carry headroom for an allocator
-//! this suite has not been run against, and the first run on that host is what
-//! turns these bands from two readings into three.
+//! set as the kernel accounted it to the generator process. Repeated local
+//! readings cover **linux-arm64** under docker and **macos-arm64** natively;
+//! the first `ubuntu-latest` **x86_64-glibc** run measured the `realistic`
+//! profile at 3.50–3.62 MiB with a 1.20 flatness ratio. The scheduled soak
+//! profile's bands remain the two repeated local sets stated below.
 //!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
 //! lane and `memory_soak.rs` for the scheduled one — and each asserts against
@@ -59,7 +58,7 @@ pub const GATE_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 /// may reach, per mille.
 ///
 /// **The flatness invariant in the per-PR lane.** Both scales are under 5k
-/// documents, so both are per-PR work under ADR 0002's by-kind split, and the
+/// documents, so both are per-PR work under ADR 0004's by-kind split, and the
 /// pair is what a ceiling cannot be: a ceiling passes anything that fits under
 /// it, and a ratio fails the moment the two scales stop moving together.
 ///
