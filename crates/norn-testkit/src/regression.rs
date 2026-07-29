@@ -359,7 +359,10 @@ pub struct Listing {
 /// list — and a binding that names one is a binding nothing runs.
 #[derive(Clone, Debug, Default)]
 pub struct TestIndex {
-    listings: BTreeMap<(String, Target), Listing>,
+    /// A target cargo refused to list keeps the refusal, so it reaches the
+    /// caller as one more thing wrong with the binding that named it rather
+    /// than as a collection step that blew up before the audit ran.
+    listings: BTreeMap<(String, Target), Result<Listing, String>>,
 }
 
 impl TestIndex {
@@ -367,7 +370,10 @@ impl TestIndex {
     /// audit against registries that name no real test.
     pub fn from_listings(listings: impl IntoIterator<Item = ((String, Target), Listing)>) -> Self {
         TestIndex {
-            listings: listings.into_iter().collect(),
+            listings: listings
+                .into_iter()
+                .map(|(key, listing)| (key, Ok(listing)))
+                .collect(),
         }
     }
 
@@ -383,29 +389,32 @@ impl TestIndex {
     /// standard output, so the two cannot be read as one interleaved stream —
     /// which is why the target is selected on the command line rather than
     /// parsed out of the output.
-    pub fn from_cargo(
-        workspace_root: &Path,
-        targets: impl IntoIterator<Item = TargetRef>,
-    ) -> Result<Self, String> {
+    pub fn from_cargo(workspace_root: &Path, targets: impl IntoIterator<Item = TargetRef>) -> Self {
         let wanted: BTreeSet<(String, Target)> =
             targets.into_iter().map(|target| target.key()).collect();
         let mut listings = BTreeMap::new();
         for (package, target) in wanted {
-            let all = list(workspace_root, &package, &target, false)?;
-            let ignored = list(workspace_root, &package, &target, true)?;
-            listings.insert((package, target), Listing { all, ignored });
+            let listing = list(workspace_root, &package, &target, false).and_then(|all| {
+                let ignored = list(workspace_root, &package, &target, true)?;
+                Ok(Listing { all, ignored })
+            });
+            listings.insert((package, target), listing);
         }
-        Ok(TestIndex { listings })
+        TestIndex { listings }
     }
 
     /// Whether `function` is a live test in `target`'s listing, and whether it
     /// is ignored — or what is wrong with the reference.
     fn resolve(&self, target: &TargetRef, function: &str) -> Result<bool, String> {
-        let Some(listing) = self.listings.get(&target.key()) else {
-            return Err(format!(
-                "no test list was collected for `{} {}`",
-                target.package, target.target
-            ));
+        let listing = match self.listings.get(&target.key()) {
+            Some(Ok(listing)) => listing,
+            Some(Err(problem)) => return Err(problem.clone()),
+            None => {
+                return Err(format!(
+                    "no test list was collected for `{} {}`",
+                    target.package, target.target
+                ));
+            }
         };
         let matched: Vec<&String> = listing
             .all
@@ -1450,6 +1459,30 @@ fn a_name_in_prose() {
             },
             "no test list was collected",
         );
+    }
+
+    #[test]
+    fn a_target_cargo_refused_to_list_is_caught() {
+        // Cargo declining to list a target is a thing the audit says, not a
+        // collection step that fails before the audit runs: the reference that
+        // asked for it is the thing that is wrong. The scratch tree is not a
+        // cargo workspace, so listing anything in it fails — while the file the
+        // reference names is really there and really declares the test, which
+        // is what puts the refusal on the only remaining check.
+        let root = scratch();
+        let reference = TestRef::parse("crates/demo/tests/suite.rs::a_carrier").expect("a pair");
+        let refused = TestIndex::from_cargo(&root, [reference.target().expect("a target")]);
+        let registry = sound();
+        let found = registry.audit(&root, &refused);
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("listing `demo --test suite`'s tests failed")),
+            "{found:#?}"
+        );
+        // And the same registry against a listing that was collected has
+        // nothing wrong with it, so the refusal is what the audit reported.
+        assert_eq!(registry.audit(&root, &index()), Vec::<String>::new());
     }
 
     #[test]

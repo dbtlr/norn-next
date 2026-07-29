@@ -106,8 +106,7 @@ fn registry() -> Registry {
 fn the_registry_is_structurally_sound() {
     let registry = registry();
     let root = workspace_root();
-    let tests = TestIndex::from_cargo(&root, registry.cited_targets())
-        .unwrap_or_else(|e| panic!("the cited targets' tests could not be listed: {e}"));
+    let tests = TestIndex::from_cargo(&root, registry.cited_targets());
     let problems = registry.audit(&root, &tests);
     assert!(
         problems.is_empty(),

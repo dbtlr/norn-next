@@ -246,7 +246,8 @@ property is a judgment, made when the binding edit is reviewed.
   from the file's only in case, a reference to a function the file does not
   declare, a reference to a function cargo never compiled — spelled both as a
   string literal and behind a `cfg` nothing turns on — a reference into a
-  target nothing was listed for, and an ignored carrier no lane adopts. Two
+  target nothing was listed for, a reference into a target cargo refused to
+  list, and an ignored carrier no lane adopts. Two
   further shapes are held by the suite rather than the audit: a case deleted
   without moving the total, and an unknown field in the data. The digest is
   exercised the same way — a gutted property, a swapped citation, a dropped
