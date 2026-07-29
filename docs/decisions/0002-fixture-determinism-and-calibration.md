@@ -11,12 +11,6 @@ tree has to be **reproducible**, or a measurement compares two different
 worlds; and it has to be **realistic**, or the measurement is precise about a
 world nobody lives in.
 
-> **Amended 2026-07-28** — the memory bars and the soak lane are built, and
-> the crate has acquired a development dependency. Three passages below carry
-> that clause: the sentence above, the leaf statement in **The contract**, and
-> the soak-lane statement beside it. Each is left standing as written with the
-> amendment beneath it. The guarantees the decision is about are unchanged.
-
 ↳ **Amended 2026-07-28.** The memory bars and the soak lane exist:
 `.github/workflows/soak.yml` runs this crate's ≥5k determinism, calibration
 and memory cases nightly, and `.github/workflows/ci.yml`'s memory job runs the
@@ -24,6 +18,13 @@ sub-5k memory bars per pull request. The counter gates and plan assertions are
 still placeholders, waiting on `norn-store` and the Layer 3 read builders.
 [ADR 0004](0004-two-tier-measurement-and-authored-baselines.md) records what
 those lanes assert and how their baselines are held.
+
+> **Amended 2026-07-28** — the memory bars and the soak lane are built, and
+> the crate has acquired a development dependency. Three passages carry that
+> clause: the placeholder claim in the paragraph above, the leaf statement in
+> **The contract**, and the soak-lane statement beside it. Each is left
+> standing as written, with its amendment attached where it sits, and
+> [Amendments](#amendments) records the change in full.
 
 ## The contract
 
@@ -276,3 +277,44 @@ same way, with the sub-5k bars in the per-PR lane and the ≥5k ones here.
 - The calibration envelope is authored, and says so. Its provenance is this
   document and the `why` field of each entry, not a measurement of any
   collection.
+
+## Amendments
+
+### Amendment 1, 2026-07-28 — the memory bars and soak lane land, and the crate takes its first dependency
+
+**What changed.**
+
+- The per-PR memory job and the nightly soak lane, placeholders when this
+  decision was recorded, are built and running. `.github/workflows/soak.yml`
+  runs this crate's ≥5k determinism, calibration and memory cases nightly,
+  selecting them by kind and failing when none ran; `.github/workflows/ci.yml`'s
+  memory job runs the sub-5k memory bars per pull request. The counter gates
+  and plan assertions named in the same original sentence are still
+  placeholders, waiting on `norn-store` and the Layer 3 read builders.
+  [ADR 0004](0004-two-tier-measurement-and-authored-baselines.md) records what
+  the two lanes assert and how their baselines are held.
+- The leaf claim narrows from "no dependencies at all" to a normal-dependency
+  claim: nothing this crate builds or ships links anything, but it now carries
+  one development dependency, on `norn-testkit`.
+- The largest profile's soak-lane placement is no longer a placeholder either:
+  the soak workflow runs those cases nightly, and the split by kind — not by
+  stopwatch — now has a second application, dividing the memory cases the same
+  way the determinism and calibration cases already were.
+
+**Why it changed.** The memory bars need a live process to read a peak
+resident set from, and the only subject this workspace has is this crate's own
+binary. Reading it from an integration test requires spawning
+`CARGO_BIN_EXE_norn-fixtures`, which cargo sets only for integration tests of
+the package that defines the binary — so the bars, and the dev dependency on
+`norn-testkit` that runs them under a process harness, have to live here. A dev
+edge reaches no generated tree: it feeds no byte a `(profile, seed)` pair
+produces, so it does not touch the guarantees this decision is about, and the
+architecture gate reads and discards dev edges because they cycle by
+construction.
+
+**What it touched.** The three passages amended in place — the placeholder
+claim in the opening paragraph, the leaf statement in **The contract**, and the
+soak-lane statement beside it — plus `.github/workflows/ci.yml`,
+`.github/workflows/soak.yml`, `crates/norn-fixtures/tests/baselines/mod.rs`,
+and the crate's `Cargo.toml` dev-dependencies. [ADR 0004](0004-two-tier-measurement-and-authored-baselines.md)
+states the lane-assignment and baseline contract these mechanisms practise.
