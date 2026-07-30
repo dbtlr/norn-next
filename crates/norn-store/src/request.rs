@@ -53,7 +53,9 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter};
+use rusqlite::{
+    Connection, OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter,
+};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
@@ -75,6 +77,19 @@ type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 /// reads them.
 const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span_column,
             span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation";
+
+/// How many finding ids one further-query batches its `IN` list by.
+///
+/// A class or a path can hold more findings than SQLite's 32766-parameter
+/// bound leaves room for in one statement — the candidate and class reads bind
+/// one parameter per id — so [`Request::findings`] chunks rather than binding
+/// the whole list at once.
+#[cfg(not(test))]
+const FINDING_ID_CHUNK: usize = 500;
+/// Shrunk under test, so a unit test can cross a chunk boundary without
+/// writing tens of thousands of rows to do it.
+#[cfg(test)]
+const FINDING_ID_CHUNK: usize = 4;
 
 /// One request's worth of work against a store.
 pub struct Request<'a> {
@@ -647,7 +662,8 @@ impl<'a> Request<'a> {
         &self,
         path: &DocumentPath,
     ) -> Result<Option<StoredDocument>, StoreError> {
-        self.read_one(
+        Self::read_one(
+            &self.store.connection,
             "SELECT path, content_hash, byte_length, body_offset, frontmatter,
                     frontmatter_diagnostic_count, generation, derived_at
              FROM documents WHERE path = ?1",
@@ -663,8 +679,22 @@ impl<'a> Request<'a> {
     /// The row, the body and the document's id come back in one statement, and
     /// the four fact reads are keyed by that id — so the path is looked up once
     /// rather than once per fact table.
-    pub fn stored_facts(&self, path: &DocumentPath) -> Result<Option<StoredFacts>, StoreError> {
-        let found = self.read_one(
+    ///
+    /// **All five reads run inside one `DEFERRED` transaction, so they all see
+    /// one WAL snapshot.** Without it, a second `Store` on the same path — the
+    /// per-vault file lock that would rule that out is a later crate's, not
+    /// this one's (NORN-33) — could commit a re-derivation between the document
+    /// read and a fact read, pairing an old document row with the new fact
+    /// rows. A snapshot taken once at the first statement is what a torn read
+    /// like that cannot happen inside.
+    pub fn stored_facts(&mut self, path: &DocumentPath) -> Result<Option<StoredFacts>, StoreError> {
+        let transaction = self
+            .store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|error| error::sql("opening the stored-facts snapshot", error))?;
+        let found = Self::read_one(
+            &transaction,
             "SELECT id, body, path, content_hash, byte_length, body_offset, frontmatter,
                     frontmatter_diagnostic_count, generation, derived_at
              FROM documents WHERE path = ?1",
@@ -682,7 +712,8 @@ impl<'a> Request<'a> {
         Ok(Some(StoredFacts {
             document,
             body,
-            links: self.read_all(
+            links: Self::read_all(
+                &transaction,
                 "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset
                  FROM links WHERE document = ?1 ORDER BY ordinal",
@@ -690,7 +721,8 @@ impl<'a> Request<'a> {
                 stored_link,
                 "reading a document's links",
             )?,
-            headings: self.read_all(
+            headings: Self::read_all(
+                &transaction,
                 "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
                         inside_container
                  FROM headings WHERE document = ?1 ORDER BY ordinal",
@@ -698,14 +730,16 @@ impl<'a> Request<'a> {
                 stored_heading,
                 "reading a document's headings",
             )?,
-            blocks: self.read_all(
+            blocks: Self::read_all(
+                &transaction,
                 "SELECT block_id, span_line, span_column, span_offset
                  FROM blocks WHERE document = ?1 ORDER BY ordinal",
                 params![id],
                 stored_block,
                 "reading a document's block ids",
             )?,
-            tags: self.read_all(
+            tags: Self::read_all(
+                &transaction,
                 "SELECT name, source, span_line, span_column, span_offset
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal",
                 params![id],
@@ -713,6 +747,9 @@ impl<'a> Request<'a> {
                 "reading a document's tags",
             )?,
         }))
+        // The transaction is never committed. A read takes no write lock worth
+        // keeping and discards nothing on rollback, so letting it drop here
+        // is the same outcome as a `COMMIT` without a statement that says so.
     }
 
     /// The death recorded for one path, if any.
@@ -720,7 +757,8 @@ impl<'a> Request<'a> {
         &self,
         path: &DocumentPath,
     ) -> Result<Option<StoredTombstone>, StoreError> {
-        self.read_one(
+        Self::read_one(
+            &self.store.connection,
             "SELECT path, last_content_hash, provenance, generation, recorded_at
              FROM tombstones WHERE path = ?1",
             params![path.as_str()],
@@ -785,7 +823,8 @@ impl<'a> Request<'a> {
     /// fall out in row-insertion order is a ladder that reorders itself when a
     /// document is re-derived.
     pub fn suffix_candidates(&self, probe: &SuffixProbe) -> Result<Vec<DocumentPath>, StoreError> {
-        self.read_all(
+        Self::read_all(
+            &self.store.connection,
             &suffix_candidates_sql(probe.range_count()),
             probe_parameters(probe),
             |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
@@ -825,7 +864,8 @@ impl<'a> Request<'a> {
     /// `documents.body` no longer carries is an index that has drifted, and
     /// [`crate::Store::verify_integrity`] is what states that as damage.
     pub fn full_text_matches(&self, expression: &str) -> Result<Vec<DocumentPath>, StoreError> {
-        self.read_all(
+        Self::read_all(
+            &self.store.connection,
             "SELECT documents.path FROM documents_fts
              JOIN documents ON documents.id = documents_fts.rowid
              WHERE documents_fts MATCH ?1
@@ -853,7 +893,8 @@ impl<'a> Request<'a> {
             ProbeReader::SuffixCandidates => suffix_candidates_sql(probe.range_count()),
             ProbeReader::FindingsInClass => findings_in_class_sql(probe.range_count()),
         };
-        let steps = self.read_all(
+        let steps = Self::read_all(
+            &self.store.connection,
             &format!("EXPLAIN QUERY PLAN {sql}"),
             probe_parameters(probe),
             |row| {
@@ -873,41 +914,27 @@ impl<'a> Request<'a> {
     /// The findings one statement selects, each with the head of its candidates
     /// and the set of classes it is in.
     ///
-    /// The candidates and the classes come back in **one** further statement each
-    /// for the whole set rather than one per finding, so reading a class costs
-    /// three round trips whatever the class holds.
+    /// The candidates and the classes come back in one further statement each
+    /// **per chunk of [`FINDING_ID_CHUNK`] ids** rather than one per finding, so
+    /// reading a class costs a small, bounded number of round trips whatever the
+    /// class holds — and never one `IN` list wide enough to trip SQLite's
+    /// 32766-parameter cap.
     fn findings(
         &self,
         sql: &str,
         parameters: impl Params,
     ) -> Result<Vec<StoredFinding>, StoreError> {
-        let found = self.read_all(sql, parameters, stored_finding, "reading findings")?;
+        let found = Self::read_all(
+            &self.store.connection,
+            sql,
+            parameters,
+            stored_finding,
+            "reading findings",
+        )?;
         if found.is_empty() {
             return Ok(Vec::new());
         }
         let ids: Vec<i64> = found.iter().map(|(id, _)| *id).collect();
-        let placeholders = (1..=ids.len())
-            .map(|index| format!("?{index}"))
-            .collect::<Vec<String>>()
-            .join(", ");
-        let candidates = self.read_all(
-            &format!(
-                "SELECT finding, path, suffix FROM finding_candidates
-                 WHERE finding IN ({placeholders}) ORDER BY finding, rank"
-            ),
-            params_from_iter(ids.iter()),
-            stored_candidate,
-            "reading a finding's candidates",
-        )?;
-        let classes = self.read_all(
-            &format!(
-                "SELECT finding, class_key FROM finding_classes
-                 WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
-            ),
-            params_from_iter(ids.iter()),
-            stored_class,
-            "reading a finding's classes",
-        )?;
 
         let mut findings: Vec<StoredFinding> = Vec::with_capacity(found.len());
         let mut positions = std::collections::HashMap::with_capacity(found.len());
@@ -915,28 +942,54 @@ impl<'a> Request<'a> {
             positions.insert(id, position);
             findings.push(finding);
         }
-        for (finding, candidate) in candidates {
-            if let Some(position) = positions.get(&finding) {
-                findings[*position].candidates.push(candidate);
+
+        for chunk in ids.chunks(FINDING_ID_CHUNK) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<String>>()
+                .join(", ");
+            let candidates = Self::read_all(
+                &self.store.connection,
+                &format!(
+                    "SELECT finding, path, suffix FROM finding_candidates
+                     WHERE finding IN ({placeholders}) ORDER BY finding, rank"
+                ),
+                params_from_iter(chunk.iter()),
+                stored_candidate,
+                "reading a finding's candidates",
+            )?;
+            for (finding, candidate) in candidates {
+                if let Some(position) = positions.get(&finding) {
+                    findings[*position].candidates.push(candidate);
+                }
             }
-        }
-        for (finding, class_key) in classes {
-            if let Some(position) = positions.get(&finding) {
-                findings[*position].class_keys.insert(class_key);
+            let classes = Self::read_all(
+                &self.store.connection,
+                &format!(
+                    "SELECT finding, class_key FROM finding_classes
+                     WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
+                ),
+                params_from_iter(chunk.iter()),
+                stored_class,
+                "reading a finding's classes",
+            )?;
+            for (finding, class_key) in classes {
+                if let Some(position) = positions.get(&finding) {
+                    findings[*position].class_keys.insert(class_key);
+                }
             }
         }
         Ok(findings)
     }
 
     fn read_one<T>(
-        &self,
+        connection: &Connection,
         sql: &str,
         parameters: impl Params,
         read: impl FnOnce(&Row<'_>) -> Reading<T>,
         operation: &'static str,
     ) -> Result<Option<T>, StoreError> {
-        self.store
-            .connection
+        connection
             .query_row(sql, parameters, read)
             .optional()
             .map_err(|error| error::sql(operation, error))?
@@ -944,15 +997,13 @@ impl<'a> Request<'a> {
     }
 
     fn read_all<T>(
-        &self,
+        connection: &Connection,
         sql: &str,
         parameters: impl Params,
         read: impl FnMut(&Row<'_>) -> Reading<T>,
         operation: &'static str,
     ) -> Result<Vec<T>, StoreError> {
-        let mut statement = self
-            .store
-            .connection
+        let mut statement = connection
             .prepare(sql)
             .map_err(|error| error::sql(operation, error))?;
         let rows = statement
@@ -1225,4 +1276,62 @@ fn unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`findings`] chunks its two follow-up `IN` lists at [`FINDING_ID_CHUNK`],
+    /// which this build shrinks to 4. Ten findings, each with one candidate and
+    /// one class of its own, cross that boundary twice, and every one has to
+    /// come back paired with the candidate and class it — and only it — wrote.
+    #[test]
+    fn findings_reassemble_correctly_across_a_chunk_boundary() {
+        let root =
+            std::env::temp_dir().join(format!("norn-store-request-chunk-{}", std::process::id()));
+        let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
+        let subject = DocumentPath::new("notes.md").expect("a document path");
+
+        let mut request = store.begin_request();
+        for index in 0..10 {
+            let class_key = ClassKey::new(&format!("class-{index}/")).expect("a class key");
+            request
+                .record_finding(&FindingFacts {
+                    kind: "test/chunking".to_string(),
+                    severity: "warning".to_string(),
+                    path: subject.clone(),
+                    class_keys: [class_key].into_iter().collect(),
+                    target: None,
+                    span: None,
+                    candidates: vec![CandidateFact {
+                        path: DocumentPath::new(&format!("candidate-{index}.md")).unwrap(),
+                        suffix: format!("candidate-{index}"),
+                    }],
+                    candidates_total: 1,
+                    message: format!("finding {index}"),
+                    detail: None,
+                })
+                .expect("recording a finding");
+        }
+
+        let found = request.stored_findings(&subject).expect("reading findings");
+        assert_eq!(found.len(), 10);
+        for (index, finding) in found.iter().enumerate() {
+            assert_eq!(
+                finding.candidates.len(),
+                1,
+                "finding {index} lost or gained a candidate at a chunk boundary"
+            );
+            assert_eq!(
+                finding.candidates[0].path.as_str(),
+                format!("candidate-{index}.md")
+            );
+            let expected = ClassKey::new(&format!("class-{index}/")).expect("a class key");
+            assert!(
+                finding.class_keys.contains(&expected),
+                "finding {index} lost its class at a chunk boundary"
+            );
+        }
+    }
 }

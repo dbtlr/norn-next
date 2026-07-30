@@ -73,6 +73,6 @@ pub use facts::{
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use path::{ClassKey, DocumentPath, SuffixProbe, class_probe, suffix_probe};
 pub use request::{EmittedPlan, PlanStep, ProbeReader, Request};
-pub use store::{
-    OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode, induced_failure,
-};
+#[cfg(feature = "induced-failure")]
+pub use store::induced_failure;
+pub use store::{OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode};

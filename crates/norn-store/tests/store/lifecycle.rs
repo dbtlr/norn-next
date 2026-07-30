@@ -326,6 +326,10 @@ fn a_name_that_is_not_a_file_is_refused_as_a_caller_error() {
 /// **URI filenames are off**, so a path that looks like one is a filename. A
 /// store whose path begins `file:` is a file called that, which is what makes
 /// removing it at rung 3 remove the database that was written.
+///
+/// Unix-only: `:` and `?` are not legal in an NTFS file name, so this exact
+/// spelling is not a filename Windows can hold.
+#[cfg(unix)]
 #[test]
 fn a_path_that_looks_like_a_uri_is_a_filename() {
     let scratch = Scratch::new("uri");
@@ -390,6 +394,49 @@ fn a_throwaway_store_refuses_to_adopt_a_durable_one() {
         panic!("it was refused as {error:?} rather than as a lifecycle refusal");
     };
     assert!(operation.contains("throwaway"), "{operation}");
+
+    assert!(exists(&database), "the refused open removed the file");
+    let mut reopened = Store::open(&database).expect("reopening the durable store");
+    assert!(
+        reopened
+            .begin_request()
+            .stored_document(&subject)
+            .expect("reading a document")
+            .is_some(),
+        "the refused open took the durable store's derived state with it"
+    );
+}
+
+/// **A `store_mode` row that is absent or unreadable refuses a throwaway open,
+/// exactly as a recorded durable store does.** Create always records the
+/// mode, so a missing row is out-of-band tampering rather than a database
+/// this crate ever produced, and the conservative reading is the same
+/// refusal: adopting would arm delete-on-drop over a database whose own
+/// record does not say it is disposable.
+#[test]
+fn a_throwaway_store_refuses_to_adopt_an_unrecorded_mode() {
+    let scratch = Scratch::new("throwaway-over-unrecorded");
+    let database = scratch.database();
+    let subject = path("docs/norn/glossary.md");
+
+    let mut store = Store::open(&database).expect("creating a durable store");
+    store
+        .begin_request()
+        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
+        .expect("writing a document");
+    induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_mode'")
+        .expect("deleting the store_mode row");
+    drop(store);
+
+    let error = Store::open_throwaway(&database).expect_err("a throwaway over an unrecorded mode");
+    let StoreError::Lifecycle {
+        operation, message, ..
+    } = &error
+    else {
+        panic!("it was refused as {error:?} rather than as a lifecycle refusal");
+    };
+    assert!(operation.contains("throwaway"), "{operation}");
+    assert!(message.contains("does not record itself"), "{message}");
 
     assert!(exists(&database), "the refused open removed the file");
     let mut reopened = Store::open(&database).expect("reopening the durable store");

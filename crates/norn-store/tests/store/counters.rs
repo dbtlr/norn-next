@@ -144,7 +144,7 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .expect("storing a vector");
     assert!(!warming.finish().is_all_zero());
 
-    let warm = store.begin_request();
+    let mut warm = store.begin_request();
     let _ = warm.stored_document(&subject).expect("reading a document");
     let _ = warm.stored_facts(&subject).expect("reading a document");
     let _ = warm
@@ -152,16 +152,16 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .expect("reading a tombstone");
     let _ = warm.stored_findings(&subject).expect("reading findings");
     let _ = warm
-        .findings_in_class(&norn_store::class_probe("glossary"))
+        .findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let _ = warm
-        .suffix_candidates(&norn_store::class_probe("glossary"))
+        .suffix_candidates(&norn_store::class_probe("glossary").expect("a class stem"))
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
         .probe_reader_plan(
             norn_store::ProbeReader::SuffixCandidates,
-            &norn_store::class_probe("glossary"),
+            &norn_store::class_probe("glossary").expect("a class stem"),
         )
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
@@ -308,7 +308,7 @@ fn discarding_a_class_counts_the_findings_it_removed() {
         .expect("recording a finding");
 
     let invalidation = request
-        .discard_findings_in_class(&norn_store::class_probe("glossary"))
+        .discard_findings_in_class(&norn_store::class_probe("glossary").expect("a class stem"))
         .expect("discarding a class");
     assert_eq!(invalidation.findings_discarded, 2);
     let reading = request.finish();

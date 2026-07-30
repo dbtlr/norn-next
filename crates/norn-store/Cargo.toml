@@ -34,5 +34,19 @@ publish.workspace = true
 norn-wire = { path = "../norn-wire" }
 rusqlite = { workspace = true }
 
+# `induced-failure` gates `induced_failure`, the module of out-of-band
+# arrangements the store's own suite reaches through to reach a rung or a
+# refusal from outside — a store schema this build did not write, a dropped
+# index, a busy database. Off by default, so a shipped build carries neither
+# the out-of-band SQL executor nor the busy-injection thread-local it hooks
+# into every pinned-scalar read.
+[features]
+induced-failure = []
+
+# This crate is its own dev-dependency, with the feature turned on, because
+# the integration suite in `tests/` links against `norn-store` as an external
+# crate and needs the fenced seam the feature gates — the same reason a
+# feature-gated test module cannot simply live behind `#[cfg(test)]`.
 [dev-dependencies]
+norn-store = { path = ".", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

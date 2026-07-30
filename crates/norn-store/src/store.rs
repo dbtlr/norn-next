@@ -460,6 +460,11 @@ impl Drop for Store {
 /// owns the connection. **Nothing in a product path calls any of this.** The
 /// module is hidden from the documentation and every name in it says what it
 /// does.
+///
+/// The whole module lives behind the `induced-failure` feature, off by
+/// default, so a shipped build carries neither the out-of-band executor here
+/// nor the busy-injection hook a pinned-scalar read checks on every call.
+#[cfg(feature = "induced-failure")]
 #[doc(hidden)]
 pub mod induced_failure {
     use super::{Store, StoreError, error, put_meta};
@@ -766,10 +771,21 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
 ///
 /// A throwaway open over a durable store is refused: adopting it would arm a
 /// teardown that deletes a registered vault's whole derived state when the store
-/// drops. The other direction is adoption — a durable open over the leftovers of
-/// a throwaway store takes the file over and records that it is durable now,
-/// because disposable derived state is rebuildable and the file is no longer
-/// anybody's to delete.
+/// drops. **A throwaway open over a `store_mode` row that is absent or
+/// unreadable is refused the same way.** Create always records the mode, so a
+/// missing or unrecognized row is out-of-band tampering rather than a database
+/// this crate ever produces, and the conservative reading is the refusal: the
+/// alternative is arming delete-on-drop over a database whose own record does
+/// not say it is disposable.
+///
+/// The other direction is adoption, and it is safe unconditionally: a durable
+/// open deletes nothing, so it takes over a throwaway store's leftovers or an
+/// unrecorded mode exactly as it takes over its own kind. Disposable derived
+/// state is rebuildable and the file is no longer anybody's to delete.
+///
+/// The arms are written out explicitly, mode by recorded mode, rather than
+/// folded behind a wildcard — a wildcard is how the throwaway-and-absent case
+/// went unnoticed the first time.
 fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(), StoreError> {
     let recorded = get_meta::<String>(connection, ddl::meta::STORE_MODE)?
         .as_deref()
@@ -783,8 +799,20 @@ fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(
                       it closes"
                     .to_string(),
         }),
+        (StoreMode::Throwaway, None) => Err(StoreError::Lifecycle {
+            operation: "opening a throwaway store",
+            path: path.to_path_buf(),
+            message: "the database does not record itself as a throwaway store, and a throwaway \
+                      store deletes its file when it closes"
+                .to_string(),
+        }),
+        (StoreMode::Throwaway, Some(StoreMode::Throwaway)) => {
+            put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
+        }
         (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(()),
-        _ => put_meta(connection, ddl::meta::STORE_MODE, mode.as_str()),
+        (StoreMode::Durable, Some(StoreMode::Throwaway)) | (StoreMode::Durable, None) => {
+            put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
+        }
     }
 }
 
@@ -822,6 +850,7 @@ fn read_meta<T: rusqlite::types::FromSql>(
     connection: &Connection,
     key: &str,
 ) -> rusqlite::Result<Option<T>> {
+    #[cfg(feature = "induced-failure")]
     if NEXT_META_READ_FAILS.replace(false) {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
@@ -837,6 +866,7 @@ fn read_meta<T: rusqlite::types::FromSql>(
         .optional()
 }
 
+#[cfg(feature = "induced-failure")]
 std::thread_local! {
     /// Whether the next pinned-scalar read reports the database busy. Set only
     /// by [`induced_failure::fail_next_meta_read_as_busy`], and cleared by the
