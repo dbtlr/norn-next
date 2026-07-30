@@ -23,7 +23,9 @@
 //! serializes but has no schema is a payload no surface can advertise:
 //!
 //! - [`serde::Serialize`] and [`serde::Deserialize`], with `snake_case` field
-//!   and variant names on the wire.
+//!   and variant names on the wire. One read path is written by hand —
+//!   [`ErrorEnvelope`] refuses a parse whose code is not its detail's — with
+//!   the same wire shape a derive would read.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
 //!   advertised schema and the emitted bytes are one description.
 //! - `Debug`, `Clone` and `PartialEq`, plus `Eq` wherever every field holds it.

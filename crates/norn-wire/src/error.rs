@@ -6,10 +6,8 @@
 //! beside them is a second answer to that question that can disagree with the
 //! first.
 //!
-//! **There is deliberately no forecast field.** A forecast is a report about
-//! what a mutation would do; it is its own wire type, requested and returned
-//! in its own right, and riding it on a refusal would make every refusal carry
-//! a shape only some refusals have.
+//! **There is deliberately no forecast field.** Riding a forecast on every
+//! refusal would make every refusal carry a shape only some refusals have.
 //!
 //! Both absences follow one placement rule: **a payload that belongs to one
 //! refusal belongs to that code's [`ErrorDetail`] variant, never to a field on
@@ -30,14 +28,8 @@ use crate::trust::UntrustedReason;
 
 /// The code a refusal is filed under.
 ///
-/// A code is a flat namespaced string on the wire — `namespace/what-happened`
-/// — and a Rust variant in here. The enum, rather than a set of string
-/// constants, is what makes a code a value the compiler checks: a producer
-/// cannot emit a code that does not exist, and a consumer switching on codes
-/// is told when the list grows.
-///
-/// The list holds the codes the system can emit today, and it grows one code
-/// at a time with the mechanism that emits it.
+/// A code is a flat namespaced string — `namespace/what-happened` — and the
+/// list holds every code the system can emit today.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum ReasonCode {
@@ -50,12 +42,11 @@ pub enum ReasonCode {
 
 /// The typed payload one reason code carries.
 ///
-/// One variant per code, and the variant's wire tag *is* the code:
+/// One detail shape per code, and the detail's `code` tag *is* the code:
 /// `{"code":"host/entry-untrusted","reason":{"kind":"torn_increment"}}`.
 ///
 /// A detail composes the types the rest of the vocabulary already uses — an
-/// untrusted entry's detail is the same reason its trust state carries —
-/// rather than flattening those distinctions into more codes.
+/// untrusted entry's detail is the same reason its trust state carries.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "code")]
 #[non_exhaustive]

@@ -386,7 +386,9 @@ exact equality is restricted to crates currently present.
 Symbol-level rules the dependency graph cannot express **escalate to lint tooling**. Which
 tooling expresses them is an implementation detail, not a fixed part of this contract —
 clippy's `disallowed-types` and `disallowed-methods` are the starting point, with custom
-lints if configuration-level lints prove insufficient. The rules:
+lints if configuration-level lints prove insufficient. A rule no configuration-level lint
+can express yet is review-held: the wire-seam rule is today, because `disallowed-types`
+cannot tell a signature crossing the seam from legitimate test and helper use. The rules:
 
 - no `serde_json::Value` crossing the wire seam
 - no SQLite connection opened outside `norn-store`
