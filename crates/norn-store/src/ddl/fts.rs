@@ -24,6 +24,13 @@
 //! transactionally consistent with `documents.body` for every write path that
 //! exists now and every one added later.
 //!
+//! Triggers can be dropped, though, and an external-content index whose
+//! triggers are gone drifts silently: the terms it holds still answer a `MATCH`,
+//! and they answer it about text the column no longer carries. Detecting that is
+//! what FTS5's `integrity-check` **at rank 1** is for — rank 0 checks only that
+//! the index is internally well formed, which a desynchronized index is. The
+//! store's verification asks for rank 1; see [`crate::Store::verify_integrity`].
+//!
 //! The update trigger is guarded by `WHEN old.body IS NOT new.body`. A
 //! re-derivation that found the body unchanged does no index work at all, which
 //! is the warm case, and the guard is what keeps that true rather than merely
@@ -42,7 +49,11 @@
 //! the diacritic handling that treats a composed and a decomposed spelling of
 //! the same word as the same word.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE VIRTUAL TABLE documents_fts USING fts5(
     body,
     content = 'documents',

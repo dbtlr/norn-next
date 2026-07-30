@@ -6,14 +6,20 @@
 //! incremental path from an older shape, because a store schema that is not
 //! this one is resolved by discarding the database and running the list again.
 //!
-//! # The fingerprint is the whole list
+//! # The fingerprint is the whole list, and it is only half the question
 //!
 //! [`fingerprint`] digests every statement in order. A statement that is
 //! reordered, reworded or reformatted changes it, which is deliberate: the
-//! fingerprint answers *is the database in front of me the shape this build
-//! writes*, and a whitespace edit that left it alone would be a shape this
-//! build did not write. What it is not is a security primitive — it detects an
-//! edit, not an adversary, so it is a 64-bit digest and says so.
+//! fingerprint answers *which statement list produced this database*, and a
+//! whitespace edit that left it alone would be a shape this build did not write.
+//! What it is not is a security primitive — it detects an edit, not an
+//! adversary, so it is a 64-bit digest and says so.
+//!
+//! What the fingerprint cannot answer is whether the database still *holds* what
+//! that list created: it is compared against a value the database reports about
+//! itself, so a dropped table, index or trigger leaves it intact. That question
+//! is the schema digest's, taken over `sqlite_schema` at create and re-taken at
+//! every open — see [`crate::Store`].
 //!
 //! # Two kinds of table, and only one of them carries a schema key
 //!
@@ -31,13 +37,17 @@
 //!
 //! # Foreign keys are the wholesale-replacement mechanism
 //!
-//! A document's derived fact rows exist only as long as the document does, so
-//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. Two
-//! operations rely on it: a hard delete removes the document row and the
-//! cascade takes everything derived from it, and a re-derivation replaces one
-//! document's fact rows wholesale. `PRAGMA foreign_keys` is off by default in
-//! SQLite and is turned on per connection, which is why the store opens every
-//! connection through one place.
+//! A **parse-fact** row exists only as long as the document it was read from, so
+//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`, and so
+//! does a vector. Two operations rely on it: a hard delete removes the document
+//! row and the cascade takes everything derived from it, and a re-derivation
+//! replaces one document's fact rows wholesale. `PRAGMA foreign_keys` is off by
+//! default in SQLite and is turned on per connection, which is why the store
+//! opens every connection through one place.
+//!
+//! `findings` is deliberately outside that: a finding is keyed by path and class
+//! and outlives its subject, so no cascade reaches it and its lifecycle is
+//! class-scoped maintenance. See [`findings`].
 
 pub(crate) mod documents;
 pub(crate) mod facts;
@@ -61,20 +71,33 @@ pub const STORE_SCHEMA_VERSION: i64 = 1;
 /// reads to decide whether the rest is trustworthy; `documents` precedes
 /// everything that references it; the pillars come last because two of them
 /// (full text, vectors) are defined over rows the earlier areas own.
-const AREAS: &[&[&str]] = &[
-    meta::STATEMENTS,
-    documents::STATEMENTS,
-    facts::STATEMENTS,
-    tombstones::STATEMENTS,
-    fts::STATEMENTS,
-    vectors::STATEMENTS,
-    findings::STATEMENTS,
-    migrations::STATEMENTS,
+///
+/// An area is a function rather than a slice of literals because a statement
+/// may carry a bound the Rust API also states — `finding_candidates`'s rank
+/// `CHECK` is [`crate::CANDIDATE_HEAD`] — and the statement builds that bound
+/// from the constant instead of spelling it a second time.
+const AREAS: &[fn() -> Vec<String>] = &[
+    meta::statements,
+    documents::statements,
+    facts::statements,
+    tombstones::statements,
+    fts::statements,
+    vectors::statements,
+    findings::statements,
+    migrations::statements,
 ];
 
 /// Every statement the store schema is made of, in execution order.
-pub fn statements() -> impl Iterator<Item = &'static str> {
-    AREAS.iter().copied().flatten().copied()
+pub fn statements() -> Vec<String> {
+    AREAS.iter().flat_map(|area| area()).collect()
+}
+
+/// The statements an area states literally, as the list the areas return.
+pub(crate) fn fixed(statements: &[&str]) -> Vec<String> {
+    statements
+        .iter()
+        .map(|statement| (*statement).to_string())
+        .collect()
 }
 
 /// The digest of the whole statement list, as sixteen lowercase hex digits.
@@ -86,11 +109,24 @@ pub fn statements() -> impl Iterator<Item = &'static str> {
 /// **An edit-detector, not a security primitive.** Nothing here defends
 /// against a chosen collision: the question it answers is whether a developer
 /// changed the DDL under a database that already exists, and the cost of a
-/// wrong answer is a rebuild that was not needed.
+/// wrong answer is a rebuild that was not needed. Its failure directions are
+/// not symmetric: a digest that changed when the shape did not costs one
+/// unnecessary rebuild of rebuildable state, and a collision — two shapes
+/// digesting the same — leaves a database this build did not write in place,
+/// which is what the schema digest folded into an open ([`crate::Store`])
+/// catches independently.
 pub fn fingerprint() -> String {
+    digest(statements().iter().map(String::as_str))
+}
+
+/// FNV-1a over a sequence of parts, as sixteen lowercase hex digits.
+///
+/// Each part is followed by a separator, so that moving a boundary between two
+/// parts changes the digest rather than leaving the concatenation unchanged.
+pub(crate) fn digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for statement in statements() {
-        for byte in statement.as_bytes().iter().chain(b"\x1e") {
+    for part in parts {
+        for byte in part.as_bytes().iter().chain(b"\x1e") {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }

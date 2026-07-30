@@ -1,18 +1,17 @@
 //! Scratch stores, and the facts the suite writes into them.
 //!
-//! Every suite in this crate is black box: it reaches the store through its
-//! public API and never opens a connection, which is the same rule every other
-//! crate in the workspace is held to. What this module holds is the temporary
-//! directory a store's file lives in for the length of one test, and builders
-//! for the fact shapes the suite writes.
-#![allow(dead_code)]
+//! What this module holds is the temporary directory a store's file lives in for
+//! the length of one test, and builders for the fact shapes the suite writes.
+//! Reading and writing files beside a store belongs to the lifecycle suite, which
+//! is the only one that judges the file, so those helpers live there.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_store::{
-    BlockFact, CandidateFact, DocumentFacts, DocumentPath, FindingFacts, FrontmatterValue,
-    HeadingFact, LinkFact, LinkFamily, Span, Store, TagFact, TagSource, VectorFacts,
+    BlockFact, CandidateFact, ClassKey, DocumentFacts, DocumentPath, FindingFacts,
+    FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Span, Store, TagFact, TagSource,
+    VectorFacts,
 };
 
 /// Distinguishes two scratch directories taken in the same process.
@@ -36,10 +35,6 @@ impl Scratch {
         Scratch { root }
     }
 
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// The path a store's database file sits at. Its parent does not exist, so
     /// that opening a store is what prepares it.
     pub fn database(&self) -> PathBuf {
@@ -48,27 +43,6 @@ impl Scratch {
 
     pub fn open(&self) -> Store {
         Store::open(self.database()).expect("opening a store")
-    }
-
-    /// Write bytes at a path under the scratch root.
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a file a store has to judge.
-    pub fn write(&self, relative: &str, bytes: &[u8]) -> PathBuf {
-        let path = self.root.join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("a scratch directory");
-        }
-        std::fs::write(&path, bytes).expect("writing a scratch file");
-        path
-    }
-
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the bytes a store wrote, to damage them.
-    pub fn read(&self, path: &Path) -> Vec<u8> {
-        std::fs::read(path).expect("reading a scratch file")
-    }
-
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: whether a store's file survived.
-    pub fn exists(&self, path: &Path) -> bool {
-        std::fs::metadata(path).is_ok()
     }
 }
 
@@ -85,6 +59,11 @@ pub fn path(text: &str) -> DocumentPath {
         .unwrap_or_else(|problem| panic!("`{text}` is a document path: {problem}"))
 }
 
+/// A class key, or a panic naming what was wrong with it.
+pub fn class(text: &str) -> ClassKey {
+    ClassKey::new(text).unwrap_or_else(|problem| panic!("`{text}` is a class key: {problem}"))
+}
+
 pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
     Span {
         line,
@@ -93,9 +72,10 @@ pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
     }
 }
 
-/// A document with a body and nothing derived from it.
+/// A document with a body and nothing derived from it. Its body is the whole
+/// document, so its size is the body's length.
 pub fn document(text: &str, hash: &str, body: &str) -> DocumentFacts {
-    DocumentFacts::new(path(text), hash, body)
+    DocumentFacts::new(path(text), hash, body, body.len() as u64)
 }
 
 /// A document carrying one of every fact shape the store holds, including the
@@ -106,8 +86,11 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
         hash,
         "the body of the document\n\nwith two paragraphs\n",
     );
+    // A frontmatter block sits ahead of the body, so the document is longer than
+    // its body by exactly the frame.
     facts.body_offset = 42;
-    facts.diagnostic_count = 1;
+    facts.byte_length = facts.body_offset + facts.body.len() as u64;
+    facts.frontmatter_diagnostic_count = 1;
     facts.frontmatter = Some(FrontmatterValue::Map(vec![
         (
             "title".to_string(),
@@ -193,7 +176,7 @@ pub fn ambiguity(
         kind: "resolution/ambiguous-target".to_string(),
         severity: "warning".to_string(),
         path: path(at),
-        class_key: Some(class_key.to_string()),
+        class_key: Some(class(class_key)),
         target: Some(target.to_string()),
         span: Some(span(2, 1, 10)),
         candidates: candidates

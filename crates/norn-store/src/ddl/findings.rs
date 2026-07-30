@@ -8,7 +8,14 @@
 //! under one schema says nothing under another: a schema edit discards exactly
 //! the rows whose key is not the new fingerprint, and touches no parse-fact
 //! table. That is the whole of "a schema edit re-derives exactly the tables it
-//! keys" — one predicate over one indexed column.
+//! keys".
+//!
+//! The discard is stated as **two ranges rather than an inequality**:
+//! `fingerprint < pinned OR fingerprint > pinned`. `<>` is not a predicate an
+//! index can answer, so it reads every finding in the table — including on the
+//! path where nothing is stale, which is every pin but the ones that changed
+//! the schema. Two open ranges are two index seeks over
+//! `findings_vault_schema_fingerprint`, and they cost the rows they delete.
 //!
 //! # `generation` is what a repair plan cites
 //!
@@ -22,9 +29,12 @@
 //! # The bounded head of five, at rest as on the wire
 //!
 //! `finding_candidates` holds a finding's candidates in deterministic
-//! resolution-ladder order, **at most five of them**, and `CHECK (rank BETWEEN
-//! 0 AND 4)` is what makes that structural instead of remembered.
-//! `findings.candidates_total` carries how many there really were.
+//! resolution-ladder order, **at most [`crate::CANDIDATE_HEAD`] of them**, and
+//! a `CHECK` on `rank` is what makes that structural instead of remembered. The
+//! statement builds the bound out of that constant, so the schema and the API
+//! cannot come to hold two numbers. `findings.candidates_total` carries how
+//! many there really were, and a head longer than the total it claims is
+//! refused where the head is written.
 //!
 //! A bounded payload has to be bounded at rest too, or the bound is a rendering
 //! step that a second consumer forgets. A vault with a four-hundred-document
@@ -64,30 +74,65 @@
 //!   starts with that path's class key — one prefix range over
 //!   `findings(class_key)` — and the candidates of each are one prefix range
 //!   over `documents(suffix_key)`. Both bounds come from
-//!   [`crate::path::class_probe`], and neither reads a row outside the class.
+//!   [`crate::path::class_probe`].
 //!
-//! A tombstone carries the same two derived forms for the same reason: a
-//! deletion changes a class, and the class has to stay computable after the
-//! document row is gone.
+//! The class range is **correct in the no-miss direction, and a superset**: a
+//! probe of one class key opens every finding whose class key it prefixes, so
+//! nothing a change can invalidate is missed, and a longer-suffix finding in the
+//! same class — `[[norn/glossary]]` under `glossary/` — is read even where that
+//! particular change cannot have reached it. Re-deciding a finding that was
+//! already right is cheap; missing one is a stale finding nothing revisits.
+//!
+//! A tombstone keeps the same class computable for the same reason: a deletion
+//! changes a class, and the class has to stay derivable after the document row
+//! is gone. It carries the `path` and nothing derived from it — the class is
+//! recomputed from the path, which is how the tombstone is read in the first
+//! place.
 //!
 //! `class_key` is nullable, because not every finding is about resolution. A
 //! finding about a frontmatter field violating the vault schema has no
 //! ambiguity class, and giving it a synthetic one would put it in the blast
-//! radius of every rename that shared a stem with it.
+//! radius of every rename that shared a stem with it. Where it is present it is
+//! a validated [`crate::ClassKey`]: a class key that is not
+//! separator-terminated names a range no probe opens, so the finding would be
+//! at rest and permanently invisible to the maintenance that owns it.
 //!
-//! # What a finding cites, and what it does not
+//! # Findings outlive their subject, and the class owns their lifecycle
 //!
-//! `path` is text rather than only a document reference, because a finding
-//! outlives the row it is about: a target that resolves to nothing names a path
-//! no document has. `document` is the reference where one exists, so that
-//! deleting a document takes its findings with it.
+//! A finding is keyed by **path and class**, never by a document row. It has to
+//! be: the finding a resolution failure produces is about a path no document
+//! has, and a class is invalidated by documents joining or leaving it rather
+//! than by the document that cited it changing. So nothing here references
+//! `documents`, and no delete cascades into this table — a finding whose subject
+//! was deleted is exactly as live as one whose subject was never there, and both
+//! are resolved the same way.
 //!
-//! Nothing here references `links`. Fact rows are replaced wholesale on every
-//! re-derivation, so a reference into them would delete every finding about a
-//! document each time that document was re-read. A finding cites a place — path,
-//! target, span — and the repair planner re-reads.
+//! The way is class-scoped maintenance, in both directions:
+//! [`crate::Request::findings_in_class`] reads the class and
+//! [`crate::Request::discard_findings_in_class`] empties it. **Discard-then-
+//! record is the idempotence story** — re-deriving a class discards it and
+//! records what holds now, so there is no dedupe rule to keep and no way for two
+//! derivations of one class to leave two copies. Every deletion goes through
+//! that verb, which is what makes findings leaving the table counted rather than
+//! a side effect of a cascade nobody billed.
+//!
+//! Nothing here references `links` either. Fact rows are replaced wholesale on
+//! every re-derivation, so a reference into them would delete every finding
+//! about a document each time that document was re-read. A finding cites a
+//! place — path, target, span — and the repair planner re-reads.
+//!
+//! `detail` is text the caller has already projected, and it travels **in
+//! only**. When the wire mints a finding type, the wire owns the code strings
+//! and this column stays `TEXT`; `detail` is projected into the store by
+//! whatever composed it and is never forwarded back out as a typed shape.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    let mut all = super::fixed(STATEMENTS);
+    all.push(finding_candidates());
+    all
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE TABLE findings (
     id                       INTEGER PRIMARY KEY,
     vault_schema_fingerprint TEXT    NOT NULL,
@@ -95,7 +140,6 @@ pub(crate) const STATEMENTS: &[&str] = &[
     kind                     TEXT    NOT NULL,
     severity                 TEXT    NOT NULL,
     path                     TEXT    NOT NULL,
-    document                 INTEGER REFERENCES documents(id) ON DELETE CASCADE,
     class_key                TEXT,
     target                   TEXT,
     span_line                INTEGER,
@@ -103,18 +147,26 @@ pub(crate) const STATEMENTS: &[&str] = &[
     span_offset              INTEGER,
     candidates_total         INTEGER NOT NULL,
     message                  TEXT    NOT NULL,
-    detail                   TEXT
+    detail                   TEXT,
+    CHECK ((span_line IS NULL) = (span_column IS NULL)
+       AND (span_line IS NULL) = (span_offset IS NULL))
 )",
     "CREATE INDEX findings_class_key ON findings(class_key)",
     "CREATE INDEX findings_path ON findings(path)",
-    "CREATE INDEX findings_document ON findings(document)",
-    "CREATE INDEX findings_generation ON findings(generation)",
     "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint)",
-    "CREATE TABLE finding_candidates (
+];
+
+/// The bounded head, with its rank bound taken from the constant the API states
+/// it by rather than spelled a second time.
+fn finding_candidates() -> String {
+    let highest_rank = crate::facts::CANDIDATE_HEAD - 1;
+    format!(
+        "CREATE TABLE finding_candidates (
     finding INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
-    rank    INTEGER NOT NULL CHECK (rank BETWEEN 0 AND 4),
+    rank    INTEGER NOT NULL CHECK (rank BETWEEN 0 AND {highest_rank}),
     path    TEXT    NOT NULL,
     suffix  TEXT    NOT NULL,
     PRIMARY KEY (finding, rank)
-) WITHOUT ROWID",
-];
+) WITHOUT ROWID"
+    )
+}

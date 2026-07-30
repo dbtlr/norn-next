@@ -17,10 +17,11 @@
 //! without racing anything.
 //!
 //! **Reasoning, for heal and doctor.** `provenance` says how the death was
-//! learned: a full tree heal that found the file absent, a watcher removal, an
-//! applied plan that deleted it, or a rebuild that dropped it. A vault losing
-//! documents to the wrong provenance is the shape of a defect that is otherwise
-//! invisible.
+//! learned, and it is a closed vocabulary of three: a full tree heal that found
+//! the file absent, a watcher removal, or an applied plan that deleted it. A
+//! vault losing documents to the wrong provenance is the shape of a defect that
+//! is otherwise invisible, which is why the column is checked against that
+//! vocabulary by [`crate::Store::verify_integrity`] rather than trusted.
 //!
 //! # One row per path, holding the most recent death
 //!
@@ -35,30 +36,35 @@
 //! — when a tombstone has outlived the disorder it was recorded to survive — is
 //! not decided here.
 //!
-//! # The class columns outlive the document
+//! # The class outlives the document, and it is recomputed rather than stored
 //!
-//! `suffix_key` and `stem` are the same derived forms `documents` carries, kept
-//! because a deletion **changes an ambiguity class** and the class has to stay
-//! computable once the document row is gone: a path that was one of three
-//! candidates for `glossary` leaves two behind, and the findings that named
-//! that class are the ones a deletion has to revisit. See
-//! [`crate::ddl::findings`].
+//! A deletion **changes an ambiguity class**, and the class has to stay
+//! reachable once the document row is gone: a path that was one of three
+//! candidates for `glossary` leaves two behind, and the findings that named that
+//! class are the ones a deletion has to revisit. See [`crate::ddl::findings`].
+//!
+//! The class comes from `path`, which is the column a tombstone is read by, and
+//! [`crate::DocumentPath`] derives it on the way out. Storing the derived forms
+//! beside it would put one fact in two homes for a scan no statement performs.
 //!
 //! `last_content_hash` is nullable, because a death can be learned from a path
-//! that is already absent and there is nothing left to hash.
+//! that is already absent and there is nothing left to hash. A re-death of a
+//! path whose hash is already recorded **keeps** the recorded one: the hash is
+//! the comparison basis a late event needs, and a second death learned from an
+//! absent file carries nothing better to replace it with.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE TABLE tombstones (
     id                INTEGER PRIMARY KEY,
     path              TEXT    NOT NULL,
-    suffix_key        TEXT    NOT NULL,
-    stem              TEXT    NOT NULL,
     last_content_hash TEXT,
     provenance        TEXT    NOT NULL,
     generation        INTEGER NOT NULL,
     recorded_at       INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX tombstones_path ON tombstones(path)",
-    "CREATE INDEX tombstones_stem ON tombstones(stem)",
-    "CREATE INDEX tombstones_generation ON tombstones(generation)",
 ];

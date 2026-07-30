@@ -10,9 +10,7 @@
 //! the shape the future bars read them in: the store owns the counters and
 //! `norn-testkit` owns the assertions over them.
 
-mod common;
-
-use common::{Scratch, document, document_with_every_fact, path, vector, violation};
+use crate::common::{Scratch, document, document_with_every_fact, path, vector, violation};
 use norn_store::{DerivationCounters, Provenance};
 use norn_testkit::counters::CounterSnapshot;
 
@@ -24,27 +22,34 @@ fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
 /// Every counter is present in every reading, whatever its value. A counter that
 /// appears in one reading and not another is a difference rather than a zero,
 /// and reading a missing one as zero is how a renamed counter compares equal to
-/// the one it replaced.
+/// the one it replaced — which is why a name the vocabulary does not carry reads
+/// as absent rather than as a value.
 #[test]
 fn every_reading_carries_every_counter() {
     let scratch = Scratch::new("names");
     let mut store = scratch.open();
 
-    let empty = snapshot(&store.begin_request().finish());
+    let empty = store.begin_request().finish();
     let mut request = store.begin_request();
     request
         .upsert_document(&document("notes.md", "hash-1", "a body\n"))
         .expect("writing a document");
-    let worked = snapshot(&request.finish());
+    let worked = request.finish();
 
-    let names: Vec<&str> = DerivationCounters::names().collect();
+    let names: Vec<&str> = empty.readings().map(|(name, _)| name).collect();
     assert!(!names.is_empty());
-    for name in &names {
-        assert!(
-            empty.names().any(|carried| carried == *name),
-            "an empty reading does not carry `{name}`"
-        );
+    for (name, value) in empty.readings() {
+        assert_eq!(value, 0, "an empty reading carries `{name}` at {value}");
+        assert_eq!(empty.get(name), Some(0), "`{name}` reads back as absent");
     }
+    assert_eq!(
+        empty.get("documents_renamed"),
+        None,
+        "a counter this vocabulary does not carry reads as a value rather than as absent"
+    );
+
+    let empty = snapshot(&empty);
+    let worked = snapshot(&worked);
     assert_eq!(
         empty.names().count(),
         names.len(),
@@ -101,21 +106,21 @@ fn a_second_request_is_not_charged_for_the_first_ones_work() {
         .upsert_document(&document_with_every_fact("one.md", "hash-1"))
         .expect("writing a document");
     let first = first.finish();
-    assert_eq!(first.get("documents_upserted"), 1);
-    assert_eq!(first.get("link_rows_written"), 2);
+    assert_eq!(first.get("documents_upserted"), Some(1));
+    assert_eq!(first.get("link_rows_written"), Some(2));
 
     let mut second = store.begin_request();
     second
         .upsert_document(&document("two.md", "hash-2", "a body\n"))
         .expect("writing a document");
     let second = second.finish();
-    assert_eq!(second.get("documents_upserted"), 1);
+    assert_eq!(second.get("documents_upserted"), Some(1));
     assert_eq!(
         second.get("link_rows_written"),
-        0,
+        Some(0),
         "the second request was charged for the first one's links"
     );
-    assert_eq!(second.get("fact_rows_discarded"), 0);
+    assert_eq!(second.get("fact_rows_discarded"), Some(0));
 }
 
 /// **A request that only reads derives nothing.** Every reader is outside the
@@ -152,12 +157,20 @@ fn a_request_that_only_reads_finishes_at_zero() {
     let _ = warm
         .suffix_candidates(&norn_store::class_probe("glossary"))
         .expect("reading candidates");
+    let _ = warm.full_text_matches("body").expect("reading matches");
+    let _ = warm
+        .probe_reader_plan(
+            norn_store::ProbeReader::SuffixCandidates,
+            &norn_store::class_probe("glossary"),
+        )
+        .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
     let _ = warm.pillars().expect("a pillar report");
 
     let reading = warm.finish();
-    assert!(reading.is_all_zero(), "{:?}", reading.nonzero());
-    snapshot(&reading).assert_all_zero("a request that only read");
+    let snapshot = snapshot(&reading);
+    assert!(reading.is_all_zero(), "{:?}", snapshot.nonzero());
+    snapshot.assert_all_zero("a request that only read");
 }
 
 /// A re-derivation counts the rows it discarded as well as the ones it wrote, so
@@ -173,9 +186,9 @@ fn a_re_derivation_counts_what_it_discarded() {
     request.upsert_document(&facts).expect("re-deriving");
     let reading = request.finish();
 
-    assert_eq!(reading.get("documents_upserted"), 2);
-    assert_eq!(reading.get("fact_rows_discarded"), 8);
-    assert_eq!(reading.get("link_rows_written"), 4);
+    assert_eq!(reading.get("documents_upserted"), Some(2));
+    assert_eq!(reading.get("fact_rows_discarded"), Some(8));
+    assert_eq!(reading.get("link_rows_written"), Some(4));
 }
 
 /// The same operation over two documents of the same shape reads the same
@@ -233,14 +246,15 @@ fn a_delete_counts_the_death_and_the_tombstone() {
         .expect("recording a death");
     let reading = request.finish();
 
-    assert_eq!(reading.get("documents_deleted"), 1);
-    assert_eq!(reading.get("tombstones_recorded"), 2);
+    assert_eq!(reading.get("documents_deleted"), Some(1));
+    assert_eq!(reading.get("tombstones_recorded"), Some(2));
 }
 
-/// The schema-keyed discard counts what it discarded, and pinning counts as its
-/// own act.
+/// The pin counts as its own act, and the discard it folds in counts what it
+/// discarded. A re-pin of the schema that is already pinned is not an act at all,
+/// so it counts as nothing.
 #[test]
-fn a_schema_change_counts_the_pin_and_the_discard() {
+fn a_schema_change_counts_the_pin_and_the_discard_it_folds_in() {
     let scratch = Scratch::new("schema-counts");
     let mut store = scratch.open();
 
@@ -252,12 +266,52 @@ fn a_schema_change_counts_the_pin_and_the_discard() {
         .record_finding(&violation("docs/index.md"))
         .expect("recording a finding");
     request
+        .pin_vault_schema(b"one\n", "schema-1")
+        .expect("pinning the schema that is already pinned");
+    request
         .pin_vault_schema(b"two\n", "schema-2")
         .expect("re-pinning a vault schema");
-    request.discard_schema_dependent().expect("an invalidation");
     let reading = request.finish();
 
-    assert_eq!(reading.get("vault_schema_pins"), 2);
-    assert_eq!(reading.get("findings_written"), 1);
-    assert_eq!(reading.get("findings_discarded"), 1);
+    assert_eq!(reading.get("vault_schema_pins"), Some(2));
+    assert_eq!(reading.get("findings_written"), Some(1));
+    assert_eq!(reading.get("findings_discarded"), Some(1));
+}
+
+/// Discarding a class counts the findings it removed. It is the only way a
+/// finding leaves the table, which is what makes every deletion billed.
+#[test]
+fn discarding_a_class_counts_the_findings_it_removed() {
+    let scratch = Scratch::new("class-discard-counts");
+    let mut store = scratch.open();
+
+    let mut request = store.begin_request();
+    for at in ["one.md", "two.md"] {
+        request
+            .record_finding(&crate::common::ambiguity(
+                at,
+                "glossary",
+                "glossary/",
+                &[],
+                3,
+            ))
+            .expect("recording a finding");
+    }
+    request
+        .record_finding(&crate::common::ambiguity(
+            "one.md",
+            "index",
+            "index/",
+            &[],
+            2,
+        ))
+        .expect("recording a finding");
+
+    let invalidation = request
+        .discard_findings_in_class(&norn_store::class_probe("glossary"))
+        .expect("discarding a class");
+    assert_eq!(invalidation.findings_discarded, 2);
+    let reading = request.finish();
+    assert_eq!(reading.get("findings_discarded"), Some(2));
+    assert_eq!(reading.get("findings_written"), Some(3));
 }

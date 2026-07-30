@@ -23,7 +23,11 @@
 //! keeps rebuild-from-zero honest about its lifetime: after the freeze, rung 3
 //! narrows to damaged state, and evolution belongs here.
 
-pub(crate) const STATEMENTS: &[&str] = &["CREATE TABLE migrations (
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &["CREATE TABLE migrations (
     version            INTEGER PRIMARY KEY,
     ddl_fingerprint    TEXT    NOT NULL,
     applied_generation INTEGER NOT NULL,

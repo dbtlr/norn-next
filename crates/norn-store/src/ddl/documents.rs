@@ -10,7 +10,7 @@
 //! rather than the path itself: the path is the document's name, and a name is
 //! not an identity.
 //!
-//! # The path is stored three ways, all derived from one
+//! # The path is stored two ways, both derived from one
 //!
 //! - `path` — the vault-root-relative path, already normalized. Case,
 //!   dot-prefix and separator normalization belong to the filesystem seam, so
@@ -20,19 +20,16 @@
 //!   probes, described in [`crate::path`]. It exists so that
 //!   right-to-left, segment-aligned suffix resolution is a range scan over an
 //!   index rather than a scan over every path in the vault.
-//! - `stem` — the leaf segment with its final extension removed, which is the
-//!   one-segment case of the same ladder and the key an **ambiguity class** is
-//!   named by. Indexed in its own right so that enumerating every ambiguous
-//!   stem in a vault is a grouped index read.
 //!
-//! All three are computed in one place, from one input, by
-//! [`crate::path::DocumentPath`] — three columns that must agree, produced
+//! Both are computed in one place, from one input, by
+//! [`crate::path::DocumentPath`] — two columns that must agree, produced
 //! together so they cannot disagree.
 //!
-//! `depth` is the number of segments the path has. Emitting a candidate as its
-//! *minimal disambiguating suffix* needs to know how much of a path to take,
-//! and asking the database rather than splitting strings back apart is what
-//! keeps that a projection of the column that was indexed.
+//! **One fact, one home.** The stem and the segment count are functions of
+//! `path`, and [`crate::path::DocumentPath`] computes both from it on the way
+//! back out of the table. A column for either would be a second spelling that
+//! no statement reads and that a bad write could make disagree with the path
+//! beside it.
 //!
 //! # The rest of the row
 //!
@@ -53,32 +50,37 @@
 //!   frontmatter block, or it carries one that did not parse. An empty block
 //!   projects to `{}`, which is a different value from `NULL`, so a second
 //!   presence column would be a redundant answer to a question this one already
-//!   settles. See [`crate::json`], and `diagnostic_count` for which of the two
-//!   `NULL` means.
-//! - `diagnostic_count` — how many diagnostics the parse raised. It answers
-//!   "did this document read cleanly" without a table of diagnostics; what a
+//!   settles. See [`crate::json`], and `frontmatter_diagnostic_count` for which
+//!   of the two `NULL` means.
+//! - `frontmatter_diagnostic_count` — how many **frontmatter-scoped**
+//!   diagnostics the parse raised, which is what discriminates the two things
+//!   `frontmatter IS NULL` can mean: zero is "there was no block", and nonzero
+//!   is "there was a block and it did not read". A count over every diagnostic
+//!   a parse raised could not tell those apart the moment one diagnostic came
+//!   from anywhere else, so the column holds the narrower fact. What a
 //!   diagnostic *means* is a finding's question, not a parse fact.
 //! - `generation` — the write generation this row was last derived at.
 //! - `derived_at` — unix seconds, for a person reading a report. It orders
 //!   nothing: `generation` does that.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE TABLE documents (
-    id               INTEGER PRIMARY KEY,
-    path             TEXT    NOT NULL,
-    suffix_key       TEXT    NOT NULL,
-    stem             TEXT    NOT NULL,
-    depth            INTEGER NOT NULL,
-    content_hash     TEXT    NOT NULL,
-    byte_length      INTEGER NOT NULL,
-    body             TEXT    NOT NULL,
-    body_offset      INTEGER NOT NULL,
-    frontmatter      TEXT,
-    diagnostic_count INTEGER NOT NULL,
-    generation       INTEGER NOT NULL,
-    derived_at       INTEGER NOT NULL
+    id                           INTEGER PRIMARY KEY,
+    path                         TEXT    NOT NULL,
+    suffix_key                   TEXT    NOT NULL,
+    content_hash                 TEXT    NOT NULL,
+    byte_length                  INTEGER NOT NULL,
+    body                         TEXT    NOT NULL,
+    body_offset                  INTEGER NOT NULL,
+    frontmatter                  TEXT,
+    frontmatter_diagnostic_count INTEGER NOT NULL,
+    generation                   INTEGER NOT NULL,
+    derived_at                   INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
-    "CREATE INDEX documents_stem ON documents(stem)",
 ];

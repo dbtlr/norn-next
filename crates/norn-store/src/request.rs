@@ -1,9 +1,19 @@
 //! One request against one store, and everything it derived.
 //!
-//! Every operation the store performs happens inside a request, which is what
-//! makes derivation attributable: the counters belong to the request rather than
-//! to the process, so "what did this cost" is answerable without subtracting two
+//! # A request is an attribution scope, not an atomicity scope
+//!
+//! Every operation the store performs happens inside a request, and what that
+//! buys is attribution: the counters belong to the request rather than to the
+//! process, so "what did this cost" is answerable without subtracting two
 //! readings of a shared number.
+//!
+//! It buys nothing about atomicity. **Each operation opens and commits its own
+//! transaction**, so a request that performed three writes and then failed has
+//! three writes at rest. Every one of them is individually whole — a document
+//! and its fact rows land together or not at all — and the store's own
+//! consistency never depends on a caller finishing. What does not exist yet is a
+//! transaction that spans several operations; that is the changeset seam, and it
+//! will re-cut this boundary rather than reuse it.
 //!
 //! # Writes replace one document's facts wholesale
 //!
@@ -14,8 +24,8 @@
 //! ordinal means what it says.
 //!
 //! **The document row keeps its identity across a re-derivation.** It is updated
-//! rather than replaced, which is what lets a finding or a vector reference a
-//! document that has been re-read since.
+//! rather than replaced, which is what lets a vector reference a document that
+//! has been re-read since.
 //!
 //! What is *not* here is the increment: which documents a change reaches, how a
 //! changeset is ordered, how a torn write is detected, and when a tombstone has
@@ -29,33 +39,40 @@
 //! heal decides whether a document changed and how a re-derivation compares what
 //! it is about to write.
 //!
-//! The two probe readers — [`Request::suffix_candidates`] and
+//! The probe readers — [`Request::suffix_candidates`] and
 //! [`Request::findings_in_class`] — are the range reads the resolution ladder
 //! and the findings pillar are defined in terms of. They take a
-//! [`SuffixProbe`], which is a pair of index bounds, and read exactly the class
-//! it opens.
+//! [`SuffixProbe`], which is a set of index bounds, and read exactly the class it
+//! opens. [`Request::probe_reader_plan`] hands their emitted SQL and its query
+//! plan out, because a plan bar over hand-copied SQL judges a string nobody runs
+//! — and no crate outside this one may open a connection to take a plan itself.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
 //! compose these primitives rather than re-spelling the ranges.
 
-use rusqlite::{OptionalExtension, Params, Row, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, Deletion, DocumentFacts, FindingFacts, HeadingFact,
-    Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, Span, StoredDocument,
+    Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
     StoredFacts, StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
 use crate::json;
-use crate::path::{DocumentPath, SuffixProbe};
+use crate::path::{ClassKey, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
 /// A row reading that can fail twice: the driver may not produce the row, and
 /// the row may hold a value this schema does not describe.
 type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
+
+/// The columns every finding reader selects, in the order [`stored_finding`]
+/// reads them.
+const FINDING_COLUMNS: &str = "id, kind, severity, path, class_key, target, span_line, span_column,
+            span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation";
 
 /// One request's worth of work against a store.
 pub struct Request<'a> {
@@ -89,7 +106,11 @@ impl<'a> Request<'a> {
     /// the first statement: a deferred transaction that upgrades halfway through
     /// can fail after the fact rows have been discarded.
     pub fn upsert_document(&mut self, facts: &DocumentFacts) -> Result<(), StoreError> {
-        let projection = facts.frontmatter.as_ref().map(json::canonical_json);
+        let projection = facts
+            .frontmatter
+            .as_ref()
+            .map(json::canonical_json)
+            .transpose()?;
         let derived_at = unix_seconds();
         let transaction = self
             .store
@@ -101,33 +122,29 @@ impl<'a> Request<'a> {
         let document: i64 = transaction
             .query_row(
                 "INSERT INTO documents (
-                     path, suffix_key, stem, depth, content_hash, byte_length, body,
-                     body_offset, frontmatter, diagnostic_count, generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     path, suffix_key, content_hash, byte_length, body, body_offset, frontmatter,
+                     frontmatter_diagnostic_count, generation, derived_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(path) DO UPDATE SET
-                     suffix_key       = excluded.suffix_key,
-                     stem             = excluded.stem,
-                     depth            = excluded.depth,
-                     content_hash     = excluded.content_hash,
-                     byte_length      = excluded.byte_length,
-                     body             = excluded.body,
-                     body_offset      = excluded.body_offset,
-                     frontmatter      = excluded.frontmatter,
-                     diagnostic_count = excluded.diagnostic_count,
-                     generation       = excluded.generation,
-                     derived_at       = excluded.derived_at
+                     suffix_key                   = excluded.suffix_key,
+                     content_hash                 = excluded.content_hash,
+                     byte_length                  = excluded.byte_length,
+                     body                         = excluded.body,
+                     body_offset                  = excluded.body_offset,
+                     frontmatter                  = excluded.frontmatter,
+                     frontmatter_diagnostic_count = excluded.frontmatter_diagnostic_count,
+                     generation                   = excluded.generation,
+                     derived_at                   = excluded.derived_at
                  RETURNING id",
                 params![
                     facts.path.as_str(),
                     facts.path.suffix_key(),
-                    facts.path.stem(),
-                    facts.path.depth() as i64,
                     facts.content_hash,
                     facts.byte_length,
                     facts.body,
                     facts.body_offset,
                     projection,
-                    facts.diagnostic_count,
+                    facts.frontmatter_diagnostic_count,
                     generation,
                     derived_at,
                 ],
@@ -282,6 +299,11 @@ impl<'a> Request<'a> {
     /// carries is the point, and it is worth most exactly when a derivation
     /// never happened: a late event then has something to compare against
     /// instead of guessing.
+    ///
+    /// A path that dies twice **keeps the hash already recorded** where the
+    /// second death has none of its own. The recorded hash is the comparison
+    /// basis the tombstone exists to carry, and a death learned from an absent
+    /// file carries nothing better to put in its place.
     pub fn delete_document(
         &mut self,
         path: &DocumentPath,
@@ -308,19 +330,17 @@ impl<'a> Request<'a> {
         transaction
             .execute(
                 "INSERT INTO tombstones (
-                     path, suffix_key, stem, last_content_hash, provenance, generation, recorded_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     path, last_content_hash, provenance, generation, recorded_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(path) DO UPDATE SET
-                     suffix_key        = excluded.suffix_key,
-                     stem              = excluded.stem,
-                     last_content_hash = excluded.last_content_hash,
+                     last_content_hash = COALESCE(
+                         excluded.last_content_hash, tombstones.last_content_hash
+                     ),
                      provenance        = excluded.provenance,
                      generation        = excluded.generation,
                      recorded_at       = excluded.recorded_at",
                 params![
                     path.as_str(),
-                    path.suffix_key(),
-                    path.stem(),
                     last_content_hash,
                     provenance.as_str(),
                     generation,
@@ -350,11 +370,23 @@ impl<'a> Request<'a> {
     /// pinned schema stamps the empty fingerprint: a schema arriving later is a
     /// schema change, and these findings are invalidated by it exactly as they
     /// should be.
+    ///
+    /// Two shapes of head are refused rather than stored: one longer than
+    /// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
+    /// of. The total is what makes the head a head, so a total below the head's
+    /// own length describes no vault.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         if finding.candidates.len() > CANDIDATE_HEAD {
             return Err(StoreError::Bound {
                 what: "a finding's candidate head",
                 limit: CANDIDATE_HEAD,
+                given: finding.candidates.len(),
+            });
+        }
+        if finding.candidates_total < finding.candidates.len() as u64 {
+            return Err(StoreError::Bound {
+                what: "a finding's candidate total, against the head it heads",
+                limit: finding.candidates_total as usize,
                 given: finding.candidates.len(),
             });
         }
@@ -370,20 +402,18 @@ impl<'a> Request<'a> {
         let id: i64 = transaction
             .query_row(
                 "INSERT INTO findings (
-                     vault_schema_fingerprint, generation, kind, severity, path, document,
-                     class_key, target, span_line, span_column, span_offset, candidates_total,
-                     message, detail
-                 ) VALUES (
-                     ?1, ?2, ?3, ?4, ?5, (SELECT id FROM documents WHERE path = ?5),
-                     ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-                 ) RETURNING id",
+                     vault_schema_fingerprint, generation, kind, severity, path, class_key,
+                     target, span_line, span_column, span_offset, candidates_total, message,
+                     detail
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 RETURNING id",
                 params![
                     fingerprint,
                     generation,
                     finding.kind,
                     finding.severity,
                     finding.path.as_str(),
-                    finding.class_key,
+                    finding.class_key.as_ref().map(ClassKey::as_str),
                     finding.target,
                     finding.span.map(|span| span.line),
                     finding.span.map(|span| span.column),
@@ -420,6 +450,37 @@ impl<'a> Request<'a> {
             .map_err(|error| error::sql("committing a finding", error))?;
         self.counters.add(Counter::FindingsWritten, 1);
         Ok(())
+    }
+
+    /// Discard every finding in the class a probe opens, and report what went.
+    ///
+    /// The write side of class-scoped maintenance, and the reason findings need
+    /// no cascade: a finding is keyed by path and class, outlives the document it
+    /// is about, and leaves the table through this verb — counted, rather than as
+    /// a side effect of a delete somewhere else.
+    ///
+    /// **Discard, then record, is the idempotence story.** Re-deriving a class is
+    /// this call followed by a [`Request::record_finding`] for each finding that
+    /// holds now, so two derivations of one class cannot leave two copies and
+    /// there is no dedupe rule for a caller to keep.
+    pub fn discard_findings_in_class(
+        &mut self,
+        probe: &SuffixProbe,
+    ) -> Result<Invalidation, StoreError> {
+        let sql = format!(
+            "DELETE FROM findings WHERE {}",
+            range_predicate("class_key", probe.range_count())
+        );
+        let discarded = self
+            .store
+            .connection
+            .execute(&sql, probe_parameters(probe))
+            .map_err(|error| error::sql("discarding a class's findings", error))?
+            as u64;
+        self.counters.add(Counter::FindingsDiscarded, discarded);
+        Ok(Invalidation {
+            findings_discarded: discarded,
+        })
     }
 
     /// Store one document's embedding under one model.
@@ -476,17 +537,51 @@ impl<'a> Request<'a> {
         Ok(())
     }
 
-    /// Pin the vault schema's projection: the bytes, their fingerprint, and the
-    /// generation the pin happened at.
+    /// Pin the vault schema's projection — the bytes, their fingerprint, and the
+    /// generation the pin happened at — and discard the derived state the new key
+    /// invalidates.
     ///
     /// The file remains the schema's sole authority. What this records is which
     /// schema derived state was derived under.
-    pub fn pin_vault_schema(&mut self, bytes: &[u8], fingerprint: &str) -> Result<i64, StoreError> {
+    ///
+    /// **The pin and the discard are one transaction.** Splitting them leaves a
+    /// generation in which the pinned key says a set of findings is dead and a
+    /// request can still read them, and nothing outside the store can close that
+    /// window. Parse-fact rows carry no schema key and are not touched: a schema
+    /// edit re-derives exactly the tables it keys.
+    ///
+    /// Pinning a schema whose bytes and fingerprint already match the standing
+    /// pin is **not a schema change**. It takes no generation, writes nothing and
+    /// discards nothing, so a caller that pins on every attach does not move the
+    /// store's write sequence for a schema that did not move.
+    pub fn pin_vault_schema(
+        &mut self,
+        bytes: &[u8],
+        fingerprint: &str,
+    ) -> Result<SchemaPin, StoreError> {
         let transaction = self
             .store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error::sql("opening the schema-pin transaction", error))?;
+
+        let pinned_fingerprint: Option<String> =
+            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+        let pinned_bytes: Option<Vec<u8>> =
+            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES)?;
+        if pinned_fingerprint.as_deref() == Some(fingerprint)
+            && pinned_bytes.as_deref() == Some(bytes)
+        {
+            let generation: i64 =
+                store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION)?
+                    .unwrap_or_default();
+            return Ok(SchemaPin {
+                generation,
+                repinned: false,
+                invalidated: Invalidation::default(),
+            });
+        }
+
         let generation = store::next_generation(&transaction)?;
         store::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES, bytes)?;
         store::put_meta(
@@ -495,41 +590,30 @@ impl<'a> Request<'a> {
             fingerprint,
         )?;
         store::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION, generation)?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing a schema pin", error))?;
-        self.counters.add(Counter::VaultSchemaPins, 1);
-        Ok(generation)
-    }
 
-    /// Discard the derived state the pinned vault schema keys, and report what
-    /// went.
-    ///
-    /// The fingerprint is read from the pin rather than passed in, so what is
-    /// kept cannot disagree with what is pinned. Parse-fact rows carry no schema
-    /// key and are not touched: a schema edit re-derives exactly the tables it
-    /// keys.
-    pub fn discard_schema_dependent(&mut self) -> Result<Invalidation, StoreError> {
-        let transaction = self
-            .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the invalidation transaction", error))?;
-        let fingerprint: String =
-            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?.unwrap_or_default();
+        // Two open ranges rather than `<>`: an inequality is not a predicate an
+        // index can answer, so it would read every finding in the table on every
+        // pin — including the pins that discard nothing.
         let discarded = transaction
             .execute(
-                "DELETE FROM findings WHERE vault_schema_fingerprint <> ?1",
+                "DELETE FROM findings
+                 WHERE vault_schema_fingerprint < ?1 OR vault_schema_fingerprint > ?1",
                 params![fingerprint],
             )
             .map_err(|error| error::sql("discarding schema-dependent state", error))?
             as u64;
+
         transaction
             .commit()
-            .map_err(|error| error::sql("committing an invalidation", error))?;
+            .map_err(|error| error::sql("committing a schema pin", error))?;
+        self.counters.add(Counter::VaultSchemaPins, 1);
         self.counters.add(Counter::FindingsDiscarded, discarded);
-        Ok(Invalidation {
-            findings_discarded: discarded,
+        Ok(SchemaPin {
+            generation,
+            repinned: true,
+            invalidated: Invalidation {
+                findings_discarded: discarded,
+            },
         })
     }
 
@@ -542,63 +626,66 @@ impl<'a> Request<'a> {
     ) -> Result<Option<StoredDocument>, StoreError> {
         self.read_one(
             "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    diagnostic_count, generation, derived_at
+                    frontmatter_diagnostic_count, generation, derived_at
              FROM documents WHERE path = ?1",
             params![path.as_str()],
-            stored_document,
+            |row| stored_document(row, 0),
             "reading a document row",
         )
     }
 
     /// One document's row, its body, and every fact row derived from it, in
     /// ordinal order.
+    ///
+    /// The row, the body and the document's id come back in one statement, and
+    /// the four fact reads are keyed by that id — so the path is looked up once
+    /// rather than once per fact table.
     pub fn stored_facts(&self, path: &DocumentPath) -> Result<Option<StoredFacts>, StoreError> {
-        let Some(document) = self.stored_document(path)? else {
+        let found = self.read_one(
+            "SELECT id, body, path, content_hash, byte_length, body_offset, frontmatter,
+                    frontmatter_diagnostic_count, generation, derived_at
+             FROM documents WHERE path = ?1",
+            params![path.as_str()],
+            |row| {
+                let id: i64 = row.get(0)?;
+                let body: String = row.get(1)?;
+                Ok(stored_document(row, 2)?.map(|document| (id, body, document)))
+            },
+            "reading a document row",
+        )?;
+        let Some((id, body, document)) = found else {
             return Ok(None);
         };
-        let body: String = self
-            .store
-            .connection
-            .query_row(
-                "SELECT body FROM documents WHERE path = ?1",
-                params![path.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("reading a document body", error))?;
         Ok(Some(StoredFacts {
             document,
             body,
             links: self.read_all(
                 "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset
-                 FROM links WHERE document = (SELECT id FROM documents WHERE path = ?1)
-                 ORDER BY ordinal",
-                params![path.as_str()],
+                 FROM links WHERE document = ?1 ORDER BY ordinal",
+                params![id],
                 stored_link,
                 "reading a document's links",
             )?,
             headings: self.read_all(
                 "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
                         inside_container
-                 FROM headings WHERE document = (SELECT id FROM documents WHERE path = ?1)
-                 ORDER BY ordinal",
-                params![path.as_str()],
+                 FROM headings WHERE document = ?1 ORDER BY ordinal",
+                params![id],
                 stored_heading,
                 "reading a document's headings",
             )?,
             blocks: self.read_all(
                 "SELECT block_id, span_line, span_column, span_offset
-                 FROM blocks WHERE document = (SELECT id FROM documents WHERE path = ?1)
-                 ORDER BY ordinal",
-                params![path.as_str()],
+                 FROM blocks WHERE document = ?1 ORDER BY ordinal",
+                params![id],
                 stored_block,
                 "reading a document's block ids",
             )?,
             tags: self.read_all(
                 "SELECT name, source, span_line, span_column, span_offset
-                 FROM document_tags WHERE document = (SELECT id FROM documents WHERE path = ?1)
-                 ORDER BY ordinal",
-                params![path.as_str()],
+                 FROM document_tags WHERE document = ?1 ORDER BY ordinal",
+                params![id],
                 stored_tag,
                 "reading a document's tags",
             )?,
@@ -621,10 +708,10 @@ impl<'a> Request<'a> {
 
     /// The findings recorded at one path, oldest generation first.
     pub fn stored_findings(&self, path: &DocumentPath) -> Result<Vec<StoredFinding>, StoreError> {
-        self.findings(
-            "WHERE path = ?1 ORDER BY generation, id",
-            params![path.as_str()],
-        )
+        let sql = format!(
+            "SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id"
+        );
+        self.findings(&sql, params![path.as_str()])
     }
 
     /// The pinned vault-schema projection, if a schema has been pinned.
@@ -667,14 +754,17 @@ impl<'a> Request<'a> {
     /// Every document in the class a probe opens, in suffix-key order.
     ///
     /// The full candidate enumeration behind a finding's bounded head, and the
-    /// membership of an ambiguity class: one range over `documents(suffix_key)`,
+    /// membership of an ambiguity class: ranges over `documents(suffix_key)`,
     /// costing the class rather than the vault.
+    ///
+    /// The order is total — `suffix_key` then `path` — because equal suffix keys
+    /// are exactly what an ambiguity class is made of, and a ladder whose ties
+    /// fall out in row-insertion order is a ladder that reorders itself when a
+    /// document is re-derived.
     pub fn suffix_candidates(&self, probe: &SuffixProbe) -> Result<Vec<DocumentPath>, StoreError> {
         self.read_all(
-            "SELECT path FROM documents
-             WHERE suffix_key >= ?1 AND suffix_key < ?2
-             ORDER BY suffix_key",
-            params![probe.lower(), probe.upper()],
+            &suffix_candidates_sql(probe.range_count()),
+            probe_parameters(probe),
             |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
             "reading suffix candidates",
         )
@@ -684,39 +774,112 @@ impl<'a> Request<'a> {
     ///
     /// This is what scopes findings maintenance: a changed path names a class,
     /// and the findings a change to it can invalidate are exactly the ones in
-    /// this range. Nothing outside the class is read, and no finding is
-    /// revisited because the document it was written in happened to change.
+    /// this range. The read is **correct in the no-miss direction and a
+    /// superset**: a longer-suffix finding in the same class is read even where
+    /// the particular change cannot have reached it, which costs a re-decision
+    /// rather than a stale finding nothing revisits.
     pub fn findings_in_class(&self, probe: &SuffixProbe) -> Result<Vec<StoredFinding>, StoreError> {
         self.findings(
-            "WHERE class_key >= ?1 AND class_key < ?2 ORDER BY class_key, id",
-            params![probe.lower(), probe.upper()],
+            &findings_in_class_sql(probe.range_count()),
+            probe_parameters(probe),
         )
+    }
+
+    /// The full-text matches for one FTS5 match expression, in path order.
+    ///
+    /// The range primitive the full-text read builder composes: it takes a match
+    /// expression and returns the documents whose body the index says holds those
+    /// terms. Snippets, ranking and paging are the builder's.
+    ///
+    /// It reads the index rather than the column, which is what makes it the
+    /// pillar's observable behaviour: a `MATCH` that answers about text
+    /// `documents.body` no longer carries is an index that has drifted, and
+    /// [`crate::Store::verify_integrity`] is what states that as damage.
+    pub fn full_text_matches(&self, expression: &str) -> Result<Vec<DocumentPath>, StoreError> {
+        self.read_all(
+            "SELECT documents.path FROM documents_fts
+             JOIN documents ON documents.id = documents_fts.rowid
+             WHERE documents_fts MATCH ?1
+             ORDER BY documents.path",
+            params![expression],
+            |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
+            "reading full-text matches",
+        )
+    }
+
+    /// The statement one probe reader emits for one probe, with the query plan
+    /// SQLite reported for **that** statement.
+    ///
+    /// A plan bar is worth something only against the SQL that actually ran, and
+    /// no crate outside this one may open a connection to take a plan of its own.
+    /// So the store hands the pair out: the reader chooses the statement, the
+    /// caller judges the plan. It is deliberately not a way to explain arbitrary
+    /// SQL — the readers are named, and their statements stay this crate's.
+    pub fn probe_reader_plan(
+        &self,
+        reader: ProbeReader,
+        probe: &SuffixProbe,
+    ) -> Result<EmittedPlan, StoreError> {
+        let sql = match reader {
+            ProbeReader::SuffixCandidates => suffix_candidates_sql(probe.range_count()),
+            ProbeReader::FindingsInClass => findings_in_class_sql(probe.range_count()),
+        };
+        let steps = self.read_all(
+            &format!("EXPLAIN QUERY PLAN {sql}"),
+            probe_parameters(probe),
+            |row| {
+                Ok(Ok(PlanStep {
+                    id: row.get(0)?,
+                    parent: row.get(1)?,
+                    detail: row.get(3)?,
+                }))
+            },
+            "explaining a probe reader",
+        )?;
+        Ok(EmittedPlan { sql, steps })
     }
 
     // ---- readers ----
 
-    /// The findings one predicate selects, each with the head of its candidates.
+    /// The findings one statement selects, each with the head of its candidates.
+    ///
+    /// The candidates come back in **one** further statement for the whole set
+    /// rather than one per finding, so reading a class costs two round trips
+    /// whatever the class holds.
     fn findings(
         &self,
-        predicate: &str,
+        sql: &str,
         parameters: impl Params,
     ) -> Result<Vec<StoredFinding>, StoreError> {
-        let sql = format!(
-            "SELECT id, kind, severity, path, class_key, target, span_line, span_column,
-                    span_offset, candidates_total, message, detail, vault_schema_fingerprint,
-                    generation
-             FROM findings {predicate}"
-        );
-        let found = self.read_all(&sql, parameters, stored_finding, "reading findings")?;
-        let mut findings = Vec::with_capacity(found.len());
-        for (id, mut finding) in found {
-            finding.candidates = self.read_all(
-                "SELECT path, suffix FROM finding_candidates WHERE finding = ?1 ORDER BY rank",
-                params![id],
-                stored_candidate,
-                "reading a finding's candidates",
-            )?;
+        let found = self.read_all(sql, parameters, stored_finding, "reading findings")?;
+        if found.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<i64> = found.iter().map(|(id, _)| *id).collect();
+        let placeholders = (1..=ids.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let candidates = self.read_all(
+            &format!(
+                "SELECT finding, path, suffix FROM finding_candidates
+                 WHERE finding IN ({placeholders}) ORDER BY finding, rank"
+            ),
+            params_from_iter(ids.iter()),
+            stored_candidate,
+            "reading a finding's candidates",
+        )?;
+
+        let mut findings: Vec<StoredFinding> = Vec::with_capacity(found.len());
+        let mut positions = std::collections::HashMap::with_capacity(found.len());
+        for (position, (id, finding)) in found.into_iter().enumerate() {
+            positions.insert(id, position);
             findings.push(finding);
+        }
+        for (finding, candidate) in candidates {
+            if let Some(position) = positions.get(&finding) {
+                findings[*position].candidates.push(candidate);
+            }
         }
         Ok(findings)
     }
@@ -759,22 +922,91 @@ impl<'a> Request<'a> {
     }
 }
 
-fn stored_document(row: &Row<'_>) -> Reading<StoredDocument> {
-    let path: String = row.get(0)?;
-    let content_hash: String = row.get(1)?;
-    let byte_length: u64 = row.get(2)?;
-    let body_offset: u64 = row.get(3)?;
-    let frontmatter: Option<String> = row.get(4)?;
-    let diagnostic_count: u32 = row.get(5)?;
-    let generation: i64 = row.get(6)?;
-    let derived_at: i64 = row.get(7)?;
+/// Which probe reader [`Request::probe_reader_plan`] is asked about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeReader {
+    /// [`Request::suffix_candidates`].
+    SuffixCandidates,
+    /// [`Request::findings_in_class`].
+    FindingsInClass,
+}
+
+/// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanStep {
+    pub id: i64,
+    pub parent: i64,
+    pub detail: String,
+}
+
+/// The statement a reader emitted, paired with its plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmittedPlan {
+    pub sql: String,
+    pub steps: Vec<PlanStep>,
+}
+
+/// The statement [`Request::suffix_candidates`] emits for a probe of
+/// `ranges` ranges.
+fn suffix_candidates_sql(ranges: usize) -> String {
+    format!(
+        "SELECT path FROM documents WHERE {} ORDER BY suffix_key, path",
+        range_predicate("suffix_key", ranges)
+    )
+}
+
+/// The statement [`Request::findings_in_class`] emits for a probe of `ranges`
+/// ranges.
+fn findings_in_class_sql(ranges: usize) -> String {
+    format!(
+        "SELECT {FINDING_COLUMNS} FROM findings WHERE {} ORDER BY class_key, id",
+        range_predicate("class_key", ranges)
+    )
+}
+
+/// The predicate one probe's ranges open over `column`: a half-open range per
+/// range, `OR`ed, each bound its own parameter.
+///
+/// Ranges rather than a pattern, and `OR`ed ranges rather than a wider one,
+/// because each range is an index seek and their union is what a two-reduction
+/// target opens.
+fn range_predicate(column: &str, ranges: usize) -> String {
+    (0..ranges)
+        .map(|index| {
+            let (lower, upper) = (index * 2 + 1, index * 2 + 2);
+            format!("({column} >= ?{lower} AND {column} < ?{upper})")
+        })
+        .collect::<Vec<String>>()
+        .join(" OR ")
+}
+
+/// A probe's bounds in the order [`range_predicate`] numbers them.
+fn probe_parameters(probe: &SuffixProbe) -> impl Params {
+    params_from_iter(
+        probe
+            .ranges()
+            .flat_map(|(lower, upper)| [lower.to_string(), upper.to_string()])
+            .collect::<Vec<String>>(),
+    )
+}
+
+/// A document row, read from `first` onwards.
+fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
+    let path: String = row.get(first)?;
+    let content_hash: String = row.get(first + 1)?;
+    let byte_length: u64 = row.get(first + 2)?;
+    let body_offset: u64 = row.get(first + 3)?;
+    let frontmatter: Option<String> = row.get(first + 4)?;
+    let frontmatter_diagnostic_count: u32 = row.get(first + 5)?;
+    let generation: i64 = row.get(first + 6)?;
+    let derived_at: i64 = row.get(first + 7)?;
     Ok(DocumentPath::new(&path).map(|path| StoredDocument {
         path,
         content_hash,
         byte_length,
         body_offset,
         frontmatter,
-        diagnostic_count,
+        frontmatter_diagnostic_count,
         generation,
         derived_at,
     }))
@@ -804,7 +1036,7 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let kind: String = row.get(1)?;
     let severity: String = row.get(2)?;
     let path: String = row.get(3)?;
-    let class_key: Option<String> = row.get(4)?;
+    let written_class: Option<String> = row.get(4)?;
     let target: Option<String> = row.get(5)?;
     let span = optional_span(row, 6)?;
     let candidates_total: u64 = row.get(9)?;
@@ -812,6 +1044,13 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let detail: Option<String> = row.get(11)?;
     let vault_schema_fingerprint: String = row.get(12)?;
     let generation: i64 = row.get(13)?;
+    let class_key = match written_class {
+        None => None,
+        Some(written) => match ClassKey::new(&written) {
+            Ok(class_key) => Some(class_key),
+            Err(_) => return Ok(Err(unreadable("findings.class_key", &written))),
+        },
+    };
     Ok(DocumentPath::new(&path).map(|path| {
         (
             id,
@@ -833,10 +1072,12 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     }))
 }
 
-fn stored_candidate(row: &Row<'_>) -> Reading<CandidateFact> {
-    let path: String = row.get(0)?;
-    let suffix: String = row.get(1)?;
-    Ok(DocumentPath::new(&path).map(|path| CandidateFact { path, suffix }))
+/// A candidate and the finding it heads.
+fn stored_candidate(row: &Row<'_>) -> Reading<(i64, CandidateFact)> {
+    let finding: i64 = row.get(0)?;
+    let path: String = row.get(1)?;
+    let suffix: String = row.get(2)?;
+    Ok(DocumentPath::new(&path).map(|path| (finding, CandidateFact { path, suffix })))
 }
 
 fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {
@@ -894,8 +1135,11 @@ fn stored_tag(row: &Row<'_>) -> Reading<TagFact> {
     }))
 }
 
-/// A span read from three nullable columns, which are written together and are
-/// therefore all present or all absent.
+/// A span read from three nullable columns.
+///
+/// The columns are written together and a `CHECK` refuses a row where only some
+/// of them are set, so "any one absent means no span" reads every row that can
+/// exist rather than repairing a half-recorded position.
 fn optional_span(row: &Row<'_>, first: usize) -> rusqlite::Result<Option<Span>> {
     let line: Option<u64> = row.get(first)?;
     let column: Option<u64> = row.get(first + 1)?;

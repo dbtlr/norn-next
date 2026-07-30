@@ -32,7 +32,7 @@
 //! projection does not run backwards. See [`crate::json`].
 
 use crate::json::FrontmatterValue;
-use crate::path::DocumentPath;
+use crate::path::{ClassKey, DocumentPath};
 
 /// A position in a document body: 1-based line and column, 0-based byte offset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,6 +54,9 @@ pub enum LinkFamily {
 }
 
 impl LinkFamily {
+    /// The whole vocabulary, which is what `links.family` is checked against.
+    pub(crate) const ALL: &'static [LinkFamily] = &[LinkFamily::Wikilink, LinkFamily::Markdown];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             LinkFamily::Wikilink => "wikilink",
@@ -82,6 +85,10 @@ pub enum TagSource {
 }
 
 impl TagSource {
+    /// The whole vocabulary, which is what `document_tags.source` is checked
+    /// against.
+    pub(crate) const ALL: &'static [TagSource] = &[TagSource::Body, TagSource::Frontmatter];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             TagSource::Body => "body",
@@ -166,7 +173,9 @@ pub struct DocumentFacts {
     /// The hash the filesystem seam computed over the bytes it read. Only a
     /// content hash concludes "unchanged".
     pub content_hash: String,
-    /// The size of the document those bytes came from.
+    /// The size of the whole document those bytes came from — frontmatter block
+    /// included, so it is `body_offset` plus the body's length for a document
+    /// whose body runs to the end.
     pub byte_length: u64,
     /// The document's body, frontmatter block excluded.
     pub body: String,
@@ -176,8 +185,14 @@ pub struct DocumentFacts {
     /// The frontmatter value tree, or `None` where there is no projection to
     /// make — no block, or a block that did not parse.
     pub frontmatter: Option<FrontmatterValue>,
-    /// How many diagnostics the parse raised.
-    pub diagnostic_count: u32,
+    /// How many **frontmatter-scoped** diagnostics the parse raised, which is
+    /// what discriminates the two things `frontmatter: None` can mean: zero is
+    /// "there was no block", and nonzero is "there was a block and it did not
+    /// read". A count over every diagnostic a parse raised could not tell those
+    /// apart once one diagnostic came from anywhere else, so the caller counts
+    /// the frontmatter ones — the text layer's diagnostics carry a code, and the
+    /// frontmatter-scoped codes are the ones that name the block.
+    pub frontmatter_diagnostic_count: u32,
     /// Links in the text layer's contracted emission order.
     pub links: Vec<LinkFact>,
     /// Headings in document order.
@@ -189,24 +204,29 @@ pub struct DocumentFacts {
 }
 
 impl DocumentFacts {
-    /// A document with no derived facts at all: the row, its body, and nothing
-    /// else. The fact lists and the frontmatter are then assigned by the caller,
-    /// which keeps a document with none of them from having to name four empty
-    /// vectors.
+    /// A document with no derived facts at all: the row, its body, its size, and
+    /// nothing else. The fact lists and the frontmatter are then assigned by the
+    /// caller, which keeps a document with none of them from having to name four
+    /// empty vectors.
+    ///
+    /// `byte_length` is taken rather than defaulted from `body`. The two are the
+    /// same number only for a document with no frontmatter block, and a default
+    /// that was right until the caller set `body_offset` is a default that
+    /// reports the wrong document size for every document that has one.
     pub fn new(
         path: DocumentPath,
         content_hash: impl Into<String>,
         body: impl Into<String>,
+        byte_length: u64,
     ) -> Self {
-        let body = body.into();
         DocumentFacts {
             path,
             content_hash: content_hash.into(),
-            byte_length: body.len() as u64,
-            body,
+            byte_length,
+            body: body.into(),
             body_offset: 0,
             frontmatter: None,
-            diagnostic_count: 0,
+            frontmatter_diagnostic_count: 0,
             links: Vec::new(),
             headings: Vec::new(),
             blocks: Vec::new(),
@@ -228,7 +248,9 @@ pub struct StoredDocument {
     pub body_offset: u64,
     /// The canonical JSON projection, or `None` where no projection exists.
     pub frontmatter: Option<String>,
-    pub diagnostic_count: u32,
+    /// How many frontmatter-scoped diagnostics the parse raised. Zero beside a
+    /// `None` projection is "no block"; nonzero is "a block that did not read".
+    pub frontmatter_diagnostic_count: u32,
     /// The write generation this row was last derived at. Generations order;
     /// `derived_at` does not.
     pub generation: i64,
@@ -263,6 +285,14 @@ pub enum Provenance {
 }
 
 impl Provenance {
+    /// The whole vocabulary, which is what `tombstones.provenance` is checked
+    /// against.
+    pub(crate) const ALL: &'static [Provenance] = &[
+        Provenance::HealPrune,
+        Provenance::WatcherRemoval,
+        Provenance::PlanDelete,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Provenance::HealPrune => "heal-prune",
@@ -326,18 +356,22 @@ pub struct FindingFacts {
     /// The path the finding is about, whether or not a document is stored there.
     pub path: DocumentPath,
     /// The ambiguity class this finding is maintained by, or `None` for a
-    /// finding that is not about resolution.
-    pub class_key: Option<String>,
+    /// finding that is not about resolution. A validated key, because a class key
+    /// no probe's range opens is a finding no maintenance ever revisits.
+    pub class_key: Option<ClassKey>,
     /// The resolution target, as written.
     pub target: Option<String>,
     pub span: Option<Span>,
     /// The candidates, in deterministic resolution-ladder order, bounded at
     /// [`CANDIDATE_HEAD`].
     pub candidates: Vec<CandidateFact>,
-    /// How many candidates there were, which is what makes the head a head.
+    /// How many candidates there were, which is what makes the head a head. It
+    /// cannot be smaller than the head it heads, and a value that is is refused
+    /// beside the bound itself.
     pub candidates_total: u64,
     pub message: String,
-    /// Anything further, as text the caller has already projected.
+    /// Anything further, as text the caller has already projected. It travels in
+    /// only: nothing reads it back as a typed shape.
     pub detail: Option<String>,
 }
 
@@ -354,7 +388,7 @@ pub struct StoredFinding {
     pub kind: String,
     pub severity: String,
     pub path: DocumentPath,
-    pub class_key: Option<String>,
+    pub class_key: Option<ClassKey>,
     pub target: Option<String>,
     pub span: Option<Span>,
     pub candidates: Vec<CandidateFact>,
@@ -394,12 +428,32 @@ pub struct VaultSchemaPin {
     pub generation: i64,
 }
 
-/// What a vault-schema change discarded.
+/// What a maintenance act discarded.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Invalidation {
-    /// Findings derived under a different vault schema. Parse-fact rows carry no
-    /// schema key, so none of them is ever counted here.
+    /// Findings the act removed — derived under a different vault schema, or
+    /// belonging to a class being re-derived. Parse-fact rows carry no schema key
+    /// and no class, so none of them is ever counted here.
     pub findings_discarded: u64,
+}
+
+/// What pinning a vault schema did.
+///
+/// The pin and the discard the new schema key implies are **one act**. Two
+/// transactions would leave a generation in which the pinned key says a set of
+/// findings is dead and the findings are still readable, and no caller can close
+/// that window from outside.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaPin {
+    /// The generation the pin happened at, or the generation the standing pin was
+    /// taken at where the schema had not moved and nothing was written.
+    pub generation: i64,
+    /// Whether this call wrote a pin at all. A schema whose bytes and
+    /// fingerprint already match what is pinned is not a schema change, so it
+    /// takes no generation and derives nothing.
+    pub repinned: bool,
+    /// The derived state the new schema key invalidated.
+    pub invalidated: Invalidation,
 }
 
 /// How much each pillar is holding.

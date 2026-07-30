@@ -92,16 +92,12 @@ pub struct DerivationCounters {
 }
 
 impl DerivationCounters {
-    /// Every counter's name, in reading order.
-    pub fn names() -> impl Iterator<Item = &'static str> {
-        Counter::ALL.iter().copied().map(Counter::name)
-    }
-
     /// The whole reading, name by name, every counter present.
     ///
     /// This is the shape a counter snapshot is built from: a sequence of
     /// `(name, value)` pairs, which is why the names are `'static` and the
-    /// order is fixed.
+    /// order is fixed. It is also the whole vocabulary, so anything that needs
+    /// the names has them.
     pub fn readings(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
         Counter::ALL
             .iter()
@@ -109,16 +105,15 @@ impl DerivationCounters {
             .map(|(index, counter)| (counter.name(), self.values[index]))
     }
 
-    /// One counter's value, or zero for a name this vocabulary does not carry.
-    pub fn get(&self, name: &str) -> u64 {
+    /// One counter's value, or `None` for a name this vocabulary does not carry.
+    ///
+    /// Absent rather than zero, because reading a missing counter as zero is how
+    /// a renamed counter compares equal to the one it replaced — which is the
+    /// drift the fixed reading order exists to prevent.
+    pub fn get(&self, name: &str) -> Option<u64> {
         self.readings()
             .find(|(counter, _)| *counter == name)
-            .map_or(0, |(_, value)| value)
-    }
-
-    /// The counters that moved, in reading order.
-    pub fn nonzero(&self) -> Vec<(&'static str, u64)> {
-        self.readings().filter(|(_, value)| *value != 0).collect()
+            .map(|(_, value)| value)
     }
 
     /// Whether this request derived nothing at all.

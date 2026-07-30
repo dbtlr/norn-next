@@ -17,10 +17,19 @@
 //! - `store_schema_version` — the pinned store schema version, an integer.
 //! - `ddl_fingerprint` — the digest of the statement list this database was
 //!   created from, as text.
-//! - `write_generation` — the monotonic counter every derivation stamps its
-//!   rows with. **Generation orders; a timestamp only informs.** Two rows are
-//!   compared by generation because a clock can move backwards and a
-//!   generation cannot.
+//! - `schema_digest` — the digest of the schema the database actually holds,
+//!   taken at create. It is the independent half of the fingerprint: the
+//!   fingerprint says which statement list a build would run, and this says
+//!   whether what is in front of the reader is still the result of running it.
+//! - `store_mode` — whether this database's file is durable or disposable, as
+//!   text. It is what makes a throwaway open over a registered vault's store a
+//!   refusal rather than a deletion on drop.
+//! - `write_generation` — the monotonic counter each write takes and stamps its
+//!   rows with. It is a **global write sequence**, not a per-derivation one:
+//!   every write in the store draws from it, so two rows anywhere are
+//!   comparable, and a single derivation touching two tables stamps both with
+//!   the same number. **Generation orders; a timestamp only informs** — a clock
+//!   can move backwards and a generation cannot.
 //! - `vault_schema_bytes`, `vault_schema_fingerprint`,
 //!   `vault_schema_generation` — the pinned vault-schema projection.
 //!
@@ -34,7 +43,11 @@
 //! *which schema was this derived state derived under*, never *what does the
 //! schema say*.
 
-pub(crate) const STATEMENTS: &[&str] = &["CREATE TABLE meta (
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &["CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value BLOB
 ) WITHOUT ROWID"];
@@ -45,7 +58,13 @@ pub(crate) const STORE_SCHEMA_VERSION: &str = "store_schema_version";
 /// The digest of the statement list this database was created from.
 pub(crate) const DDL_FINGERPRINT: &str = "ddl_fingerprint";
 
-/// The monotonic counter every derivation stamps its rows with.
+/// The digest of the schema this database held when it was created.
+pub(crate) const SCHEMA_DIGEST: &str = "schema_digest";
+
+/// Whether this database's file is durable or disposable.
+pub(crate) const STORE_MODE: &str = "store_mode";
+
+/// The global write sequence every write draws its stamp from.
 pub(crate) const WRITE_GENERATION: &str = "write_generation";
 
 /// The pinned vault schema's bytes, exactly as they were read.

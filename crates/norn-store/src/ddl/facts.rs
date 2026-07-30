@@ -9,10 +9,12 @@
 //! # Ordinal is the emission order, and it is the row's identity
 //!
 //! `norn-text` contracts a total order over the tokens it reports, and
-//! `ordinal` persists exactly that order: `UNIQUE(document, ordinal)` so a
-//! re-derivation that emitted a different number of rows, or emitted them
-//! twice, fails loudly instead of leaving a document with two rows claiming
-//! the same position.
+//! `ordinal` persists exactly that order. `UNIQUE(document, ordinal)` is the
+//! guard on the crate's own write loop: the ordinals come from a slice index,
+//! so the constraint refuses the shapes a defect in that loop would produce —
+//! a second row claiming one position, or a replacement that did not discard
+//! what it replaced. It says nothing about the text layer's emission, which
+//! this schema never sees twice.
 //!
 //! Row identity is meaningful **within one document snapshot only**. A
 //! re-derivation replaces a document's fact rows wholesale, so ordinal 3 after
@@ -42,18 +44,27 @@
 //! from spans: link ranges of the two families may overlap and nest, so a
 //! span comparison is not a total order and `ordinal` is.
 //!
-//! `target` is indexed because that is the probe side of the links-to join: a
-//! document's own path yields the handful of segment-suffixes that can address
-//! it, and the join looks each of them up. Whatever further index support a
-//! read builder needs arrives with that builder, where an `EXPLAIN` bar can
-//! judge it against the SQL it actually emits.
+//! **`target` is stored raw, and it is not indexed yet.** The links-to join
+//! probes it — a document's own path yields the handful of segment-suffixes
+//! that can address it, and the join looks each of them up — but that builder
+//! is Layer 3's, and the crate's own rule is that index support arrives with
+//! the statement whose `EXPLAIN` bar can judge it. The same rule is why no
+//! other lookup column here carries an index today.
 //!
-//! # `headings` is addressed two ways, so it is indexed two ways
+//! Raw also means **unfolded**: `links.target` is compared under `BINARY`, and
+//! `documents` folds nothing either, so the two sides agree about what a name
+//! is by both leaving it alone. If case or normalization folding ever enters
+//! the resolution grammar, the shape is a derived `target_key` beside `target`
+//! and a folded `suffix_key` beside the raw one — a DDL edit, which pre-release
+//! costs a rebuild and nothing else.
+//!
+//! # `headings` is addressed two ways
 //!
 //! A wikilink `#anchor` addresses a heading's **text**; an inline Markdown
 //! `#fragment` addresses its **slug**, dedupe suffix included, as `norn-text`
-//! issued it in document order. Both lookups are inside one document, so both
-//! indexes lead with `document`.
+//! issued it in document order. Both lookups are inside one document, so an
+//! index for either leads with `document` — and both arrive with the builder
+//! that emits them.
 //!
 //! `body_offset` is where the heading construct ends and the section's body
 //! begins, and `inside_container` says the heading sits inside a blockquote or
@@ -75,14 +86,34 @@
 //!
 //! Case is preserved, because deciding that `#Work` and `#work` are the same
 //! tag is a matching question and matching happens at the query venue. The
-//! index is therefore `BINARY`; a case-folded index is the query venue's to
-//! add along with the query that needs it. `source` says which home the tag
+//! comparison is therefore `BINARY`; a case-folded index is the query venue's
+//! to add along with the query that needs it. `source` says which home the tag
 //! came from — a body token or the frontmatter `tags` field — because the two
 //! are read by different grammars and a consumer may care which one an author
 //! used. Frontmatter tags may have no locatable span, so the span columns are
 //! nullable here too.
+//!
+//! # A nullable span triple is all three or none
+//!
+//! Wherever a span is optional, a `CHECK` says the three columns agree about
+//! it. The reader turns a partial triple into `None`, which would silently
+//! degrade a position the writer half-recorded; the constraint means the writer
+//! cannot produce one, so the reader's rule is a total function over rows that
+//! exist rather than a repair.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    let mut all = super::fixed(STATEMENTS);
+    all.extend(nullable_span_tables());
+    all
+}
+
+/// The `CHECK` that keeps a nullable span triple whole. A partial triple reads
+/// back as no span at all, so refusing one at the write is what makes that
+/// reading lossless.
+pub(crate) const WHOLE_SPAN: &str = "CHECK ((span_line IS NULL) = (span_column IS NULL)
+        AND (span_line IS NULL) = (span_offset IS NULL))";
+
+const STATEMENTS: &[&str] = &[
     "CREATE TABLE links (
     id          INTEGER PRIMARY KEY,
     document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -99,7 +130,6 @@ pub(crate) const STATEMENTS: &[&str] = &[
     span_offset INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX links_document_ordinal ON links(document, ordinal)",
-    "CREATE INDEX links_target ON links(target)",
     "CREATE TABLE headings (
     id               INTEGER PRIMARY KEY,
     document         INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -114,20 +144,27 @@ pub(crate) const STATEMENTS: &[&str] = &[
     inside_container INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX headings_document_ordinal ON headings(document, ordinal)",
-    "CREATE INDEX headings_document_slug ON headings(document, slug)",
-    "CREATE INDEX headings_document_text ON headings(document, text)",
-    "CREATE TABLE blocks (
+];
+
+/// The two tables whose span triple is nullable, with the `CHECK` appended so
+/// the constraint is stated once.
+fn nullable_span_tables() -> Vec<String> {
+    vec![
+        format!(
+            "CREATE TABLE blocks (
     id          INTEGER PRIMARY KEY,
     document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal     INTEGER NOT NULL,
     block_id    TEXT    NOT NULL,
     span_line   INTEGER,
     span_column INTEGER,
-    span_offset INTEGER
-)",
-    "CREATE UNIQUE INDEX blocks_document_ordinal ON blocks(document, ordinal)",
-    "CREATE INDEX blocks_document_block_id ON blocks(document, block_id)",
-    "CREATE TABLE document_tags (
+    span_offset INTEGER,
+    {WHOLE_SPAN}
+)"
+        ),
+        "CREATE UNIQUE INDEX blocks_document_ordinal ON blocks(document, ordinal)".to_string(),
+        format!(
+            "CREATE TABLE document_tags (
     id          INTEGER PRIMARY KEY,
     document    INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     ordinal     INTEGER NOT NULL,
@@ -135,8 +172,11 @@ pub(crate) const STATEMENTS: &[&str] = &[
     source      TEXT    NOT NULL,
     span_line   INTEGER,
     span_column INTEGER,
-    span_offset INTEGER
-)",
-    "CREATE UNIQUE INDEX document_tags_document_ordinal ON document_tags(document, ordinal)",
-    "CREATE INDEX document_tags_name ON document_tags(name)",
-];
+    span_offset INTEGER,
+    {WHOLE_SPAN}
+)"
+        ),
+        "CREATE UNIQUE INDEX document_tags_document_ordinal ON document_tags(document, ordinal)"
+            .to_string(),
+    ]
+}

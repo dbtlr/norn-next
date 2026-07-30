@@ -8,7 +8,12 @@
 //! That the bytes are JSON the JSON1 reader accepts is checked against a real
 //! database in `pillars.rs`, through the store's own verification.
 
-use norn_store::{FrontmatterValue as Value, canonical_json};
+use norn_store::{FrontmatterValue as Value, MAX_FRONTMATTER_DEPTH, StoreError, canonical_json};
+
+/// The projection of a value within the depth bound, which is every value below.
+fn projected(value: &Value) -> String {
+    canonical_json(value).expect("a value within the nesting bound")
+}
 
 fn map(entries: &[(&str, Value)]) -> Value {
     Value::Map(
@@ -46,7 +51,7 @@ fn each_shape_writes_the_bytes_it_is_contracted_to() {
             "{\"a\":1,\"b\":[]}",
         ),
     ] {
-        assert_eq!(canonical_json(&value), written, "projecting {value:?}");
+        assert_eq!(projected(&value), written, "projecting {value:?}");
     }
 }
 
@@ -64,9 +69,9 @@ fn a_value_projects_the_same_bytes_whatever_order_its_keys_arrived_in() {
         ("title", text("Norn")),
         ("draft", Value::Bool(false)),
     ]);
-    assert_eq!(canonical_json(&one), canonical_json(&other));
+    assert_eq!(projected(&one), projected(&other));
     assert_eq!(
-        canonical_json(&one),
+        projected(&one),
         "{\"aliases\":[\"n\"],\"draft\":false,\"title\":\"Norn\"}"
     );
 }
@@ -76,8 +81,8 @@ fn a_value_projects_the_same_bytes_whatever_order_its_keys_arrived_in() {
 fn a_nested_map_is_canonicalized_too() {
     let one = map(&[("meta", map(&[("z", Value::Int(1)), ("a", Value::Int(2))]))]);
     let other = map(&[("meta", map(&[("a", Value::Int(2)), ("z", Value::Int(1))]))]);
-    assert_eq!(canonical_json(&one), canonical_json(&other));
-    assert_eq!(canonical_json(&one), "{\"meta\":{\"a\":2,\"z\":1}}");
+    assert_eq!(projected(&one), projected(&other));
+    assert_eq!(projected(&one), "{\"meta\":{\"a\":2,\"z\":1}}");
 }
 
 /// The canonicalization is total: a repeated key keeps its last value, which is
@@ -89,16 +94,16 @@ fn a_repeated_key_keeps_its_last_value() {
         ("b", Value::Int(2)),
         ("a", Value::Int(3)),
     ]);
-    assert_eq!(canonical_json(&repeated), "{\"a\":3,\"b\":2}");
+    assert_eq!(projected(&repeated), "{\"a\":3,\"b\":2}");
 }
 
 /// An integral float keeps a fractional marker, or `json_type` would call it an
 /// integer and the projection would report a shape the document does not have.
 #[test]
 fn an_integral_float_keeps_its_fractional_marker() {
-    assert_eq!(canonical_json(&Value::Float(1.0)), "1.0");
-    assert_eq!(canonical_json(&Value::Float(-0.0)), "-0.0");
-    assert_eq!(canonical_json(&Value::Int(1)), "1");
+    assert_eq!(projected(&Value::Float(1.0)), "1.0");
+    assert_eq!(projected(&Value::Float(-0.0)), "-0.0");
+    assert_eq!(projected(&Value::Int(1)), "1");
 }
 
 /// Whatever the magnitude, the digits read back to the same double. The form
@@ -107,7 +112,7 @@ fn an_integral_float_keeps_its_fractional_marker() {
 #[test]
 fn a_float_reads_back_to_the_double_it_was_written_from() {
     for value in [0.1_f64, 1.0, -0.0, 1e21, 1e-9, 1e300, f64::MAX, f64::MIN] {
-        let written = canonical_json(&Value::Float(value));
+        let written = projected(&Value::Float(value));
         assert!(
             !written.contains(['e', 'E']),
             "`{written}` carries an exponent"
@@ -124,7 +129,7 @@ fn a_float_reads_back_to_the_double_it_was_written_from() {
 #[test]
 fn a_non_finite_float_projects_to_null() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert_eq!(canonical_json(&Value::Float(value)), "null");
+        assert_eq!(projected(&Value::Float(value)), "null");
     }
 }
 
@@ -133,25 +138,81 @@ fn a_non_finite_float_projects_to_null() {
 #[test]
 fn a_string_escapes_what_json_requires_and_leaves_the_rest_as_utf8() {
     assert_eq!(
-        canonical_json(&text("a \"quoted\" \\ path")),
+        projected(&text("a \"quoted\" \\ path")),
         "\"a \\\"quoted\\\" \\\\ path\""
     );
     assert_eq!(
-        canonical_json(&text("line\nreturn\rtab\t")),
+        projected(&text("line\nreturn\rtab\t")),
         "\"line\\nreturn\\rtab\\t\""
     );
-    assert_eq!(
-        canonical_json(&text("\u{8}\u{c}\u{1}")),
-        "\"\\b\\f\\u0001\""
-    );
-    assert_eq!(canonical_json(&text("日本語 café")), "\"日本語 café\"");
+    assert_eq!(projected(&text("\u{8}\u{c}\u{1}")), "\"\\b\\f\\u0001\"");
+    assert_eq!(projected(&text("日本語 café")), "\"日本語 café\"");
 }
 
 /// A key is a string and is escaped as one.
 #[test]
 fn a_key_is_escaped_like_any_other_string() {
     assert_eq!(
-        canonical_json(&map(&[("a \"b\"", Value::Null)])),
+        projected(&map(&[("a \"b\"", Value::Null)])),
         "{\"a \\\"b\\\"\":null}"
     );
+}
+
+/// `depth` sequences around a scalar, which nests `depth` deep.
+fn nested(depth: usize) -> Value {
+    let mut value = Value::Null;
+    for _ in 1..depth {
+        value = Value::Sequence(vec![value]);
+    }
+    value
+}
+
+/// **The projection is bounded, and both sides of the bound are pinned.** A value
+/// at the bound projects; one past it is refused rather than written, because the
+/// alternative is bytes SQLite's JSON reader rejects — which the store's own
+/// verification reports as damage, permanently, through the rung that discards
+/// the database.
+#[test]
+fn a_value_at_the_nesting_bound_projects_and_one_past_it_is_refused() {
+    let at_the_bound = projected(&nested(MAX_FRONTMATTER_DEPTH));
+    assert!(at_the_bound.starts_with('['), "{at_the_bound:.20}");
+    assert_eq!(
+        at_the_bound.matches('[').count(),
+        MAX_FRONTMATTER_DEPTH - 1,
+        "the value at the bound did not project every level"
+    );
+
+    let error = canonical_json(&nested(MAX_FRONTMATTER_DEPTH + 1))
+        .expect_err("a value past the nesting bound");
+    let StoreError::Bound { limit, given, .. } = error else {
+        panic!("nesting was refused as {error:?} rather than as a bound");
+    };
+    assert_eq!(limit, MAX_FRONTMATTER_DEPTH);
+    assert!(given > limit, "{given} is not past {limit}");
+}
+
+/// The bound is measured rather than recursed into, so a value far past it is
+/// refused instead of overflowing the stack a recursive measurement would use.
+#[test]
+fn a_value_far_past_the_bound_is_refused_rather_than_overflowing() {
+    let pathological = nested(100_000);
+    let error = canonical_json(&pathological).expect_err("a pathologically nested value");
+    assert!(matches!(error, StoreError::Bound { .. }), "{error:?}");
+    // Dropping it is the same recursion, and it belongs to the value's owner
+    // rather than to the projection this case is about.
+    std::mem::forget(pathological);
+}
+
+/// A map nests as a sequence does, so the bound is about nesting rather than
+/// about which container does it.
+#[test]
+fn a_map_nests_against_the_same_bound() {
+    let mut value = Value::Null;
+    for _ in 1..=MAX_FRONTMATTER_DEPTH {
+        value = map(&[("k", value)]);
+    }
+    assert!(matches!(
+        canonical_json(&value),
+        Err(StoreError::Bound { .. })
+    ));
 }

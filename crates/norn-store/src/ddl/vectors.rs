@@ -19,21 +19,39 @@
 //! with no row here is ordinary, not broken. `generation` says which derivation
 //! the vector caught up to.
 //!
+//! # A rowid table, because the rows are wide
+//!
+//! The primary key is a real uniqueness constraint and nothing more. `WITHOUT
+//! ROWID` would make it the storage order too, which puts the embedding blob
+//! inside the index B-tree: at realistic embedding sizes the row overflows a
+//! page, so every key comparison walks overflow chains and the table costs
+//! materially more on disk than the same rows behind a rowid. It also makes a
+//! `count(*)` read every leaf, because there is no narrow index to count
+//! through — and `count(*)` is exactly what the pillar report asks for.
+//!
 //! # What is deliberately not decided here
 //!
 //! One row per document per model is the floor, not the ceiling. Whether a long
 //! document is embedded as one vector or several chunks, whether the blob is
 //! float32 or quantized, and what index makes nearest-neighbour search fast are
 //! **storage mechanics behind the pillar contract**, and each of them arrives
-//! with the pillar's implementation. `dimensions` is stored beside the blob so
-//! that a reader can tell what it is holding without consulting a table of
-//! model facts that lives in another crate.
+//! with the pillar's implementation.
+//!
+//! `dimensions` is stored beside the blob because the blob's own bytes do not
+//! say how many values they hold — that depends on the element width, which is
+//! one of the mechanics above. Nothing checks the two against each other yet:
+//! the check belongs with the code that decides the encoding, and until then the
+//! column records what the writer said rather than what the blob proves.
 //!
 //! The embedding runtime does not exist yet, and this table's emptiness is the
 //! honest state of that. What the carve guarantees is that adding it is not a
 //! change to `documents`.
 
-pub(crate) const STATEMENTS: &[&str] = &[
+pub(crate) fn statements() -> Vec<String> {
+    super::fixed(STATEMENTS)
+}
+
+const STATEMENTS: &[&str] = &[
     "CREATE TABLE document_vectors (
     document      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     model_id      TEXT    NOT NULL,
@@ -43,6 +61,6 @@ pub(crate) const STATEMENTS: &[&str] = &[
     embedding     BLOB    NOT NULL,
     generation    INTEGER NOT NULL,
     PRIMARY KEY (document, model_id, model_version)
-) WITHOUT ROWID",
+)",
     "CREATE INDEX document_vectors_model ON document_vectors(model_id, model_version)",
 ];

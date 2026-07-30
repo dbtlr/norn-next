@@ -6,9 +6,7 @@
 //! query that needed it. The fact types go in and come back, which is what makes
 //! the comparison a statement about the store rather than about the assertion.
 
-mod common;
-
-use common::{Scratch, document, document_with_every_fact, path, span};
+use crate::common::{Scratch, document, document_with_every_fact, path, span};
 use norn_store::{
     BlockFact, DocumentFacts, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance,
     TagFact, TagSource, ddl,
@@ -34,7 +32,10 @@ fn every_fact_shape_survives_the_round_trip() {
     assert_eq!(stored.document.content_hash, facts.content_hash);
     assert_eq!(stored.document.byte_length, facts.byte_length);
     assert_eq!(stored.document.body_offset, facts.body_offset);
-    assert_eq!(stored.document.diagnostic_count, facts.diagnostic_count);
+    assert_eq!(
+        stored.document.frontmatter_diagnostic_count,
+        facts.frontmatter_diagnostic_count
+    );
     assert_eq!(stored.body, facts.body);
     assert_eq!(stored.links, facts.links);
     assert_eq!(stored.headings, facts.headings);
@@ -105,7 +106,7 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
     );
 
     // Only the projection that exists was made.
-    assert_eq!(request.counters().get("frontmatter_projections"), 1);
+    assert_eq!(request.counters().get("frontmatter_projections"), Some(1));
 }
 
 /// A re-derivation replaces a document's fact rows wholesale and keeps the
@@ -151,7 +152,7 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
 
     // Eight fact rows went in and were discarded; the generation moved and the
     // document is still one document.
-    assert_eq!(request.counters().get("fact_rows_discarded"), 8);
+    assert_eq!(request.counters().get("fact_rows_discarded"), Some(8));
     assert!(after.document.generation > before.generation);
     assert_eq!(request.pillars().expect("a pillar report").documents, 1);
 
@@ -205,12 +206,13 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
     assert_eq!(again.links, facts.links);
 }
 
-/// The constraint behind that: every fact table declares its ordinal unique
-/// within a document, so a second row claiming one position cannot be at rest
-/// whatever writes it.
+/// The guard behind that: every fact table declares its ordinal unique within a
+/// document, so a second row claiming one position cannot be at rest whatever
+/// the crate's own write loop does.
 #[test]
 fn every_fact_table_declares_its_ordinal_unique_within_a_document() {
-    let declared: Vec<&str> = ddl::statements()
+    let declared: Vec<String> = ddl::statements()
+        .into_iter()
         .filter(|statement| statement.contains("UNIQUE INDEX"))
         .collect();
     for table in ["links", "headings", "blocks", "document_tags"] {
@@ -218,6 +220,90 @@ fn every_fact_table_declares_its_ordinal_unique_within_a_document() {
         assert!(
             declared.iter().any(|statement| statement.contains(&needle)),
             "`{table}` does not declare `{needle}`: {declared:?}"
+        );
+    }
+}
+
+/// The bound the API states and the bound the schema enforces are one number,
+/// because the statement builds its `CHECK` out of the constant.
+#[test]
+fn the_candidate_rank_check_is_built_from_the_bound_the_api_states() {
+    let declared = ddl::statements()
+        .into_iter()
+        .find(|statement| statement.contains("CREATE TABLE finding_candidates"))
+        .expect("the candidate table");
+    assert!(
+        declared.contains(&format!(
+            "CHECK (rank BETWEEN 0 AND {})",
+            norn_store::CANDIDATE_HEAD - 1
+        )),
+        "{declared}"
+    );
+}
+
+/// A nullable span triple is all three columns or none. The reader turns a
+/// partial triple into no span at all, so a row carrying one would be a position
+/// silently thrown away — the `CHECK` is what means the writer cannot make one.
+#[test]
+fn a_nullable_span_triple_is_declared_whole() {
+    let declared = ddl::statements();
+    for table in ["blocks", "document_tags", "findings"] {
+        let statement = declared
+            .iter()
+            .find(|statement| statement.contains(&format!("CREATE TABLE {table} ")))
+            .unwrap_or_else(|| panic!("`{table}` has no create statement"));
+        assert!(
+            statement.contains("(span_line IS NULL) = (span_column IS NULL)")
+                && statement.contains("(span_line IS NULL) = (span_offset IS NULL)"),
+            "`{table}` does not declare its span triple whole: {statement}"
+        );
+    }
+}
+
+/// The columns nothing reads are not columns. The stem and the segment count are
+/// functions of the path, derived where the path is read, so a second home for
+/// either is a spelling that can disagree with it.
+#[test]
+fn a_derived_path_form_has_one_home() {
+    let declared = ddl::statements();
+    let documents = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE documents "))
+        .expect("the documents table");
+    for absent in ["stem", "depth"] {
+        assert!(
+            !documents.contains(&format!("    {absent} ")),
+            "`documents` carries a `{absent}` column: {documents}"
+        );
+    }
+    let tombstones = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE tombstones "))
+        .expect("the tombstones table");
+    for absent in ["stem", "suffix_key"] {
+        assert!(
+            !tombstones.contains(&format!("    {absent} ")),
+            "`tombstones` carries a `{absent}` column: {tombstones}"
+        );
+    }
+    // And no index stands over a column no statement reads.
+    for absent in [
+        "documents_stem",
+        "tombstones_stem",
+        "tombstones_generation",
+        "links_target",
+        "headings_document_slug",
+        "headings_document_text",
+        "blocks_document_block_id",
+        "document_tags_name",
+        "findings_generation",
+        "findings_document",
+    ] {
+        assert!(
+            !declared
+                .iter()
+                .any(|statement| statement.contains(&format!("INDEX {absent} "))),
+            "`{absent}` is declared, and no statement in this build reads it"
         );
     }
 }
@@ -282,8 +368,8 @@ fn a_death_learned_for_an_underived_path_is_still_recorded() {
         .expect("a tombstone");
     assert_eq!(tombstone.last_content_hash, None);
     assert_eq!(tombstone.provenance, Provenance::WatcherRemoval);
-    assert_eq!(request.counters().get("documents_deleted"), 0);
-    assert_eq!(request.counters().get("tombstones_recorded"), 1);
+    assert_eq!(request.counters().get("documents_deleted"), Some(0));
+    assert_eq!(request.counters().get("tombstones_recorded"), Some(1));
 }
 
 /// One row per path, holding the most recent death — and a tombstone is a record
@@ -338,6 +424,89 @@ fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() 
     );
 }
 
+/// **A re-death keeps the hash already recorded.** The hash is the comparison
+/// basis a tombstone exists to carry, and a death learned from a path that is
+/// already absent has nothing to hash — so overwriting with nothing would destroy
+/// the one fact a late event needs and leave a tombstone that can only guess.
+#[test]
+fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
+    let scratch = Scratch::new("re-death-hash");
+    let mut store = scratch.open();
+    let subject = path("glossary.md");
+
+    let mut request = store.begin_request();
+    request
+        .upsert_document(&document(subject.as_str(), "hash-1", "one\n"))
+        .expect("writing a document");
+    request
+        .delete_document(&subject, Provenance::WatcherRemoval)
+        .expect("deleting a document");
+
+    // A second death for the same path, learned when nothing is there to hash:
+    // the heal found it absent after the watcher had already reported it gone.
+    let again = request
+        .delete_document(&subject, Provenance::HealPrune)
+        .expect("recording the death again");
+    assert!(!again.removed, "there was a document row to remove");
+
+    let tombstone = request
+        .stored_tombstone(&subject)
+        .expect("reading a tombstone")
+        .expect("a tombstone");
+    assert_eq!(
+        tombstone.last_content_hash.as_deref(),
+        Some("hash-1"),
+        "the re-death overwrote the comparison basis the tombstone carried"
+    );
+    // Everything the second death did know is the most recent answer.
+    assert_eq!(tombstone.provenance, Provenance::HealPrune);
+    assert_eq!(tombstone.generation, again.generation);
+
+    // And a re-death that does have a hash still replaces it.
+    request
+        .upsert_document(&document(subject.as_str(), "hash-2", "two\n"))
+        .expect("recreating the document");
+    request
+        .delete_document(&subject, Provenance::PlanDelete)
+        .expect("deleting it again");
+    assert_eq!(
+        request
+            .stored_tombstone(&subject)
+            .expect("reading a tombstone")
+            .expect("a tombstone")
+            .last_content_hash
+            .as_deref(),
+        Some("hash-2")
+    );
+}
+
+/// `byte_length` is the whole document's size, which for a document with a
+/// frontmatter block is not its body's. The store takes it rather than deriving
+/// one, so a caller that named a frame named the size that goes with it.
+#[test]
+fn byte_length_is_the_document_and_not_the_body() {
+    let scratch = Scratch::new("byte-length");
+    let mut store = scratch.open();
+    let facts = document_with_every_fact("docs/norn/glossary.md", "hash-1");
+    assert!(
+        facts.byte_length > facts.body_offset,
+        "the fixture stores a document shorter than the frame its body starts at"
+    );
+    assert_eq!(
+        facts.byte_length,
+        facts.body_offset + facts.body.len() as u64
+    );
+
+    let mut request = store.begin_request();
+    request.upsert_document(&facts).expect("writing a document");
+    let stored = request
+        .stored_document(&facts.path)
+        .expect("reading a document")
+        .expect("a document");
+    assert_eq!(stored.byte_length, facts.byte_length);
+    assert_eq!(stored.body_offset, facts.body_offset);
+}
+
 /// Generations order every write in the store, across documents and across
 /// kinds of write. A clock does not.
 #[test]
@@ -370,8 +539,8 @@ fn every_write_takes_the_next_generation() {
 #[test]
 fn a_document_facts_value_cannot_be_built_from_an_unnormalized_path() {
     assert!(norn_store::DocumentPath::new("../escape.md").is_err());
-    let ok = DocumentFacts::new(path("docs/note.md"), "hash-1", "a body\n");
-    assert_eq!(ok.byte_length, ok.body.len() as u64);
+    let ok = DocumentFacts::new(path("docs/note.md"), "hash-1", "a body\n", 7);
+    assert_eq!(ok.byte_length, 7);
 }
 
 /// Tags are recorded as written, from both homes, because deciding that `#Work`

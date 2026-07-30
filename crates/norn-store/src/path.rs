@@ -11,7 +11,7 @@
 //! A document's `suffix_key` is its segments in reverse order, with the leaf's
 //! final extension removed, each followed by `/`:
 //!
-//! | path | `suffix_key` | `stem` |
+//! | path | `suffix_key` | stem |
 //! |---|---|---|
 //! | `glossary.md` | `glossary/` | `glossary` |
 //! | `docs/norn/glossary.md` | `glossary/norn/docs/` | `glossary` |
@@ -21,7 +21,7 @@
 //! relation between the two: `norn/glossary` becomes `glossary/norn/`, which is
 //! a prefix of `glossary/norn/docs/` and of nothing else in the table. Since
 //! byte-order ranges over an index are how SQLite answers a prefix predicate
-//! without a scan, [`SuffixProbe`] carries the range rather than a pattern:
+//! without a scan, [`SuffixProbe`] carries ranges rather than a pattern:
 //! `suffix_key >= lower AND suffix_key < upper`.
 //!
 //! Three properties make the encoding right rather than merely clever:
@@ -33,14 +33,33 @@
 //! - **The extension is dropped from the leaf and only the leaf.** `glossary`
 //!   addressing `glossary.md` is the whole reason stem resolution reads as a
 //!   one-segment suffix, and dropping the extension in the stored key is what
-//!   lets one index answer both. A target that names its extension is reduced
-//!   the same way, so `norn/glossary.md` and `norn/glossary` are one probe.
+//!   lets one index answer both.
 //! - **Bytes are compared as bytes.** Case, dot-prefix and separator
 //!   normalization belong to the filesystem seam, which is the workspace's one
 //!   path-spelling normalization point. The store therefore requires a
 //!   normalized path and refuses one that is obviously not — but it folds
 //!   nothing itself, so nothing here can disagree with the seam about what two
-//!   paths are.
+//!   paths are. **`BINARY` collation is load-bearing**: it is what makes the
+//!   exclusive upper bound below exact, and a case-insensitive collation on
+//!   `suffix_key` would silently change which keys a range holds.
+//!
+//! # A target has two reductions, and it probes both
+//!
+//! Dropping a final extension is unambiguous on the stored side — the store
+//! holds the whole path and knows which segment is the leaf — and ambiguous on
+//! the target side, because a dot in a written target may be an extension or may
+//! be part of the name. `v1.2` is a version, `notes.md` is a file, and nothing
+//! in the two strings tells them apart.
+//!
+//! So a target reduces **both ways** and the probe is the union: `v1.2` opens
+//! `v1.2/` and `v1/`, `notes.tar` opens `notes.tar/` and `notes/`. Choosing one
+//! reduction would answer confidently and wrongly — reducing always would make
+//! `v1.2` resolve to `notes/v1.md` as a single candidate, and reducing never
+//! would leave `notes.tar.gz` unreachable by any target that names less than the
+//! whole leaf. Two ranges cost two index seeks and report the ambiguity that is
+//! really there.
+//!
+//! A target with no dot in its leaf has one reduction and one range.
 //!
 //! # An ambiguity class is a probe of length one
 //!
@@ -64,11 +83,17 @@ const _: () = assert!(
      characters have to be adjacent"
 );
 
+const _: () = assert!(
+    SEPARATOR.len_utf8() == 1,
+    "the upper bound replaces the final separator with one character, so the separator has to be \
+     one byte for the arithmetic to be a byte step"
+);
+
 /// A vault-root-relative document path, with the derived forms the store
 /// indexes it by.
 ///
-/// Constructed once, from one input, so that the three columns it feeds cannot
-/// disagree with each other.
+/// Constructed once, from one input, so that the columns it feeds and the forms
+/// a reader recomputes cannot disagree with each other.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DocumentPath {
     path: String,
@@ -82,8 +107,10 @@ impl DocumentPath {
     ///
     /// The refusals are the spellings a normalized path does not have: an empty
     /// path, an absolute one, a Windows separator, an empty segment (which is a
-    /// doubled or trailing separator), and a `.` or `..` segment. Each of them
-    /// would produce a suffix key that addresses the wrong documents, so
+    /// doubled or trailing separator), a `.` or `..` segment, a leaf whose
+    /// extension-stripped stem is `.` or `..`, and a NUL or control byte. Each
+    /// of them would produce a suffix key that addresses the wrong documents —
+    /// or, for a control byte, a key whose bytes no reader can print back — so
     /// refusing is what keeps the index honest about what it holds.
     pub fn new(path: &str) -> Result<Self, StoreError> {
         let refuse = |problem| {
@@ -101,6 +128,9 @@ impl DocumentPath {
         if path.contains('\\') {
             return refuse("it carries a backslash; segments are separated by `/`");
         }
+        if let Some(problem) = control_byte_problem(path) {
+            return refuse(problem);
+        }
         let segments: Vec<&str> = path.split(SEPARATOR).collect();
         for segment in &segments {
             match *segment {
@@ -113,7 +143,11 @@ impl DocumentPath {
         let (leaf, ancestors) = segments
             .split_last()
             .expect("a non-empty path splits into at least one segment");
-        let stem = leaf_stem(leaf).to_string();
+        let stem = leaf_stem(leaf);
+        if stem == "." || stem == ".." {
+            return refuse("its leaf reduces to a `.` or `..` stem, which names no class");
+        }
+        let stem = stem.to_string();
 
         let mut suffix_key = String::with_capacity(path.len() + 1);
         suffix_key.push_str(&stem);
@@ -147,50 +181,133 @@ impl DocumentPath {
     }
 
     /// How many segments the path has.
+    ///
+    /// Emitting a candidate as its *minimal disambiguating suffix* needs to know
+    /// how much of a path to take, and this is that number, derived here from the
+    /// same input the keys are.
     pub fn depth(&self) -> usize {
         self.depth
     }
 
     /// The key of the ambiguity class this document belongs to: its stem, with
     /// the separator that makes the match segment-aligned.
-    pub fn class_key(&self) -> String {
-        class_probe(&self.stem).lower
+    pub fn class_key(&self) -> ClassKey {
+        ClassKey(class_probe(&self.stem).ranges[0].lower.clone())
     }
 }
 
-/// The bounds of one prefix range over a segment-reversed key.
+/// The key of one ambiguity class, as a finding stores it.
 ///
-/// A range rather than a pattern, because a range over an index is what SQLite
-/// answers without a scan. `lower` is also the prefix itself, which is the form
-/// a finding stores as its class key.
+/// A class key is a **separator-terminated segment-reversed prefix** —
+/// `glossary/`, `glossary/norn/` — which is exactly the lower bound of the range
+/// that opens the class. The type exists because that is not a property text
+/// happens to have: a class key missing its terminator names a prefix no probe's
+/// range covers, so a finding stored under one is at rest and permanently
+/// invisible to the maintenance that owns its lifecycle.
+///
+/// It is produced by [`DocumentPath::class_key`] and [`SuffixProbe::class_key`],
+/// which is where the two sides of resolution mint the same form.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ClassKey(String);
+
+impl ClassKey {
+    /// Read `text` as a class key, refusing what no probe would open.
+    pub fn new(text: &str) -> Result<Self, StoreError> {
+        let refuse = |problem| {
+            Err(StoreError::Path {
+                path: text.to_string(),
+                problem,
+            })
+        };
+        if text.is_empty() {
+            return refuse("it is empty");
+        }
+        if let Some(problem) = control_byte_problem(text) {
+            return refuse(problem);
+        }
+        if !text.ends_with(SEPARATOR) {
+            return refuse(
+                "it is not separator-terminated, so it names a prefix no ambiguity class opens",
+            );
+        }
+        let segments = text.strip_suffix(SEPARATOR).unwrap_or(text);
+        for segment in segments.split(SEPARATOR) {
+            match segment {
+                "" => return refuse("it carries an empty segment"),
+                "." | ".." => return refuse("it carries a `.` or `..` segment"),
+                _ => {}
+            }
+        }
+        Ok(ClassKey(text.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The bounds of the prefix ranges over a segment-reversed key that one probe
+/// opens.
+///
+/// Ranges rather than patterns, because a range over an index is what SQLite
+/// answers without a scan. A probe carries one range or two: a target whose leaf
+/// carries a dot has two reductions and opens both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SuffixProbe {
+    ranges: Vec<Range>,
+}
+
+/// One prefix range. `lower` is also the prefix itself, which is the form a
+/// finding stores as its class key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Range {
     lower: String,
     upper: String,
 }
 
 impl SuffixProbe {
-    /// The inclusive lower bound, which is the prefix every key in the range
-    /// begins with.
-    pub fn lower(&self) -> &str {
-        &self.lower
+    /// Every range this probe opens, as `(lower, upper)` pairs: `lower`
+    /// inclusive, `upper` exclusive.
+    ///
+    /// `upper` is the prefix with its final separator stepped on, so a range
+    /// holds exactly the keys its prefix opens. There is always at least one.
+    pub fn ranges(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.ranges
+            .iter()
+            .map(|range| (range.lower.as_str(), range.upper.as_str()))
     }
 
-    /// The exclusive upper bound: the prefix with its last byte stepped on, so
-    /// that the range holds exactly the keys the prefix opens.
-    pub fn upper(&self) -> &str {
-        &self.upper
+    /// How many ranges the probe opens: one, or two for a target with two
+    /// reductions.
+    pub fn range_count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    /// The class key this probe names, which is the prefix of its widest range.
+    ///
+    /// The widest range is the one whose prefix the others open under: `notes`
+    /// and `notes.tar` both live under `notes`. A finding recorded from a probe
+    /// carries this, so the class that maintains it is the class the probe read.
+    pub fn class_key(&self) -> ClassKey {
+        let widest = self
+            .ranges
+            .iter()
+            .map(|range| range.lower.as_str())
+            .min_by_key(|lower| lower.len())
+            .expect("a probe carries at least one range");
+        ClassKey(widest.to_string())
     }
 }
 
 /// The probe a suffix target resolves through.
 ///
-/// The target is read as segments, its leaf's final extension is dropped, and
-/// the segments are reversed — the same reduction a document path goes through,
-/// so that the two meet. The refusals are the spellings that are not a suffix
-/// address at all: an empty target, one carrying `.` or `..` (which is a
-/// document-relative path, a different resolution mode), and one carrying an
-/// empty segment.
+/// The target is read as segments and its segments are reversed, with the leaf
+/// taken **both** as written and with its final extension dropped — see the
+/// module documentation for why one reduction cannot be chosen. The refusals are
+/// the spellings that are not a suffix address at all: an empty target, an
+/// absolute one, one carrying `.` or `..` (which is a document-relative path, a
+/// different resolution mode), one carrying an empty segment, one whose leaf
+/// reduces to a `.` or `..` stem, and one carrying a control byte.
 pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     let refuse = |problem| {
         Err(StoreError::Path {
@@ -198,9 +315,14 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
             problem,
         })
     };
-    let target = target.strip_prefix(SEPARATOR).unwrap_or(target);
     if target.is_empty() {
         return refuse("it is empty");
+    }
+    if target.starts_with(SEPARATOR) {
+        return refuse("it is absolute, and a suffix address is a suffix of a relative path");
+    }
+    if let Some(problem) = control_byte_problem(target) {
+        return refuse(problem);
     }
     let segments: Vec<&str> = target.split(SEPARATOR).collect();
     for segment in &segments {
@@ -215,23 +337,38 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
     let (leaf, ancestors) = segments
         .split_last()
         .expect("a non-empty target splits into at least one segment");
-
-    let mut lower = String::with_capacity(target.len() + 1);
-    lower.push_str(leaf_stem(leaf));
-    lower.push(SEPARATOR);
-    for segment in ancestors.iter().rev() {
-        lower.push_str(segment);
-        lower.push(SEPARATOR);
+    let stem = leaf_stem(leaf);
+    if stem == "." || stem == ".." {
+        return refuse("its leaf reduces to a `.` or `..` stem, which names no class");
     }
-    Ok(bounded(lower))
+
+    let reversed = |head: &str| {
+        let mut lower = String::with_capacity(target.len() + 1);
+        lower.push_str(head);
+        lower.push(SEPARATOR);
+        for segment in ancestors.iter().rev() {
+            lower.push_str(segment);
+            lower.push(SEPARATOR);
+        }
+        lower
+    };
+
+    let mut ranges = vec![bounded(reversed(stem))];
+    if stem != *leaf {
+        ranges.push(bounded(reversed(leaf)));
+    }
+    Ok(SuffixProbe { ranges })
 }
 
 /// The probe over the ambiguity class a stem names.
 ///
 /// Every document whose leaf reduces to `stem` is in the range, whatever
 /// directory it sits in, and so is every finding whose class key opens with it.
+/// One reduction and therefore one range: a stem is already reduced.
 pub fn class_probe(stem: &str) -> SuffixProbe {
-    bounded(format!("{stem}{SEPARATOR}"))
+    SuffixProbe {
+        ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
+    }
 }
 
 /// The prefix, and the key just past everything it opens.
@@ -239,7 +376,7 @@ pub fn class_probe(stem: &str) -> SuffixProbe {
 /// `lower` ends with the separator — that is what makes a prefix match
 /// segment-aligned — so the exclusive bound is that separator stepped by one,
 /// and the arithmetic is exact rather than a byte-level search for a successor.
-fn bounded(lower: String) -> SuffixProbe {
+fn bounded(lower: String) -> Range {
     debug_assert!(
         lower.ends_with(SEPARATOR),
         "a probe prefix is separator-terminated: {lower}"
@@ -247,7 +384,7 @@ fn bounded(lower: String) -> SuffixProbe {
     let mut upper = lower.clone();
     upper.pop();
     upper.push(PAST_SEPARATOR);
-    SuffixProbe { lower, upper }
+    Range { lower, upper }
 }
 
 /// A leaf segment with its final extension removed.
@@ -260,4 +397,15 @@ fn leaf_stem(leaf: &str) -> &str {
         Some(dot) if dot > 0 => &leaf[..dot],
         _ => leaf,
     }
+}
+
+/// The refusal for a NUL or other control byte, which no printable key holds and
+/// which a C string reader would cut short.
+fn control_byte_problem(text: &str) -> Option<&'static str> {
+    if text.contains('\0') {
+        return Some("it carries a NUL byte");
+    }
+    text.chars()
+        .any(char::is_control)
+        .then_some("it carries a control character")
 }

@@ -33,12 +33,30 @@
 //!   one — a block with duplicate keys does not parse — so this is the
 //!   canonicalization being total rather than a case anything relies on. It
 //!   matches the model's own "insert replaces" reading of a repeated key.
-//! - **Numbers are written in the shortest form that reads back exactly**, with
-//!   integral floats keeping a `.0` so that a float never projects as something
-//!   `json_type` calls an integer.
+//! - **Numbers are written as plain decimal digits, never in exponent
+//!   notation**, in the shortest such spelling that reads back to the same
+//!   value, with integral floats keeping a `.0` so that a float never projects
+//!   as something `json_type` calls an integer. Choosing between plain and
+//!   exponent form by magnitude would give one number two spellings — which is
+//!   what canonicalization exists to prevent — so an extreme value is long
+//!   rather than compact.
 //! - **Strings escape exactly what JSON requires** and nothing else: the quote,
 //!   the backslash, and the C0 controls. Every other scalar value is emitted as
 //!   the UTF-8 it already is.
+//!
+//! # Nesting is bounded
+//!
+//! A value nested deeper than [`MAX_FRONTMATTER_DEPTH`] is **refused**, because
+//! the alternative is a column no reader can read: SQLite's JSON1 functions
+//! parse to a bounded depth, so past it a write that succeeded would produce
+//! bytes `json_valid` rejects — which the store's own verification reports as
+//! damage, permanently, through the rung that discards the database. Refusing
+//! also keeps the writer's own recursion shallow.
+//!
+//! The bound sits above what the text layer can produce (libyaml stops at 128)
+//! and below what SQLite accepts, so nothing a parsed document carries reaches
+//! it. The API is public, though, and a caller composing a value tree is not
+//! bounded by a parser at all.
 
 /// A frontmatter value, as the store takes it.
 ///
@@ -60,11 +78,56 @@ pub enum FrontmatterValue {
     Map(Vec<(String, FrontmatterValue)>),
 }
 
-/// The canonical JSON text for one value.
-pub fn canonical_json(value: &FrontmatterValue) -> String {
+/// How deeply a frontmatter projection may nest.
+///
+/// Above what any parsed document can carry, below what SQLite's JSON1 reader
+/// accepts. See the module documentation for why the projection is bounded at
+/// all.
+pub const MAX_FRONTMATTER_DEPTH: usize = 256;
+
+/// The canonical JSON text for one value, or a refusal where it nests deeper
+/// than [`MAX_FRONTMATTER_DEPTH`].
+pub fn canonical_json(value: &FrontmatterValue) -> Result<String, crate::StoreError> {
+    let depth = depth(value);
+    if depth > MAX_FRONTMATTER_DEPTH {
+        return Err(crate::StoreError::Bound {
+            what: "a frontmatter projection's nesting",
+            limit: MAX_FRONTMATTER_DEPTH,
+            given: depth,
+        });
+    }
     let mut out = String::new();
     write_value(value, &mut out);
-    out
+    Ok(out)
+}
+
+/// How deeply a value nests: a scalar is 1, a container is one more than its
+/// deepest member, and an empty container is 1.
+///
+/// Walked with an explicit stack and stopped one past the bound. Measuring
+/// recursively would be the same overflow the bound exists to refuse, and
+/// measuring a pathological tree exactly would cost the walk the refusal is
+/// meant to avoid — so a value deeper than the bound reports the bound plus one
+/// rather than its true depth.
+fn depth(value: &FrontmatterValue) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(value, 1_usize)];
+    while let Some((value, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        if depth > MAX_FRONTMATTER_DEPTH {
+            return depth;
+        }
+        match value {
+            FrontmatterValue::Sequence(items) => {
+                pending.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            FrontmatterValue::Map(entries) => {
+                pending.extend(entries.iter().map(|(_, value)| (value, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    deepest
 }
 
 fn write_value(value: &FrontmatterValue, out: &mut String) {
@@ -109,14 +172,14 @@ fn write_value(value: &FrontmatterValue, out: &mut String) {
     }
 }
 
-/// A float in the shortest decimal form that reads back exactly, or `null` where
-/// JSON has no spelling for it.
+/// A float as plain decimal digits, or `null` where JSON has no spelling for it.
 ///
 /// The form carries no exponent, whatever the magnitude: an extreme value writes
-/// its digits out. That is the shortest form that reads back to the same double,
-/// which is the property the projection needs — a compact exponent notation
-/// would be a second spelling of the same number, and a column two equal values
-/// disagree about is the thing canonicalization exists to prevent.
+/// its digits out. It is the shortest *plain decimal* spelling that reads back to
+/// the same double, which is the property the projection needs — a compact
+/// exponent notation would be a second spelling of the same number, and a column
+/// two equal values disagree about is the thing canonicalization exists to
+/// prevent.
 fn write_float(number: f64, out: &mut String) {
     if !number.is_finite() {
         out.push_str("null");
