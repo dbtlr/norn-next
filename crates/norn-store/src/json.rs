@@ -109,8 +109,14 @@ fn write_value(value: &FrontmatterValue, out: &mut String) {
     }
 }
 
-/// A float in the shortest form that reads back exactly, or `null` where JSON
-/// has no spelling for it.
+/// A float in the shortest decimal form that reads back exactly, or `null` where
+/// JSON has no spelling for it.
+///
+/// The form carries no exponent, whatever the magnitude: an extreme value writes
+/// its digits out. That is the shortest form that reads back to the same double,
+/// which is the property the projection needs — a compact exponent notation
+/// would be a second spelling of the same number, and a column two equal values
+/// disagree about is the thing canonicalization exists to prevent.
 fn write_float(number: f64, out: &mut String) {
     if !number.is_finite() {
         out.push_str("null");
@@ -120,7 +126,7 @@ fn write_float(number: f64, out: &mut String) {
     out.push_str(&written);
     // `1.0` writes as `1`, which every JSON reader calls an integer. The
     // fractional marker is what keeps a float's shape in the projection.
-    if !written.contains(['.', 'e', 'E']) {
+    if !written.contains('.') {
         out.push_str(".0");
     }
 }

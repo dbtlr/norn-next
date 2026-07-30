@@ -113,6 +113,7 @@ impl fmt::Display for RebuildReason {
 }
 
 /// One vault's derived state.
+#[derive(Debug)]
 pub struct Store {
     pub(crate) connection: Connection,
     path: PathBuf,
@@ -188,11 +189,14 @@ impl Store {
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Three checks, because a store has three kinds of consistency to lose:
-    /// the pages themselves, the foreign keys that carry cascade deletion, and
-    /// the full-text index against the column it is an index of. The third is
-    /// what an external-content FTS5 table can lose without anything else
-    /// noticing, which is exactly why the index is maintained by triggers.
+    /// Four checks, because a store has four kinds of consistency to lose: the
+    /// pages themselves, the foreign keys that carry cascade deletion, the
+    /// full-text index against the column it is an index of, and the
+    /// frontmatter projection against being JSON at all. The third is what an
+    /// external-content FTS5 table can lose without anything else noticing,
+    /// which is exactly why the index is maintained by triggers; the fourth is
+    /// the projection's own claim, checked by the JSON1 reader that will be
+    /// asked to query it.
     ///
     /// This is a maintenance act rather than a request: it derives nothing, so
     /// it moves no counter.
@@ -224,7 +228,65 @@ impl Store {
                     "the full-text index disagrees with the documents it indexes: {error}"
                 ),
             })?;
+
+        let unreadable: i64 = self
+            .connection
+            .query_row(
+                "SELECT count(*) FROM documents
+                 WHERE frontmatter IS NOT NULL AND json_valid(frontmatter) = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("checking the frontmatter projection", error))?;
+        if unreadable != 0 {
+            return Err(StoreError::Damaged {
+                what: format!(
+                    "{unreadable} documents carry a frontmatter projection that is not JSON"
+                ),
+            });
+        }
         Ok(())
+    }
+
+    /// What store schema this database records having been written under.
+    ///
+    /// The pair an open compares against this build. A doctor reports it; the
+    /// open path reads it before it trusts any other table.
+    pub fn recorded_store_schema(&self) -> Result<(Option<i64>, Option<String>), StoreError> {
+        Ok((
+            get_meta(&self.connection, ddl::meta::STORE_SCHEMA_VERSION)?,
+            get_meta(&self.connection, ddl::meta::DDL_FINGERPRINT)?,
+        ))
+    }
+
+    /// Record the store schema this database is to be understood as carrying.
+    ///
+    /// Creating a database writes this pair, and it is what the next open
+    /// compares against the build that performs it. Two other callers are
+    /// expected, and both need it to take its values rather than assume them:
+    /// a migration, once version 1 has frozen as the migratable baseline, has
+    /// to record the shape it migrated *to*; and the induced-failure suite has
+    /// to arrange a database whose recorded shape is not this build's, which is
+    /// the only way to reach rung 3's fingerprint trigger from outside — no
+    /// other crate may open a connection to arrange one.
+    ///
+    /// Recording a pair this build did not produce is not a corruption of
+    /// anything: the next open reads it, disagrees, and rebuilds from zero,
+    /// which is precisely the resolution the pair exists to trigger.
+    pub fn record_store_schema(
+        &mut self,
+        version: i64,
+        fingerprint: &str,
+    ) -> Result<(), StoreError> {
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error::sql("opening the store schema transaction", error))?;
+        put_meta(&transaction, ddl::meta::STORE_SCHEMA_VERSION, version)?;
+        put_meta(&transaction, ddl::meta::DDL_FINGERPRINT, fingerprint)?;
+        transaction
+            .commit()
+            .map_err(|error| error::sql("recording the store schema", error))
     }
 
     /// Close the store, tearing a throwaway one down.
