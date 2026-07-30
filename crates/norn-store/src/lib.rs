@@ -20,7 +20,8 @@
 //!   **attribution scope**: what it groups is the accounting, never the writes.
 //! - [`Request::apply_increment`] — the write-through increment, and the store's
 //!   one way in for document facts. **A changeset is the unit of atomicity**: it
-//!   lands whole or not at all, and [`increment`] states the contract.
+//!   lands whole or not at all, and that entry point states the contract in
+//!   full.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -56,11 +57,11 @@
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
-pub mod increment;
 
 mod counters;
 mod error;
 mod facts;
+mod increment;
 mod json;
 mod path;
 mod request;

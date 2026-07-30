@@ -11,16 +11,10 @@
 //! `norn-testkit` owns the assertions over them.
 
 use crate::common::{
-    Scratch, document, document_with_every_fact, path, record_death, vector, violation,
+    Scratch, document, document_with_every_fact, path, record_death, snapshot, vector, violation,
     write_document,
 };
-use norn_store::{DerivationCounters, Provenance};
-use norn_testkit::counters::CounterSnapshot;
-
-/// A snapshot of a request's reading, in the shape the harness compares.
-fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
-    counters.readings().collect()
-}
+use norn_store::Provenance;
 
 /// Every counter is present in every reading, whatever its value. A counter that
 /// appears in one reading and not another is a difference rather than a zero,

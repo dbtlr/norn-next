@@ -16,8 +16,8 @@
 //! a property of the vault rather than of the handle; it is carved and not built
 //! (NORN-33).
 //!
-//! **A read-only request will take `&self`.** The ruling is recorded here because
-//! it is the other half of the writer discipline: when the read builders arrive,
+//! **A read-only request will take `&self`.** That is recorded here because it is
+//! the other half of the writer discipline: when the read builders arrive,
 //! a read-only request takes a shared borrow over its own connection, opened
 //! inside this crate so the substrate seam holds, and `&mut` stays what a writer
 //! takes. Nothing implements it yet — every request here is `&mut`.
@@ -474,8 +474,10 @@ impl Drop for Store {
 /// does.
 ///
 /// The whole module lives behind the `induced-failure` feature, off by
-/// default, so a shipped build carries neither the out-of-band executor here
-/// nor the busy-injection hook a pinned-scalar read checks on every call.
+/// default, so a shipped build carries none of the three hooks these
+/// arrangements reach: the out-of-band executor here, the busy-injection a
+/// pinned-scalar read checks on every call, and the tear the increment checks
+/// between two entries.
 #[cfg(feature = "induced-failure")]
 #[doc(hidden)]
 pub mod induced_failure {

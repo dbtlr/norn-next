@@ -11,16 +11,10 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, class, classes, document, document_with_every_fact, path, violation,
+    Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, violation,
     write_document, write_documents,
 };
-use norn_store::{Change, DerivationCounters, IncrementProvenance, OpenOutcome, Provenance, Store};
-use norn_testkit::counters::CounterSnapshot;
-
-/// A snapshot of a request's reading, in the shape the harness compares.
-fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
-    counters.readings().collect()
-}
+use norn_store::{Change, IncrementProvenance, OpenOutcome, Provenance, Store};
 
 /// One upsert entry, from a document and a hash.
 fn upsert(at: &str, hash: &str, body: &str) -> Change {
@@ -97,8 +91,8 @@ fn one_changeset_stamps_one_generation_across_every_row_it_wrote() {
 
 /// **An empty changeset is a valid no-op, and it takes no generation.** It writes
 /// nothing, so moving the store's write sequence for it would make the sequence
-/// report an act that never happened — the same ruling a re-pin of the schema
-/// that is already pinned is decided by.
+/// report an act that never happened — which is why a re-pin of the schema that
+/// is already pinned takes none either.
 #[test]
 fn an_empty_changeset_writes_nothing_and_takes_no_generation() {
     let scratch = Scratch::new("empty-changeset");
@@ -569,10 +563,6 @@ fn two_paths_in_one_class_name_that_class_once() {
         )
         .expect("applying a changeset");
     assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
-    assert_eq!(
-        outcome.affected_classes.iter().next(),
-        Some(&class("glossary/"))
-    );
 }
 
 /// **A `Composed` changeset records no store-side recomputation of the state it
@@ -609,7 +599,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
                 ))],
             )
             .expect("re-deriving a document");
-        assert_eq!(outcome.provenance, provenance);
+        assert_eq!(outcome.documents_upserted, 1);
         snapshot(&request.finish())
     };
 
@@ -648,16 +638,18 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
 /// generator that materializes no collection at all and applies a thousand
 /// documents out of it.
 ///
-/// What the store keeps across entries is stated in `norn_store::increment`: the
-/// prepared statements, which are a fixed cost and are what makes a thousand
-/// entries a thousand executions rather than a thousand compilations; the
-/// running tally, which is scalars; and the set of affected classes, which holds
-/// one key per distinct stem among the changed paths. The entry itself is
-/// dropped before the next one is pulled, so the store holds one.
+/// What the store keeps across entries is stated at
+/// `norn_store::Request::apply_increment`: the prepared statements, which are a
+/// fixed cost; the running tally, which is scalars; and the set of affected
+/// classes, which holds one key per distinct stem among the changed paths. The
+/// entry itself is dropped before the next one is pulled, so the store holds
+/// one.
 ///
-/// The cost of that is asserted rather than described: the same one-document
-/// changeset reads the same counters before and after the thousand, which is the
-/// size-independence pair's shape.
+/// What the counter pair either side of the thousand asserts is **attribution
+/// size-independence**: writing one document of a given shape costs the same
+/// counters whatever else the store now holds. Counters count rows, so they say
+/// nothing about what a stream held in memory or how long a lock was kept — that
+/// is measured, not counted.
 #[test]
 fn a_changeset_is_applied_from_a_generator_that_materializes_nothing() {
     const BULK: usize = 1_000;

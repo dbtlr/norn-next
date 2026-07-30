@@ -39,8 +39,8 @@
 //! whole of it.
 //!
 //! [`Counter::FrontmatterProjections`] is the only counter here that names a
-//! computation, and **the ruling is that canonical-JSON projection is storage
-//! encoding rather than recomputation.** A value tree is what the caller
+//! computation, and **canonical-JSON projection is storage encoding rather than
+//! recomputation.** A value tree is what the caller
 //! supplied; projecting it to canonical JSON is how a value tree is written into
 //! a `TEXT` column, the same act as binding a length to an integer column and
 //! only larger. It learns nothing about the document that the caller did not

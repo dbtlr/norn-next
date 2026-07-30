@@ -9,12 +9,12 @@
 //!
 //! It buys nothing about atomicity, and it is not where atomicity is decided.
 //! **[`Request::apply_increment`] is where documents are written, and a
-//! changeset lands whole or not at all** — see [`crate::increment`], which is
-//! also where the shape of that guarantee is stated. Every other write here is
-//! whole on its own: a finding and its candidate and class rows, a schema pin
-//! and the discard the new key implies, a vector. So a request that performed
-//! three acts and then failed has three whole acts at rest, and what a request
-//! never was is a way to group them into one.
+//! changeset lands whole or not at all** — that entry point states the shape of
+//! the guarantee in full. Every other write here is whole on its own: a finding
+//! and its candidate and class rows, a schema pin and the discard the new key
+//! implies, a vector. So a request that performed three acts and then failed has
+//! three whole acts at rest, and what a request never was is a way to group them
+//! into one.
 //!
 //! # Writes replace one document's facts wholesale
 //!
@@ -120,23 +120,107 @@ impl<'a> Request<'a> {
     /// Apply one changeset — document upserts and deaths — and report what it
     /// did.
     ///
-    /// **The changeset is the unit of atomicity**: every entry lands, or none of
-    /// them does. There is no scope to open and add to, because this entry
-    /// point's granularity *is* the guarantee — a caller that needs two changes
-    /// to land together hands them over together. Internally that is one
-    /// `IMMEDIATE` transaction, so the write lock is held from the first
-    /// statement rather than acquired halfway through.
+    /// This is the store's one way in for document facts, and the whole of the
+    /// increment's contract is stated here.
     ///
-    /// One generation stamps every row the changeset writes, entries apply in
-    /// the order they arrive, and the findings in every ambiguity class the
-    /// changed paths belong to are discarded before it commits — reported in
-    /// [`IncrementOutcome::affected_classes`], because re-recording what holds
-    /// now is the caller's. `provenance` marks where the post-state came from;
-    /// it changes no statement, and what it binds is how a counter reading is
-    /// read.
+    /// # The changeset is the unit of atomicity
     ///
-    /// [`crate::increment`] states all of it in full, the empty changeset and
-    /// the duplicate-path rule included.
+    /// Every entry lands, or none of them does. There is no scope to open and
+    /// add writes to, because this entry point's granularity *is* the
+    /// guarantee: a caller that needs two changes to land together hands them
+    /// over together, and a caller that needs them to land separately calls
+    /// twice. Internally it is one `IMMEDIATE` transaction, so the write lock is
+    /// held from the first statement — a deferred transaction that upgrades
+    /// halfway through can fail after fact rows have already been discarded.
+    ///
+    /// What that buys is the rung-2 story: a process that dies partway through
+    /// leaves the previous generation whole, so nothing is ever at rest saying a
+    /// document was re-derived while the fact rows derived from it were not.
+    ///
+    /// # One generation stamps everything the changeset wrote
+    ///
+    /// The generation is taken once, before the first entry, and every row the
+    /// changeset writes carries it. Generations order writes in the store, and a
+    /// changeset is one write however many documents it names — so a reader
+    /// comparing generations sees it arrive at an instant rather than as a run
+    /// of numbers it has to recognize as one act.
+    ///
+    /// An **empty changeset takes no generation.** It writes nothing, so moving
+    /// the store's write sequence for it would make the sequence report an act
+    /// that never happened; the outcome says so by carrying no generation at
+    /// all.
+    ///
+    /// # Entries apply in order, and the last entry for a path decides
+    ///
+    /// A changeset may name one path more than once, and entries apply in the
+    /// order they arrive. An upsert followed by a death for the same path leaves
+    /// a tombstone and no document; the reverse leaves the document, beside the
+    /// tombstone the death recorded. Nothing is coalesced ahead of time, because
+    /// coalescing would have to decide which of two facts about one path is the
+    /// true one — and the caller already said, by ordering them.
+    ///
+    /// So a document and a tombstone for one path can stand at the **same
+    /// generation**, and comparing the two generations then says nothing.
+    /// **Row presence is what decides liveness**: `documents` holds the live
+    /// vault, and a tombstone beside a live document is a death that a later
+    /// entry of the same changeset superseded.
+    ///
+    /// # Dependent state is composed inside the same act
+    ///
+    /// **Full text is trigger-maintained.** Three triggers on `documents` carry
+    /// `documents_fts`, the store schema's full-text pillar, so the document
+    /// statements a changeset runs are the whole of its full-text maintenance.
+    /// There is no explicit index write, and adding one would be a second
+    /// maintainer of the same rows.
+    ///
+    /// **Findings are discarded on two axes**, both inside the one transaction:
+    ///
+    /// - *By subject path.* Every changed path — upserted or dead — takes the
+    ///   findings recorded about it. A re-derivation's findings were read off
+    ///   facts the changeset has just replaced, and a death's describe a
+    ///   document that is gone.
+    /// - *By affected ambiguity class.* Every changed path also names the class
+    ///   it belongs to, and the findings in the union of those classes go with
+    ///   it — the resolution axis, where a document joining or leaving a class
+    ///   invalidates findings written in documents that did not change.
+    ///
+    /// The two axes are what make **discard-then-record** total. The store
+    /// discards and never records: minting a finding is a reading of the vault
+    /// the caller performs, so [`IncrementOutcome::affected_classes`] reports
+    /// the class scope, and the subject scope needs no report because it is the
+    /// changeset the caller just built, entry by entry.
+    ///
+    /// A finding in no class — a vault-schema violation, say — is outside the
+    /// resolution axis and reachable on the subject axis alone: it dies when the
+    /// document it is about changes, and survives every change to any other.
+    /// None of this is a cascade. Nothing in the schema references `documents`
+    /// from `findings`, so a finding about a path no document has is recordable
+    /// and no row-existence ordering matters; what takes a finding is a
+    /// statement the store runs and counts.
+    ///
+    /// # Streaming, and what a changeset holds
+    ///
+    /// Entries are consumed from the iterator one at a time and nothing collects
+    /// them, so a caller streaming a heal hands over something that yields
+    /// documents and the store holds one. What lives across entries is the
+    /// prepared statements, which are a fixed cost, the running tally, which is
+    /// scalars, and [`IncrementOutcome::affected_classes`] — the one
+    /// changeset-sized accumulation, holding a key per distinct stem among the
+    /// changed paths.
+    ///
+    /// **The write lock is held across the caller's whole iterator.** A
+    /// changeset is atomic because it is one transaction, so however long the
+    /// caller takes to produce its entries is how long no other writer on the
+    /// database proceeds. A heal-scale changeset is therefore **chunked**: each
+    /// chunk is its own atomic changeset, which bounds both the lock and the
+    /// class set by the chunk rather than by the vault. Serializing writers
+    /// across *processes* is a per-vault file lock that is carved and not built
+    /// (NORN-33); within one process the store's single connection is what
+    /// serializes.
+    ///
+    /// `provenance` marks where the post-state came from. It changes no
+    /// statement the store runs, and what it binds is how a counter reading is
+    /// read — see [`crate::DerivationCounters`].
     pub fn apply_increment(
         &mut self,
         provenance: IncrementProvenance,

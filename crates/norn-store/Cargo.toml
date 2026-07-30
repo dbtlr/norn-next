@@ -37,9 +37,10 @@ rusqlite = { workspace = true }
 # `induced-failure` gates `induced_failure`, the module of out-of-band
 # arrangements the store's own suite reaches through to reach a rung or a
 # refusal from outside — a store schema this build did not write, a dropped
-# index, a busy database. Off by default, so a shipped build carries neither
-# the out-of-band SQL executor nor the busy-injection thread-local it hooks
-# into every pinned-scalar read.
+# index, a busy database, a process killed mid-changeset. Off by default, so a
+# shipped build carries none of the three hooks: the out-of-band SQL executor,
+# the busy-injection thread-local read on every pinned scalar, and the tear the
+# increment checks between two entries.
 [features]
 induced-failure = []
 

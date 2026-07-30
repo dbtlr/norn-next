@@ -10,10 +10,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_store::{
-    BlockFact, CandidateFact, Change, ClassKey, DocumentFacts, DocumentPath, FindingFacts,
-    FrontmatterValue, HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily,
-    Provenance, Request, Span, Store, TagFact, TagSource, VectorFacts, suffix_probe,
+    BlockFact, CandidateFact, Change, ClassKey, DerivationCounters, DocumentFacts, DocumentPath,
+    FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact,
+    LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, VectorFacts, suffix_probe,
 };
+use norn_testkit::counters::CounterSnapshot;
+
+/// A snapshot of a request's reading, in the shape the harness compares.
+pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
+    counters.readings().collect()
+}
 
 /// Distinguishes two scratch directories taken in the same process.
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -75,24 +81,13 @@ pub fn record_death(
     at: &DocumentPath,
     provenance: Provenance,
 ) -> IncrementOutcome {
-    record_deaths(request, &[(at.clone(), provenance)])
-}
-
-/// Record several deaths in one changeset.
-pub fn record_deaths(
-    request: &mut Request<'_>,
-    deaths: &[(DocumentPath, Provenance)],
-) -> IncrementOutcome {
     request
         .apply_increment(
             IncrementProvenance::Derived,
-            deaths
-                .iter()
-                .map(|(path, provenance)| Change::Death {
-                    path: path.clone(),
-                    provenance: *provenance,
-                })
-                .collect::<Vec<Change>>(),
+            [Change::Death {
+                path: at.clone(),
+                provenance,
+            }],
         )
         .expect("applying a death")
 }

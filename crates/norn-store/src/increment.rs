@@ -1,82 +1,16 @@
-//! The write-through increment: one changeset, applied whole.
+//! The write-through increment's machinery: the statements one changeset runs,
+//! and the tally it reports.
 //!
-//! # The changeset is the unit of atomicity
-//!
-//! [`crate::Request::apply_increment`] takes a changeset — document upserts and
-//! deaths, in the order they are handed over — and applies **all of it or none
-//! of it**. There is no way to open a scope and add writes to it, because the
-//! entry point's granularity *is* the atomicity contract: a caller that needs
-//! two changes to land together hands them over together, and a caller that
-//! needs them to land separately calls twice.
-//!
-//! What that buys is the rung-2 story. A process that dies partway through
-//! leaves the previous generation whole: nothing partial is ever at rest, so
-//! there is no state saying a document was re-derived while the fact rows
-//! derived from it were not.
-//!
-//! # One generation stamps everything the changeset wrote
-//!
-//! The generation is taken once, before the first entry, and every row the
-//! changeset writes carries it. Generations are what order writes in the store,
-//! and a changeset is one write however many documents it names — so a reader
-//! comparing generations sees the changeset arrive at an instant rather than as
-//! a run of numbers it has to recognize as one act.
-//!
-//! An **empty changeset takes no generation.** It writes nothing, so moving the
-//! store's write sequence for it would make the sequence report an act that
-//! never happened; the outcome says so by carrying no generation at all.
-//!
-//! # Entries apply in order, and the last entry for a path decides
-//!
-//! A changeset may name one path more than once, and the entries are applied in
-//! the order they arrive. An upsert followed by a death for the same path leaves
-//! a tombstone and no document; the reverse leaves the document, beside the
-//! tombstone the death recorded. Nothing is coalesced ahead of time, because
-//! coalescing would have to decide which of two facts about one path is the
-//! true one — and the caller already said, by ordering them.
-//!
-//! # Dependent state is composed inside the same act
-//!
-//! **Full text is trigger-maintained.** Three triggers on `documents` carry
-//! `documents_fts`, the store schema's full-text pillar, so the document
-//! statements a changeset runs are the whole of its full-text maintenance. There
-//! is no explicit index write here, and adding one would be a second maintainer
-//! of the same rows.
-//!
-//! **Findings are discarded on two axes, both inside the one transaction.**
-//!
-//! - *By subject path.* Every changed path — upserted or dead — takes the
-//!   findings recorded about it. A re-derivation's findings were read off facts
-//!   the changeset has just replaced, and a death's describe a document that is
-//!   gone; the caller re-mints what holds now from the facts it just handed
-//!   over, which is the changeset itself, entry by entry.
-//! - *By affected ambiguity class.* Every changed path also names the class it
-//!   belongs to, and the findings in the union of those classes go with it —
-//!   the resolution axis, where a document joining or leaving a class
-//!   invalidates findings written in documents that did not change.
-//!
-//! The two axes are what make **discard-then-record** total. The store discards
-//! and never records: minting a finding is a reading of the vault the caller
-//! performs, so the outcome reports the classes, and the subject axis needs no
-//! report because its scope is the changeset the caller just built.
-//!
-//! A finding with no class — a vault-schema violation, say — is out of the
-//! resolution axis and reachable on the subject axis alone: it dies when the
-//! document it is about changes, and survives every change to any other.
-//!
-//! This is maintenance rather than a cascade. Nothing in the schema references
-//! `documents` from `findings`, so a finding about a path no document has is
-//! recordable and no row-existence ordering matters; what reaches a finding is
-//! a statement this crate runs and counts.
-//!
-//! # Memory is the changeset's, never the vault's
-//!
-//! Entries are consumed from an iterator one at a time and nothing collects
-//! them, so a caller streaming a heal hands over something that yields documents
-//! and the store holds one. What lives across entries is the prepared
-//! statements, the tally, and the set of affected classes — the statements are a
-//! fixed cost, and the other two are bounded by the changeset rather than by the
-//! vault behind it.
+//! The contract — atomicity, the one generation, the ordering rule, the findings
+//! maintenance folded in and what a streamed changeset costs — is stated at
+//! [`crate::Request::apply_increment`], which is where a caller meets it. This
+//! module is how it is carried out, and the recovery half of the rung-2 story
+//! belongs here: what a torn changeset leaves behind is the previous generation,
+//! whole, because a transaction that never committed rolls back with the process
+//! that died in it. Nothing partial is ever at rest, so there is nothing to
+//! detect and nothing to repair — the work the tear lost comes back the way any
+//! unapplied work does, through the attach heal comparing content hashes and
+//! finding the store's copy stale.
 
 use std::collections::BTreeSet;
 
@@ -96,14 +30,38 @@ use crate::store::{self, Store};
 /// it is gone.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
-    /// A document as it now stands, replacing everything derived from its path.
+    /// A document as it now stands.
+    ///
+    /// It replaces the document's row and every parse fact derived from that
+    /// path — its links, headings, block ids and tags — and the full-text index
+    /// the triggers carry over the body. The row keeps its identity: it is
+    /// updated rather than replaced.
+    ///
+    /// **An embedding is not replaced.** A vector is keyed by
+    /// `(document, model, version)` and survives the re-derivation of the
+    /// document it was computed over, because computing a new one is an async
+    /// worker's job rather than this act's. So a vector is **eventually
+    /// consistent** with the body, and the `content_hash` it carries is how a
+    /// reader tells one that has caught up from one that has not.
     Upsert(DocumentFacts),
     /// A path's death, recorded with how it was learned.
     ///
-    /// The hash the tombstone carries is not supplied: it is the one the store
-    /// last derived the path at, read out of the row this entry removes. A death
-    /// for a path nothing had derived has none, and keeps the one already
-    /// recorded where a tombstone is already there.
+    /// The document row goes, the cascade takes every fact row derived from it,
+    /// and a tombstone records the path, the hash it was last derived at, and
+    /// where the news came from — so there is no instant at which a document is
+    /// gone and nothing says why.
+    ///
+    /// The hash is not supplied: it is the one the store last derived the path
+    /// at, read out of the row this entry removes. **A path that dies twice
+    /// keeps the hash already recorded** where the second death has none of its
+    /// own — that hash is the comparison basis a tombstone exists to carry, and
+    /// a death learned from an absent file has nothing better to put in its
+    /// place.
+    ///
+    /// A path nothing had derived still gets a tombstone. The ordering it
+    /// carries is the point, and it is worth most exactly when a derivation
+    /// never happened: a late event then has something to compare against
+    /// instead of guessing.
     Death {
         path: DocumentPath,
         provenance: Provenance,
@@ -136,8 +94,6 @@ pub enum IncrementProvenance {
 /// What applying a changeset did.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IncrementOutcome {
-    /// The mark the changeset was applied under.
-    pub provenance: IncrementProvenance,
     /// The generation every row the changeset wrote is stamped with, or `None`
     /// for an empty changeset — which writes nothing and takes none.
     pub generation: Option<i64>,
@@ -146,6 +102,11 @@ pub struct IncrementOutcome {
     /// Document rows removed. A death for a path nothing had derived removes
     /// none of them and still records a tombstone, so this is not the number of
     /// deaths.
+    ///
+    /// This and [`IncrementOutcome::documents_upserted`] are per-entry tallies of
+    /// what the statements did, never the net change in the table: a changeset
+    /// that writes a path and then kills it reports one of each, and `documents`
+    /// ends one row shorter than subtracting the two would suggest.
     pub documents_deleted: u64,
     /// Deaths recorded, which is one per [`Change::Death`] entry.
     pub tombstones_recorded: u64,
@@ -172,7 +133,11 @@ pub struct IncrementOutcome {
 pub(crate) fn apply(
     store: &mut Store,
     counters: &mut DerivationCounters,
-    provenance: IncrementProvenance,
+    // The changeset's mark, which nothing below reads. It selects no statement
+    // and no branch — the store composes supplied facts and re-derives nothing
+    // under either mark — and what it binds is how the counter reading this
+    // function moves is judged. See [`IncrementProvenance`].
+    _provenance: IncrementProvenance,
     changes: impl IntoIterator<Item = Change>,
 ) -> Result<IncrementOutcome, StoreError> {
     // The first entry is what decides whether there is an act at all, so it is
@@ -181,7 +146,6 @@ pub(crate) fn apply(
     let mut entries = changes.into_iter();
     let Some(first) = entries.next() else {
         return Ok(IncrementOutcome {
-            provenance,
             generation: None,
             documents_upserted: 0,
             documents_deleted: 0,
@@ -227,7 +191,12 @@ pub(crate) fn apply(
             .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
             tally.findings_discarded +=
                 applied.map_err(|problem| error::in_entry(index, subject, problem))?;
-            torn_here(index + 1);
+
+            // The point a changeset can be torn at, and the only one: between
+            // two entries, with the transaction open and nothing committed. A
+            // build without the `induced-failure` feature carries no check here.
+            #[cfg(feature = "induced-failure")]
+            store::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
         let discarded =
             discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
@@ -252,7 +221,6 @@ pub(crate) fn apply(
     counters.add(Counter::FindingsDiscarded, tally.findings_discarded);
 
     Ok(IncrementOutcome {
-        provenance,
         generation: Some(generation),
         documents_upserted: tally.documents_upserted,
         documents_deleted: tally.documents_deleted,
@@ -262,19 +230,6 @@ pub(crate) fn apply(
             findings_discarded: tally.findings_discarded,
         },
     })
-}
-
-/// The point a changeset can be torn at, and the only one: between two entries,
-/// with the transaction open and nothing committed.
-///
-/// It is a call to nothing without the `induced-failure` feature, so a shipped
-/// build carries no check here.
-#[inline]
-fn torn_here(applied: usize) {
-    #[cfg(feature = "induced-failure")]
-    store::abort_if_the_changeset_is_torn(applied as u64);
-    #[cfg(not(feature = "induced-failure"))]
-    let _ = applied;
 }
 
 /// What one changeset accumulated, to be reported and counted once it committed.
@@ -542,19 +497,10 @@ fn upsert(
 
 /// Delete one document and record its death.
 ///
-/// The document row goes, the cascade takes every fact row derived from it, and
-/// a tombstone records the path, the hash it was last derived at, and where the
-/// news came from — so there is no instant at which the document is gone and
-/// nothing says why.
-///
-/// A path nothing had derived still gets a tombstone. The ordering it carries is
-/// the point, and it is worth most exactly when a derivation never happened: a
-/// late event then has something to compare against instead of guessing.
-///
-/// A path that dies twice **keeps the hash already recorded** where the second
-/// death has none of its own. The recorded hash is the comparison basis the
-/// tombstone exists to carry, and a death learned from an absent file carries
-/// nothing better to put in its place.
+/// The delete and the tombstone read one value between them: the hash comes back
+/// from the row that goes, and `COALESCE` in the tombstone write is what keeps
+/// the hash already recorded where this death has none. [`Change::Death`] states
+/// what the tombstone is for and why both of those hold.
 fn record_death(
     statements: &mut Statements<'_>,
     generation: i64,
