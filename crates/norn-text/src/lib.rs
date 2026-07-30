@@ -3,9 +3,9 @@
 //!
 //! This crate answers *what does this document say* — where its frontmatter
 //! block is, what its fields are worth, where its headings and sections start,
-//! which `[[…]]` tokens it carries — and it never answers *what does that
-//! mean* or *is it right*. It knows nothing about vaults, schemas, caches or
-//! configuration, links nothing else in the workspace, and reaches no
+//! which link and `#tag` tokens it carries — and it never answers *what does
+//! that mean* or *is it right*. It knows nothing about vaults, schemas, caches
+//! or configuration, links nothing else in the workspace, and reaches no
 //! filesystem: pure functions over strings, in and out.
 //!
 //! It is also the workspace's one document grammar. A second reading of
@@ -67,17 +67,58 @@
 //! rather than inherited: scalar reads follow the YAML 1.2 core schema, so
 //! `publish: no` is the string `no`, and [`Value`] names the rest.
 //!
+//! # Links, tags and what addresses what
+//!
+//! Two written forms produce a [`Link`], and one fact shape carries both:
+//! `[[…]]` and the inline Markdown link `[title](target)`. They differ in how
+//! a resolver reads the stem, and the fact says which through
+//! [`Link::resolution`].
+//!
+//! **Dispatch is protocol-first, family-second.** A recognized `protocol://`
+//! prefix shadows the family, because the family says which grammar the author
+//! wrote and the protocol says what the address is; a protocol-free target
+//! falls through to its family, where a wikilink stem is a path suffix and a
+//! Markdown one a path relative to the containing document. Fragments follow
+//! the family either way: a wikilink `#anchor` addresses heading *text*, a
+//! Markdown `#fragment` addresses a heading *slug* ([`Heading::slug`]). All of
+//! it is recorded raw; none of it is matched here.
+//!
+//! A `protocol://` prefix is recognized, and only recognized: `[[x]]` and
+//! `[[vault://x]]` are distinct facts, nothing supplies a default protocol,
+//! and no protocol means anything to this crate. What recognizing one does
+//! change is what may be rewritten — a rename does not reach inside somebody
+//! else's URL.
+//!
+//! The two grammars are read independently, so **link ranges may overlap and
+//! nest across the families**: `[[a]](b)` satisfies both at once and produces
+//! two facts sharing bytes. Deciding which one an author meant is semantics,
+//! and [`BodyScan::links`] instead contracts a total order so the same link is
+//! the same row twice.
+//!
+//! [`Tag`] is its own fact kind rather than a link — one grammar, read from
+//! body tokens and from the frontmatter `tags` field.
+//!
+//! Frontmatter string values are scanned for exactly one thing: `[[…]]`
+//! tokens. A `[title](target)` string in a property is inert text and a
+//! `#tag` inside some other value is text in a string.
+//! [`Document::frontmatter_wikilinks`] is that surface, reporting the tokens
+//! whose bytes the source names; [`parse_wikilinks_in_text`] over
+//! [`Document::field_texts`] reads the shapes that carry no span, and
+//! [`Document::frontmatter_tags`] is the tag half.
+//!
 //! # Code is opaque
 //!
 //! Fenced code blocks, indented code blocks and inline code spans are a
-//! different document. No heading, wikilink or block id may be recognized
+//! different document. No heading, link, tag or block id may be recognized
 //! inside one. See [`BodyScan`], which is also the single CommonMark pass
-//! every body-level answer comes from.
+//! every body-level answer comes from, and which documents the forms that are
+//! recognized and deliberately produce no fact.
 //!
 //! # Where to start
 //!
 //! - [`Document`] — read a document, then edit one field or one section.
-//! - [`BodyScan`] — headings, sections, wikilinks and block ids, in one pass.
+//! - [`BodyScan`] — headings, sections, links, tags and block ids, in one
+//!   pass.
 //! - [`render_document`] — write a whole document from scratch.
 
 mod body;
@@ -86,10 +127,11 @@ mod document;
 mod frontmatter;
 mod heading;
 mod line_ending;
+mod link;
 mod section;
 mod span;
+mod tag;
 mod value;
-mod wikilink;
 
 pub use body::BodyScan;
 pub use diagnostic::Diagnostic;
@@ -97,10 +139,11 @@ pub use document::{Document, EditError, FieldText, frontmatter_reads_back};
 pub use frontmatter::{Field, RenderError, ScalarContext, ValueStyle, render_document};
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
+pub use link::{
+    Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
+    splice_wikilinks_in_text, wikilink_target_is_representable,
+};
 pub use section::{SectionAddress, SectionError, SectionSpan};
 pub use span::SourceSpan;
+pub use tag::Tag;
 pub use value::{Mapping, Value};
-pub use wikilink::{
-    Wikilink, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
-    split_wikilink_target, wikilink_target_is_representable,
-};

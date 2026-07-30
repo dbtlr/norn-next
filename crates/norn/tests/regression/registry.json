@@ -471,11 +471,11 @@
       "name": "one-parser-authority-for-link-text",
       "kind": "defect-class",
       "venue": 1,
-      "property": "One parser is the authority for link text and target splitting, and the link universe is identical whichever consumer computes it. Code spans are opaque to every targeted parse and rewrite; destination parsing follows URL rules, splitting fragments before percent-decoding; scheme detection is case-insensitive; a caret is a block sigil only after a hash; and target normalization strips a trailing markdown extension without applying filesystem stem semantics to a version-like name.",
+      "property": "One parser is the authority for link text and target splitting, and the link universe is identical whichever consumer computes it. Code spans are opaque to every targeted parse and rewrite; destination parsing follows URL rules, splitting fragments over the bytes the author wrote and before percent-decoding; a caret is a block sigil only after a hash; and target normalization strips a trailing markdown extension without applying filesystem stem semantics to a version-like name.",
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "a second link-text consumer does not exist; the parser half is carried by norn-text's suite."
+        "reason": "the recognition halves are carried today — norn-text's suite holds code opacity, the destination split and the caret rule, and crates/norn-text/tests/markdown_links.rs::the_link_universe_is_the_same_whichever_accessor_computes_it holds one universe across all four accessors. The target-normalization half has no subject at any layer: norn-text normalizes nothing by charter, so the extension-stripping rule binds wherever resolution lands and this case stays dormant until it does."
       }
     },
     {
@@ -508,7 +508,7 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "diagnostics are produced; no consumer exists to hold to not-dropping them."
+        "reason": "diagnostics are produced; no consumer exists to hold to not-dropping them. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure."
       }
     },
     {
@@ -1062,7 +1062,7 @@
       "sources": ["norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no repair planner and no link rewriter exist."
+        "reason": "no repair planner exists."
       }
     },
     {

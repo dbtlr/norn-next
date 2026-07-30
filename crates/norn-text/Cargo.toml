@@ -1,6 +1,6 @@
 [package]
 name = "norn-text"
-description = "The syntax of a vault document — frontmatter parse/edit/serialize, headings, sections, wikilink syntax"
+description = "The syntax of a vault document — frontmatter parse/edit/serialize, headings, sections, link and tag syntax"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

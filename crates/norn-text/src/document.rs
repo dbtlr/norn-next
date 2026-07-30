@@ -13,10 +13,14 @@ use crate::frontmatter::render::{
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
+use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
 use crate::span::LineCursor;
+use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{Mapping, Value};
-use crate::wikilink::Wikilink;
+
+/// The one frontmatter field whose strings are read as tags.
+const TAGS_FIELD: &str = "tags";
 
 /// A frontmatter string value and where its bytes are.
 ///
@@ -137,6 +141,15 @@ impl From<SectionError> for EditError {
 /// Reading is forgiving and reports what it worked around in
 /// [`Document::diagnostics`]. Editing is not: each edit either returns a whole
 /// new document that provably reads back as intended, or refuses.
+///
+/// # Ask the body once
+///
+/// The body accessors here — [`Document::headings`], [`Document::links`],
+/// [`Document::wikilinks`], [`Document::tags`] — each build their own
+/// [`BodyScan`], so asking four questions parses the body four times. They are
+/// the convenience for a caller with one question and source coordinates. A
+/// caller with several should take [`Document::scan_body`] once and rebase by
+/// [`Document::body_start`], which is what the one-pass guarantee is worth.
 #[derive(Debug, Clone)]
 pub struct Document<'a> {
     source: &'a str,
@@ -342,12 +355,116 @@ impl<'a> Document<'a> {
     }
 
     /// Every `[[…]]` token in the body, code excluded, in source coordinates.
-    pub fn wikilinks(&self) -> Vec<Wikilink> {
-        let scan = self.scan_body();
+    pub fn wikilinks(&self) -> Vec<Link> {
+        self.rebased(self.scan_body().wikilinks())
+    }
+
+    /// Every link token in the body, both families, in document order, code
+    /// excluded, in source coordinates.
+    pub fn links(&self) -> Vec<Link> {
+        self.rebased(self.scan_body().links())
+    }
+
+    /// Every `#tag` in the body, in document order, in source coordinates.
+    ///
+    /// Frontmatter tags are a separate answer: see
+    /// [`Document::frontmatter_tags`].
+    pub fn tags(&self) -> Vec<Tag> {
         let mut cursor = LineCursor::new(self.source);
-        scan.wikilinks()
+        self.scan_body()
+            .tags()
             .into_iter()
-            .map(|link| Wikilink {
+            .map(|tag| Tag {
+                span: tag
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..tag
+            })
+            .collect()
+    }
+
+    /// The tags the frontmatter `tags` field declares, in document order.
+    ///
+    /// Every string the field holds is read — the items of a sequence, or the
+    /// field's own value when it is a scalar string — under the same grammar
+    /// body tags follow, with the `#` marker optional: `#foo` and `foo` are
+    /// both the tag `foo`. A string the grammar does not describe produces no
+    /// tag and no complaint; judging it is validation's venue, not this
+    /// crate's. No other field is scanned, and no field is scanned for body
+    /// tokens.
+    pub fn frontmatter_tags(&self) -> Vec<Tag> {
+        let mut cursor = LineCursor::new(self.source);
+        self.field_texts()
+            .into_iter()
+            .filter(|text| text.field == TAGS_FIELD)
+            .filter_map(|text| {
+                let name = frontmatter_tag_name(text.text)?;
+                Some(Tag {
+                    name,
+                    span: text.range.map(|range| cursor.span_at(range.start)),
+                })
+            })
+            .collect()
+    }
+
+    /// Every `[[…]]` token written in a frontmatter string value, in source
+    /// coordinates.
+    ///
+    /// The counterpart to [`Document::frontmatter_tags`], and the other half
+    /// of what a frontmatter value is scanned for: every string the block
+    /// holds is read — scalar values and the string items of sequences, not
+    /// just one field — because writing the wikilink form is what opts a
+    /// property into the link graph, whichever property it is. A
+    /// `[title](target)` string is inert text here; the Markdown form is body
+    /// syntax.
+    ///
+    /// **A link is reported when the entry's source bytes carry its value
+    /// literally** — a plain scalar, or one wrapped in a single pair of quotes
+    /// — because that is the only case where an offset in the parsed string is
+    /// an offset in the document, which is what makes the span exact and
+    /// [`Link::range`] index the source.
+    ///
+    /// An entry whose bytes and whose parsed string are *different text*
+    /// reports nothing here. That refusal covers the flow sequence's items and
+    /// the flow value, which have no nameable bytes at all; the escaped scalar,
+    /// where `"[[X]]"` and `[[X]]` share no offsets; the doubled quote of
+    /// `'it''s'`; the block scalar and the folded scalar (`|`, `>`); the
+    /// multi-line quoted scalar; and the nested map, whose strings are not
+    /// top-level entries. Locating a token by searching the source for its text
+    /// instead is guessing, and guessing wrong is silent: an escaped token
+    /// whose text matches a later literal one claims that one's bytes and the
+    /// literal link disappears. Reading these shapes without a span is what
+    /// [`Document::field_texts`] and [`crate::parse_wikilinks_in_text`] are
+    /// for.
+    pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        let mut links = Vec::new();
+        for text in self.field_texts() {
+            let Some(range) = text.range else {
+                continue;
+            };
+            let Some(offset) = literal_text_offset(&self.source[range.clone()], text.text) else {
+                continue;
+            };
+            // Every token's offset in the entry's text is its offset in the
+            // source, one quote apart, so no token is searched for and two
+            // identical links in one value are two entries at two offsets.
+            for link in parse_wikilinks_in_text(text.text) {
+                links.push(Link {
+                    span: cursor.span_at(range.start + offset + link.span.byte_offset),
+                    ..link
+                });
+            }
+        }
+        links
+    }
+
+    /// Rebase body-relative link spans onto the source.
+    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        links
+            .into_iter()
+            .map(|link| Link {
                 span: cursor.span_at(link.span.byte_offset + self.body_start),
                 ..link
             })
@@ -679,6 +796,27 @@ impl<'a> Document<'a> {
         }
         Ok(())
     }
+}
+
+/// Where `text` begins inside the `written` bytes that produced it, when those
+/// bytes carry it literally: zero for a plain scalar, one for a scalar wrapped
+/// in a single pair of quotes.
+///
+/// `None` when the two are different text — an escape, a doubled quote, a
+/// folded line — and no offset maps the parsed string onto the source at all.
+/// The whole entry is refused rather than partly located: the two texts share a
+/// prefix up to the first difference and nothing after it, so a token past that
+/// point has no source position and the ones before it cannot be told apart
+/// from the ones after.
+fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
+    if written == text {
+        return Some(0);
+    }
+    ['"', '\'']
+        .into_iter()
+        .filter_map(|quote| written.strip_prefix(quote)?.strip_suffix(quote))
+        .any(|inner| inner == text)
+        .then_some(1)
 }
 
 /// The frontmatter value `source` holds, without locating its fields.
