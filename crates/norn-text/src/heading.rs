@@ -5,6 +5,8 @@
 //! mistaken for one. Both written forms — ATX (`## Title`) and setext (a title
 //! line over `---`/`===`) — produce the same record.
 
+use std::collections::HashMap;
+
 use crate::span::SourceSpan;
 
 /// A Markdown heading located in a document body.
@@ -77,7 +79,7 @@ pub fn slugify(text: &str) -> String {
 /// that address the same heading are the defect this closes.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SlugCounter {
-    issued: std::collections::HashMap<String, usize>,
+    issued: HashMap<String, usize>,
 }
 
 impl SlugCounter {
