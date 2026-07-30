@@ -184,11 +184,18 @@ pub const INVARIANTS: &[Invariant] = &[
         // configured rule expresses is the scope — `serde_json::Value` in a
         // signature that crosses the seam is the defect, and the same type in
         // a test or a helper is not. `disallowed-types` cannot tell them
-        // apart, so the rule is a reviewer's until tooling can.
+        // apart, so the rule is a reviewer's until tooling can. Of the
+        // zero-effects half, the filesystem is the workspace-wide `std::fs`
+        // lint's and raw syscalls are `forbid(unsafe_code)`'s; the remainder
+        // — process, network, environment — is a reviewer's.
         mechanisms: &[
             Mechanism::Edge(EdgeClaim::NoDependencies("norn-wire")),
             Mechanism::Review(
                 "whether a signature crossing the client/host seam carries an untyped JSON value",
+            ),
+            Mechanism::Review(
+                "whether norn-wire reaches an effect no lint covers — process, network, \
+                 environment",
             ),
         ],
     },
