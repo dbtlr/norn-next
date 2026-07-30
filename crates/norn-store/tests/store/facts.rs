@@ -306,6 +306,36 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
+    // The two that stay, because a statement in this build reads each: the
+    // resolution ladder's range, and the schema-key discard's two ranges.
+    for present in ["documents_suffix_key", "findings_vault_schema_fingerprint"] {
+        assert!(
+            declared
+                .iter()
+                .any(|statement| statement.contains(&format!("INDEX {present} "))),
+            "`{present}` is not declared, and a statement in this build reads it"
+        );
+    }
+}
+
+/// `document_vectors` is a rowid table. Its primary key is a uniqueness
+/// constraint; making it the storage order too puts the embedding blob inside the
+/// index B-tree, so every key comparison walks overflow chains and `count(*)` —
+/// which is what the pillar report asks for — reads every leaf.
+#[test]
+fn the_vector_table_keeps_its_rows_behind_a_rowid() {
+    let declared = ddl::statements()
+        .into_iter()
+        .find(|statement| statement.contains("CREATE TABLE document_vectors"))
+        .expect("the vector table");
+    assert!(
+        declared.contains("PRIMARY KEY (document, model_id, model_version)"),
+        "{declared}"
+    );
+    assert!(
+        !declared.contains("WITHOUT ROWID"),
+        "the embedding blob is stored inside the primary key's B-tree: {declared}"
+    );
 }
 
 /// A delete is hard: the document row goes, the cascade takes everything derived

@@ -1064,3 +1064,43 @@ fn the_migration_ledger_is_empty_through_the_pre_release_build() {
         0
     );
 }
+
+/// **A verification that could not run is not a verdict that the database is
+/// damaged.** The full-text check is a write, so it fails on a database nothing
+/// can write to — and `Damaged` is what authorizes discarding the database, so
+/// reporting one here would answer a broken environment by destroying sound
+/// derived state.
+#[test]
+fn a_verification_that_cannot_write_is_refused_rather_than_called_damage() {
+    let scratch = Scratch::new("read-only");
+    let mut store = scratch.open();
+    store
+        .begin_request()
+        .upsert_document(&document("notes.md", "hash-1", "a body\n"))
+        .expect("writing a document");
+    store.verify_integrity().expect("a store just written to");
+
+    // The connection can read and cannot write, which is what a revoked
+    // permission or a read-only mount looks like from inside a statement.
+    induced_failure::damage_out_of_band(&mut store, "PRAGMA query_only = ON")
+        .expect("making the connection read-only");
+
+    let error = store
+        .verify_integrity()
+        .expect_err("a verification that cannot write");
+    assert!(
+        !matches!(error, StoreError::Damaged { .. }),
+        "a database nothing can write to was reported as damaged: {error:?}"
+    );
+    let StoreError::Sql { operation, .. } = &error else {
+        panic!("it was reported as {error:?} rather than as a refused operation");
+    };
+    assert!(operation.contains("full-text index"), "{operation}");
+
+    // And the database it could not verify is still readable and still there.
+    induced_failure::damage_out_of_band(&mut store, "PRAGMA query_only = OFF")
+        .expect("restoring the connection");
+    store
+        .verify_integrity()
+        .expect("the same store, once it can be written to");
+}
