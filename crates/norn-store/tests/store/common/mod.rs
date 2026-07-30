@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_store::{
-    BlockFact, CandidateFact, ClassKey, DocumentFacts, DocumentPath, FindingFacts,
-    FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Span, Store, TagFact, TagSource,
-    VectorFacts, suffix_probe,
+    BlockFact, CandidateFact, Change, ClassKey, DocumentFacts, DocumentPath, FindingFacts,
+    FrontmatterValue, HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact, LinkFamily,
+    Provenance, Request, Span, Store, TagFact, TagSource, VectorFacts, suffix_probe,
 };
 
 /// Distinguishes two scratch directories taken in the same process.
@@ -52,6 +52,64 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// Write one document as a changeset of its own.
+///
+/// The store's one way in for document facts is a changeset, so a case that is
+/// not *about* changesets still applies one — this is that changeset, spelled
+/// once. The mark is `Derived`, which is what a case about anything else is: a
+/// host read the file and derived these facts from the bytes it read.
+pub fn write_document(request: &mut Request<'_>, facts: &DocumentFacts) -> IncrementOutcome {
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [Change::Upsert(facts.clone())],
+        )
+        .expect("applying a document upsert")
+}
+
+/// Record one death as a changeset of its own.
+pub fn record_death(
+    request: &mut Request<'_>,
+    at: &DocumentPath,
+    provenance: Provenance,
+) -> IncrementOutcome {
+    record_deaths(request, &[(at.clone(), provenance)])
+}
+
+/// Record several deaths in one changeset.
+pub fn record_deaths(
+    request: &mut Request<'_>,
+    deaths: &[(DocumentPath, Provenance)],
+) -> IncrementOutcome {
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            deaths
+                .iter()
+                .map(|(path, provenance)| Change::Death {
+                    path: path.clone(),
+                    provenance: *provenance,
+                })
+                .collect::<Vec<Change>>(),
+        )
+        .expect("applying a death")
+}
+
+/// Write several documents in one changeset, which is what a case that needs a
+/// populated store rather than a sequence of writes wants.
+pub fn write_documents(request: &mut Request<'_>, facts: &[DocumentFacts]) -> IncrementOutcome {
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            facts
+                .iter()
+                .cloned()
+                .map(Change::Upsert)
+                .collect::<Vec<_>>(),
+        )
+        .expect("applying a changeset")
 }
 
 /// A document path, or a panic naming what was wrong with it.
