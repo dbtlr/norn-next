@@ -635,11 +635,13 @@ pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<Bl
         if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
             let id_range = (line_start + block_id.start())..(line_start + block_id.end());
             if !overlaps_any(ignored, &id_range) {
+                // Group 1 sits directly after the `\^` in the pattern, so the
+                // marker is always the byte before it.
+                let marker = id_range.start - 1;
+                debug_assert_eq!(body.as_bytes()[marker], b'^');
                 block_ids.push(BlockId {
                     id: block_id.as_str().to_string(),
-                    // Group 1 sits directly after the `\^` in the pattern, so
-                    // the marker is always the byte before it.
-                    span: cursor.span_at(id_range.start - 1),
+                    span: cursor.span_at(marker),
                 });
             }
         }

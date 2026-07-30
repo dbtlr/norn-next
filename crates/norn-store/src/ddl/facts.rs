@@ -75,9 +75,10 @@
 //! # `blocks` is the target side of `links.block_ref`
 //!
 //! A block-id definition trailing a line is what a `[[Note#^id]]` reference
-//! points at. The span columns are nullable: `norn-text` reports a block id's
-//! text and not its position today, so the column stands ready and is filled
-//! when the text layer names one. Nothing enforces uniqueness of `block_id`
+//! points at. `norn-text` names each definition's `^`-marker span, so a writer
+//! reading the text layer has a position to record; the columns are nullable
+//! because this table takes what a writer knows rather than forcing a
+//! position on one that lacks it. Nothing enforces uniqueness of `block_id`
 //! within a document — two lines defining the same id is a vault defect, and
 //! judging it is the findings pillar's job, not a constraint that would refuse
 //! to record what the file says.

@@ -414,6 +414,22 @@ fn a_block_id_span_points_at_its_marker() {
             },
         ]
     );
+    // A lone-CR body is the case that separates the cursor's three-way break
+    // rule from counting `\n` alone: the definition sits on line 2, not at
+    // column 17 of line 1. Detection here finds only the chunk's last
+    // candidate — `a` is dropped — which is NORN-41's characterized gap, not
+    // this span's.
+    assert_eq!(
+        BodyScan::new("first ^a\rsecond ^b\r").block_ids(),
+        [BlockId {
+            id: "b".to_string(),
+            span: SourceSpan {
+                line: 2,
+                column: 8,
+                byte_offset: 16,
+            },
+        }]
+    );
 }
 
 #[test]
