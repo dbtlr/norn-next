@@ -307,7 +307,7 @@ impl Store {
             .map_err(|error| error::sql("checking foreign keys", error))?;
         if orphans != 0 {
             return Err(StoreError::Damaged {
-                what: format!("{orphans} rows reference a document that is not there"),
+                what: format!("{orphans} rows reference a row that is not there"),
             });
         }
 
