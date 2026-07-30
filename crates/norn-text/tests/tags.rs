@@ -202,6 +202,40 @@ fn a_hash_inside_a_link_token_is_not_a_marker() {
     assert_eq!(names(&body_tags("[[Note#H]] #real\n")), ["real"]);
 }
 
+/// The same rule covers every construct the parse recognizes, not only the two
+/// that produce link facts. A URL fragment written in an autolink, an image,
+/// a reference-style link or a definition line is that construct's syntax, and
+/// reading it as a marker would mint a schema-shaped fact out of every
+/// documentation URL in the vault.
+#[test]
+fn a_hash_inside_any_recognized_construct_is_not_a_marker() {
+    for body in [
+        "<https://example.com/#install>\n",
+        "![alt](./pics/#frag)\n",
+        "[label]: ./target.md#faq\n",
+        "[text][sec#faq]\n\n[sec#faq]: ./target.md\n",
+        "[sec#faq]\n\n[sec#faq]: ./target.md\n",
+    ] {
+        assert!(body_tags(body).is_empty(), "in {body:?}");
+    }
+
+    // A tag beside one of them is unaffected.
+    assert_eq!(
+        names(&body_tags("<https://example.com/#install> #real\n")),
+        ["real"]
+    );
+}
+
+/// The stated limitation. A bare URL in prose is recognized by nothing — no
+/// autolink event, no link token — so its fragment reads as a marker like any
+/// other hash after a non-word character. Closing this would mean a URL
+/// detector, which is a second grammar for a construct CommonMark does not
+/// have.
+#[test]
+fn a_bare_url_in_prose_still_mints_a_tag_from_its_fragment() {
+    assert_eq!(names(&body_tags("see https://x/#setup\n")), ["setup"]);
+}
+
 // ── Code is opaque ───────────────────────────────────────────────────────
 
 #[test]

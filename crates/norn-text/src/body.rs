@@ -2,10 +2,12 @@
 //!
 //! Every body-level fact this crate reports — headings, section boundaries,
 //! link tokens of both families, `#tag` tokens, block-id anchors — is derived
-//! from a single `pulldown-cmark` traversal held by [`BodyScan`]. One pass is
-//! both the cost story (a document is walked once, not once per question) and
-//! the correctness story: three passes are three chances for two parsers to
-//! disagree about where a code fence is.
+//! from a single `pulldown-cmark` traversal held by [`BodyScan`], or from the
+//! byte masks that traversal produces: the `#tag` scanner and the `[[…]]`
+//! token parser walk the body themselves, over ranges the one pass decided
+//! were opaque. One pass is both the cost story (a document is walked once,
+//! not once per question) and the correctness story: three parses are three
+//! chances for two readings to disagree about where a code fence is.
 //!
 //! # Code is opaque
 //!
@@ -35,6 +37,13 @@
 //!   (`[label]: target.md`) produces no parser event at all and is invisible
 //!   here; an *undefined* reference is not a link to the parser either and
 //!   arrives as ordinary text.
+//!
+//! Producing no link fact is not the same as being unrecognized. Every one of
+//! these forms is opaque to the `#tag` scan, definition lines included, so a
+//! URL fragment written in one is that construct's syntax rather than a tag —
+//! the same rule the two implemented families follow. A bare URL in prose is
+//! the stated exception: nothing recognizes one, so `see https://x/#setup`
+//! carries the tag `setup`.
 
 use std::ops::Range;
 
@@ -60,6 +69,7 @@ pub struct BodyScan<'a> {
     headings: Vec<Heading>,
     markdown_links: Vec<MarkdownToken>,
     code_ranges: Vec<Range<usize>>,
+    construct_ranges: Vec<Range<usize>>,
 }
 
 impl<'a> BodyScan<'a> {
@@ -68,6 +78,7 @@ impl<'a> BodyScan<'a> {
         let mut headings = Vec::new();
         let mut markdown_links = Vec::new();
         let mut code_ranges: Vec<Range<usize>> = Vec::new();
+        let mut construct_ranges: Vec<Range<usize>> = Vec::new();
         let mut active_heading: Option<ActiveHeading> = None;
         let mut active_link: Option<ActiveLink> = None;
         let mut active_code_block: Option<usize> = None;
@@ -81,6 +92,16 @@ impl<'a> BodyScan<'a> {
         let mut container_depth: usize = 0;
 
         for (event, range) in Parser::new(body).into_offset_iter() {
+            // Every link and image the parse recognizes is opaque to the tag
+            // scan, whichever family it belongs to and whether or not it
+            // produces a link fact: the `#` in `<https://x/#install>` or
+            // `![alt](./pics/#frag)` is that construct's own fragment syntax.
+            // The ranges come free with the events, so the mask covers exactly
+            // what the one pass already saw.
+            if matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. })) {
+                construct_ranges.push(range.clone());
+            }
+
             match event {
                 Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
                     container_depth += 1;
@@ -179,6 +200,7 @@ impl<'a> BodyScan<'a> {
             headings,
             markdown_links,
             code_ranges,
+            construct_ranges,
         }
     }
 
@@ -220,9 +242,12 @@ impl<'a> BodyScan<'a> {
 
     /// Every `#tag` in the body, in document order.
     ///
-    /// Code is opaque to tags, and so are link tokens: the `#` in
-    /// `[[Note#Heading]]` or `[text](#frag)` is that link's fragment syntax,
-    /// not a marker.
+    /// Code is opaque to tags, and so is every construct the parse recognizes
+    /// as addressing something: the `#` in `[[Note#Heading]]`,
+    /// `[text](#frag)`, `<https://x/#install>`, `![alt](./pics/#frag)` or a
+    /// `[label]: url#faq` definition line is that construct's fragment syntax,
+    /// not a marker. A bare URL in prose is recognized by nothing and is the
+    /// stated exception.
     pub fn tags(&self) -> Vec<TagFact> {
         scan_tags(self.body, &self.opaque_to_tags())
     }
@@ -276,14 +301,45 @@ impl<'a> BodyScan<'a> {
             .collect()
     }
 
-    /// The ranges a tag may not be read out of: code, plus every link token of
-    /// either family.
+    /// The ranges a tag may not be read out of: code, every `[[…]]` token, and
+    /// every link or image construct the CommonMark parse recognized —
+    /// reference-style links and their definition lines included.
     fn opaque_to_tags(&self) -> Vec<Range<usize>> {
         let mut ranges = self.code_ranges.clone();
         ranges.extend(wikilink_ranges(self.body, &self.code_ranges));
-        ranges.extend(self.markdown_links.iter().map(|token| token.range.clone()));
+        ranges.extend(self.construct_ranges.iter().cloned());
+        ranges.extend(definition_lines(self.body, &self.code_ranges));
         merge_ranges(ranges)
     }
+}
+
+/// The byte range of every link reference definition line (`[label]: target`),
+/// code excluded.
+///
+/// A definition line produces no parser event, so it is the one recognized
+/// construct whose bytes the one pass cannot hand over. The rule is therefore
+/// the line shape CommonMark gives a definition its own: up to three spaces of
+/// indent, `[`, a label, then `]:`. Masking the line is deliberate over-reach
+/// in the safe direction — the alternative is minting a tag out of the
+/// fragment of every URL a document defines.
+fn definition_lines(body: &str, code_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut lines = Vec::new();
+    let mut line_start = 0;
+    for line in body.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent <= 3
+            && line[indent..].starts_with('[')
+            && let Some(close) = line[indent..].find(']')
+            && line[indent + close + 1..].starts_with(':')
+        {
+            let range = line_start..line_start + line.len();
+            if !overlaps_any(code_ranges, &range) {
+                lines.push(range);
+            }
+        }
+        line_start += line.len();
+    }
+    lines
 }
 
 /// A heading being accumulated across the events that make it up.
