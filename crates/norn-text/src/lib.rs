@@ -89,6 +89,12 @@
 //! change is what may be rewritten — a rename does not reach inside somebody
 //! else's URL.
 //!
+//! The two grammars are read independently, so **link ranges may overlap and
+//! nest across the families**: `[[a]](b)` satisfies both at once and produces
+//! two facts sharing bytes. Deciding which one an author meant is semantics,
+//! and [`BodyScan::links`] instead contracts a total order so the same link is
+//! the same row twice.
+//!
 //! [`Tag`] is its own fact kind rather than a link — one grammar, read from
 //! body tokens and from the frontmatter `tags` field.
 //!
