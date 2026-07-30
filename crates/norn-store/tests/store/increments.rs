@@ -3,9 +3,11 @@
 //!
 //! The cases here are the ones the entry point exists for — atomicity across
 //! several documents, one generation for the whole act, the order entries apply
-//! in, the findings a changed path invalidates, and the counter reading a
-//! `Composed` changeset is held to. Every other suite writes through the same
-//! entry point; these are the ones that judge it.
+//! in, the findings a changed path invalidates on either axis, and the counter
+//! reading a `Composed` changeset is held to. Atomicity is judged from both
+//! ends: a changeset refused partway through, and a process killed partway
+//! through. Every other suite writes through the same entry point; these are the
+//! ones that judge it.
 
 use std::path::Path;
 use std::process::Command;
@@ -14,7 +16,7 @@ use crate::common::{
     Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, violation,
     write_document, write_documents,
 };
-use norn_store::{Change, IncrementProvenance, OpenOutcome, Provenance, Store};
+use norn_store::{Change, IncrementProvenance, OpenOutcome, Provenance, Store, StoreError};
 
 /// One upsert entry, from a document and a hash.
 fn upsert(at: &str, hash: &str, body: &str) -> Change {
@@ -205,6 +207,83 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
     );
 
     assert_eq!(request.pillars().expect("a pillar report").documents, 2);
+    assert_eq!(request.pillars().expect("a pillar report").tombstones, 2);
+
+    request.finish();
+    store.verify_integrity().expect("a store after a changeset");
+}
+
+/// **The ordering rule is per entry, not per pair.** A third entry decides over a
+/// second exactly as a second decides over a first, and a path that only ever
+/// dies keeps one tombstone however many deaths name it.
+///
+/// The changeset also leaves a live document beside its own tombstone at the
+/// **same generation**, which is why row presence is what decides liveness:
+/// comparing the two generations answers nothing.
+#[test]
+fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
+    let scratch = Scratch::new("three-entries");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                upsert("revived.md", "hash-1", "first\n"),
+                death("revived.md", Provenance::WatcherRemoval),
+                upsert("revived.md", "hash-2", "second\n"),
+                // A path nothing ever derived, killed twice.
+                death("twice/dead.md", Provenance::HealPrune),
+                death("twice/dead.md", Provenance::PlanDelete),
+            ],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(outcome.documents_upserted, 2);
+    assert_eq!(
+        outcome.documents_deleted, 1,
+        "a death that found no row removed one"
+    );
+    assert_eq!(outcome.tombstones_recorded, 3);
+
+    let revived = request
+        .stored_facts(&path("revived.md"))
+        .expect("reading a document")
+        .expect("the upsert after the death did not stand");
+    assert_eq!(revived.document.content_hash, "hash-2");
+    assert_eq!(revived.body, "second\n");
+
+    let tombstone = request
+        .stored_tombstone(&path("revived.md"))
+        .expect("reading a tombstone")
+        .expect("a tombstone");
+    assert_eq!(
+        tombstone.last_content_hash.as_deref(),
+        Some("hash-1"),
+        "the death did not read the row the entry before it wrote"
+    );
+    assert_eq!(
+        revived.document.generation, tombstone.generation,
+        "a document and the tombstone it outlived stand at one generation, so nothing about \
+         which is current can be read off them"
+    );
+
+    let twice_dead = request
+        .stored_tombstone(&path("twice/dead.md"))
+        .expect("reading a tombstone")
+        .expect("a tombstone");
+    assert_eq!(
+        twice_dead.last_content_hash, None,
+        "a path nothing ever derived had a hash to record"
+    );
+    assert_eq!(
+        twice_dead.provenance,
+        Provenance::PlanDelete,
+        "the second death is the most recent answer"
+    );
+
+    assert_eq!(request.pillars().expect("a pillar report").documents, 1);
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 2);
 
     request.finish();
@@ -704,6 +783,146 @@ fn a_changeset_is_applied_from_a_generator_that_materializes_nothing() {
     small.assert_equal_counts(&large, "one document of the same shape, either side");
 
     store.verify_integrity().expect("a store after a thousand");
+}
+
+/// **A changeset that refuses leaves nothing behind and consumes no
+/// generation.** The entries ahead of the refusal already ran their statements,
+/// so what makes them absent afterwards is the rollback rather than their never
+/// having happened — and the same rollback returns the generation the changeset
+/// took before its first entry.
+///
+/// This is the other end of the tear: a process killed mid-changeset and a
+/// changeset refused mid-changeset leave the same store, and only one of them is
+/// reachable without killing anything.
+#[test]
+fn a_refused_changeset_rolls_back_the_entries_that_ran_before_it() {
+    let scratch = Scratch::new("refused-changeset");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let before = write_documents(
+        &mut request,
+        &[
+            document("notes/one.md", "hash-1", "the first body\n"),
+            document("notes/two.md", "hash-1", "the second body\n"),
+        ],
+    );
+    // Written in the first document and about the third one's class, so both
+    // axes of the refused changeset's findings maintenance would reach it.
+    request
+        .record_finding(&ambiguity("notes/one.md", "three", "three/", &[], 2))
+        .expect("recording a finding");
+    // A committed changeset immediately before, so the generation the refused
+    // one would have taken is known exactly.
+    let marker = write_document(&mut request, &document("marker.md", "hash-1", "a body\n"));
+    let counted = snapshot(request.counters());
+
+    // The third entry does not add up: its body offset and body do not account
+    // for the byte length it claims.
+    let mut refused = document("notes/three.md", "hash-1", "a body\n");
+    refused.byte_length = 4_096;
+
+    let error = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                upsert("notes/one.md", "hash-2", "a replaced body\n"),
+                death("notes/two.md", Provenance::PlanDelete),
+                Change::Upsert(refused),
+                upsert("notes/four.md", "hash-1", "never reached\n"),
+            ],
+        )
+        .expect_err("a changeset carrying an entry that does not add up");
+
+    let StoreError::Entry {
+        index,
+        path: named,
+        problem,
+    } = &error
+    else {
+        panic!("the refusal does not say which entry it came from: {error:?}");
+    };
+    assert_eq!(*index, 2, "the refusal named the wrong entry");
+    assert_eq!(named, "notes/three.md");
+    assert!(matches!(**problem, StoreError::Bound { .. }), "{problem:?}");
+
+    // The entries that ran before the refusal are rolled back: the re-derivation
+    // did not stand and the death did not stand.
+    let one = request
+        .stored_facts(&path("notes/one.md"))
+        .expect("reading a document")
+        .expect("a document the refused changeset removed");
+    assert_eq!(one.document.content_hash, "hash-1");
+    assert_eq!(one.body, "the first body\n");
+    assert_eq!(
+        Some(one.document.generation),
+        before.generation,
+        "a re-derivation inside a refused changeset stood"
+    );
+    assert!(
+        request
+            .stored_document(&path("notes/two.md"))
+            .expect("reading a document")
+            .is_some(),
+        "a death inside a refused changeset stood"
+    );
+    assert_eq!(
+        request
+            .stored_tombstone(&path("notes/two.md"))
+            .expect("reading a tombstone"),
+        None,
+        "a refused changeset left a tombstone at rest"
+    );
+    // Neither the entry that was refused nor the one after it is anywhere.
+    for at in ["notes/three.md", "notes/four.md"] {
+        assert_eq!(
+            request
+                .stored_document(&path(at))
+                .expect("reading a document"),
+            None,
+            "`{at}` is at rest after the changeset that named it refused"
+        );
+    }
+    assert_eq!(request.pillars().expect("a pillar report").documents, 3);
+    assert!(
+        request
+            .full_text_matches("replaced")
+            .expect("reading matches")
+            .is_empty(),
+        "the full-text index holds terms only the refused changeset wrote"
+    );
+    // The discards the entries ahead of the refusal ran are rolled back too.
+    assert_eq!(
+        request
+            .stored_findings(&path("notes/one.md"))
+            .expect("reading findings")
+            .len(),
+        1,
+        "a refused changeset's findings discard stood"
+    );
+
+    // Counters record what happened, and none of this did.
+    snapshot(request.counters())
+        .assert_equal_counts(&counted, "a request either side of a refused changeset");
+
+    // No generation was consumed: the next changeset takes the one the refused
+    // changeset would have.
+    let next = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("notes/five.md", "hash-1", "a body\n")],
+        )
+        .expect("applying a changeset");
+    assert_eq!(
+        next.generation,
+        marker.generation.map(|generation| generation + 1),
+        "the refused changeset consumed a generation"
+    );
+
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store a changeset was refused in");
 }
 
 /// The environment variable that puts this suite's own binary in the child role,

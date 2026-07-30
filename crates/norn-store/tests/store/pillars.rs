@@ -71,8 +71,11 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     request.finish();
     store.verify_integrity().expect("after an update");
 
-    // A re-derivation that did not change the body does no index work, and the
-    // index still agrees.
+    // A re-derivation that did not change the body leaves the index agreeing
+    // with the column. The update trigger's `WHEN old.body IS NOT new.body`
+    // guard is what makes that free rather than a delete and an insert of the
+    // same terms — a cost difference rather than a behavioural one, since no
+    // read distinguishes the two. What is asserted here is the agreement.
     let mut request = store.begin_request();
     write_document(
         &mut request,
