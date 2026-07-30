@@ -210,11 +210,18 @@ fn a_hash_inside_a_link_token_is_not_a_marker() {
 #[test]
 fn a_hash_inside_any_recognized_construct_is_not_a_marker() {
     for body in [
+        // Autolinks, of which a `mailto:` one is still a URI autolink.
         "<https://example.com/#install>\n",
+        "<mailto:person@example.com/#note>\n",
+        // An image, whose destination is a destination like any other.
         "![alt](./pics/#frag)\n",
-        "[label]: ./target.md#faq\n",
-        "[text][sec#faq]\n\n[sec#faq]: ./target.md\n",
-        "[sec#faq]\n\n[sec#faq]: ./target.md\n",
+        // A definition line, which produces no parser event at all.
+        "[label]: ./target/#faq\n",
+        // A reference-style link and its definition, in all three written
+        // forms. Each token carries the hash in its label.
+        "[text][sec-#faq]\n\n[sec-#faq]: ./target/#faq\n",
+        "[sec-#faq][]\n\n[sec-#faq]: ./target/#faq\n",
+        "[sec-#faq]\n\n[sec-#faq]: ./target/#faq\n",
     ] {
         assert!(body_tags(body).is_empty(), "in {body:?}");
     }
