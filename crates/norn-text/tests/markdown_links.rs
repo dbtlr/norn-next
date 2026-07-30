@@ -1,11 +1,15 @@
 //! Inline Markdown links: the second link family, the fact shape it shares
-//! with wikilinks, the addressing mode that tells them apart, and the fence
-//! around the forms that stay characterized rather than implemented.
+//! with wikilinks, the resolution that tells them apart, and the fence around
+//! the forms that stay characterized rather than implemented.
 
-use norn_text::{AddressingMode, BodyScan, Document, Link, LinkFamily, reconstruct_wikilink};
+use norn_text::{BodyScan, Document, Link, LinkFamily, Resolution, reconstruct_wikilink};
 
 fn markdown_links(body: &str) -> Vec<Link> {
-    BodyScan::new(body).markdown_links()
+    BodyScan::new(body)
+        .links()
+        .into_iter()
+        .filter(|link| link.family == LinkFamily::Markdown)
+        .collect()
 }
 
 fn only(body: &str) -> Link {
@@ -22,7 +26,7 @@ fn targets(links: &[Link]) -> Vec<&str> {
     links.iter().map(|link| link.target.as_str()).collect()
 }
 
-// ── One fact shape, two addressing modes ─────────────────────────────────
+// ── One fact shape, protocol-first resolution ────────────────────────────
 
 #[test]
 fn an_inline_link_decomposes_into_the_link_fact() {
@@ -37,21 +41,39 @@ fn an_inline_link_decomposes_into_the_link_fact() {
     assert!(!link.embed);
 }
 
-/// The two families reach the same document by two standards, and the fact
-/// says which one a resolver should use. A wikilink stem is a suffix address;
-/// a Markdown destination is a path relative to the document it was written
-/// in.
+/// A protocol-free target reaches its document by its family's standard, and
+/// the fact says which one a resolver should use. A wikilink stem is a suffix
+/// address; a Markdown destination is a path relative to the document it was
+/// written in.
 #[test]
-fn the_family_decides_the_addressing_mode() {
+fn a_protocol_free_target_resolves_by_its_family() {
     let wikilink = BodyScan::new("[[norn-links]]\n").wikilinks().remove(0);
     let markdown = only("[Links](./norn-links.md)\n");
 
-    assert_eq!(wikilink.addressing(), AddressingMode::Suffix);
-    assert_eq!(markdown.addressing(), AddressingMode::RelativePath);
-    assert_eq!(LinkFamily::Wikilink.addressing(), AddressingMode::Suffix);
+    assert_eq!(wikilink.resolution(), Resolution::Suffix);
+    assert_eq!(markdown.resolution(), Resolution::RelativePath);
+}
+
+/// A written protocol shadows the family, because the family says which
+/// grammar the author wrote and the protocol says what the address is.
+/// Deriving the reading from the family alone claimed `https://example.com`
+/// was a relative path and `[[https://x|Docs]]` a suffix address — two false
+/// facts, and the second one licensed rewriting somebody else's URL.
+#[test]
+fn a_written_protocol_shadows_the_family() {
     assert_eq!(
-        LinkFamily::Markdown.addressing(),
-        AddressingMode::RelativePath
+        only("[Home](https://example.com)\n").resolution(),
+        Resolution::Protocol("https")
+    );
+    assert_eq!(
+        BodyScan::new("[[https://x|Docs]]\n").wikilinks()[0].resolution(),
+        Resolution::Protocol("https")
+    );
+    // The reserved identifier routes through the same arm; it is a written
+    // protocol like any other until a layer means something by it.
+    assert_eq!(
+        BodyScan::new("[[vault://Note]]\n").wikilinks()[0].resolution(),
+        Resolution::Protocol("vault")
     );
 }
 
@@ -153,7 +175,6 @@ fn links_reports_both_families_in_document_order() {
         ]
     );
     assert_eq!(targets(&scan.wikilinks()), ["Wiki"]);
-    assert_eq!(targets(&scan.markdown_links()), ["./a.md", "./b.md"]);
 }
 
 #[test]
@@ -179,15 +200,18 @@ fn a_token_reports_where_it_starts_and_how_far_it_runs() {
 
 // ── Rewriting is not a token substitution here ───────────────────────────
 
-/// A wikilink rewrite refuses a Markdown link. Its target is relative to the
-/// document it sits in, so one move produces different bytes per referencing
-/// file — a per-document computation rather than a splice, and it belongs to
-/// the layer that knows where documents are.
+/// A wikilink rewrite refuses a Markdown link even though its stem is
+/// nameable. Its target is relative to the document it sits in, so one move
+/// produces different bytes per referencing file — a per-document computation
+/// rather than a splice, and it belongs to the layer that knows where
+/// documents are. The span is what that layer writes over; it is not a licence
+/// for this one to.
 #[test]
 fn a_markdown_link_is_not_rewritten_by_the_wikilink_splicer() {
     let link = only("[t](./old.md)\n");
-    assert_eq!(link.stem_range, None);
+    assert_eq!(link.stem_range, Some(4..12));
     assert_eq!(reconstruct_wikilink(&link, "./new.md"), None);
+    assert_eq!(reconstruct_wikilink(&link, "new"), None);
 
     let body = "[t](./old.md) and [[old]]\n";
     let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "new"));
@@ -231,6 +255,19 @@ fn a_markdown_link_in_a_frontmatter_value_is_not_a_link() {
 fn an_image_is_recognized_and_produces_no_link() {
     assert!(markdown_links("![alt](picture.png)\n").is_empty());
     assert!(BodyScan::new("![alt](picture.png)\n").links().is_empty());
+}
+
+/// A link written inside an image's alt text is a link, and it is reported. It
+/// is a construct of an implemented family with its own target and its own
+/// bytes, and the image around it is still not a link — the fence is about
+/// which written form produces a fact, not about where in the document it was
+/// written.
+#[test]
+fn a_link_inside_an_images_alt_text_is_still_a_link() {
+    let links = BodyScan::new("![see [here](a.md)](i.png)\n").links();
+    assert_eq!(targets(&links), ["a.md"]);
+    assert_eq!(links[0].raw, "[here](a.md)");
+    assert_eq!(links[0].title.as_deref(), Some("here"));
 }
 
 /// An image nested inside a link is still not a link of its own, and its alt
@@ -290,21 +327,66 @@ fn a_definition_line_and_an_undefined_reference_are_invisible() {
 
 /// The document is read through one parser, so a link's destination is the
 /// destination that parser reports: an angle-bracketed form is unwrapped and a
-/// backslash escape is resolved. The stem therefore has no sub-span — the
-/// parsed target need not appear literally in the source — and a span that is
-/// not certainly right is absent rather than guessed.
+/// backslash escape is resolved. What the parse does *not* answer is which
+/// hash the author wrote, so a destination whose bytes it changed carries no
+/// stem sub-span — a span that is not certainly right is absent rather than
+/// guessed.
 #[test]
-fn a_destination_is_the_parsers_and_carries_no_stem_span() {
+fn a_destination_is_the_parsers_and_a_rewritten_one_carries_no_stem_span() {
     let angled = only("[t](<my file.md>)\n");
     assert_eq!(angled.target, "my file.md");
     assert_eq!(angled.raw, "[t](<my file.md>)");
     assert_eq!(angled.stem_range, None);
 
-    // A backslash-escaped hash is resolved by the parse and then reads as a
-    // fragment. Percent-encoding is the spelling that survives the split.
     let escaped = only("[t](note\\#draft.md)\n");
-    assert_eq!(escaped.target, "note");
-    assert_eq!(escaped.anchor.as_deref(), Some("draft.md"));
+    assert_eq!(escaped.stem_range, None);
+}
+
+/// The fragment split runs over the destination's *source* bytes. An escaped
+/// `\#` is a literal hash the parse resolves, so splitting its answer turned a
+/// real filename into a note with an anchor; an unescaped `#` splits wherever
+/// it is written, angle brackets included, which is the convention every URL
+/// reader follows.
+#[test]
+fn the_fragment_split_reads_the_hash_the_author_wrote() {
+    let escaped = only("[t](note\\#draft.md)\n");
+    assert_eq!(escaped.target, "note#draft.md");
+    assert_eq!(escaped.anchor, None);
+    assert_eq!(escaped.block_ref, None);
+
+    let angled = only("[t](<a#b.md>)\n");
+    assert_eq!(angled.target, "a");
+    assert_eq!(angled.anchor.as_deref(), Some("b.md"));
+
+    // An escape after the fragment opens belongs to the fragment, and the
+    // first unescaped hash is still the one that splits.
+    let both = only("[t](a\\#b#c)\n");
+    assert_eq!(both.target, "a#b");
+    assert_eq!(both.anchor.as_deref(), Some("c"));
+}
+
+/// A destination standing in the token exactly as the parse read it has
+/// nameable bytes, and the stem's own sub-span is what a rewrite at the layer
+/// that owns relative paths writes over. Re-emitting a destination from its
+/// parts is lossy, which is why the span rather than the parts is the answer.
+#[test]
+fn a_literal_destination_carries_the_stems_sub_span() {
+    for (body, stem) in [
+        ("[t](./note.md#Heading)\n", "./note.md"),
+        ("[t](note.md)\n", "note.md"),
+        ("[t](note%23draft.md)\n", "note%23draft.md"),
+        ("[Home](https://example.com/page#top)\n", "example.com/page"),
+        ("[t](x.md \"Tooltip\")\n", "x.md"),
+        ("[t](#frag)\n", ""),
+    ] {
+        let link = only(body);
+        let range = link
+            .stem_range
+            .clone()
+            .unwrap_or_else(|| panic!("a literal destination has a stem span in {body:?}"));
+        assert_eq!(&link.raw[range], stem, "stem span of {body:?}");
+        assert_eq!(link.target, stem, "target of {body:?}");
+    }
 }
 
 /// CommonMark's optional link title — the quoted string after the destination
@@ -322,8 +404,12 @@ fn the_commonmark_title_attribute_is_not_the_links_title() {
 /// sharing bytes — and both facts are reported. Neither grammar is given
 /// precedence over the other, because deciding what an author meant by an
 /// ambiguous token is not a syntax question.
+///
+/// So link ranges overlap, and across the families they nest. The order is
+/// what keeps that usable: ascending by start, wikilink first on a tie, which
+/// is what makes the same link the same row twice.
 #[test]
-fn a_token_that_satisfies_both_grammars_reports_both_facts() {
+fn a_token_that_satisfies_both_grammars_reports_both_overlapping_facts() {
     let body = "[[a]](b)\n";
     let links = BodyScan::new(body).links();
     assert_eq!(targets(&links), ["a", "b"]);
@@ -331,4 +417,12 @@ fn a_token_that_satisfies_both_grammars_reports_both_facts() {
         links.iter().map(|link| link.family).collect::<Vec<_>>(),
         [LinkFamily::Wikilink, LinkFamily::Markdown]
     );
+    assert_eq!(links[0].range(), 0..5);
+    assert_eq!(links[1].range(), 0..8);
+
+    // Nesting: a wikilink written inside a Markdown link's bracket text.
+    let nested = BodyScan::new("[see [[Inner]] here](./out.md)\n").links();
+    assert_eq!(targets(&nested), ["./out.md", "Inner"]);
+    assert_eq!(nested[0].range(), 0..30);
+    assert_eq!(nested[1].range(), 5..14);
 }

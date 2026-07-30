@@ -9,7 +9,7 @@
 
 use norn_text::{
     BodyScan, Link, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
-    split_wikilink_target, wikilink_target_is_representable,
+    wikilink_target_is_representable,
 };
 
 fn only(text: &str) -> Link {
@@ -97,6 +97,19 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
     assert!(parse_wikilinks_in_text("[[]]").is_empty());
     assert!(parse_wikilinks_in_text("![[]]").is_empty());
 
+    // `[[   ]]` *is* a token: there are characters between the fences, and
+    // padding is padding whether or not anything is padded. Its target is
+    // empty, which is a broken link somebody wrote rather than a token nobody
+    // wrote.
+    let blank = only("[[   ]]");
+    assert_eq!(blank.target, "");
+    assert_eq!(blank.title, None);
+    assert_eq!(blank.anchor, None);
+    assert_eq!(
+        reconstruct_wikilink(&blank, "new").as_deref(),
+        Some("[[   new]]")
+    );
+
     // `[[|]]` is a token with an empty target and an empty title.
     let piped = only("[[|]]");
     assert_eq!(piped.target, "");
@@ -131,10 +144,11 @@ fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
 /// paragraph are two tokens, and a token whose fences straddle the break is
 /// still a token — its target simply carries the newline.
 ///
-/// That target is not representable, so the link reads but does not rewrite:
-/// reconstructing it, even with the target it already has, returns nothing and
-/// a splice leaves it alone. Recognizing it and refusing to rewrite it is the
-/// pair that keeps a rename from reflowing a paragraph.
+/// It reads and it does not rewrite. A replacement is one line, and splicing
+/// one over bytes that span several deletes the line breaks between them: the
+/// paragraph the token swallowed comes back reflowed. Recognizing the token
+/// and refusing to rewrite it is the pair that keeps a rename out of prose it
+/// was never pointed at.
 #[test]
 fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
     let body = "see [[Target]]\nand [[Other]] too\n";
@@ -148,9 +162,24 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
     assert_eq!(link.target, "Target\nOther");
     assert!(!wikilink_target_is_representable(&link.target));
     assert_eq!(reconstruct_wikilink(&link, &link.target), None);
+    assert_eq!(reconstruct_wikilink(&link, "new"), None);
     assert_eq!(
         BodyScan::new(straddling).splice_wikilinks(|link| reconstruct_wikilink(link, "new")),
-        "before [[new]] after\n"
+        straddling
+    );
+}
+
+/// The reason the refusal is not pedantry: an unclosed `[[` swallows every
+/// byte up to the next `]]`, paragraph breaks included. A rename that spliced
+/// a one-line stem over that token would delete two paragraphs and the blank
+/// line between them, and report success.
+#[test]
+fn a_token_that_swallowed_two_paragraphs_is_a_no_op_splice() {
+    let body = "an unclosed [[link here\n\nand a later ]] closer\n\nplus [[Real]]\n";
+    let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "new"));
+    assert_eq!(
+        out,
+        "an unclosed [[link here\n\nand a later ]] closer\n\nplus [[new]]\n"
     );
 }
 
@@ -161,10 +190,6 @@ fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
 /// one splitter, and it says a caret is a block sigil only after a hash.
 #[test]
 fn a_bare_caret_is_an_ordinary_target_character() {
-    assert_eq!(
-        split_wikilink_target("a^b"),
-        ("a^b".to_string(), None, None)
-    );
     let link = only("[[a^b]]");
     assert_eq!(link.target, "a^b");
     assert_eq!(link.block_ref, None);
@@ -177,25 +202,38 @@ fn a_bare_caret_is_an_ordinary_target_character() {
 
 #[test]
 fn only_the_first_hash_splits_and_the_rest_stay_in_the_anchor() {
-    assert_eq!(
-        split_wikilink_target("Note#Heading#With#Hashes"),
-        (
-            "Note".to_string(),
-            Some("Heading#With#Hashes".to_string()),
-            None
-        )
-    );
-    assert_eq!(
-        split_wikilink_target("Note#^block-id"),
-        ("Note".to_string(), None, Some("block-id".to_string()))
-    );
-    assert_eq!(
-        split_wikilink_target("Note"),
-        ("Note".to_string(), None, None)
-    );
-    assert_eq!(
-        split_wikilink_target("#Heading"),
-        ("".to_string(), Some("Heading".to_string()), None)
+    let hashes = only("[[Note#Heading#With#Hashes]]");
+    assert_eq!(hashes.target, "Note");
+    assert_eq!(hashes.anchor.as_deref(), Some("Heading#With#Hashes"));
+    assert_eq!(hashes.block_ref, None);
+
+    let block = only("[[Note#^block-id]]");
+    assert_eq!(block.target, "Note");
+    assert_eq!(block.anchor, None);
+    assert_eq!(block.block_ref.as_deref(), Some("block-id"));
+
+    let plain = only("[[Note]]");
+    assert_eq!(plain.target, "Note");
+    assert_eq!(plain.anchor, None);
+
+    let same_note = only("[[#Heading]]");
+    assert_eq!(same_note.target, "");
+    assert_eq!(same_note.anchor.as_deref(), Some("Heading"));
+}
+
+/// The block-reference alphabets are not symmetric, and the asymmetry is
+/// characterized rather than fixed. A `#^id` fragment is recorded raw, so it
+/// carries whatever the author wrote; a trailing `^id` *definition* is matched
+/// against an ASCII alphabet, so the non-ASCII one it would point at is
+/// invisible. Widening the definition's alphabet is a behaviour change with
+/// its own venue.
+#[test]
+fn a_block_reference_carries_what_a_block_id_definition_will_not_match() {
+    assert_eq!(only("[[N#^ünicode]]").block_ref.as_deref(), Some("ünicode"));
+    assert!(
+        BodyScan::new("a paragraph ^ünicode\n")
+            .block_ids()
+            .is_empty()
     );
 }
 
@@ -239,114 +277,10 @@ fn one_fence_is_opaque_to_every_body_parser() {
     assert!(scan.headings().is_empty());
 }
 
-// ── Reconstruction (NRN-431) ─────────────────────────────────────────────
-
-/// NRN-431: a hand-rolled rewriter that strips `[[` and re-emits loses the
-/// embed marker and the title, so a transclusion silently becomes a plain
-/// link. A tight link reconstructed with its own target is byte-identical.
-#[test]
-fn a_tight_link_reconstructed_with_its_own_target_is_unchanged() {
-    for raw in [
-        "[[Target]]",
-        "![[Target]]",
-        "[[Target|Title]]",
-        "![[Target|Title]]",
-        "[[Target#Heading]]",
-        "![[Target#Heading]]",
-        "[[Target#Heading|Title]]",
-        "[[Target#^blk]]",
-        "![[Target#^blk|Title]]",
-    ] {
-        let link = only(raw);
-        assert_eq!(
-            reconstruct_wikilink(&link, &link.target).as_deref(),
-            Some(raw),
-            "reconstructing {raw:?}"
-        );
-    }
-}
-
-#[test]
-fn a_rewrite_keeps_the_embed_marker_the_anchor_and_the_title() {
-    assert_eq!(
-        reconstruct_wikilink(&only("![[old|Display]]"), "new").as_deref(),
-        Some("![[new|Display]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&only("[[old#Heading]]"), "new").as_deref(),
-        Some("[[new#Heading]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&only("[[old#^blk]]"), "new").as_deref(),
-        Some("[[new#^blk]]")
-    );
-}
-
-/// A padded link keeps its padding on rewrite: only the stem's bytes change,
-/// so the spaces the author wrote and the title as they wrote it are outside
-/// the edited range. A rename produces a hunk that reads as exactly the
-/// rename.
-#[test]
-fn a_padded_link_keeps_its_padding_and_its_title_when_it_is_rewritten() {
-    let link = only("[[ Target | Shown ]]");
-    assert_eq!(link.target, "Target");
-    assert_eq!(link.title.as_deref(), Some("Shown"));
-    assert_eq!(
-        reconstruct_wikilink(&link, "Target").as_deref(),
-        Some("[[ Target | Shown ]]")
-    );
-    assert_eq!(
-        reconstruct_wikilink(&link, "New").as_deref(),
-        Some("[[ New | Shown ]]")
-    );
-}
-
-#[test]
-fn a_target_carrying_a_delimiter_is_refused_rather_than_emitted() {
-    let link = only("[[old]]");
-    for bad in ["a|b", "a#b", "a]]b", "a[[b", "a]b", "a[b"] {
-        assert!(!wikilink_target_is_representable(bad), "{bad:?}");
-        assert!(
-            reconstruct_wikilink(&link, bad).is_none(),
-            "reconstructing with {bad:?}"
-        );
-    }
-}
-
-/// A target has to carry something, and carry it on one line. An empty or
-/// blank target writes `[[]]`, which is not a token this grammar recognizes,
-/// so the link vanishes; a target holding a line break splices one into
-/// whatever the link sat in.
-#[test]
-fn an_empty_or_line_breaking_target_is_refused_rather_than_emitted() {
-    let link = only("[[old]]");
-    for bad in ["", "   ", "\t", "a\nb", "a\r\nb", "\n"] {
-        assert!(!wikilink_target_is_representable(bad), "{bad:?}");
-        assert!(
-            reconstruct_wikilink(&link, bad).is_none(),
-            "reconstructing with {bad:?}"
-        );
-    }
-}
-
-/// The reason the refusal is not pedantry: a line break inside a table cell
-/// ends the row, and one inside a blockquote ends the quote. A splice that
-/// emitted these would rewrite the block the link sat in, so it emits nothing
-/// and leaves the token alone.
-#[test]
-fn a_splice_to_a_line_breaking_target_leaves_the_document_alone() {
-    for body in [
-        "| a | b |\n| --- | --- |\n| [[old]] | x |\n",
-        "> quoted [[old]] here\n> still quoted\n",
-    ] {
-        let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "a\nb"));
-        assert_eq!(out, body, "for {body:?}");
-        let blanked = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, ""));
-        assert_eq!(blanked, body, "for {body:?}");
-    }
-}
-
 // ── Splicing (NRN-424, NRN-432, NRN-484) ─────────────────────────────────
+//
+// What a rewrite preserves and what it refuses is `rewrite_fidelity.rs`. What
+// a splice selects is here.
 
 #[test]
 fn a_splice_rewrites_only_the_tokens_it_selects() {

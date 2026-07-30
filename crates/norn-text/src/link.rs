@@ -10,12 +10,16 @@
 //! ```
 //!
 //! What differs between them is how a resolver is meant to read the stem, and
-//! that difference is carried on the fact as [`AddressingMode`]: a wikilink
-//! stem is a path *suffix*, an inline Markdown link's is a path *relative to
-//! the containing document*. Neither reading happens here. Matching a target
-//! to a document — suffix resolution, path joining, ambiguity, containment,
-//! percent-decoding — is **resolution**, and a [`Link`] carries no vault
-//! knowledge to do it with.
+//! [`Link::resolution`] is where that is decided. **Protocol first, family
+//! second**: a target opening with a recognized `protocol://` prefix addresses
+//! whatever that protocol addresses, and the form it was written in says
+//! nothing about it. Only a target with no protocol falls through to its
+//! family — a wikilink stem is a path *suffix*, an inline Markdown link's is a
+//! path *relative to the containing document*.
+//!
+//! None of those readings happens here. Matching a target to a document —
+//! suffix resolution, path joining, ambiguity, containment, percent-decoding —
+//! is **resolution**, and a [`Link`] carries no vault knowledge to do it with.
 //!
 //! # Recognition is lossless
 //!
@@ -36,6 +40,12 @@ use crate::span::{LineCursor, SourceSpan};
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));
 
+/// The one protocol identifier this crate names. It is reserved rather than
+/// resolved: an absent protocol is the vault protocol wherever protocols come
+/// to mean anything, which is why a `vault://` stem is still a vault path and
+/// rewrites like one.
+const VAULT_PROTOCOL: &str = "vault";
+
 static BLOCK_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|\s)\^([A-Za-z0-9_-]+)\s*$").expect("valid block id regex"));
 
@@ -43,38 +53,48 @@ static BLOCK_ID_RE: LazyLock<Regex> =
 ///
 /// Plain rather than `#[non_exhaustive]`: a third family arriving should break
 /// every `match` that dispatches on this one, because a family whose
-/// addressing nobody chose is the defect this enum exists to prevent.
+/// resolution nobody chose is the defect this enum exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkFamily {
-    /// `[[…]]`, the vault idiom.
+    /// `[[…]]`, the vault idiom. A protocol-free wikilink stem is a
+    /// right-to-left, segment-aligned path *suffix*: `glossary` addresses any
+    /// `**/glossary.md`, `norn/glossary` only `**/norn/glossary.md`, and
+    /// never anything relative to the document it was written in.
     Wikilink,
-    /// `[title](target)`, an inline Markdown link. Reference-style links,
-    /// autolinks and images are not this family and produce no link fact —
-    /// see [`crate::BodyScan`].
+    /// `[title](target)`, an inline Markdown link. A protocol-free destination
+    /// is a filesystem path resolved against the containing document's
+    /// directory — `./`, `../`, or a bare segment — and against the vault root
+    /// when the path is rooted. Exact, with no ambiguity class.
+    ///
+    /// Reference-style links, autolinks and images are not this family and
+    /// produce no link fact — see [`crate::BodyScan`].
     Markdown,
 }
 
-/// How a family's stems address a document.
+/// How a resolver is meant to reach what a link addresses.
+///
+/// **Protocol first, family second.** A recognized `protocol://` prefix
+/// shadows the family, because the family says which grammar the author wrote
+/// and the protocol says what the address is: `[t](https://example.com)` is
+/// not a relative path and `[[https://x|Docs]]` is not a suffix address, so
+/// deriving the reading from the family alone states a false fact about both.
+///
+/// Plain rather than `#[non_exhaustive]`: matching this exhaustively is the
+/// point, and a caller that has not decided what to do with a protocol should
+/// fail to compile rather than fall into a default arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AddressingMode {
-    /// A right-to-left, segment-aligned path suffix: `glossary` addresses any
-    /// `**/glossary.md`, `norn/glossary` only `**/norn/glossary.md`. Never
-    /// relative to the document it was written in.
+pub enum Resolution<'a> {
+    /// The target was written with this `protocol://` prefix, sentinel
+    /// excluded. What the protocol addresses is the protocol's business;
+    /// nothing in this crate knows. The reserved `vault` arrives here too — it
+    /// is a written protocol like any other until a layer means something by
+    /// it.
+    Protocol(&'a str),
+    /// A path suffix, per [`LinkFamily::Wikilink`].
     Suffix,
-    /// A filesystem path resolved against the containing document's directory
-    /// — `./`, `../`, or a bare segment — and against the vault root when the
-    /// path is rooted. Exact, with no ambiguity class.
+    /// A path relative to the containing document, per
+    /// [`LinkFamily::Markdown`].
     RelativePath,
-}
-
-impl LinkFamily {
-    /// The addressing mode this family's stems are read with.
-    pub fn addressing(self) -> AddressingMode {
-        match self {
-            LinkFamily::Wikilink => AddressingMode::Suffix,
-            LinkFamily::Markdown => AddressingMode::RelativePath,
-        }
-    }
 }
 
 /// A recognized link token, decomposed and unresolved.
@@ -112,10 +132,16 @@ pub struct Link {
     /// Where [`Link::target`]'s bytes sit inside [`Link::raw`], which is what
     /// a rewrite writes over.
     ///
-    /// `None` when the stem's bytes cannot be named as one span of `raw`: a
-    /// Markdown destination may be written with backslash escapes or inside
-    /// `<…>`, so the parsed target need not appear literally in the source,
-    /// and a span that is not certainly right is absent rather than guessed.
+    /// A wikilink always has one. A Markdown link has one when its destination
+    /// stands in the token exactly as the parse read it, which is the ordinary
+    /// case; `None` when it does not, because a destination written with
+    /// backslash escapes or inside `<…>` is not made of the bytes that produced
+    /// it, and a span that is not certainly right is absent rather than
+    /// guessed.
+    ///
+    /// A span being present is not a licence to splice one family's grammar
+    /// over the other's: [`reconstruct_wikilink`] still refuses a Markdown
+    /// link, whose target is relative to the document it sits in.
     pub stem_range: Option<Range<usize>>,
     /// The display title, trimmed — after `|` for a wikilink, the bracket text
     /// for a Markdown link. A Markdown link always has one, `Some("")`
@@ -135,12 +161,20 @@ impl Link {
         self.span.byte_offset..self.span.byte_offset + self.raw.len()
     }
 
-    /// How this link's stem addresses a document, which is its family's.
+    /// How this link's stem is to be resolved: its protocol when it was
+    /// written with one, and otherwise its family's reading.
     ///
-    /// Derived rather than stored: two fields that must agree are two fields
-    /// that can disagree, and the family is the one that was observed.
-    pub fn addressing(&self) -> AddressingMode {
-        self.family.addressing()
+    /// Derived rather than stored, because two fields that must agree are two
+    /// fields that can disagree, and the protocol and the family are the ones
+    /// that were observed.
+    pub fn resolution(&self) -> Resolution<'_> {
+        match self.protocol.as_deref() {
+            Some(scheme) => Resolution::Protocol(scheme),
+            None => match self.family {
+                LinkFamily::Wikilink => Resolution::Suffix,
+                LinkFamily::Markdown => Resolution::RelativePath,
+            },
+        }
     }
 }
 
@@ -187,11 +221,17 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
             let (target_part, title) = inner_text
                 .split_once('|')
                 .map_or((inner_text, None), |(target, title)| {
-                    (target, Some(title.trim().to_string()))
+                    (target, Some(title.trim()))
                 });
             let padding = target_part.len() - target_part.trim_start().len();
-            let (addressed, anchor, block_ref) = split_wikilink_target(target_part.trim());
-            let (protocol, target) = split_protocol(&addressed);
+            let (addressed, anchor, block_ref) = split_fragment(target_part.trim());
+            // Whitespace between the stem and the fragment is padding, not
+            // part of the address: `[[note #Head]]` addresses `note`, and no
+            // resolver will ever match a target with a space welded to its
+            // end. Trimming it here — rather than in the caller — is also what
+            // keeps it outside `stem_range`, so a rewrite leaves it standing.
+            let addressed = addressed.trim_end();
+            let (protocol, target) = split_protocol(addressed);
             // The stem sits at a known offset inside the token: past the
             // fences and any embed marker, past the padding the author wrote,
             // past the protocol prefix. A rewrite writes over exactly that, so
@@ -208,9 +248,9 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
                 protocol,
                 stem_range: Some(stem_start..stem_start + target.len()),
                 target,
-                title,
-                anchor,
-                block_ref,
+                title: title.map(str::to_string),
+                anchor: anchor.map(str::to_string),
+                block_ref: block_ref.map(str::to_string),
                 span: cursor.span_at(full_match.start()),
             })
         })
@@ -221,28 +261,162 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
 ///
 /// `destination` is the CommonMark parse's link destination and `text` its
 /// bracket text, so backslash escapes and entity references are already
-/// resolved — the document is read through one parser, and re-lexing what that
-/// parser already answered is how two readings drift. Percent-encoding is
-/// *not* resolved, here or anywhere: the fragment split runs over the
-/// destination as written, so `note%23draft.md` names a file and carries no
-/// anchor.
-pub(crate) fn markdown_link(raw: &str, destination: &str, text: &str, span: SourceSpan) -> Link {
-    let (addressed, anchor, block_ref) = split_wikilink_target(destination);
-    let (protocol, target) = split_protocol(&addressed);
+/// resolved — the document is read through one parser, and re-deciding what
+/// that parser already answered is how two readings drift. `text_end` is where
+/// the bracket text ended, which is the parse's answer to the one question the
+/// destination bytes cannot be found without.
+///
+/// The fragment split runs over those source bytes rather than over the
+/// resolved destination, because the two disagree about what a `#` is: the
+/// parse resolves `\#` to a hash, and a split over its answer reads the real
+/// filename `note\#draft.md` as a note with a `draft.md` anchor. An escaped
+/// hash is a literal; an unescaped one opens a fragment, inside `<…>` as well
+/// as outside it. Percent-encoding is resolved nowhere, so `note%23draft.md`
+/// names a file and carries no anchor.
+pub(crate) fn markdown_link(
+    raw: &str,
+    destination: &str,
+    text: &str,
+    text_end: usize,
+    span: SourceSpan,
+) -> Link {
+    let written = destination_span(raw, text_end);
+    let (hash, stem_origin) = match &written {
+        // The source carries the destination byte for byte, so the split and
+        // the stem's own bytes are both nameable inside the token.
+        Some(found) if !found.angled && &raw[found.range.clone()] == destination => {
+            (destination.find('#'), Some(found.range.start))
+        }
+        // The parse resolved something. The split still belongs to the source,
+        // so it is located there and mapped onto the resolved destination —
+        // and the stem's bytes are no longer nameable, because the bytes that
+        // produced them are not the bytes it is made of.
+        Some(found) => (
+            unescaped_hash(&raw[found.range.clone()], destination).unwrap_or(destination.find('#')),
+            None,
+        ),
+        // The destination could not be located in the token at all, so there
+        // is nothing to read but what the parse reported.
+        None => (destination.find('#'), None),
+    };
+
+    let (addressed, anchor, block_ref) = split_at_hash(destination, hash);
+    let (protocol, target) = split_protocol(addressed);
+    let stem_start =
+        stem_origin.map(|start| start + protocol.as_ref().map_or(0, |scheme| scheme.len() + 3));
     Link {
         family: LinkFamily::Markdown,
         raw: raw.to_string(),
         embed: false,
         protocol,
+        stem_range: stem_start.map(|start| start..start + target.len()),
         target,
-        // The destination's source bytes are not separately nameable, so the
-        // stem has no sub-span and a wikilink rewrite refuses this link.
-        stem_range: None,
         title: Some(text.trim().to_string()),
-        anchor,
-        block_ref,
+        anchor: anchor.map(str::to_string),
+        block_ref: block_ref.map(str::to_string),
         span,
     }
+}
+
+/// A Markdown destination as it was written, inside the link token's bytes.
+struct WrittenDestination {
+    range: Range<usize>,
+    /// Whether it was written inside `<…>`, whose bytes the parse strips.
+    angled: bool,
+}
+
+/// Locate the destination inside an inline Markdown link token.
+///
+/// `text_end` is where the parse said the bracket text ended, so the closing
+/// `]` is the next one after it however many brackets the text itself carried.
+/// From there the shape is CommonMark's own: `(`, optional whitespace, then
+/// either a `<…>` destination or a bare one running to the first unescaped
+/// space or to the closing paren, with nested parens counted.
+///
+/// `None` when the token does not have that shape, which is the answer that
+/// leaves the fragment split to the parse's own destination.
+fn destination_span(raw: &str, text_end: usize) -> Option<WrittenDestination> {
+    let close = text_end + raw.get(text_end..)?.find(']')?;
+    let after = raw.get(close + 1..)?.strip_prefix('(')?;
+    let lead = after.len() - after.trim_start().len();
+    let start = close + 2 + lead;
+    let rest = &after[lead..];
+
+    if let Some(inside) = rest.strip_prefix('<') {
+        let end = unescaped_index(inside, '>')?;
+        return Some(WrittenDestination {
+            range: start + 1..start + 1 + end,
+            angled: true,
+        });
+    }
+
+    let mut depth = 0usize;
+    let mut end = rest.len();
+    let mut chars = rest.char_indices();
+    while let Some((at, ch)) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                end = at;
+                break;
+            }
+            ')' => depth -= 1,
+            _ if ch.is_whitespace() => {
+                end = at;
+                break;
+            }
+            _ => {}
+        }
+    }
+    Some(WrittenDestination {
+        range: start..start + end,
+        angled: false,
+    })
+}
+
+/// Where the fragment opens in `destination`, given the `source` bytes it was
+/// written as: the first `#` the source does not escape, as an index into the
+/// resolved destination.
+///
+/// `None` when unescaping `source` does not reproduce `destination` — the
+/// parse resolved something beyond backslash escapes, an entity reference say,
+/// so the source cannot be mapped onto its answer and guessing which byte
+/// corresponds to which is exactly the drift one parser exists to prevent.
+fn unescaped_hash(source: &str, destination: &str) -> Option<Option<usize>> {
+    let mut resolved = String::with_capacity(source.len());
+    let mut hash = None;
+    let mut chars = source.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && let Some(escaped) = chars.clone().next()
+            && escaped.is_ascii_punctuation()
+        {
+            chars.next();
+            resolved.push(escaped);
+            continue;
+        }
+        if ch == '#' && hash.is_none() {
+            hash = Some(resolved.len());
+        }
+        resolved.push(ch);
+    }
+    (resolved == destination).then_some(hash)
+}
+
+/// The index of the first unescaped `needle` in `text`.
+fn unescaped_index(text: &str, needle: char) -> Option<usize> {
+    let mut chars = text.char_indices();
+    while let Some((at, ch)) = chars.next() {
+        if ch == '\\' {
+            chars.next();
+        } else if ch == needle {
+            return Some(at);
+        }
+    }
+    None
 }
 
 pub(crate) fn splice_tokens(
@@ -320,13 +494,22 @@ fn is_scheme_identifier(candidate: &str) -> bool {
 /// function's: a wikilink anchor is heading text, a Markdown fragment is a
 /// heading slug, and the raw fragment recorded here is what both readings
 /// start from.
-pub fn split_wikilink_target(raw: &str) -> (String, Option<String>, Option<String>) {
-    match raw.split_once('#') {
-        Some((target, reference)) if reference.starts_with('^') => {
-            (target.to_string(), None, Some(reference[1..].to_string()))
-        }
-        Some((target, anchor)) => (target.to_string(), Some(anchor.to_string()), None),
-        None => (raw.to_string(), None, None),
+pub(crate) fn split_fragment(raw: &str) -> (&str, Option<&str>, Option<&str>) {
+    split_at_hash(raw, raw.find('#'))
+}
+
+/// [`split_fragment`] with the splitting hash already located, which is how a
+/// Markdown destination is split: where its fragment opens is a question about
+/// the bytes it was written as, not about the string the parse resolved.
+fn split_at_hash(raw: &str, hash: Option<usize>) -> (&str, Option<&str>, Option<&str>) {
+    let Some(hash) = hash else {
+        return (raw, None, None);
+    };
+    let (target, reference) = raw.split_at(hash);
+    let reference = &reference[1..];
+    match reference.strip_prefix('^') {
+        Some(block_ref) => (target, None, Some(block_ref)),
+        None => (target, Some(reference), None),
     }
 }
 
@@ -338,11 +521,13 @@ pub fn split_wikilink_target(raw: &str) -> (String, Option<String>, Option<Strin
 /// target carrying one would re-parse as a different link shape — `a|b` reads
 /// as target `a` with title `b`.
 ///
-/// A target must also carry something, and carry it on one line. `[[]]` and
-/// `[[   ]]` are not tokens this grammar recognizes at all, so a link written
-/// with one vanishes; a target holding `\n` or `\r` splices a line break into
-/// whatever the link sat in, which ends a table row and leaves a blockquote
-/// mid-paragraph.
+/// A target must also carry something, carry it on one line, and carry no
+/// surrounding whitespace. `[[]]` is not a token this grammar recognizes at
+/// all, so a link written with one vanishes; a target holding `\n` or `\r`
+/// splices a line break into whatever the link sat in, which ends a table row
+/// and leaves a blockquote mid-paragraph; and a padded target such as
+/// `" New "` re-parses trimmed, so the fact it produces is not the fact it was
+/// written from.
 ///
 /// A target opening with a recognized `protocol://` prefix is refused for the
 /// same reason: written as a stem it re-parses as a protocol and a shorter
@@ -351,7 +536,8 @@ pub fn split_wikilink_target(raw: &str) -> (String, Option<String>, Option<Strin
 ///
 /// Every other byte, a bare `^` included, round-trips.
 pub fn wikilink_target_is_representable(target: &str) -> bool {
-    !target.trim().is_empty()
+    !target.is_empty()
+        && target.trim() == target
         && !target.contains(['|', '#', '[', ']', '\n', '\r'])
         && split_protocol(target).0.is_none()
 }
@@ -373,8 +559,27 @@ pub fn wikilink_target_is_representable(target: &str) -> bool {
 /// Markdown link is not a token-level edit at all: its target is relative to
 /// the document it sits in, so one move produces different bytes per
 /// referencing file.
+///
+/// Three more refusals, each the other half of something this crate already
+/// recognizes:
+///
+/// - **A token carrying a line break.** `[[Target\nOther]]` is recognized, and
+///   an unclosed `[[` can make one span two paragraphs. Splicing a single-line
+///   replacement over those bytes reflows the text the token swallowed, so the
+///   recognize-and-refuse pair is real rather than documented.
+/// - **A non-`vault` protocol.** `[[https://Old Note|Docs]]` has a stem, but
+///   the stem is part of a URL and a vault rename has no business in it. The
+///   reserved `vault` is the exception: a `vault://` stem *is* a vault path.
+/// - The target-side mirror of that rule, which
+///   [`wikilink_target_is_representable`] already applies.
 pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
     if link.family != LinkFamily::Wikilink || !wikilink_target_is_representable(new_target) {
+        return None;
+    }
+    if link.raw.contains(['\n', '\r']) {
+        return None;
+    }
+    if matches!(link.resolution(), Resolution::Protocol(scheme) if scheme != VAULT_PROTOCOL) {
         return None;
     }
     let stem = link.stem_range.clone()?;

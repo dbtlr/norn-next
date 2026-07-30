@@ -6,7 +6,7 @@
 //! routes or validates anything, and no protocol is ever supplied or removed.
 
 use norn_text::{
-    BodyScan, Link, LinkFamily, parse_wikilinks_in_text, reconstruct_wikilink,
+    BodyScan, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
     wikilink_target_is_representable,
 };
 
@@ -21,7 +21,10 @@ fn only(text: &str) -> Link {
 }
 
 fn only_markdown(body: &str) -> Link {
-    let mut links = BodyScan::new(body).markdown_links().into_iter();
+    let mut links = BodyScan::new(body)
+        .links()
+        .into_iter()
+        .filter(|link| link.family == LinkFamily::Markdown);
     let link = links.next().expect("one markdown link");
     assert!(
         links.next().is_none(),
@@ -178,7 +181,7 @@ fn an_absent_protocol_and_a_written_one_are_different_facts() {
     assert_eq!(written.raw, "[[vault://Note]]");
 }
 
-/// The bytes survive recognition: reconstructing a protocol-bearing link with
+/// The bytes survive recognition: reconstructing a vault-addressed link with
 /// its own stem returns exactly what was written, padded or not.
 #[test]
 fn recognition_does_not_move_a_byte() {
@@ -187,7 +190,6 @@ fn recognition_does_not_move_a_byte() {
         "![[vault://Note]]",
         "[[ vault://Note | Shown ]]",
         "[[vault://Note#Heading|Shown]]",
-        "[[https://example.com/a/b#frag]]",
     ] {
         let link = only(raw);
         assert_eq!(
@@ -196,6 +198,12 @@ fn recognition_does_not_move_a_byte() {
             "reconstructing {raw:?}"
         );
     }
+
+    // An external address is recognized just as losslessly and rewritten by
+    // nobody, so its bytes survive by never being touched.
+    let external = only("[[https://example.com/a/b#frag]]");
+    assert_eq!(external.raw, "[[https://example.com/a/b#frag]]");
+    assert_eq!(reconstruct_wikilink(&external, &external.target), None);
 }
 
 /// A rewrite changes the stem and leaves the protocol where the author put it.
@@ -208,7 +216,43 @@ fn a_rewrite_keeps_the_protocol_the_author_wrote() {
     );
     assert_eq!(
         reconstruct_wikilink(&only("[[ vault://Old #Heading]]"), "New").as_deref(),
-        Some("[[ vault://New#Heading]]")
+        Some("[[ vault://New #Heading]]")
+    );
+}
+
+/// A rewrite of a non-`vault` protocol's stem is refused. `[[https://Old
+/// Note|Docs]]` has a stem span, and splicing a rename over it edits somebody
+/// else's URL — the same corruption the target side already refuses, applied
+/// to the link being rewritten rather than to the name it is rewritten to.
+///
+/// The reserved identifier is the exception: a `vault://` stem is a vault
+/// path, and renaming one is exactly what a rename is.
+#[test]
+fn a_rewrite_of_a_non_vault_protocol_is_refused() {
+    for raw in [
+        "[[https://Old Note|Docs]]",
+        "[[https://example.com/page]]",
+        "![[atlas://Image.png]]",
+        "[[svn+ssh://host/repo]]",
+    ] {
+        let link = only(raw);
+        assert!(link.stem_range.is_some(), "stem span of {raw:?}");
+        assert_eq!(
+            reconstruct_wikilink(&link, "Renamed"),
+            None,
+            "rewriting {raw:?}"
+        );
+    }
+
+    assert_eq!(
+        reconstruct_wikilink(&only("[[vault://Old]]"), "New").as_deref(),
+        Some("[[vault://New]]")
+    );
+    // A single-colon form is no protocol at all, so it rewrites like the
+    // ordinary target it is.
+    assert_eq!(
+        reconstruct_wikilink(&only("[[note:draft]]"), "New").as_deref(),
+        Some("[[New]]")
     );
 }
 
@@ -234,15 +278,17 @@ fn a_protocol_bearing_stem_is_refused_as_a_target() {
 
 // ── Recognition is all there is ──────────────────────────────────────────
 
-/// No protocol means anything here. A `vault://` target and an `https://`
-/// target differ only in the bytes recorded, and the crate offers no way to
+/// No protocol is *resolved* here. A `vault://` target and an `https://`
+/// target are read by the same grammar into the same fact shape, each
+/// reporting the scheme it was written with, and the crate offers no way to
 /// ask what either one points at.
 #[test]
-fn a_protocol_carries_no_behaviour() {
+fn a_protocol_is_reported_and_never_resolved() {
     let internal = only("[[vault://Note]]");
     let external = only("[[https://example.com]]");
     assert_eq!(internal.family, external.family);
-    assert_eq!(internal.addressing(), external.addressing());
+    assert_eq!(internal.resolution(), Resolution::Protocol("vault"));
+    assert_eq!(external.resolution(), Resolution::Protocol("https"));
 }
 
 /// `vault` is reserved, and a reservation is a promise about naming rather

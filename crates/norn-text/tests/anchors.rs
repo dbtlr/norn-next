@@ -2,7 +2,7 @@
 //! same text are told apart, and how the two link families address a heading
 //! differently while this crate records both fragments raw.
 
-use norn_text::{BodyScan, Link, slugify};
+use norn_text::{BodyScan, Link, LinkFamily, slugify};
 
 fn slugs(body: &str) -> Vec<String> {
     BodyScan::new(body)
@@ -17,7 +17,11 @@ fn only_wikilink(body: &str) -> Link {
 }
 
 fn only_markdown(body: &str) -> Link {
-    BodyScan::new(body).markdown_links().remove(0)
+    BodyScan::new(body)
+        .links()
+        .into_iter()
+        .find(|link| link.family == LinkFamily::Markdown)
+        .expect("a markdown link")
 }
 
 // ── The slug is GFM's ────────────────────────────────────────────────────
@@ -121,7 +125,7 @@ fn a_wikilink_addresses_heading_text_and_a_markdown_link_addresses_the_slug() {
     let wikilink = scan.wikilinks().remove(0);
     assert_eq!(wikilink.anchor.as_deref(), Some("What? Really!"));
 
-    let markdown = scan.markdown_links().remove(0);
+    let markdown = only_markdown(body);
     assert_eq!(markdown.anchor.as_deref(), Some("what-really"));
     assert_eq!(markdown.anchor.as_deref(), Some(heading.slug.as_str()));
 }

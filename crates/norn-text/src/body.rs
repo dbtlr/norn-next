@@ -101,6 +101,16 @@ impl<'a> BodyScan<'a> {
             if matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. })) {
                 construct_ranges.push(range.clone());
             }
+            // Where an inline link's bracket text ends is the parse's answer,
+            // and the only one needed to find the destination's own bytes
+            // afterwards: the closing `]` is the next one past it, however
+            // many brackets the text itself carried. Every event between the
+            // link's start and its end is inside that text.
+            if let Some(active) = active_link.as_mut()
+                && !matches!(event, Event::End(TagEnd::Link))
+            {
+                active.text_end = active.text_end.max(range.end.min(active.range.end));
+            }
 
             match event {
                 Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
@@ -141,6 +151,7 @@ impl<'a> BodyScan<'a> {
                     ..
                 }) => {
                     active_link = Some(ActiveLink {
+                        text_end: range.start + 1,
                         range: range.clone(),
                         destination: dest_url.into_string(),
                         text: String::new(),
@@ -149,6 +160,7 @@ impl<'a> BodyScan<'a> {
                 Event::End(TagEnd::Link) => {
                     if let Some(active) = active_link.take() {
                         markdown_links.push(MarkdownToken {
+                            text_end: active.text_end - active.range.start,
                             range: active.range,
                             destination: active.destination,
                             text: active.text,
@@ -215,13 +227,19 @@ impl<'a> BodyScan<'a> {
     }
 
     /// Every link token in the body, both families, in document order, code
-    /// excluded.
+    /// excluded. Filter on [`Link::family`] for one family alone.
     ///
-    /// Ordering is by where the token starts, so a caller reading the body
-    /// once reads these in the order they were written.
+    /// **The order is total and contracted**, because a caller storing these
+    /// as rows needs the same link to be the same row twice: ascending by
+    /// where the token starts, and a wikilink before a Markdown link that
+    /// starts on the same byte. The tie is not hypothetical — `[[a]](b)`
+    /// satisfies both grammars at once, and the ranges of two link facts may
+    /// overlap and nest across the families.
     pub fn links(&self) -> Vec<Link> {
         let mut links = self.wikilinks();
         links.extend(self.markdown_link_facts());
+        // A stable sort, so the wikilinks that went in first stay in front of
+        // the Markdown links they tie with.
         links.sort_by_key(|link| link.span.byte_offset);
         links
     }
@@ -229,15 +247,6 @@ impl<'a> BodyScan<'a> {
     /// Every `[[…]]` token in the body, code excluded.
     pub fn wikilinks(&self) -> Vec<Link> {
         parse_tokens(self.body, &self.code_ranges)
-    }
-
-    /// Every inline Markdown link (`[title](target)`) in the body, in document
-    /// order.
-    ///
-    /// Code exclusion is structural: the CommonMark pass reports no link
-    /// inside a fence or a code span, so there is nothing to filter.
-    pub fn markdown_links(&self) -> Vec<Link> {
-        self.markdown_link_facts()
     }
 
     /// Every `#tag` in the body, in document order.
@@ -295,6 +304,7 @@ impl<'a> BodyScan<'a> {
                     &self.body[token.range.clone()],
                     &token.destination,
                     &token.text,
+                    token.text_end,
                     cursor.span_at(token.range.start),
                 )
             })
@@ -354,6 +364,9 @@ struct ActiveHeading {
 /// up.
 struct ActiveLink {
     range: Range<usize>,
+    /// The body offset just past the furthest event seen inside the link,
+    /// which is where its bracket text ends.
+    text_end: usize,
     destination: String,
     text: String,
 }
@@ -363,6 +376,8 @@ struct ActiveLink {
 #[derive(Debug, Clone)]
 struct MarkdownToken {
     range: Range<usize>,
+    /// Where the bracket text ends, relative to the token's first byte.
+    text_end: usize,
     destination: String,
     text: String,
 }

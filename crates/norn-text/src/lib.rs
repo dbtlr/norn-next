@@ -71,16 +71,23 @@
 //!
 //! Two written forms produce a [`Link`], and one fact shape carries both:
 //! `[[…]]` and the inline Markdown link `[title](target)`. They differ in how
-//! a resolver reads the stem, and the fact says which — a wikilink stem is a
-//! path suffix, a Markdown one a path relative to the containing document —
-//! so resolution dispatches on [`Link::addressing`] instead of guessing. The
-//! same split governs fragments: a wikilink `#anchor` addresses heading
-//! *text*, a Markdown `#fragment` addresses a heading *slug*
-//! ([`Heading::slug`]). Both are recorded raw; neither is matched here.
+//! a resolver reads the stem, and the fact says which through
+//! [`Link::resolution`].
+//!
+//! **Dispatch is protocol-first, family-second.** A recognized `protocol://`
+//! prefix shadows the family, because the family says which grammar the author
+//! wrote and the protocol says what the address is; a protocol-free target
+//! falls through to its family, where a wikilink stem is a path suffix and a
+//! Markdown one a path relative to the containing document. Fragments follow
+//! the family either way: a wikilink `#anchor` addresses heading *text*, a
+//! Markdown `#fragment` addresses a heading *slug* ([`Heading::slug`]). All of
+//! it is recorded raw; none of it is matched here.
 //!
 //! A `protocol://` prefix is recognized, and only recognized: `[[x]]` and
 //! `[[vault://x]]` are distinct facts, nothing supplies a default protocol,
-//! and no protocol means anything to this crate.
+//! and no protocol means anything to this crate. What recognizing one does
+//! change is what may be rewritten — a rename does not reach inside somebody
+//! else's URL.
 //!
 //! [`Tag`] is its own fact kind rather than a link — one grammar, read from
 //! body tokens and from the frontmatter `tags` field.
@@ -124,8 +131,8 @@ pub use frontmatter::{Field, RenderError, ScalarContext, ValueStyle, render_docu
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
 pub use link::{
-    AddressingMode, Link, LinkFamily, parse_wikilinks_in_text, reconstruct_wikilink,
-    splice_wikilinks_in_text, split_wikilink_target, wikilink_target_is_representable,
+    Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
+    splice_wikilinks_in_text, wikilink_target_is_representable,
 };
 pub use section::{SectionAddress, SectionError, SectionSpan};
 pub use span::SourceSpan;
