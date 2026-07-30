@@ -53,6 +53,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::frontmatter::extract::MERGE_KEY;
 use crate::value::{StripReport, Value};
 
 /// How a field's value is written.
@@ -171,9 +172,6 @@ pub(crate) fn field_spans(
 
     Some(fields)
 }
-
-/// The key a merge directive is written under.
-const MERGE_KEY: &str = "<<";
 
 /// The trailing lines of `slice` that are whole blank lines or column-0
 /// comment lines, in document order.

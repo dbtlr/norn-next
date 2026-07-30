@@ -41,9 +41,13 @@
 //! - **A merge key** — `<<: *base` — is a directive rather than a field, and
 //!   is expanded the same way and for the same reason: the extraction folds
 //!   the merged mapping in before a value exists, so `<<` is never a field and
-//!   never a phantom one. Its bytes are never rewritten either — a block
-//!   carrying one has no trustworthy per-field split, so every field edit in
-//!   it refuses.
+//!   never a phantom one. Explicit keys keep the positions the document wrote
+//!   them in and a key only the merge contributes is appended after them. The
+//!   directive's own bytes are never rewritten, because its line belongs to no
+//!   field. What costs a block its edits is a key the merge *introduces*: it
+//!   is a parsed key no line can be attributed to, so the block has no
+//!   trustworthy per-field split and every field edit in it refuses. A merge
+//!   contributing only keys the block already writes leaves it editable.
 //! - **Duplicate keys** are not a value-model question at all: the block is
 //!   not well-formed, so it does not parse and no value exists.
 

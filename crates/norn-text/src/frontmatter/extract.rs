@@ -123,6 +123,9 @@ fn is_fence(line: &str) -> bool {
         .is_some_and(|rest| rest.bytes().all(|byte| byte == b' ' || byte == b'\t'))
 }
 
+/// The key a merge directive is written under.
+pub(crate) const MERGE_KEY: &str = "<<";
+
 /// Parse the YAML between the delimiters, expanding merge keys.
 ///
 /// `<<` is a merge directive rather than a field: the mapping it names is
@@ -135,6 +138,75 @@ fn is_fence(line: &str) -> bool {
 pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, String> {
     let mut parsed: serde_yaml::Value =
         serde_yaml::from_str(yaml).map_err(|error| error.to_string())?;
-    parsed.apply_merge().map_err(|error| error.to_string())?;
+    expand_merges(&mut parsed)?;
     Ok(parsed)
+}
+
+/// Fold every `<<` directive into the mapping holding it, in place.
+///
+/// **Key order is part of the answer.** An explicit key keeps the position the
+/// document wrote it in — the directive's own line vacates, and nothing else
+/// moves — and a key only the merge contributes is appended after every
+/// explicit one, in the order the merged mapping wrote it. An explicit key
+/// wins over a merged one of the same name, and among several sources the
+/// first to name a key wins, which is what YAML says a merge means.
+///
+/// This is why `serde_yaml::Value::apply_merge` is not what runs here: it
+/// removes `<<` by swapping the mapping's *last* entry into the vacated slot,
+/// which permutes document order. Order is a contract this crate keeps —
+/// fields are never reordered, and a re-read that finds them moved is an edit
+/// this crate refuses to prove.
+///
+/// The walk expands a mapping's children before the mapping itself, so a
+/// merged source that carries a `<<` of its own is already expanded when it is
+/// folded in and no directive survives anywhere in the value.
+fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
+    match value {
+        serde_yaml::Value::Sequence(items) => items.iter_mut().try_for_each(expand_merges),
+        serde_yaml::Value::Tagged(tagged) => expand_merges(&mut tagged.value),
+        serde_yaml::Value::Mapping(mapping) => {
+            for (_, child) in mapping.iter_mut() {
+                expand_merges(child)?;
+            }
+            let Some(directive) = mapping.shift_remove(MERGE_KEY) else {
+                return Ok(());
+            };
+            for source in merge_sources(directive)? {
+                for (key, value) in source {
+                    mapping.entry(key).or_insert(value);
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The mappings a `<<` names: one, or a sequence of them. Anything else is not
+/// a merge and has no expansion, so it refuses the block.
+fn merge_sources(directive: serde_yaml::Value) -> Result<Vec<serde_yaml::Mapping>, String> {
+    match directive {
+        serde_yaml::Value::Mapping(mapping) => Ok(vec![mapping]),
+        serde_yaml::Value::Sequence(items) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_yaml::Value::Mapping(mapping) => Ok(mapping),
+                other => Err(not_a_merge_source(&other)),
+            })
+            .collect(),
+        other => Err(not_a_merge_source(&other)),
+    }
+}
+
+fn not_a_merge_source(value: &serde_yaml::Value) -> String {
+    let kind = match value {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "a bool",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a string",
+        serde_yaml::Value::Sequence(_) => "a sequence",
+        serde_yaml::Value::Mapping(_) => "a mapping",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
+    };
+    format!("a merge key must name a mapping or a sequence of mappings, but it names {kind}")
 }

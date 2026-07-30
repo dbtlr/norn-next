@@ -5,7 +5,7 @@
 //! diagnostic and a usable body, never an error return — so most of what this
 //! file states is which diagnostic, and what survives beside it.
 
-use norn_text::{Document, LineEnding, Value, ValueStyle};
+use norn_text::{Document, LineEnding, Value, ValueStyle, render_document};
 
 fn codes<'a>(document: &'a Document<'a>) -> Vec<&'a str> {
     document
@@ -213,6 +213,38 @@ fn the_seven_shapes_read_as_themselves() {
 fn a_mapping_keeps_the_order_the_document_wrote() {
     let map = map_of("---\nzebra: 1\nalpha: 2\nmiddle: 3\n---\n");
     assert_eq!(map.keys().collect::<Vec<_>>(), ["zebra", "alpha", "middle"]);
+}
+
+/// Expanding a merge moves no explicit key. The directive's line vacates and
+/// everything the document wrote stays where it was written — the keys below
+/// the `<<` line included, which is the half a swap-based removal breaks by
+/// hoisting the block's last entry into the vacated slot.
+#[test]
+fn expanding_a_merge_keeps_the_order_the_document_wrote() {
+    let merged = map_of("---\nb: &m {x: 1}\n<<: *m\nx: 2\np: 3\nq: 4\nr: 5\n---\n");
+    assert_eq!(merged.keys().collect::<Vec<_>>(), ["b", "x", "p", "q", "r"]);
+    // The explicit `x` wins over the merged one, as YAML says a merge means.
+    assert_eq!(merged.get("x"), Some(&Value::Int(2)));
+
+    // A key only the merge contributes has no position of its own, so it is
+    // appended after every explicit key, in the order its source wrote it.
+    let contributed = map_of("---\nbase: &m {y: 1, z: 2}\n<<: *m\na: 3\n---\n");
+    assert_eq!(
+        contributed.keys().collect::<Vec<_>>(),
+        ["base", "a", "y", "z"]
+    );
+}
+
+/// The order a merge-bearing block reads as is the order a rendered document
+/// emits: the value model carries document order all the way to the bytes.
+#[test]
+fn a_merge_bearing_block_re_emits_in_document_order() {
+    let map = map_of("---\n<<: {a: 1}\nb: 2\nc: 3\n---\n");
+    assert_eq!(map.keys().collect::<Vec<_>>(), ["b", "c", "a"]);
+    assert_eq!(
+        render_document(&map, "body\n", LineEnding::Lf),
+        Ok("---\nb: 2\nc: 3\na: 1\n---\nbody\n".to_string())
+    );
 }
 
 /// A non-string key has no addressable form, so its entry is dropped rather

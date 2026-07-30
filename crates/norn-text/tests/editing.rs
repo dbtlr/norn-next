@@ -525,12 +525,13 @@ fn a_value_no_span_can_name_refuses_an_in_place_edit_and_stays_removable() {
     }
 }
 
-/// A merged-in field has no bytes of its own — the directive that produced it
-/// names a mapping written somewhere else — so nothing in the block it landed
-/// in can be edited in place, and the merge line is never absorbed into a
-/// neighbour's range and deleted.
+/// A field a merge *introduces* has no bytes of its own — the directive that
+/// produced it names a mapping written somewhere else — so the block holding
+/// it has a parsed key no line can be attributed to. There is no trustworthy
+/// per-field split, so every field edit in the block refuses, and the merge
+/// line is never absorbed into a neighbour's range and deleted.
 #[test]
-fn a_block_carrying_a_merge_key_refuses_every_field_edit() {
+fn a_merge_that_introduces_a_new_key_refuses_every_field_edit() {
     let source = "---\n<<: {a: 1}\ntitle: t\n---\nbody\n";
     let document = Document::parse(source);
     assert!(document.fields().is_empty());
@@ -551,6 +552,40 @@ fn a_block_carrying_a_merge_key_refuses_every_field_edit() {
                 .into_iter()
                 .collect()
         ))
+    );
+}
+
+/// The merge key is not itself the disqualifier. A merge that contributes no
+/// key the block does not already write leaves every parsed key attributable
+/// to exactly one line, so the block keeps its per-field split and edits in it
+/// are ordinary edits — the directive's own line still belongs to no field.
+#[test]
+fn a_merge_that_introduces_no_new_key_leaves_the_block_editable() {
+    let source = "---\nbase: &b {title: x}\ntitle: t\n<<: *b\n---\nbody\n";
+    assert_eq!(
+        set(source, "title", Value::String("new".into())),
+        Ok("---\nbase: &b {title: x}\ntitle: new\n<<: *b\n---\nbody\n".to_string())
+    );
+    assert!(
+        !Document::parse(source)
+            .fields()
+            .iter()
+            .any(|field| field.name == "<<"),
+        "the merge line is no field's bytes"
+    );
+}
+
+/// Appending into such a block is an ordinary append: the new entry goes in
+/// before the closing delimiter and the re-read proves every other field, its
+/// position included, unmoved. An expansion that permuted key order made this
+/// refuse — the re-read found the block's own fields in a different order than
+/// the pre-image it was compared against.
+#[test]
+fn an_append_into_a_merge_bearing_block_succeeds() {
+    let source = "---\nb: &m {x: 1}\n<<: *m\nx: 2\np: 3\nq: 4\nr: 5\n---\nbody\n";
+    assert_eq!(
+        set(source, "zz", Value::Int(7)),
+        Ok("---\nb: &m {x: 1}\n<<: *m\nx: 2\np: 3\nq: 4\nr: 5\nzz: 7\n---\nbody\n".to_string())
     );
 }
 
