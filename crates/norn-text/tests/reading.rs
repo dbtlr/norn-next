@@ -481,6 +481,24 @@ fn a_merge_key_expands_through_an_alias_and_inside_a_nested_mapping() {
     );
 }
 
+/// A merge source that itself carries a merge expands child-first, so the
+/// outer expansion folds in fully-expanded keys and `<<` survives as a field
+/// at no depth.
+#[test]
+fn a_merge_source_carrying_its_own_merge_expands_without_a_phantom_key() {
+    let map = map_of("---\ninner: &i\n  p: 1\nmid: &m\n  <<: *i\n  q: 2\ntitle: t\n<<: *m\n---\n");
+    let keys: Vec<&str> = map.keys().collect();
+    assert_eq!(keys, ["inner", "mid", "title", "q", "p"]);
+    assert_eq!(
+        map.get("mid"),
+        Some(&Value::Map(
+            [("q", Value::Int(2)), ("p", Value::Int(1))]
+                .into_iter()
+                .collect()
+        ))
+    );
+}
+
 /// A `<<` naming something that is not a mapping is not a merge, and there is
 /// no honest reading of it: expanding is impossible and carrying it as a field
 /// is the phantom the expansion exists to prevent. The block is refused.
