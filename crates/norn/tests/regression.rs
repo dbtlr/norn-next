@@ -61,7 +61,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "45117408ae0903bfaf083d8e2430a218e6d0ef0942e516c8e98b4d54158cef0f";
+const CONTRACT_DIGEST: &str = "0fdc02fe02d70062a1af186209d8fcf24f7f670c519c67f30e13e21dc5f57fee";
 
 /// The cases carried by tests today, by name.
 ///
@@ -72,10 +72,13 @@ const CONTRACT_DIGEST: &str = "45117408ae0903bfaf083d8e2430a218e6d0ef0942e516c8e
 /// cases sit in the file is the file's business.
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
+    "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
+    "frontmatter-roundtrip-or-refuse",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
+    "one-field-edit-is-a-one-field-diff",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -172,20 +175,29 @@ fn the_bound_cases_are_the_ones_the_harness_already_carries() {
     assert_eq!(bound, pinned, "the set of bound cases moved");
 }
 
-/// Every venue on the scale is accounted for, and layer 0 is the only one
-/// with anything bound.
+/// The layer a bound case may sit at, inclusive.
 ///
-/// The second half is the honest statement of where this workspace is: the
-/// harness exists, and nothing above it does. A case bound at a venue above 0
-/// would be asserting against a subject that has not landed.
+/// Layer 0 is complete and layer 1 is landing task by task, so a venue-1 case
+/// binds the moment its subject exists — the structural audit holds every
+/// binding to tests cargo really compiled, which is what "exists" means here.
+/// Raising this is a reviewed edit made when the next layer starts landing.
+const LAYER_LANDING: u8 = 1;
+
+/// Every venue on the scale is accounted for, and nothing is bound above the
+/// layer currently landing.
+///
+/// The second half is the honest statement of where this workspace is: a case
+/// bound at a venue above [`LAYER_LANDING`] would be asserting against a
+/// subject that cannot have landed yet.
 #[test]
 fn only_the_layer_that_exists_carries_bound_cases() {
     let registry = registry();
     for case in registry.bound_cases() {
-        assert_eq!(
-            case.venue, 0,
-            "`{}` is bound at layer {}, above the layer that exists",
-            case.name, case.venue
+        assert!(
+            case.venue <= LAYER_LANDING,
+            "`{}` is bound at layer {}, above the layer that is landing",
+            case.name,
+            case.venue
         );
     }
     for layer in 0..registry.venues.len() as u8 {
