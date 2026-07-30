@@ -276,6 +276,10 @@ pub struct StoredFacts {
 /// Provenance is on the tombstone because a vault losing documents to the wrong
 /// provenance is otherwise invisible: a prune that should have been a refusal
 /// looks exactly like a deletion somebody asked for.
+///
+/// **One death's provenance, not a changeset's.** The changeset carries its own
+/// mark — [`crate::IncrementProvenance`] — saying where its post-state came
+/// from, and a changeset carrying deaths carries both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Provenance {
     /// A full tree heal found the path absent.
@@ -323,18 +327,6 @@ pub struct StoredTombstone {
     pub provenance: Provenance,
     pub generation: i64,
     pub recorded_at: i64,
-}
-
-/// What a delete did.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Deletion {
-    /// Whether a document row was there to remove. A death recorded for a path
-    /// nothing had derived still leaves a tombstone: the ordering it carries is
-    /// the point, and it is worth most exactly when the derivation never
-    /// happened.
-    pub removed: bool,
-    /// The generation the tombstone was recorded at.
-    pub generation: i64,
 }
 
 /// One resolution candidate in a finding's bounded head.
@@ -439,6 +431,9 @@ pub struct VaultSchemaPin {
 }
 
 /// What a maintenance act discarded.
+///
+/// Three acts report one: a schema pin, a class discard a caller asked for, and
+/// the class-scoped discard an increment folds into its own transaction.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Invalidation {
     /// Findings the act removed — derived under a different vault schema, or

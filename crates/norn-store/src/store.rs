@@ -526,6 +526,20 @@ pub mod induced_failure {
     pub fn fail_next_meta_read_as_busy() {
         super::NEXT_META_READ_FAILS.set(true);
     }
+
+    /// Kill this process partway through the next changeset, once `entries` of
+    /// its entries have been applied.
+    ///
+    /// **A process killed mid-increment is a rung-2 injection, and it cannot be
+    /// arranged from outside.** The abort happens with the transaction open and
+    /// nothing committed — no unwinding, no rollback, no destructor — which is
+    /// what a `SIGKILL` between two entries looks like to the database, and the
+    /// only way to put a store's file in that state deliberately. The
+    /// arrangement is per-thread, and the process does not survive it, so there
+    /// is nothing to clear.
+    pub fn abort_after_changeset_entries(entries: u64) {
+        super::TEAR_CHANGESET_AFTER.set(Some(entries));
+    }
 }
 
 /// What connecting to a path produced.
@@ -872,6 +886,25 @@ std::thread_local! {
     /// by [`induced_failure::fail_next_meta_read_as_busy`], and cleared by the
     /// read it fails.
     static NEXT_META_READ_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// How many entries a changeset applies before this process aborts. Set
+    /// only by [`induced_failure::abort_after_changeset_entries`]; nothing
+    /// clears it, because nothing runs after the abort it arms.
+    static TEAR_CHANGESET_AFTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// End the process where an arrangement asked for a changeset to be torn after
+/// this many entries.
+///
+/// The abort is deliberate rather than a panic: a panic unwinds, and an unwind
+/// rolls the transaction back through the driver's own destructor — which is the
+/// tidy end, not the one rung 2 has to survive.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn abort_if_the_changeset_is_torn(applied: u64) {
+    if TEAR_CHANGESET_AFTER.get() == Some(applied) {
+        std::process::abort();
+    }
 }
 
 /// The next write generation, taken inside whatever transaction is open.
