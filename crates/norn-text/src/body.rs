@@ -29,7 +29,11 @@
 //! would be a half-supported family:
 //!
 //! - **Images** (`![alt](x.png)`) are a different element to the parser, and a
-//!   transclusion in this vocabulary is `![[…]]`.
+//!   transclusion in this vocabulary is `![[…]]`. The fence is about which
+//!   written form produces a fact rather than about where in the document it
+//!   was written, so a link inside an image's *alt text* —
+//!   `![see [here](a.md)](i.png)` — is a link of an implemented family and **is
+//!   reported**, while the image around it still is not.
 //! - **Autolinks** (`<https://example.com>`) and bare email autolinks.
 //! - **Reference-style links** — `[text][label]`, collapsed `[label][]`, and
 //!   shortcut `[label]` — whose destination sits in a definition line
@@ -39,11 +43,13 @@
 //!   arrives as ordinary text.
 //!
 //! Producing no link fact is not the same as being unrecognized. Every one of
-//! these forms is opaque to the `#tag` scan, definition lines included, so a
-//! URL fragment written in one is that construct's syntax rather than a tag —
-//! the same rule the two implemented families follow. A bare URL in prose is
-//! the stated exception: nothing recognizes one, so `see https://x/#setup`
-//! carries the tag `setup`.
+//! these forms is opaque to the `#tag` scan — raw HTML and definition lines
+//! included, wherever a definition line sits, block quotes and list items
+//! included — so a URL fragment written in one is that construct's syntax
+//! rather than a tag, and a `#tag` commented out in `<!-- … -->` stays
+//! commented out. That is the same rule the two implemented families follow. A
+//! bare URL in prose is the stated exception: nothing recognizes one, so
+//! `see https://x/#setup` carries the tag `setup`.
 
 use std::ops::Range;
 
@@ -92,13 +98,20 @@ impl<'a> BodyScan<'a> {
         let mut container_depth: usize = 0;
 
         for (event, range) in Parser::new(body).into_offset_iter() {
-            // Every link and image the parse recognizes is opaque to the tag
-            // scan, whichever family it belongs to and whether or not it
-            // produces a link fact: the `#` in `<https://x/#install>` or
-            // `![alt](./pics/#frag)` is that construct's own fragment syntax.
-            // The ranges come free with the events, so the mask covers exactly
-            // what the one pass already saw.
-            if matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. })) {
+            // Every link, image and span of raw HTML the parse recognizes is
+            // opaque to the tag scan, whichever family it belongs to and
+            // whether or not it produces a link fact: the `#` in
+            // `<https://x/#install>`, `![alt](./pics/#frag)`,
+            // `<a href="https://x/#frag">` or `<!-- #tag -->` is that
+            // construct's own syntax rather than a marker. The ranges come free
+            // with the events, so the mask covers exactly what the one pass
+            // already saw.
+            if matches!(
+                event,
+                Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::HtmlBlock)
+                    | Event::Html(_)
+                    | Event::InlineHtml(_)
+            ) {
                 construct_ranges.push(range.clone());
             }
             // Where an inline link's bracket text ends is the parse's answer,
@@ -253,10 +266,11 @@ impl<'a> BodyScan<'a> {
     ///
     /// Code is opaque to tags, and so is every construct the parse recognizes
     /// as addressing something: the `#` in `[[Note#Heading]]`,
-    /// `[text](#frag)`, `<https://x/#install>`, `![alt](./pics/#frag)` or a
-    /// `[label]: url#faq` definition line is that construct's fragment syntax,
-    /// not a marker. A bare URL in prose is recognized by nothing and is the
-    /// stated exception.
+    /// `[text](#frag)`, `<https://x/#install>`, `![alt](./pics/#frag)`,
+    /// `<a href="https://x/#frag">` or a `[label]: url#faq` definition line is
+    /// that construct's fragment syntax, not a marker. Raw HTML is opaque
+    /// whole, so a `#tag` inside an HTML comment is commented out. A bare URL
+    /// in prose is recognized by nothing and is the stated exception.
     pub fn tags(&self) -> Vec<TagFact> {
         scan_tags(self.body, &self.opaque_to_tags())
     }
@@ -331,17 +345,13 @@ impl<'a> BodyScan<'a> {
 /// the line shape CommonMark gives a definition its own: up to three spaces of
 /// indent, `[`, a label, then `]:`. Masking the line is deliberate over-reach
 /// in the safe direction — the alternative is minting a tag out of the
-/// fragment of every URL a document defines.
+/// fragment of every URL a document defines. A footnote definition
+/// (`[^fn]: prose`) has that shape too and is masked with them.
 fn definition_lines(body: &str, code_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut line_start = 0;
     for line in body.split_inclusive('\n') {
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        if indent <= 3
-            && line[indent..].starts_with('[')
-            && let Some(close) = line[indent..].find(']')
-            && line[indent + close + 1..].starts_with(':')
-        {
+        if is_definition_line(line) {
             let range = line_start..line_start + line.len();
             if !overlaps_any(code_ranges, &range) {
                 lines.push(range);
@@ -350,6 +360,54 @@ fn definition_lines(body: &str, code_ranges: &[Range<usize>]) -> Vec<Range<usize
         line_start += line.len();
     }
     lines
+}
+
+/// Whether `line` carries a link reference definition.
+///
+/// A definition is a leaf block, so it sits wherever a leaf block sits: inside
+/// a block quote, inside a list item, inside both at once. Every container
+/// marker opening the line is stripped before the definition's own shape is
+/// tested, because `> [label]: ./target/#faq` defines a label exactly as the
+/// unprefixed line does and a shape test anchored at column zero reads its
+/// fragment as a tag.
+fn is_definition_line(line: &str) -> bool {
+    let mut rest = line;
+    loop {
+        let indent = rest.len() - rest.trim_start_matches(' ').len();
+        if indent > 3 {
+            return false;
+        }
+        rest = &rest[indent..];
+        if let Some(after) = rest.strip_prefix('>').or_else(|| strip_list_marker(rest)) {
+            rest = after;
+            continue;
+        }
+        return rest.starts_with('[')
+            && matches!(rest.find(']'), Some(close) if rest[close + 1..].starts_with(':'));
+    }
+}
+
+/// Strip one list marker — a `-`, `*` or `+` bullet, or a `1.` / `1)` ordinal —
+/// leaving the space that follows it to be counted as the content's indent.
+///
+/// The trailing whitespace is what makes a marker a marker: `-[label]: x` opens
+/// no list item and is ordinary paragraph text.
+fn strip_list_marker(rest: &str) -> Option<&str> {
+    let after = match rest.as_bytes().first()? {
+        b'-' | b'*' | b'+' => &rest[1..],
+        b'0'..=b'9' => {
+            let digits = rest.len()
+                - rest
+                    .trim_start_matches(|ch: char| ch.is_ascii_digit())
+                    .len();
+            if !matches!(rest.as_bytes().get(digits), Some(b'.' | b')')) {
+                return None;
+            }
+            &rest[digits + 1..]
+        }
+        _ => return None,
+    };
+    after.starts_with(' ').then_some(after)
 }
 
 /// A heading being accumulated across the events that make it up.

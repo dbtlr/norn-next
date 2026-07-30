@@ -233,6 +233,63 @@ fn a_hash_inside_any_recognized_construct_is_not_a_marker() {
     );
 }
 
+/// A definition is a leaf block, so it sits wherever a leaf block sits: behind
+/// a block-quote marker, inside a bulleted or numbered list item, behind both
+/// at once. Each of these lines defines the label `label`, and a shape test
+/// anchored at column zero read the container marker as prose and minted `faq`
+/// out of the definition's own fragment.
+#[test]
+fn a_definition_line_inside_a_container_is_still_a_definition() {
+    for body in [
+        "> [label]: ./target/#faq\n",
+        ">> [label]: ./target/#faq\n",
+        "- [label]: ./target/#faq\n",
+        "* [label]: ./target/#faq\n",
+        "1. [label]: ./target/#faq\n",
+        "1) [label]: ./target/#faq\n",
+        "> - [label]: ./target/#faq\n",
+    ] {
+        assert!(body_tags(body).is_empty(), "in {body:?}");
+    }
+
+    // The marker is a marker only with whitespace behind it, and prose that
+    // merely opens with a bracket is prose.
+    assert_eq!(names(&body_tags("-[label] #real\n")), ["real"]);
+    assert_eq!(names(&body_tags("> a note about #real\n")), ["real"]);
+}
+
+/// Raw HTML is a construct the parse recognizes and hands over whole, so what
+/// is written inside it is that markup's business: an `href` fragment is a URL
+/// fragment, and **a `#tag` inside an HTML comment stays commented out**. A
+/// commented-out tag reading as a live one is the case that bites a real vault,
+/// because commenting a line out is how an author retires it.
+#[test]
+fn a_hash_inside_raw_html_is_not_a_marker() {
+    for body in [
+        "<a href=\"https://x/#frag\">link</a>\n",
+        "<img src=\"./p/#frag\">\n",
+        "<!-- a comment about #tag -->\n",
+        "<div>\n  <a href=\"./p/#frag\">x</a>\n</div>\n",
+    ] {
+        assert!(body_tags(body).is_empty(), "in {body:?}");
+    }
+
+    // A tag in the prose beside an inline HTML span is unaffected.
+    assert_eq!(names(&body_tags("<b>bold</b> and #real\n")), ["real"]);
+}
+
+/// A footnote definition has the definition line's shape — `[`, a label, `]:`
+/// — so the definition rule masks it too. That is over-reach in the safe
+/// direction and deliberate: the rule is a line shape rather than a parser
+/// event, and a tag written in a footnote's prose going unread costs a fact,
+/// while a fragment read as a tag mints one.
+#[test]
+fn a_footnote_definition_is_masked_by_the_definition_line_rule() {
+    assert!(body_tags("[^fn]: prose with #tag\n").is_empty());
+    // The footnote's reference site is ordinary prose, and a tag there reads.
+    assert_eq!(names(&body_tags("text[^fn] and #real\n")), ["real"]);
+}
+
 /// The stated limitation. A bare URL in prose is recognized by nothing — no
 /// autolink event, no link token — so its fragment reads as a marker like any
 /// other hash after a non-word character. Closing this would mean a URL
