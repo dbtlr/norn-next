@@ -87,6 +87,71 @@ fn several_links_on_one_line_are_all_recognized() {
     assert_eq!(targets(&links), ["a", "b", "c"]);
 }
 
+/// The degenerate tokens, pinned as what they are. `[[]]` is not a token —
+/// the grammar wants at least one character inside the fences — and the rest
+/// are tokens with empty parts, which is different from being unrecognized.
+#[test]
+fn the_degenerate_tokens_are_told_apart_from_no_token_at_all() {
+    assert!(parse_wikilinks_in_text("[[]]").is_empty());
+    assert!(parse_wikilinks_in_text("![[]]").is_empty());
+
+    // `[[|]]` is a token with an empty target and an empty title.
+    let piped = only("[[|]]");
+    assert_eq!(piped.target, "");
+    assert_eq!(piped.title.as_deref(), Some(""));
+    assert_eq!(piped.anchor, None);
+
+    // `[[a#]]` is a token with an empty anchor, which is not the same as no
+    // anchor: the `#` was written.
+    let anchored = only("[[a#]]");
+    assert_eq!(anchored.target, "a");
+    assert_eq!(anchored.anchor.as_deref(), Some(""));
+
+    // `[[a|]]` is a token with an empty title.
+    let titled = only("[[a|]]");
+    assert_eq!(titled.target, "a");
+    assert_eq!(titled.title.as_deref(), Some(""));
+
+    // None of the three has a representable target to be rewritten to, and
+    // reconstructing the two that do keeps the empty part they carry.
+    assert!(!wikilink_target_is_representable(&piped.target));
+    assert_eq!(
+        reconstruct_wikilink(&anchored, "new").as_deref(),
+        Some("[[new#]]")
+    );
+    assert_eq!(
+        reconstruct_wikilink(&titled, "new").as_deref(),
+        Some("[[new|]]")
+    );
+}
+
+/// A soft break does not interrupt recognition. Two tokens on two lines of one
+/// paragraph are two tokens, and a token whose fences straddle the break is
+/// still a token — its target simply carries the newline.
+///
+/// That target is not representable, so the link reads but does not rewrite:
+/// reconstructing it, even with the target it already has, returns nothing and
+/// a splice leaves it alone. Recognizing it and refusing to rewrite it is the
+/// pair that keeps a rename from reflowing a paragraph.
+#[test]
+fn a_token_is_recognized_across_a_soft_break_and_refuses_to_be_rewritten() {
+    let body = "see [[Target]]\nand [[Other]] too\n";
+    assert_eq!(
+        targets(&BodyScan::new(body).wikilinks()),
+        ["Target", "Other"]
+    );
+
+    let straddling = "before [[Target\nOther]] after\n";
+    let link = only(straddling);
+    assert_eq!(link.target, "Target\nOther");
+    assert!(!wikilink_target_is_representable(&link.target));
+    assert_eq!(reconstruct_wikilink(&link, &link.target), None);
+    assert_eq!(
+        BodyScan::new(straddling).splice_wikilinks(|link| reconstruct_wikilink(link, "new")),
+        "before [[new]] after\n"
+    );
+}
+
 // ── One splitter, and the bare caret (NRN-433, NRN-440) ──────────────────
 
 /// NRN-433: a second splitter treated any `^` as a block sigil, so a rewrite

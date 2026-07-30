@@ -473,6 +473,96 @@ fn a_merge_line_is_never_absorbed_into_a_neighbouring_field() {
     assert!(!document.fields().iter().any(|field| field.name == "<<"));
 }
 
+/// Every construct the value model has no shape for is resolved at the parse
+/// boundary, and each is held to both halves of the same bargain: something is
+/// said about it — a diagnostic, or an expansion — and the construct itself is
+/// absent from the model afterwards. A class that only satisfies the first
+/// half leaves a phantom in the value; a class that only satisfies the second
+/// drops a document's content in silence.
+#[test]
+fn every_stripped_class_is_both_reported_and_absent() {
+    // A non-string key: diagnosed, and no key of that spelling in the model.
+    let dropped = Document::parse("---\n1: x\nname: z\n---\n");
+    assert!(
+        dropped
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "frontmatter-non-string-key")
+    );
+    let map = dropped
+        .frontmatter()
+        .and_then(Value::as_map)
+        .expect("a map");
+    assert_eq!(map.keys().collect::<Vec<_>>(), ["name"]);
+
+    // A tag: diagnosed, and no tag survives anywhere in the value — the value
+    // it wrapped is what the model holds.
+    let tagged = Document::parse("---\na: !foo bar\n---\n");
+    assert!(
+        tagged
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "frontmatter-tag-stripped")
+    );
+    assert_eq!(
+        tagged.frontmatter(),
+        Some(&Value::Map([("a", "bar")].into_iter().collect()))
+    );
+
+    // A merge key: expanded rather than diagnosed, which is the other way of
+    // saying something about it, and `<<` is not in the model.
+    let merged = Document::parse("---\n<<: {a: 1}\nb: 2\n---\n");
+    let map = merged.frontmatter().and_then(Value::as_map).expect("a map");
+    assert!(!map.contains_key("<<"));
+    assert_eq!(map.get("a"), Some(&Value::Int(1)));
+    // The expansion is loud in the other currency: the block's fields are
+    // withheld, and the diagnostic says so.
+    assert!(
+        merged
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "frontmatter-not-editable")
+    );
+    assert!(merged.fields().is_empty());
+}
+
+/// A column-0 `---` inside a block scalar ends the frontmatter block, and the
+/// rest of the scalar becomes body. YAML reads `---` at column 0 as a document
+/// boundary, so this is a defensible read of an ambiguous document rather than
+/// a bug — but it is silent, and what it costs is content.
+///
+/// It is pinned as characterized, not fixed. A heuristic warning here would
+/// guess about a document nobody has complained about; noticing that a
+/// document lost content belongs to a health scan that can see the vault, not
+/// to the grammar that can see one string.
+#[test]
+fn a_column_zero_fence_inside_a_block_scalar_truncates_the_block() {
+    let source = "---\ntext: |\n  one\n---\n  two\nother: x\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map(
+            [("text", Value::String("one\n".into()))]
+                .into_iter()
+                .collect()
+        ))
+    );
+    // Everything past the first column-0 fence is body, `other` included.
+    assert_eq!(document.body(), "  two\nother: x\n---\nbody\n");
+    assert!(document.diagnostics().is_empty());
+    // Indent the fence and it is part of the scalar, which is what an author
+    // who meant it to be content writes.
+    let indented = Document::parse("---\ntext: |\n  one\n  ---\n  two\n---\nbody\n");
+    assert_eq!(
+        indented.frontmatter(),
+        Some(&Value::Map(
+            [("text", Value::String("one\n---\ntwo\n".into()))]
+                .into_iter()
+                .collect()
+        ))
+    );
+}
+
 // ── Field spans ──────────────────────────────────────────────────────────
 
 fn styles(source: &str) -> Vec<(String, ValueStyle, Option<String>)> {

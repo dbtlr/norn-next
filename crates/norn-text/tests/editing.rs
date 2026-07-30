@@ -529,6 +529,97 @@ fn a_block_carrying_a_merge_key_refuses_every_field_edit() {
     );
 }
 
+/// A value spelled `---` is a value, and the span layer refuses it rather than
+/// splicing over bytes that also spell a fence. Nothing here writes a fence
+/// into a value's place, and nothing reads this one as a block boundary — the
+/// fence scan works on whole lines, and this one is not one.
+#[test]
+fn a_value_spelled_like_a_fence_refuses_an_in_place_edit() {
+    let source = "---\na: ---\nother: x\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map(
+            [("a", Value::String("---".into())), ("other", "x".into())]
+                .into_iter()
+                .collect()
+        ))
+    );
+    assert_eq!(
+        set(source, "a", Value::String("new".into())),
+        Err(EditError::FieldNotEditable {
+            field: "a".to_string()
+        })
+    );
+    // It stays removable through its whole entry, like every other value no
+    // span can name.
+    assert_eq!(
+        remove(source, "a"),
+        Ok("---\nother: x\n---\nbody\n".to_string())
+    );
+}
+
+/// A tab-indented continuation is not YAML: tabs are forbidden as indentation.
+/// The block does not parse, so there is nothing to read and every edit
+/// refuses — which is the honest answer, rather than a scan guessing at a
+/// structure the parser rejected.
+#[test]
+fn a_tab_indented_sequence_does_not_parse_and_refuses_every_edit() {
+    let source = "---\ntags:\n\t- a\n\t- b\ntitle: t\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(document.frontmatter(), None);
+    assert!(
+        document
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "frontmatter-parse-failed")
+    );
+    assert_eq!(
+        set(source, "title", Value::String("x".into())),
+        Err(EditError::FrontmatterUnreadable)
+    );
+}
+
+/// A stub carrying a trailing comment takes a scalar and refuses a sequence,
+/// and the asymmetry is not an oversight. A scalar splices into the insertion
+/// point between the colon and the comment, so the comment stays put. A
+/// sequence replaces the whole entry, and the comment sits inside it — so the
+/// write would silently delete a comment the author put there, which the
+/// post-image check has no way to notice because the block still reads back as
+/// intended.
+#[test]
+fn a_stub_with_a_comment_takes_a_scalar_and_takes_a_sequence_with_the_comment() {
+    let source = "---\ntags: # what goes here\nother: x\n---\n";
+    assert_eq!(
+        set(source, "tags", Value::String("draft".into())),
+        Ok("---\ntags: draft # what goes here\nother: x\n---\n".to_string())
+    );
+    assert_eq!(
+        set(source, "tags", Value::Sequence(vec!["a".into()])),
+        Ok("---\ntags:\n  - a\nother: x\n---\n".to_string())
+    );
+}
+
+/// Removing an anchor definition leaves its alias dangling, which makes the
+/// block unparseable — so the post-image check refuses and no bytes are
+/// returned. This is the gate doing its job on a document where every span was
+/// correct and the edit was still wrong.
+#[test]
+fn removing_an_anchor_definition_its_alias_still_needs_is_refused() {
+    let source = "---\na: &x 1\nb: *x\n---\nbody\n";
+    assert_eq!(
+        remove(source, "a"),
+        Err(EditError::PostImageMismatch {
+            field: "a".to_string()
+        })
+    );
+    // Removing the alias is fine: nothing depends on it.
+    assert_eq!(
+        remove(source, "b"),
+        Ok("---\na: &x 1\n---\nbody\n".to_string())
+    );
+}
+
 #[test]
 fn a_sequence_offered_for_a_scalar_field_refuses_rather_than_restyling_it() {
     assert!(matches!(

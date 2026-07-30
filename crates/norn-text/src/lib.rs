@@ -38,9 +38,11 @@
 //! replaces the value's bytes, so a comment sharing that line survives. A
 //! sequence set replaces the whole entry — a list's items are not separately
 //! addressable, and rewriting the items around interleaved comments would be
-//! guesswork — so a comment written *inside* that entry is replaced with it. A
-//! comment on its own line between two entries belongs to neither and always
-//! survives.
+//! guesswork — so a comment written *inside* that entry, **including one
+//! trailing it on the same line**, is replaced with it: the comment sits
+//! inside the entry's bytes, and the entry's bytes are what a whole-entry
+//! replacement writes over. A comment on its own line between two entries
+//! belongs to neither and always survives.
 //!
 //! **What cannot be proven is refused.** Every emitted scalar is re-parsed in
 //! the lexical context it will live in and compared against the value it came
@@ -53,9 +55,17 @@
 //! A frontmatter value is one of seven shapes — null, bool, int, float,
 //! string, sequence, string-keyed map — and the parse boundary strips
 //! everything outside them once, loudly, as diagnostics. See [`Value`] for
-//! what is stripped and why. No serialization framework appears in any public
-//! signature here: the dialect and the parser behind this seam are
-//! implementation, replaceable without touching a caller.
+//! what is stripped and why.
+//!
+//! The *model* is dialect-free: no shape in it is a YAML shape, and no
+//! serialization framework appears in any signature here, so the parser behind
+//! the seam is replaceable without touching a caller. The *style* vocabulary
+//! is not, and does not pretend to be — [`ValueStyle`] and [`ScalarContext`]
+//! are YAML's own, because preserving how a value was written is a question
+//! about the dialect the document is in, and the round-trip contract this
+//! crate holds is YAML's by charter. What that dialect resolves is stated
+//! rather than inherited: scalar reads follow the YAML 1.2 core schema, so
+//! `publish: no` is the string `no`, and [`Value`] names the rest.
 //!
 //! # Code is opaque
 //!

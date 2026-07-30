@@ -147,6 +147,37 @@ fn an_occurrence_addresses_one_of_several_headings_with_the_same_text() {
     );
 }
 
+/// An occurrence counts matches by text, and text is all it counts by: two
+/// headings with the same words at different levels are occurrence 1 and 2 in
+/// document order. Level is not part of the address, so it does not narrow the
+/// count — the same reason a `## X` anchor resolves a `### X` heading.
+#[test]
+fn an_occurrence_counts_across_levels_in_document_order() {
+    let body = "## Notes\nshallow\n\n### Notes\ndeep\n\n# Notes\ntop\n";
+    assert_eq!(
+        resolve_section(body, "Notes"),
+        Err(SectionError::HeadingAmbiguous {
+            heading: "Notes".into(),
+            count: 3
+        })
+    );
+    // What each one owns still follows from its own level, so the first — a
+    // `## ` heading — owns the `### ` one counted after it.
+    for (occurrence, content) in [
+        (1, "shallow\n\n### Notes\ndeep\n"),
+        (2, "deep\n"),
+        (3, "top\n"),
+    ] {
+        let span = resolve_section(body, SectionAddress::occurrence("Notes", occurrence))
+            .unwrap_or_else(|error| panic!("occurrence {occurrence}: {error}"));
+        assert_eq!(
+            &body[span.content_start..span.content_end],
+            content,
+            "occurrence {occurrence}"
+        );
+    }
+}
+
 #[test]
 fn a_heading_inside_a_fence_addresses_nothing_and_belongs_to_its_owner() {
     let body = "## Real\n```\n## Fake\n```\nbody\n";
