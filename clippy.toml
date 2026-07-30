@@ -12,9 +12,8 @@
 # it says where the effect is, which a crate-wide allow would erase.
 #
 # Rules are adopted one at a time, as each invariant's subject becomes real.
-# The rules named but not yet configured — no SQLite connection outside
-# norn-store, no norn-config registry-surface use outside norn-host — are
-# carried as pending entries in the mapping in
+# The rule named but not yet configured — no norn-config registry-surface use
+# outside norn-host — is carried as a pending entry in the mapping in
 # crates/norn-testkit/src/invariants.rs, which is the authoritative record of
 # what carries which invariant. That mapping is asserted against this file: an
 # entry here that no live rule claims fails the architecture gate, so a rule
@@ -23,11 +22,15 @@
 # `disallowed-types` cannot separate from the same type in a test — is carried
 # there as review-held rather than as a rule waiting on configuration.
 #
-# **These rules bind std-surface effects, and that is their whole reach.** An
-# effect reached another way is outside them and is review-held: a child
-# process inheriting this process's stdout writes to a terminal no render seam
-# saw, and a raw `libc` call reaches the filesystem without naming a `std`
-# path. Neither is a lint's subject; both are a reviewer's.
+# **Most of these rules bind std-surface effects, and for those that is their
+# whole reach.** An effect reached another way is outside them and is
+# review-held: a child process inheriting this process's stdout writes to a
+# terminal no render seam saw, and a raw `libc` call reaches the filesystem
+# without naming a `std` path. Neither is a lint's subject; both are a
+# reviewer's. The exception is the SQLite rule, whose subject is a registry
+# crate's constructors — a path clippy resolves only in a crate that links it,
+# which is why an entry naming one is silent everywhere else rather than an
+# error.
 
 # `std::fs` disallowed workspace-wide.
 #
@@ -88,6 +91,21 @@ disallowed-methods = [
     # No direct stdout writes outside norn-console. A handle to stdout is a
     # render seam nobody reviewed.
     { path = "std::io::stdout", reason = "norn-console owns the render seam; verbs return data" },
+    # No SQLite connection opened outside norn-store. Opening is the act the
+    # rule is about, so the constructors are its subject rather than the
+    # `Connection` type: norn-store names that type throughout, and a crate-wide
+    # allow on it would erase the marker this rule exists to leave. The
+    # `from_handle` pair is in the set because adopting a raw `sqlite3*` produces
+    # a live connection without naming a path — the same effect through a
+    # constructor that does not read as an open.
+    { path = "rusqlite::Connection::open", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::from_handle", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
+    { path = "rusqlite::Connection::from_handle_owned", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
 ]
 
 # The types that open a filesystem handle. A type only ever obtained from a
