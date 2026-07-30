@@ -418,14 +418,24 @@ impl<'a> Document<'a> {
     /// `[title](target)` string is inert text here; the Markdown form is body
     /// syntax.
     ///
-    /// **A link is reported when the entry's source bytes carry its token
-    /// literally**, which is what makes the span exact and
-    /// [`Link::range`] index the source. A value whose bytes and whose parsed
-    /// string are different text — a flow sequence's items, which have no
-    /// nameable bytes at all, or an escaped scalar — yields nothing here
-    /// rather than a span that is not certainly right. Reading one without a
-    /// span is what [`Document::field_texts`] and
-    /// [`crate::parse_wikilinks_in_text`] are for.
+    /// **A link is reported when the entry's source bytes carry its value
+    /// literally** — a plain scalar, or one wrapped in a single pair of quotes
+    /// — because that is the only case where an offset in the parsed string is
+    /// an offset in the document, which is what makes the span exact and
+    /// [`Link::range`] index the source.
+    ///
+    /// An entry whose bytes and whose parsed string are *different text*
+    /// reports nothing here. That refusal covers the flow sequence's items and
+    /// the flow value, which have no nameable bytes at all; the escaped scalar,
+    /// where `"[[X]]"` and `[[X]]` share no offsets; the doubled quote of
+    /// `'it''s'`; the block scalar and the folded scalar (`|`, `>`); the
+    /// multi-line quoted scalar; and the nested map, whose strings are not
+    /// top-level entries. Locating a token by searching the source for its text
+    /// instead is guessing, and guessing wrong is silent: an escaped token
+    /// whose text matches a later literal one claims that one's bytes and the
+    /// literal link disappears. Reading these shapes without a span is what
+    /// [`Document::field_texts`] and [`crate::parse_wikilinks_in_text`] are
+    /// for.
     pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
         let mut cursor = LineCursor::new(self.source);
         let mut links = Vec::new();
@@ -433,18 +443,15 @@ impl<'a> Document<'a> {
             let Some(range) = text.range else {
                 continue;
             };
-            let written = &self.source[range.clone()];
-            // The tokens are found in ascending order, so the search for each
-            // one resumes where the last was found: two identical links in one
-            // value are two entries at two offsets.
-            let mut at = 0;
+            let Some(offset) = literal_text_offset(&self.source[range.clone()], text.text) else {
+                continue;
+            };
+            // Every token's offset in the entry's text is its offset in the
+            // source, one quote apart, so no token is searched for and two
+            // identical links in one value are two entries at two offsets.
             for link in parse_wikilinks_in_text(text.text) {
-                let Some(found) = written[at..].find(&link.raw) else {
-                    continue;
-                };
-                at = at + found + link.raw.len();
                 links.push(Link {
-                    span: cursor.span_at(range.start + at - link.raw.len()),
+                    span: cursor.span_at(range.start + offset + link.span.byte_offset),
                     ..link
                 });
             }
@@ -789,6 +796,27 @@ impl<'a> Document<'a> {
         }
         Ok(())
     }
+}
+
+/// Where `text` begins inside the `written` bytes that produced it, when those
+/// bytes carry it literally: zero for a plain scalar, one for a scalar wrapped
+/// in a single pair of quotes.
+///
+/// `None` when the two are different text — an escape, a doubled quote, a
+/// folded line — and no offset maps the parsed string onto the source at all.
+/// The whole entry is refused rather than partly located: the two texts share a
+/// prefix up to the first difference and nothing after it, so a token past that
+/// point has no source position and the ones before it cannot be told apart
+/// from the ones after.
+fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
+    if written == text {
+        return Some(0);
+    }
+    ['"', '\'']
+        .into_iter()
+        .filter_map(|quote| written.strip_prefix(quote)?.strip_suffix(quote))
+        .any(|inner| inner == text)
+        .then_some(1)
 }
 
 /// The frontmatter value `source` holds, without locating its fields.

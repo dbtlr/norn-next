@@ -231,15 +231,24 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Link> {
             // end. Trimming it here — rather than in the caller — is also what
             // keeps it outside `stem_range`, so a rewrite leaves it standing.
             let addressed = addressed.trim_end();
-            let (protocol, target) = split_protocol(addressed);
+            let (protocol, stem) = split_protocol(addressed);
+            // A sentinel is a prefix rather than a separator, so whitespace
+            // behind it is padding on the stem's left exactly as the space in
+            // `[[note #Head]]` is padding on its right: `[[vault:// Note]]`
+            // addresses `Note`. Trimming both sides is also what lets the token
+            // round-trip to itself — a padded target is not representable, so
+            // an untrimmed one reads as a target no rewrite would accept.
+            let stem_padding = stem.len() - stem.trim_start().len();
+            let target = stem[stem_padding..].to_string();
             // The stem sits at a known offset inside the token: past the
             // fences and any embed marker, past the padding the author wrote,
-            // past the protocol prefix. A rewrite writes over exactly that, so
-            // padding, protocol, fragment and title bytes are never in the
-            // edited range.
+            // past the protocol prefix and the padding behind it. A rewrite
+            // writes over exactly that, so padding, protocol, fragment and
+            // title bytes are never in the edited range.
             let stem_start = inner.start() - full_match.start()
                 + padding
-                + protocol.as_ref().map_or(0, |scheme| scheme.len() + 3);
+                + protocol.as_ref().map_or(0, |scheme| scheme.len() + 3)
+                + stem_padding;
 
             Some(Link {
                 family: LinkFamily::Wikilink,

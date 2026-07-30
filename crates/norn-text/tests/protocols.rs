@@ -115,6 +115,37 @@ fn a_protocol_with_an_empty_stem_is_an_ordinary_target() {
     assert_eq!(link.target, "vault://");
 }
 
+/// The sentinel is a prefix, not a separator, so whitespace behind it is
+/// padding on the stem's left the way `[[note #Head]]`'s space is padding on
+/// its right. Trimming one side only left the target `" Note"`, which no
+/// resolver matches and which `wikilink_target_is_representable` refuses — a
+/// token that could not round-trip to itself.
+#[test]
+fn whitespace_behind_the_sentinel_is_padding_and_not_the_stem() {
+    let link = only("[[vault:// Note]]");
+    assert_eq!(link.protocol.as_deref(), Some("vault"));
+    assert_eq!(link.target, "Note");
+    assert!(wikilink_target_is_representable(&link.target));
+    assert_eq!(
+        reconstruct_wikilink(&link, &link.target).as_deref(),
+        Some("[[vault:// Note]]"),
+        "the padding survives an identity rewrite"
+    );
+    assert_eq!(
+        reconstruct_wikilink(&link, "Renamed").as_deref(),
+        Some("[[vault:// Renamed]]")
+    );
+
+    // Padding on both sides of the whole target composes with it.
+    let padded = only("[[ vault://  Note #Head | Shown ]]");
+    assert_eq!(padded.target, "Note");
+    assert_eq!(padded.anchor.as_deref(), Some("Head"));
+    assert_eq!(
+        reconstruct_wikilink(&padded, "New").as_deref(),
+        Some("[[ vault://  New #Head | Shown ]]")
+    );
+}
+
 /// Only the first sentinel splits; the rest belongs to the stem.
 #[test]
 fn only_the_first_sentinel_splits() {

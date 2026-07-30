@@ -185,7 +185,18 @@ fn links_reports_both_families_in_document_order() {
 /// Two readings of the same bytes drift, and the drift is invisible until it
 /// corrupts something — so this is asserted over a corpus built to make them
 /// drift: overlapping and nested tokens, code of all three kinds, escapes,
-/// protocols, the characterize-only forms, and multi-byte text.
+/// protocols, the characterize-only forms, and multi-byte text. The corpus is
+/// fixed, so the universe it produces is written out literally: an expectation
+/// computed from one of the accessors under test agrees with itself whatever
+/// the accessors do.
+///
+/// This test is the carrier of the regression registry's
+/// `one-parser-authority-for-link-text` case, which names it by path — renaming
+/// either one without the other leaves the registry pointing at nothing.
+///
+/// The indented-code line spells its four spaces `\x20`, because a `\`
+/// line-continuation swallows the leading whitespace of the line it joins and
+/// the arm silently stopped being indented at all.
 #[test]
 fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
     let body = "\
@@ -195,7 +206,7 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
 \n\
 ```\n[[fenced]]\n[t](fenced.md)\n```\n\
 \n\
-    [[indented]]\n\
+\x20\x20\x20\x20[[indented]]\n\
 \n\
 ![alt](picture.png) and <https://example.com> and [text][label]\n\
 \n\
@@ -212,18 +223,47 @@ fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
     let scan = BodyScan::new(body);
     let document = Document::parse(&source);
 
-    let both: Vec<Link> = {
-        let mut links = scan.wikilinks();
-        links.extend(
-            scan.links()
-                .into_iter()
-                .filter(|link| link.family == LinkFamily::Markdown),
-        );
-        links.sort_by_key(|link| link.span.byte_offset);
+    // The universe the corpus produces, written out: every token of an
+    // implemented family, in the contracted order, with the three kinds of code
+    // and the four characterize-only forms contributing nothing.
+    let universe = [
+        (LinkFamily::Markdown, "./a.md"),
+        (LinkFamily::Wikilink, "Wiki"),
+        (LinkFamily::Wikilink, "a"),
+        (LinkFamily::Markdown, "b"),
+        (LinkFamily::Markdown, "./out.md"),
+        (LinkFamily::Wikilink, "Inner"),
+        (LinkFamily::Wikilink, "Tight"),
+        (LinkFamily::Markdown, "note#draft.md"),
+        (LinkFamily::Markdown, "a"),
+        (LinkFamily::Wikilink, "Proto"),
+        (LinkFamily::Wikilink, "日本語"),
+        (LinkFamily::Markdown, "./路径.md"),
+        (LinkFamily::Wikilink, "Padded"),
+        (LinkFamily::Wikilink, "Straddling\nAcross"),
+        (LinkFamily::Wikilink, "a^b"),
+        (LinkFamily::Markdown, "x.md"),
+    ];
+    let facts = |links: &[Link]| -> Vec<(LinkFamily, String)> {
         links
+            .iter()
+            .map(|link| (link.family, link.target.clone()))
+            .collect()
     };
+    let expected: Vec<(LinkFamily, String)> = universe
+        .iter()
+        .map(|(family, target)| (*family, (*target).to_string()))
+        .collect();
+    assert_eq!(facts(&scan.links()), expected, "BodyScan::links");
+
+    let mut both = scan.wikilinks();
+    both.extend(
+        scan.links()
+            .into_iter()
+            .filter(|link| link.family == LinkFamily::Markdown),
+    );
+    both.sort_by_key(|link| link.span.byte_offset);
     assert_eq!(scan.links(), both, "links() is its two families");
-    assert!(!scan.links().is_empty(), "the corpus produces links");
 
     let rebase = |mut link: Link| {
         link.span.byte_offset += offset;
@@ -365,22 +405,73 @@ fn a_document_reports_the_wikilinks_its_frontmatter_values_carry() {
     assert_eq!(targets(&document.links()), ["Body"]);
 }
 
-/// The stated limitation. A flow sequence's items have no separately nameable
-/// bytes — the same reason a flow value has no value span — so a link written
-/// in one is reported by nothing here rather than by a span that is not
-/// certainly right. `field_texts` plus `parse_wikilinks_in_text` reads it
-/// without one.
+/// The stated limitation, in every shape it takes. A link is reported when the
+/// entry's source bytes carry its value literally, because that is the only
+/// case where an offset in the parsed string is an offset in the document.
+/// Everything else — a flow sequence's items and the flow value, which have no
+/// nameable bytes at all; an escaped scalar; a doubled quote; a block or folded
+/// scalar; a multi-line quoted scalar; a nested map — is reported by nothing
+/// here rather than by a span that is not certainly right. `field_texts` plus
+/// `parse_wikilinks_in_text` reads them all without one.
 #[test]
 fn a_frontmatter_link_with_no_nameable_bytes_is_absent_rather_than_guessed() {
-    let document = Document::parse("---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n");
-    assert!(document.frontmatter_wikilinks().is_empty());
+    for source in [
+        // A flow sequence, and the flow value itself.
+        "---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n",
+        // An escaped scalar: `"[[A]]"` and `[[A]]` share no offsets.
+        "---\nsee: \"[[\\u0041]] and [[B]]\"\n---\n",
+        "---\nsee: \"a\\tb [[A]]\"\n---\n",
+        // A doubled quote is an escape too.
+        "---\nsee: 'it''s [[A]]'\n---\n",
+        // Block and folded scalars, and a quoted scalar continued across
+        // lines: no single run of bytes to name.
+        "---\nsee: |\n  [[A]]\n---\n",
+        "---\nsee: >\n  [[A]]\n---\n",
+        "---\nsee: \"one\n  two [[A]]\"\n---\n",
+        // A nested map's strings are not top-level entries.
+        "---\nsee:\n  inner: \"[[A]]\"\n---\n",
+    ] {
+        let document = Document::parse(source);
+        assert!(document.frontmatter_wikilinks().is_empty(), "in {source:?}");
+    }
 
+    let document = Document::parse("---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n");
     let unnamed: Vec<Link> = document
         .field_texts()
         .iter()
         .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
         .collect();
     assert_eq!(targets(&unnamed), ["A", "B"]);
+}
+
+/// Refusing the whole entry is the point rather than a side effect. Tokens were
+/// parsed from the decoded text and then searched for in the source, so an
+/// escaped token whose decoded text matched a later literal one claimed that
+/// one's bytes. An entry decoding to `[[X]] and [[X]]` whose first token was
+/// spelled with an escape held two tokens and reported one, sitting on the
+/// second, with the first gone and no diagnostic. Two links, one fact, no
+/// complaint is the failure a span-free seam exists to avoid.
+#[test]
+fn an_escaped_token_cannot_claim_a_later_literal_tokens_bytes() {
+    let stolen = Document::parse("---\na: \"[[\\u0058]] and [[X]]\"\n---\n");
+    assert!(stolen.frontmatter_wikilinks().is_empty());
+    let from_text: Vec<Link> = stolen
+        .field_texts()
+        .iter()
+        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
+        .collect();
+    assert_eq!(targets(&from_text), ["X", "X"]);
+
+    // Two identical tokens whose bytes *are* literal are two facts at two
+    // offsets, each indexing the source.
+    let source = "---\na: \"[[X]] and [[X]]\"\n---\n";
+    let document = Document::parse(source);
+    let links = document.frontmatter_wikilinks();
+    assert_eq!(targets(&links), ["X", "X"]);
+    assert_ne!(links[0].span.byte_offset, links[1].span.byte_offset);
+    for link in &links {
+        assert_eq!(&source[link.range()], "[[X]]");
+    }
 }
 
 // ── The scope fence, characterized ───────────────────────────────────────
