@@ -215,7 +215,7 @@ contract.
 | Crate | Owns | Earned by |
 |---|---|---|
 | `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
-| `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, both link families (wikilink and inline Markdown, one fact shape carrying family, protocol, title and addressing mode), `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Frontmatter string values are scanned for wikilinks only. Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a vault schema facet enforced through `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
+| `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, both link families (wikilink and inline Markdown, one fact shape carrying family, protocol and title, from which the resolution mode derives — protocol first, family second), `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Frontmatter string values are scanned for wikilinks only. Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". The `#tag` family is committed to graduate past syntax: a vault schema facet enforced through `norn-store`, and a query surface the verb charter decides. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
 | `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-vault flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-prefix, redundant separators — so every consumer compares normalized identity instead of deriving its own. Watcher coverage for an entry is the vault root tree plus that entry's configured schema-source path. Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
 | `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, and the read builders (wire params → emitted SQL). Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch, so an unverified blob never appears under a name anything loads. A fetch failure or a digest mismatch refuses with a structured reason: semantic search stays un-enabled, and nothing else degrades. Acquisition is eager, at the explicit enable act, never lazy inside a query. A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
@@ -344,9 +344,9 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
 9. **The fs event stream carries filesystem facts only**, from a single producer (the
    watcher). Domain eventing, if it ever earns existence, is a separate host-internal
    concern — never a rider on the fs bus.
-10. **One parser.** All document syntax — frontmatter, headings, sections, wikilinks, tags —
-    is read and written through `norn-text`. A second interpretation of document text
-    anywhere else is a defect.
+10. **One parser.** All document syntax — frontmatter, headings, sections, links (both
+    families), tags — is read and written through `norn-text`. A second interpretation of
+    document text anywhere else is a defect.
 11. **Machine-local state has one owner.** `norn-config` owns config-directory bytes —
     registry file, bearer token, endpoint conventions — and every read and write of them
     flows through its API. Registry *semantics* (the serving set and its mutation verbs)
@@ -535,14 +535,16 @@ builder with its own `EXPLAIN` bar and index support. Candidates emit as minimal
 disambiguating suffixes, and the findings pillar indexes full candidate enumeration so the
 wire's bounded head stays a head rather than becoming the query surface.
 
-The links table stores **syntactic facts only** — raw target, protocol, title, addressing
-mode, span — and resolution runs at query time through this one grammar; resolved edges are
-never stored, and a materialized projection could only ever arrive as keyed, invalidated
-derived state.
-Backlinks are an indexed suffix join over those facts. Two addressing modes share that fact
-shape, each true to its own standard: a wikilink target resolves as a suffix address, while
-an inline Markdown link target resolves as a relative filesystem path against the containing
-document — vault-root-relative when the path is rooted, and containment-bounded either way.
+The links table stores **syntactic facts only** — raw target, family, protocol, title, span —
+and resolution runs at query time through this one grammar; resolved edges are never stored,
+and a materialized projection could only ever arrive as keyed, invalidated derived state.
+Backlinks are an indexed suffix join over those facts. How a target resolves **derives from
+the fact, protocol first and family second**: a written `protocol://` prefix shadows the
+family, because the family says which grammar the author wrote and the protocol says what
+the address is. A protocol-free wikilink target resolves as a suffix address, while a
+protocol-free inline Markdown target resolves as a relative filesystem path against the
+containing document — vault-root-relative when the path is rooted, and containment-bounded
+either way.
 
 **Derivation — attach, heal, watch.** Pure host composition. Cold attach walks
 `fs.walk → text.parse → store.upsert`. Warm operation is watcher facts from `norn-fs`
