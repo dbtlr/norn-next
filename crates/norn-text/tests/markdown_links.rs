@@ -177,6 +177,99 @@ fn links_reports_both_families_in_document_order() {
     assert_eq!(targets(&scan.wikilinks()), ["Wiki"]);
 }
 
+/// One parser is the authority, so the link universe is identical whichever
+/// accessor computes it. `BodyScan::links` is exactly its wikilinks plus its
+/// Markdown links; `Document::links` and `Document::wikilinks` are the same
+/// facts with every span rebased by one `body_start` and nothing else changed.
+///
+/// Two readings of the same bytes drift, and the drift is invisible until it
+/// corrupts something — so this is asserted over a corpus built to make them
+/// drift: overlapping and nested tokens, code of all three kinds, escapes,
+/// protocols, the characterize-only forms, and multi-byte text.
+#[test]
+fn the_link_universe_is_the_same_whichever_accessor_computes_it() {
+    let body = "\
+[Md](./a.md) then [[Wiki]] then [[a]](b) and [see [[Inner]] here](./out.md)\n\
+\n\
+`[[incode]]` and `[t](incode.md)` and a real [[Tight|Shown]]\n\
+\n\
+```\n[[fenced]]\n[t](fenced.md)\n```\n\
+\n\
+    [[indented]]\n\
+\n\
+![alt](picture.png) and <https://example.com> and [text][label]\n\
+\n\
+[label]: ./definition.md#faq\n\
+\n\
+[t](note\\#draft.md) and [t](<a#b.md>) and [[vault://Proto#H|T]]\n\
+\n\
+[[日本語#見出し]] and [多字節](./路径.md#锚) and ![[ Padded | Title ]]\n\
+\n\
+[[Straddling\nAcross]] and [[a^b]] and [t](x.md \"Tooltip\")\n";
+    let source = format!("---\ntitle: Note\ntags:\n  - alpha\n---\n\n{body}");
+    let offset = source.len() - body.len();
+
+    let scan = BodyScan::new(body);
+    let document = Document::parse(&source);
+
+    let both: Vec<Link> = {
+        let mut links = scan.wikilinks();
+        links.extend(
+            scan.links()
+                .into_iter()
+                .filter(|link| link.family == LinkFamily::Markdown),
+        );
+        links.sort_by_key(|link| link.span.byte_offset);
+        links
+    };
+    assert_eq!(scan.links(), both, "links() is its two families");
+    assert!(!scan.links().is_empty(), "the corpus produces links");
+
+    let rebase = |mut link: Link| {
+        link.span.byte_offset += offset;
+        link.span.line += source[..offset].lines().count();
+        link
+    };
+    let expected: Vec<Link> = scan.links().into_iter().map(rebase).collect();
+    let from_document = document.links();
+    assert_eq!(
+        from_document
+            .iter()
+            .map(|link| (&link.raw, link.family, link.span.byte_offset))
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|link| (&link.raw, link.family, link.span.byte_offset))
+            .collect::<Vec<_>>(),
+        "Document::links is BodyScan::links rebased"
+    );
+    for link in &from_document {
+        assert_eq!(&source[link.range()], link.raw);
+    }
+
+    assert_eq!(
+        document
+            .wikilinks()
+            .iter()
+            .map(|link| link.span.byte_offset)
+            .collect::<Vec<_>>(),
+        scan.wikilinks()
+            .iter()
+            .map(|link| link.span.byte_offset + offset)
+            .collect::<Vec<_>>(),
+        "Document::wikilinks is BodyScan::wikilinks rebased"
+    );
+    assert_eq!(
+        document
+            .links()
+            .into_iter()
+            .filter(|link| link.family == LinkFamily::Wikilink)
+            .collect::<Vec<_>>(),
+        document.wikilinks(),
+        "the wikilinks in links() are the wikilinks"
+    );
+}
+
 #[test]
 fn a_document_reports_links_in_source_coordinates() {
     let source = "---\ntitle: Note\n---\n\n[Md](./a.md) and [[Wiki]]\n";
