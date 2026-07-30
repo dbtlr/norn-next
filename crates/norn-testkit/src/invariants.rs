@@ -100,9 +100,24 @@ pub const LINT_RULES: &[LintRule] = &[
     },
     LintRule {
         name: "no SQLite connection opened outside norn-store",
-        state: LintState::Pending,
-        prefixes: &[],
-        required: &[],
+        state: LintState::Live,
+        prefixes: &[("disallowed-methods", "rusqlite::Connection::")],
+        // Opening is the act the rule is about, so its subject is the
+        // constructors rather than the `Connection` type. `norn-store` names
+        // that type throughout, and disallowing it would earn a crate-wide
+        // allow — which erases the use-site marker the rule exists to leave.
+        required: &[
+            ("disallowed-methods", "rusqlite::Connection::open"),
+            ("disallowed-methods", "rusqlite::Connection::open_in_memory"),
+            (
+                "disallowed-methods",
+                "rusqlite::Connection::open_with_flags",
+            ),
+            (
+                "disallowed-methods",
+                "rusqlite::Connection::open_in_memory_with_flags",
+            ),
+        ],
     },
     LintRule {
         name: "no norn-config registry-surface use outside norn-host",
@@ -728,12 +743,16 @@ mod tests {
         );
     }
 
+    /// The example is a symbol no rule in the mapping owns. Spawning a child
+    /// process is a real effect nothing here governs today, which is exactly
+    /// what an unclaimed entry looks like: a rule configured in one place and
+    /// named in neither.
     #[test]
     fn a_configured_entry_no_rule_claims_is_caught() {
         let mut config = config();
         config.entries.insert((
             "disallowed-methods".to_string(),
-            "rusqlite::Connection::open".to_string(),
+            "std::process::Command::new".to_string(),
         ));
         let problems = consistency_violations(&config);
         assert!(

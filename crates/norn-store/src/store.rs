@@ -348,6 +348,7 @@ enum Verdict {
 /// Every connection this crate holds comes from here. The journal mode is read
 /// back rather than assumed, because a database that refuses write-ahead logging
 /// is not a database this store can keep its promises on.
+#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 fn connect(path: &Path) -> Result<Attempt, StoreError> {
     let connection = Connection::open(path).map_err(|error| StoreError::Lifecycle {
         operation: "opening the database",
