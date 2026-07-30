@@ -63,6 +63,67 @@ fn a_tag_may_be_written_in_any_alphabet() {
     assert_eq!(names(&body_tags("#проект/задача\n")), ["проект/задача"]);
 }
 
+/// A combining mark is part of the letter it sits on, so the run does not stop
+/// at one. Without that, a Devanagari virama ends the name halfway through the
+/// word the author wrote.
+#[test]
+fn a_combining_mark_is_part_of_the_run() {
+    assert_eq!(names(&body_tags("#हिन्दी prose\n")), ["हिन्दी"]);
+    assert_eq!(names(&body_tags("#עִבְרִית\n")), ["עִבְרִית"]);
+}
+
+/// The composed and the decomposed spelling of one visible tag are one tag
+/// name each, and each is the whole word. The decomposed form is what a macOS
+/// filesystem and several keyboard layouts produce, so a grammar that stopped
+/// at the combining accent would report `cafe` for a document that reads
+/// `#café`.
+#[test]
+fn the_composed_and_decomposed_spellings_both_carry_the_whole_name() {
+    assert_eq!(names(&body_tags("#café\n")), ["café"]);
+    assert_eq!(names(&body_tags("#cafe\u{301}\n")), ["cafe\u{301}"]);
+}
+
+/// A mark sits inside a word, so a marker written after one opens nothing —
+/// the same rule that makes `foo#bar` carry no tag.
+#[test]
+fn a_marker_after_a_combining_mark_is_inside_a_word() {
+    assert!(body_tags("cafe\u{301}#tag\n").is_empty());
+}
+
+/// Numerals are numerals in every alphabet, and a run of them is still a
+/// number somebody wrote down.
+#[test]
+fn a_run_of_unicode_numerals_is_not_a_tag() {
+    assert!(body_tags("#٠١٢\n").is_empty());
+    assert!(body_tags("#Ⅻ\n").is_empty());
+}
+
+/// The look-behind asks whether the previous character is part of a word, and
+/// non-ASCII punctuation is not. A non-ASCII letter is.
+#[test]
+fn the_look_behind_reads_non_ascii_characters_by_what_they_are() {
+    for body in ["«#tag»\n", "—#tag\n", "。#tag\n"] {
+        assert_eq!(names(&body_tags(body)), ["tag"], "in {body:?}");
+    }
+    assert!(body_tags("א#tag\n").is_empty());
+}
+
+/// A zero-width joiner is a format character rather than a letter or a mark,
+/// so it ends the run.
+#[test]
+fn a_zero_width_joiner_ends_the_run() {
+    assert_eq!(names(&body_tags("#a\u{200D}b\n")), ["a"]);
+}
+
+/// The grammar's letter, characterized: `-` and `_` are in the set and neither
+/// is a digit, so a run made only of them is a tag name. Nothing here judges
+/// whether it is a *useful* one.
+#[test]
+fn a_punctuation_only_run_is_a_tag_name() {
+    assert_eq!(names(&body_tags("#---\n")), ["---"]);
+    assert_eq!(names(&body_tags("#_\n")), ["_"]);
+}
+
 /// At least one character must not be a digit, so a number somebody wrote down
 /// stays a number. A digit beside a letter is a tag.
 #[test]

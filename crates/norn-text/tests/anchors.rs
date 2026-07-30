@@ -49,6 +49,17 @@ fn a_slug_keeps_letters_whatever_alphabet_they_are_written_in() {
     assert_ne!(slugify("日本語"), slugify("한국어"));
 }
 
+/// A combining mark is kept, because dropping it writes a different word and
+/// the anchor stops matching the one a renderer emits. Lowercasing is where
+/// this bites hardest: `İ` lowercases to an `i` and a combining dot above, and
+/// the dot has to survive.
+#[test]
+fn a_slug_keeps_the_combining_marks_the_text_carries() {
+    assert_eq!(slugify("हिन्दी"), "हिन्दी");
+    assert_eq!(slugify("İstanbul"), "i\u{307}stanbul");
+    assert_eq!(slugify("cafe\u{301}"), "cafe\u{301}");
+}
+
 #[test]
 fn a_heading_carries_the_slug_of_its_flattened_text() {
     assert_eq!(slugs("## What? Really!\n"), ["what-really"]);

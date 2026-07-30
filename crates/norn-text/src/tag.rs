@@ -1,11 +1,18 @@
 //! `#tag` syntax — one grammar, two homes.
 //!
 //! A tag is a `#` marker followed by a run of tag characters: unicode letters,
-//! digits, `_`, `-` and `/`, the last of which nests (`#area/project`). The
-//! run ends at the first character outside that set, at least one character in
-//! it is not a digit — `#123` is a number somebody wrote down, not a tag — and
-//! the case is recorded as it was written, because deciding that `#Work` and
-//! `#work` are the same tag is a matching question and matching is not syntax.
+//! combining marks, digits, `_`, `-` and `/`, the last of which nests
+//! (`#area/project`). The run ends at the first character outside that set, at
+//! least one character in it is not a digit — `#123` is a number somebody
+//! wrote down, not a tag — and the case is recorded as it was written, because
+//! deciding that `#Work` and `#work` are the same tag is a matching question
+//! and matching is not syntax.
+//!
+//! Marks are in the set because a mark is part of the letter it sits on. A
+//! Devanagari virama, a combining acute, a Hebrew point: leaving them out cuts
+//! `#हिन्दी` down to `हिन` and splits one visible `#café` into two facts
+//! depending on whether the author's keyboard produced the composed or the
+//! decomposed spelling.
 //!
 //! # Where a marker counts
 //!
@@ -27,9 +34,14 @@
 //! diagnostic is raised about it.
 
 use std::ops::Range;
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use crate::body::overlaps_any;
 use crate::span::{LineCursor, SourceSpan};
+
+static MARK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\p{M}$").expect("valid mark regex"));
 
 /// A recognized tag, marker excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,14 +58,25 @@ pub struct Tag {
     pub span: Option<SourceSpan>,
 }
 
+/// Whether `ch` is a Unicode combining mark (`Mn`, `Mc` or `Me`).
+///
+/// `char::is_alphanumeric` covers the marks that carry `Other_Alphabetic` and
+/// no others, so a virama or a combining accent reads as the end of a word to
+/// it. Every character class that asks "is this still the same word" — the tag
+/// run, the marker's look-behind, the slug's keep-set — needs the whole
+/// category, and the ASCII fast path keeps prose off the regex entirely.
+pub(crate) fn is_mark(ch: char) -> bool {
+    !ch.is_ascii() && MARK.is_match(ch.encode_utf8(&mut [0u8; 4]))
+}
+
 /// Whether `ch` may appear in a tag name.
 fn is_tag_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | '-' | '/')
+    ch.is_alphanumeric() || is_mark(ch) || matches!(ch, '_' | '-' | '/')
 }
 
 /// Whether `ch` is part of a word, and so cannot sit in front of a marker.
 fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_'
+    ch.is_alphanumeric() || is_mark(ch) || ch == '_'
 }
 
 /// Whether `name` is a tag name: non-empty, every character in the set, and at

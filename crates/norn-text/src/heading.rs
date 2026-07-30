@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::span::SourceSpan;
+use crate::tag::is_mark;
 
 /// A Markdown heading located in a document body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,13 +46,18 @@ pub struct Heading {
 }
 
 /// Slugify heading text into a GFM anchor: surrounding whitespace trimmed,
-/// lowercased, letters and digits kept whatever alphabet they are written in,
-/// `_` and `-` kept, a space written as `-`, and everything else — punctuation
-/// and symbols — dropped.
+/// lowercased, letters, combining marks and digits kept whatever alphabet they
+/// are written in, `_` and `-` kept, a space written as `-`, and everything
+/// else — punctuation and symbols — dropped.
 ///
 /// `## What? Really!` slugs to `what-really` and `## 日本語` to `日本語`.
 /// Runs are not collapsed, because GFM does not collapse them: `A  B` slugs to
 /// `a--b`, and an anchor that agrees with the renderer is the point.
+///
+/// Marks are kept because dropping them writes a different word: `हिन्दी`
+/// would slug to `हिनदी`, and lowercasing `İstanbul` produces an `i` and a
+/// combining dot that has to survive for the anchor to match the one a
+/// renderer emits.
 ///
 /// This answers for one text. Telling two headings with the same text apart is
 /// a property of the document they sit in, so the `-1`, `-2` suffixes are
@@ -63,7 +69,7 @@ pub fn slugify(text: &str) -> String {
     for ch in text.trim().chars().flat_map(char::to_lowercase) {
         if ch == ' ' {
             slug.push('-');
-        } else if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+        } else if ch.is_alphanumeric() || is_mark(ch) || ch == '_' || ch == '-' {
             slug.push(ch);
         }
     }
