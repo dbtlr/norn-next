@@ -13,12 +13,15 @@
 #
 # Rules are adopted one at a time, as each invariant's subject becomes real.
 # The rules named but not yet configured — no SQLite connection outside
-# norn-store, no serde_json::Value crossing the wire seam, no norn-config
-# registry-surface use outside norn-host — are carried as pending entries in
-# the mapping in crates/norn-testkit/src/invariants.rs, which is the
-# authoritative record of what carries which invariant. That mapping is
-# asserted against this file: an entry here that no live rule claims fails the
-# architecture gate, so a rule cannot arrive in one place and not the other.
+# norn-store, no norn-config registry-surface use outside norn-host — are
+# carried as pending entries in the mapping in
+# crates/norn-testkit/src/invariants.rs, which is the authoritative record of
+# what carries which invariant. That mapping is asserted against this file: an
+# entry here that no live rule claims fails the architecture gate, so a rule
+# cannot arrive in one place and not the other. A claim no configured rule can
+# express — `serde_json::Value` in a signature crossing the wire seam, which
+# `disallowed-types` cannot separate from the same type in a test — is carried
+# there as review-held rather than as a rule waiting on configuration.
 #
 # **These rules bind std-surface effects, and that is their whole reach.** An
 # effect reached another way is outside them and is review-held: a child
