@@ -370,6 +370,7 @@ fn a_derived_path_form_has_one_home() {
         "document_tags_name",
         "findings_generation",
         "findings_document",
+        "document_vectors_model",
     ] {
         assert!(
             !declared

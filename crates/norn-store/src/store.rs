@@ -243,6 +243,14 @@ impl Store {
         &self.path
     }
 
+    /// Whether this store's file outlives it — and so whether closing or dropping
+    /// the store removes the database.
+    ///
+    /// It is the mode the open settled on rather than the one the caller asked
+    /// for: the mode is recorded in the database, and a throwaway open over a
+    /// durable store is refused rather than adopted, so a registered vault's
+    /// derived state cannot be armed for teardown by a process that opened it
+    /// casually.
     pub fn mode(&self) -> StoreMode {
         self.mode
     }
@@ -445,13 +453,13 @@ impl Drop for Store {
 
 /// The arrangements a suite reaches past the store's own guarantees to make.
 ///
-/// Every function here writes state the store would never write on its own, and
-/// each of them exists because a rung, a refusal or a verification cannot be
-/// reached from outside otherwise — no other crate may open a connection, so the
-/// only way to arrange a damaged database is through the crate that owns the
-/// connection. **Nothing in a product path calls any of this.** The module is
-/// hidden from the documentation and every name in it says what it does to the
-/// database.
+/// Every function here puts the database, or the connection to it, in a state no
+/// store operation produces, and each of them exists because a rung, a refusal or
+/// a verification cannot be reached from outside otherwise — no other crate may
+/// open a connection, so the only way to arrange either is through the crate that
+/// owns the connection. **Nothing in a product path calls any of this.** The
+/// module is hidden from the documentation and every name in it says what it
+/// does.
 #[doc(hidden)]
 pub mod induced_failure {
     use super::{Store, StoreError, error, put_meta};
@@ -482,16 +490,24 @@ pub mod induced_failure {
 
     /// Run SQL against the store's own connection.
     ///
-    /// What it is for is damage: dropping a trigger the full-text index depends
-    /// on, editing a body behind that index's back, dropping the unique index
-    /// that keeps paths unique, writing a value outside a closed vocabulary. All
-    /// of it is state no store operation produces, and all of it is state a
-    /// verification or an open has to be able to catch.
-    pub fn damage_out_of_band(store: &mut Store, sql: &str) -> Result<(), StoreError> {
+    /// Two kinds of arrangement, and both are the whole reason the fence exists.
+    ///
+    /// **Damage at rest**: dropping a trigger the full-text index depends on,
+    /// editing a body behind that index's back, dropping the unique index that
+    /// keeps paths unique, writing a value outside a closed vocabulary. All of it
+    /// is state no store operation produces, and all of it is state a verification
+    /// or an open has to be able to catch.
+    ///
+    /// **A condition on the connection**: `PRAGMA query_only`, which is what a
+    /// revoked permission or a read-only mount looks like from inside a statement.
+    /// That is not damage and the store must not answer it as damage — a verdict
+    /// of `Damaged` authorizes discarding the database — so arranging it is how
+    /// the distinction gets tested at all.
+    pub fn execute_out_of_band(store: &mut Store, sql: &str) -> Result<(), StoreError> {
         store
             .connection
             .execute_batch(sql)
-            .map_err(|error| error::sql("damaging the database out of band", error))
+            .map_err(|error| error::sql("running SQL out of band", error))
     }
 
     /// Make the next read of a pinned `meta` scalar fail as though the database

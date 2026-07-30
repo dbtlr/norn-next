@@ -11,8 +11,9 @@
 //! is the staleness test: a vector whose hash differs from its document's
 //! current hash describes text that is no longer there, and finding those is a
 //! join rather than a bookkeeping table. A model upgrade is a migration of
-//! derived state over `(model_id, model_version)`, which is what that index is
-//! for.
+//! derived state over `(model_id, model_version)`, and **no index stands over
+//! those two columns**: the statement that would migrate them does not exist yet,
+//! and index support arrives with the statement whose `EXPLAIN` bar can judge it.
 //!
 //! Embeddings are **eventually consistent** — they arrive from async workers
 //! rather than inside the increment that changed the document — so a document
@@ -51,8 +52,7 @@ pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
 }
 
-const STATEMENTS: &[&str] = &[
-    "CREATE TABLE document_vectors (
+const STATEMENTS: &[&str] = &["CREATE TABLE document_vectors (
     document      INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     model_id      TEXT    NOT NULL,
     model_version TEXT    NOT NULL,
@@ -61,6 +61,4 @@ const STATEMENTS: &[&str] = &[
     embedding     BLOB    NOT NULL,
     generation    INTEGER NOT NULL,
     PRIMARY KEY (document, model_id, model_version)
-)",
-    "CREATE INDEX document_vectors_model ON document_vectors(model_id, model_version)",
-];
+)"];

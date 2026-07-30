@@ -174,7 +174,7 @@ fn a_schema_that_no_longer_holds_what_it_was_created_with_is_rebuilt_from_zero()
 
     // The unique index on `path` is what makes a path one document. Without it a
     // re-derivation inserts a second row rather than updating the first.
-    induced_failure::damage_out_of_band(&mut store, "DROP INDEX documents_path")
+    induced_failure::execute_out_of_band(&mut store, "DROP INDEX documents_path")
         .expect("dropping an index");
     assert_eq!(
         store.recorded_store_schema().expect("the recorded schema"),

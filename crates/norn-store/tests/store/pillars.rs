@@ -125,7 +125,7 @@ fn a_full_text_index_that_drifted_from_its_column_is_damage() {
 
     // The triggers are the only thing that writes to the index, so dropping them
     // is what makes a later body edit invisible to it.
-    induced_failure::damage_out_of_band(
+    induced_failure::execute_out_of_band(
         &mut store,
         "DROP TRIGGER documents_fts_update;
          DROP TRIGGER documents_fts_insert;
@@ -164,7 +164,7 @@ fn a_full_text_index_holding_a_deleted_document_is_damage() {
         .begin_request()
         .upsert_document(&document("notes.md", "hash-1", "the only body\n"))
         .expect("writing a document");
-    induced_failure::damage_out_of_band(
+    induced_failure::execute_out_of_band(
         &mut store,
         "DROP TRIGGER documents_fts_delete; DELETE FROM documents",
     )
@@ -205,7 +205,7 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             .expect("recording a death");
         store.verify_integrity().expect("a store just written to");
 
-        induced_failure::damage_out_of_band(&mut store, arrange)
+        induced_failure::execute_out_of_band(&mut store, arrange)
             .expect("writing a value nothing writes");
         let error = store.verify_integrity().unwrap_err();
         let StoreError::Damaged { what } = &error else {
@@ -1258,7 +1258,7 @@ fn a_verification_that_cannot_write_is_refused_rather_than_called_damage() {
 
     // The connection can read and cannot write, which is what a revoked
     // permission or a read-only mount looks like from inside a statement.
-    induced_failure::damage_out_of_band(&mut store, "PRAGMA query_only = ON")
+    induced_failure::execute_out_of_band(&mut store, "PRAGMA query_only = ON")
         .expect("making the connection read-only");
 
     let error = store
@@ -1274,7 +1274,7 @@ fn a_verification_that_cannot_write_is_refused_rather_than_called_damage() {
     assert!(operation.contains("full-text index"), "{operation}");
 
     // And the database it could not verify is still readable and still there.
-    induced_failure::damage_out_of_band(&mut store, "PRAGMA query_only = OFF")
+    induced_failure::execute_out_of_band(&mut store, "PRAGMA query_only = OFF")
         .expect("restoring the connection");
     store
         .verify_integrity()

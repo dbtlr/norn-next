@@ -46,8 +46,9 @@
 //! opens every connection through one place.
 //!
 //! `findings` is deliberately outside that: a finding is keyed by path and class
-//! and outlives its subject, so no cascade reaches it and its lifecycle is
-//! class-scoped maintenance. See [`findings`].
+//! and outlives its subject, so no document delete reaches it and its lifecycle is
+//! class-scoped maintenance. The `findings` area in this tree states the whole of
+//! it beside its own statements.
 
 pub(crate) mod documents;
 pub(crate) mod facts;
