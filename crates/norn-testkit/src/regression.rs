@@ -10,8 +10,8 @@
 //! at which a real test can bind the property, and dormancy is structural:
 //! binding a case means editing its entry to name the tests that carry it, and
 //! [`Registry::audit`] holds those names to functions that really compile into
-//! the suite. A case whose venue is layer 0 is bindable in the harness as it
-//! stands, so leaving one dormant costs a stated reason.
+//! the suite. A case at or below [`LAYER_LANDING`] is bindable against a
+//! subject that exists, so leaving one dormant costs a stated reason.
 //!
 //! **The audit holds content, not only shape.** [`Registry::contract_digest`]
 //! is one value over every case's name, kind, mandatory flag, venue, property,
@@ -50,6 +50,16 @@ pub const MANDATORY_CASES: &[&str] = &[
     "one-display-source-per-semantic",
     "unknown-sort-or-projection-keys-never-silently-no-op",
 ];
+
+/// The highest layer whose subject exists, and so the highest venue at which a
+/// case may be bound.
+///
+/// A case at or below it could be carried by a real test today, which is what
+/// makes leaving one dormant a statement rather than a wait: [`Registry::audit`]
+/// requires every dormant case at or below this layer to say why. Raising it is
+/// a reviewed edit made when the next layer starts landing, and it raises the
+/// bar on every case that was already sitting there.
+pub const LAYER_LANDING: u8 = 1;
 
 /// The layers a case's venue names, indexed by layer number.
 ///
@@ -143,8 +153,8 @@ pub struct Binding {
     /// The tests that carry the property, as `<workspace-relative file>::<fn>`.
     #[serde(default)]
     pub tests: Vec<String>,
-    /// Why a case that could bind today does not. Required of a dormant
-    /// layer-0 case, because layer 0 is what exists.
+    /// Why a case that could bind today does not. Required of a dormant case
+    /// at or below [`LAYER_LANDING`], because that is what exists.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -616,8 +626,8 @@ impl Registry {
     /// named once, states something falsifiable no other case already states,
     /// and cites sources of a shape a citation has; that the mandatory set is
     /// exactly the one the harness pins; that a bound case names tests cargo
-    /// compiled into the suite; and that a dormant case at the layer that
-    /// exists says why it is still dormant.
+    /// compiled into the suite; and that a dormant case at or below the layer
+    /// that exists says why it is still dormant.
     ///
     /// `workspace_root` is where a test reference's path resolves from, and
     /// `tests` is what cargo says each cited target compiled.
@@ -773,9 +783,10 @@ impl Registry {
                         Some(reason) if reason.trim().is_empty() => {
                             problems.push(format!("`{name}` states an empty reason"));
                         }
-                        None if case.venue == 0 => problems.push(format!(
-                            "`{name}` is dormant at layer 0, which is the layer that exists, and \
-                             states no reason"
+                        None if case.venue <= LAYER_LANDING => problems.push(format!(
+                            "`{name}` is dormant at layer {}, which is at or below the layer that \
+                             exists, and states no reason",
+                            case.venue
                         )),
                         _ => {}
                     }
@@ -1015,9 +1026,9 @@ fn read(path: &Path) -> Result<String, RegistryError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Binding, BindingStatus, Case, Kind, LANE_IGNORE_PREFIXES, Listing, MANDATORY_CASES,
-        Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_test, ignore_reason,
-        is_identifier, is_kebab_case, opens_fn,
+        Binding, BindingStatus, Case, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
+        MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_test,
+        ignore_reason, is_identifier, is_kebab_case, opens_fn,
     };
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
@@ -1325,11 +1336,30 @@ fn a_name_in_prose() {
         );
     }
 
+    /// A dormant case at any layer whose subject exists has to say why. The
+    /// requirement is not layer 0's alone: layer 1 has landed, so a case
+    /// sitting there dormant and silent is an obligation nobody wrote down.
     #[test]
-    fn a_dormant_layer_zero_case_with_no_reason_is_caught() {
-        refused(
-            |registry| find(registry, "a-dormant-layer-zero-case").binding.reason = None,
-            "states no reason",
+    fn a_dormant_case_at_a_landed_layer_with_no_reason_is_caught() {
+        for venue in 0..=LAYER_LANDING {
+            refused(
+                |registry| {
+                    let case = find(registry, "a-dormant-layer-zero-case");
+                    case.venue = venue;
+                    case.binding.reason = None;
+                },
+                "states no reason",
+            );
+        }
+        // Above the landed layer there is nothing to explain: the subject has
+        // not been built.
+        assert_eq!(
+            problems(|registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.venue = LAYER_LANDING + 1;
+                case.binding.reason = None;
+            }),
+            Vec::<String>::new()
         );
     }
 

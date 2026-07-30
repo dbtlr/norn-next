@@ -335,8 +335,13 @@
       "property": "An encoding prefix is recognized at the extraction seam and never duplicated, relocated or shadowed: a byte-order mark ahead of a frontmatter block leaves the block addressable, no edit synthesizes a second block above the real one, and the prefix bytes are untouched by every edit.",
       "sources": ["NRN-349", "NRN-385"],
       "binding": {
-        "status": "dormant",
-        "reason": "no document extraction seam exists to be prefix-transparent."
+        "status": "bound",
+        "tests": [
+          "crates/norn-text/tests/reading.rs::a_byte_order_mark_does_not_hide_the_block",
+          "crates/norn-text/tests/reading.rs::a_byte_order_mark_alone_does_not_invent_a_block",
+          "crates/norn-text/tests/editing.rs::a_synthesized_block_lands_after_the_byte_order_mark",
+          "crates/norn-text/tests/editing.rs::editing_a_marked_document_leaves_the_mark_alone"
+        ]
       }
     },
     {
@@ -357,8 +362,13 @@
       "property": "Every emitted scalar and key re-parses to exactly the intended value in its actual context — block or flow, value or key position — verified by re-parse rather than by a denylist of shapes. A write not provably round-trip-safe refuses, and no write leaves frontmatter unparseable: an emission judged by a denylist of shapes is the shape this forbids, and under it a flow-sequence item containing a comma becomes two items while one containing a bracket makes every field in the block vanish from every query.",
       "sources": ["NRN-118", "NRN-141", "NRN-142"],
       "binding": {
-        "status": "dormant",
-        "reason": "no serializer exists to hold to a round trip."
+        "status": "bound",
+        "tests": [
+          "crates/norn-text/tests/quoting.rs::hostile_block_values_read_back_as_themselves",
+          "crates/norn-text/tests/quoting.rs::hostile_flow_items_read_back_as_themselves",
+          "crates/norn-text/tests/quoting.rs::hostile_keys_read_back_as_themselves",
+          "crates/norn-text/tests/quoting.rs::a_key_no_parser_will_read_back_refuses_rather_than_emitting_unproven_bytes"
+        ]
       }
     },
     {
@@ -435,8 +445,15 @@
       "property": "An edit addressed at one field or one section changes exactly those bytes: comments, blank lines, key order, quote style and line terminators outside the span are byte-preserved, and a removal never orphans a continuation line or absorbs a neighbouring field. Section and heading addressing resolves on line boundaries for every accepted heading form, including setext and a heading at end of file with no trailing newline, and the same resolver serves reads and writes.",
       "sources": ["NRN-128", "NRN-434", "NRN-143", "NRN-133", "NRN-141", "NRN-166", "NRN-137", "NRN-437"],
       "binding": {
-        "status": "dormant",
-        "reason": "no byte-span locator or splice path exists."
+        "status": "bound",
+        "tests": [
+          "crates/norn-text/tests/editing.rs::an_edit_moves_only_the_bytes_of_the_construct_it_addresses",
+          "crates/norn-text/tests/editing.rs::removing_a_field_leaves_the_comments_and_blank_lines_around_it",
+          "crates/norn-text/tests/editing.rs::a_crlf_document_stays_crlf_through_every_synthesis_path",
+          "crates/norn-text/tests/round_trip.rs::adversarial_document_edits_are_one_construct_diffs",
+          "crates/norn-text/tests/sections.rs::a_setext_headings_underline_belongs_to_the_heading",
+          "crates/norn-text/tests/sections.rs::a_heading_at_end_of_file_without_a_newline_reads_as_an_empty_section"
+        ]
       }
     },
     {
@@ -458,7 +475,7 @@
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "no link parser exists."
+        "reason": "a second link-text consumer does not exist; the parser half is carried by norn-text's suite."
       }
     },
     {
@@ -491,7 +508,7 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "no parser produces a diagnostic and no consumer reads one."
+        "reason": "diagnostics are produced; no consumer exists to hold to not-dropping them."
       }
     },
     {
