@@ -15,6 +15,10 @@
 //! judgment made in review. That mapping is the authoritative one, and it is
 //! code so that it is checked rather than read.
 //!
+//! [`generated`] is assistance rather than enforcement: it hands a suite the
+//! documents a fixture profile generates, without the suite holding a
+//! temporary tree to get them.
+//!
 //! The measurement machinery is the same shape: [`counters`] compares counter
 //! readings, [`explain`] states plan assertions over emitted SQL, [`scale`]
 //! expresses the size-independence pair, and [`process`] spawns a child under
@@ -26,6 +30,7 @@ pub mod base64;
 pub mod corpus;
 pub mod counters;
 pub mod explain;
+pub mod generated;
 pub mod invariants;
 mod json;
 #[cfg(unix)]

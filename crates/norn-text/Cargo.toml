@@ -1,0 +1,22 @@
+[package]
+name = "norn-text"
+description = "The syntax of a vault document — frontmatter parse/edit/serialize, headings, sections, wikilink syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies, so nothing about vaults, schemas, caches or config can reach
+# this crate. The registry dependencies below are implementation, never
+# contract — `serde_yaml` is the round-trip oracle behind the seam and appears
+# in no public signature, which is what keeps a purpose-built parser a
+# drop-in replacement rather than surgery.
+[dependencies]
+pulldown-cmark = { workspace = true }
+regex = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }
