@@ -129,7 +129,7 @@ pub(crate) const MERGE_KEY: &str = "<<";
 /// Parse the YAML between the delimiters, expanding merge keys.
 ///
 /// `<<` is a merge directive rather than a field: the mapping it names is
-/// folded into the one holding it, and the vault value model — which addresses
+/// folded into the one holding it, and the value model — which addresses
 /// fields by string key — has no shape for the directive itself. Expansion
 /// happens here, before a value exists, so the model holds the merged mapping
 /// and `<<` never becomes a field. A `<<` that names no mapping is not a merge

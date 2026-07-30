@@ -1,7 +1,7 @@
 //! Text-layer diagnostics.
 //!
 //! Reading a document is forgiving: a malformed frontmatter block, a key the
-//! vault value model cannot hold, a block whose spans cannot be trusted — each
+//! value model cannot hold, a block whose spans cannot be trusted — each
 //! yields a [`Diagnostic`] and a usable rest-of-document rather than an error
 //! return. Writing is not forgiving; a write that cannot be proven refuses.
 //! That split is why a diagnostic carries no severity: everything on the

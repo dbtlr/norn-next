@@ -1,4 +1,4 @@
-//! The vault value model — what a frontmatter value is allowed to be.
+//! The value model — what a frontmatter value is allowed to be.
 //!
 //! Seven shapes, and no eighth: null, bool, integer, float, string, sequence,
 //! and a string-keyed map. The model is derived from what a consumer of a
@@ -306,7 +306,7 @@ impl StripReport {
     }
 }
 
-/// Convert a parsed YAML value into the vault value model, reporting every
+/// Convert a parsed YAML value into the value model, reporting every
 /// construct the model has no shape for.
 ///
 /// `path` is a scratch buffer naming where the walk currently is. It is
@@ -341,7 +341,7 @@ pub(crate) fn from_yaml(
                     diagnostics.push(
                         Diagnostic::warning(
                             "frontmatter-non-string-key",
-                            "an entry keyed by a non-string was dropped; the vault value model \
+                            "an entry keyed by a non-string was dropped; the value model \
                              addresses fields by string key",
                         )
                         .with_detail(location(path)),
@@ -363,7 +363,7 @@ pub(crate) fn from_yaml(
             diagnostics.push(
                 Diagnostic::warning(
                     "frontmatter-tag-stripped",
-                    "an explicit YAML tag was dropped and its value kept; the vault value model \
+                    "an explicit YAML tag was dropped and its value kept; the value model \
                      carries no tags",
                 )
                 .with_detail(format!("`{}` {}", tagged.tag, location(path))),
