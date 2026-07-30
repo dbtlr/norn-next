@@ -178,9 +178,15 @@ struct ActiveHeading {
 /// one candidate — the last range that could reach it — so an empty range
 /// standing in that position would hide a real one behind it.
 fn push_code_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
-    if range.start < range.end {
-        ranges.push(range);
+    if range.start >= range.end {
+        return;
     }
+    debug_assert!(
+        ranges.last().is_none_or(|last| last.end <= range.start),
+        "opaque ranges arrive ascending and disjoint: {range:?} after {:?}",
+        ranges.last()
+    );
+    ranges.push(range);
 }
 
 /// Whether `query` overlaps any of `ranges`, which are ascending,

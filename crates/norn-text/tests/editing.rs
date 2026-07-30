@@ -210,10 +210,18 @@ fn a_crlf_document_stays_crlf_through_every_synthesis_path() {
         Ok("---\r\ntitle: t\r\n---\r\n# heading\r\ntext\r\n".to_string())
     );
 
+    // Section content carries its own line structure, and single-line content
+    // binds nothing: the terminator between two written lines is the one the
+    // splice chooses, so the content has to have an interior break for the
+    // claim to be tested at all. It arrives here written LF, as content
+    // written anywhere else would be.
     let sections = "---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\nold\r\n\r\n## Beta\r\n";
     assert_eq!(
-        Document::parse(sections).replace_section("Alpha", "new"),
-        Ok("---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\nnew\r\n\r\n## Beta\r\n".to_string())
+        Document::parse(sections).replace_section("Alpha", "one\ntwo\n\nthree"),
+        Ok(
+            "---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\none\r\ntwo\r\n\r\nthree\r\n\r\n## Beta\r\n"
+                .to_string()
+        )
     );
 
     let fields: Mapping = [("title", "t")].into_iter().collect();
@@ -221,6 +229,23 @@ fn a_crlf_document_stays_crlf_through_every_synthesis_path() {
         render_document(&fields, "body\r\n", LineEnding::Crlf),
         Ok("---\r\ntitle: t\r\n---\r\nbody\r\n".to_string())
     );
+
+    // Nothing above leaves a lone LF behind: every break in every result is a
+    // CRLF pair.
+    for edited in [
+        set(existing, "status", Value::String("draft".into())),
+        set(stub, "tags", Value::Sequence(vec!["a".into()])),
+        set(bodiless, "title", Value::String("t".into())),
+        Document::parse(sections).replace_section("Alpha", "one\ntwo"),
+        remove(existing, "title"),
+    ] {
+        let edited = edited.expect("an edit");
+        assert_eq!(
+            edited.matches('\n').count(),
+            edited.matches("\r\n").count(),
+            "a lone line feed survived in {edited:?}"
+        );
+    }
 }
 
 // ── A stubbed field is settable (NRN-435) ────────────────────────────────
