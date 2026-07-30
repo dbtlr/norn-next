@@ -1,0 +1,276 @@
+//! `#tag` syntax: what a tag is made of, where a marker counts, and the two
+//! homes that share the one grammar.
+//!
+//! A tag is its own fact kind. It is not a link, it carries no target, and
+//! nothing here decides whether a tag is *allowed* — that is validation, and
+//! validation has its own venue.
+
+use norn_text::{BodyScan, Document, Tag};
+
+fn names(tags: &[Tag]) -> Vec<&str> {
+    tags.iter().map(|tag| tag.name.as_str()).collect()
+}
+
+fn body_tags(body: &str) -> Vec<Tag> {
+    BodyScan::new(body).tags()
+}
+
+// ── The name ─────────────────────────────────────────────────────────────
+
+#[test]
+fn a_tag_is_the_marker_and_the_run_that_follows_it() {
+    let tags = body_tags("prose #alpha and #beta here\n");
+    assert_eq!(names(&tags), ["alpha", "beta"]);
+}
+
+/// The run ends at the first character outside the set, and the characters
+/// outside it are not swallowed.
+#[test]
+fn the_run_ends_at_the_first_character_outside_the_set() {
+    for (body, expected) in [
+        ("#tag.\n", "tag"),
+        ("#tag, next\n", "tag"),
+        ("(#tag)\n", "tag"),
+        ("#tag's\n", "tag"),
+        ("#tag\n", "tag"),
+        ("a #tag!\n", "tag"),
+        ("#tag:value\n", "tag"),
+    ] {
+        assert_eq!(names(&body_tags(body)), [expected], "in {body:?}");
+    }
+}
+
+/// Letters, digits, `_`, `-` and `/`. The slash nests, and a nested tag is one
+/// name rather than a path this crate takes apart.
+#[test]
+fn the_set_is_letters_digits_underscore_hyphen_and_slash() {
+    assert_eq!(
+        names(&body_tags("#area/project/sub\n")),
+        ["area/project/sub"]
+    );
+    assert_eq!(
+        names(&body_tags("#snake_case-kebab\n")),
+        ["snake_case-kebab"]
+    );
+    assert_eq!(names(&body_tags("#v2\n")), ["v2"]);
+}
+
+/// Unicode letters are letters. A tag alphabet is the author's business.
+#[test]
+fn a_tag_may_be_written_in_any_alphabet() {
+    assert_eq!(names(&body_tags("#日本語 prose\n")), ["日本語"]);
+    assert_eq!(names(&body_tags("#Ünicode\n")), ["Ünicode"]);
+    assert_eq!(names(&body_tags("#проект/задача\n")), ["проект/задача"]);
+}
+
+/// At least one character must not be a digit, so a number somebody wrote down
+/// stays a number. A digit beside a letter is a tag.
+#[test]
+fn a_run_of_digits_is_not_a_tag() {
+    assert!(body_tags("#123\n").is_empty());
+    assert!(body_tags("issue #42 is open\n").is_empty());
+    assert_eq!(names(&body_tags("#1a\n")), ["1a"]);
+    assert_eq!(names(&body_tags("#2026-07\n")), ["2026-07"]);
+}
+
+/// A marker with nothing after it is not a tag.
+#[test]
+fn a_bare_marker_is_not_a_tag() {
+    assert!(body_tags("a # b\n").is_empty());
+    assert!(body_tags("##\n").is_empty());
+}
+
+/// Case is recorded as written. Deciding that `#Work` and `#work` are the same
+/// tag is a matching question, and matching happens where queries happen.
+#[test]
+fn case_is_recorded_as_written() {
+    let tags = body_tags("#Work and #work and #WORK\n");
+    assert_eq!(names(&tags), ["Work", "work", "WORK"]);
+}
+
+// ── Where a marker counts ────────────────────────────────────────────────
+
+/// A marker opens a tag at the start of the text, after whitespace, or after a
+/// character that is not part of a word. Mid-word it opens nothing.
+#[test]
+fn a_marker_inside_a_word_is_not_a_marker() {
+    assert!(body_tags("foo#bar\n").is_empty());
+    assert!(body_tags("issue1#tag\n").is_empty());
+    assert!(body_tags("snake_case#tag\n").is_empty());
+
+    for body in ["#tag\n", "a #tag\n", "(#tag)\n", "—#tag\n", "a-#tag\n"] {
+        assert_eq!(names(&body_tags(body)), ["tag"], "in {body:?}");
+    }
+}
+
+/// A line-leading `#tag` is a tag and not a heading: CommonMark wants a space
+/// after the hashes, so the two grammars partition instead of competing.
+#[test]
+fn a_line_leading_tag_is_not_a_heading() {
+    let scan = BodyScan::new("#tag\n\n# Heading\n");
+    assert_eq!(names(&scan.tags()), ["tag"]);
+    assert_eq!(scan.headings().len(), 1);
+    assert_eq!(scan.headings()[0].text, "Heading");
+}
+
+/// A tag written inside a heading is still a tag — the heading is text, and
+/// the marker sits in it the way it sits in a paragraph.
+#[test]
+fn a_tag_inside_a_heading_is_a_tag() {
+    let scan = BodyScan::new("## Planning #status/active\n");
+    assert_eq!(names(&scan.tags()), ["status/active"]);
+    assert_eq!(scan.headings()[0].text, "Planning #status/active");
+}
+
+/// The hash in a link token is that link's fragment syntax. Reading it as a
+/// marker would mint a tag out of every same-note reference in the vault.
+#[test]
+fn a_hash_inside_a_link_token_is_not_a_marker() {
+    for body in [
+        "[[#Heading]]\n",
+        "[[Note#Heading]]\n",
+        "![[Note#^blk]]\n",
+        "[text](#frag)\n",
+        "[text](./note.md#Heading)\n",
+        "[[Note#Heading|#Shown]]\n",
+    ] {
+        assert!(body_tags(body).is_empty(), "in {body:?}");
+    }
+
+    // A tag beside a link is unaffected.
+    assert_eq!(names(&body_tags("[[Note#H]] #real\n")), ["real"]);
+}
+
+// ── Code is opaque ───────────────────────────────────────────────────────
+
+#[test]
+fn a_tag_inside_code_is_literal_text() {
+    assert_eq!(
+        names(&body_tags("before `#ignored` after #real\n")),
+        ["real"]
+    );
+    assert_eq!(
+        names(&body_tags("#real\n\n```\n#in-code\n```\n\n#real2\n")),
+        ["real", "real2"]
+    );
+    assert_eq!(
+        names(&body_tags("prose\n\n    #indented\n\nafter\n")),
+        Vec::<&str>::new()
+    );
+}
+
+// ── Positions ────────────────────────────────────────────────────────────
+
+#[test]
+fn a_tag_reports_where_its_marker_begins() {
+    let body = "line one\nprose #alpha here\n";
+    let tags = body_tags(body);
+    let span = tags[0].span.expect("a body tag carries a span");
+    assert_eq!(span.line, 2);
+    assert_eq!(span.column, 7);
+    assert_eq!(&body[span.byte_offset..span.byte_offset + 6], "#alpha");
+}
+
+/// A document reports body tags in source coordinates, so a frontmatter block
+/// above them shifts every offset and neither the caller nor the crate adds
+/// anything by hand.
+#[test]
+fn a_document_reports_body_tags_in_source_coordinates() {
+    let source = "---\ntitle: Note\n---\n\n#alpha\n";
+    let document = Document::parse(source);
+    let tags = document.tags();
+    assert_eq!(names(&tags), ["alpha"]);
+    let span = tags[0].span.expect("a body tag carries a span");
+    assert_eq!(span.line, 5);
+    assert_eq!(&source[span.byte_offset..span.byte_offset + 6], "#alpha");
+}
+
+// ── Frontmatter: the same grammar, the marker optional ───────────────────
+
+/// One definition of what a tag is, in both homes. In the `tags` field the
+/// marker is syntax rather than part of the name, so a hand-written `#foo`
+/// reads as the tag `foo` and sorts, matches and counts with the ones written
+/// bare.
+#[test]
+fn a_frontmatter_marker_is_stripped_and_the_name_is_the_same_grammar() {
+    let document = Document::parse("---\ntags:\n  - alpha\n  - \"#beta\"\n---\nbody\n");
+    assert_eq!(names(&document.frontmatter_tags()), ["alpha", "beta"]);
+}
+
+#[test]
+fn a_frontmatter_tag_follows_the_body_grammar_exactly() {
+    let document = Document::parse(
+        "---\ntags:\n  - area/project\n  - snake_case-kebab\n  - 日本語\n  - 2026-07\n---\n",
+    );
+    assert_eq!(
+        names(&document.frontmatter_tags()),
+        ["area/project", "snake_case-kebab", "日本語", "2026-07"]
+    );
+}
+
+/// A string the grammar does not describe is not a tag, and saying so is not
+/// this crate's job: no fact, no diagnostic. Whether such a string is an error
+/// belongs to validation.
+#[test]
+fn a_non_conforming_entry_produces_no_tag_and_no_complaint() {
+    let document =
+        Document::parse("---\ntags:\n  - good\n  - not a tag\n  - 123\n  - \"\"\n  - \"#\"\n---\n");
+    assert_eq!(names(&document.frontmatter_tags()), ["good"]);
+    assert!(document.diagnostics().is_empty());
+}
+
+/// The field's own value is read when it is a scalar string, the same way a
+/// sequence's items are.
+#[test]
+fn a_scalar_tags_field_holds_one_tag() {
+    let document = Document::parse("---\ntags: alpha\n---\n");
+    assert_eq!(names(&document.frontmatter_tags()), ["alpha"]);
+
+    let marked = Document::parse("---\ntags: \"#alpha\"\n---\n");
+    assert_eq!(names(&marked.frontmatter_tags()), ["alpha"]);
+}
+
+/// Only the `tags` field is read as tags, and no frontmatter value is scanned
+/// for body tokens. A `#` inside some other string is text in a string.
+#[test]
+fn no_other_frontmatter_value_is_scanned_for_tags() {
+    let document = Document::parse(
+        "---\ntitle: Notes on #alpha\nsummary: \"see #beta\"\ncategories:\n  - gamma\n---\n\
+         #real\n",
+    );
+    assert!(document.frontmatter_tags().is_empty());
+    assert_eq!(names(&document.tags()), ["real"]);
+}
+
+/// A frontmatter tag points at the entry that produced it, so a caller can
+/// take a reader to the line it was written on.
+#[test]
+fn a_frontmatter_tag_points_at_the_entry_that_produced_it() {
+    let source = "---\ntags:\n  - alpha\n  - beta\n---\n";
+    let document = Document::parse(source);
+    let tags = document.frontmatter_tags();
+    let first = tags[0].span.expect("a block sequence item has a span");
+    assert_eq!(first.line, 3);
+    assert_eq!(&source[first.byte_offset..first.byte_offset + 5], "alpha");
+    assert_eq!(tags[1].span.expect("a span").line, 4);
+}
+
+/// A flow sequence's items have no separately nameable bytes — the same reason
+/// a flow value has no value span — so the tags are read and the spans are
+/// absent rather than guessed at.
+#[test]
+fn a_flow_sequence_yields_tags_without_spans() {
+    let document = Document::parse("---\ntags: [alpha, \"#beta\"]\n---\n");
+    let tags = document.frontmatter_tags();
+    assert_eq!(names(&tags), ["alpha", "beta"]);
+    assert!(tags.iter().all(|tag| tag.span.is_none()));
+}
+
+/// Body tags and frontmatter tags are separate answers about separate homes,
+/// and neither reaches into the other's.
+#[test]
+fn the_two_homes_are_asked_separately() {
+    let document = Document::parse("---\ntags:\n  - declared\n---\n\nprose #written\n");
+    assert_eq!(names(&document.frontmatter_tags()), ["declared"]);
+    assert_eq!(names(&document.tags()), ["written"]);
+}
