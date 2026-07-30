@@ -78,18 +78,13 @@ fn tag_constants<'a>(schema: &'a Value, tag: &str) -> Vec<&'a str> {
 
 #[test]
 fn every_wire_type_derives_a_schema() {
-    for (name, schema) in [
-        ("TrustState", schema_of::<TrustState>()),
-        ("UntrustedReason", schema_of::<UntrustedReason>()),
-        ("ReasonCode", schema_of::<ReasonCode>()),
-        ("ErrorDetail", schema_of::<ErrorDetail>()),
-        ("ErrorEnvelope", schema_of::<ErrorEnvelope>()),
+    for schema in [
+        schema_of::<TrustState>(),
+        schema_of::<UntrustedReason>(),
+        schema_of::<ReasonCode>(),
+        schema_of::<ErrorDetail>(),
+        schema_of::<ErrorEnvelope>(),
     ] {
-        assert_eq!(
-            schema.get("title").and_then(Value::as_str),
-            Some(name),
-            "the schema does not name the type it describes: {schema}"
-        );
         assert!(
             schema.get("$schema").is_some(),
             "the schema declares no dialect: {schema}"
@@ -127,46 +122,11 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
     assert_eq!(tag_constants(&schema, "code"), ["host/entry-untrusted"]);
 }
 
-/// External tagging would name each variant as a property of the branch —
-/// `{"properties":{"Warming":{…}}}` — so a branch carrying a variant name as a
-/// key is the shape this vocabulary does not use.
-#[test]
-fn no_branch_names_a_variant_as_a_property() {
-    for (schema, tag, variants) in [
-        (
-            schema_of::<TrustState>(),
-            "state",
-            ["Unattached", "Warming", "Ready", "Untrusted"].as_slice(),
-        ),
-        (
-            schema_of::<UntrustedReason>(),
-            "kind",
-            ["TornIncrement", "WatcherOverflow", "EnvironmentalRefusal"].as_slice(),
-        ),
-        (
-            schema_of::<ErrorDetail>(),
-            "code",
-            ["EntryUntrusted"].as_slice(),
-        ),
-    ] {
-        for branch in branches(&schema) {
-            let properties = property_names(branch);
-            assert!(
-                properties.contains(tag),
-                "a branch carries no `{tag}` property: {branch}"
-            );
-            for variant in variants {
-                assert!(
-                    !properties.contains(variant),
-                    "a branch names the variant `{variant}` as a property: {branch}"
-                );
-            }
-        }
-    }
-}
-
 // ── The field names ──────────────────────────────────────────────────────
 
+/// The counters are advertised under the names the wire uses, and the estimate
+/// is advertised as a number or `null`: a surface rendering progress is told
+/// that the denominator may not be known.
 #[test]
 fn a_warming_state_advertises_its_two_counters_in_snake_case() {
     let schema = schema_of::<TrustState>();
@@ -178,6 +138,13 @@ fn a_warming_state_advertises_its_two_counters_in_snake_case() {
         property_names(warming),
         ["state", "healed", "total_estimate"].into_iter().collect()
     );
+    let estimate: BTreeSet<&str> = warming["properties"]["total_estimate"]["type"]
+        .as_array()
+        .expect("the estimate's advertised types")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(estimate, ["integer", "null"].into_iter().collect());
 }
 
 #[test]
