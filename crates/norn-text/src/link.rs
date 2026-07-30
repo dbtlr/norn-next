@@ -280,6 +280,11 @@ pub(crate) fn splice_tokens(
 ///
 /// The `//` is a recognition sentinel here rather than a claim about an
 /// authority component: `vault://Note` names no host.
+///
+/// `vault` is reserved. An absent protocol is the vault protocol wherever
+/// protocols come to mean anything, so nothing else may claim the name — a
+/// reservation the grammar records and nothing here enforces, because
+/// recognition is all this layer does.
 fn split_protocol(addressed: &str) -> (Option<String>, String) {
     let Some((scheme, stem)) = addressed.split_once("://") else {
         return (None, addressed.to_string());

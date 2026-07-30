@@ -244,3 +244,19 @@ fn a_protocol_carries_no_behaviour() {
     assert_eq!(internal.family, external.family);
     assert_eq!(internal.addressing(), external.addressing());
 }
+
+/// `vault` is reserved, and a reservation is a promise about naming rather
+/// than a behaviour: written out it is recognized like any other identifier,
+/// and left out it stays absent. Supplying it — or reading `[[vault://Note]]`
+/// back as `[[Note]]` — is the normalization the reservation exists to keep
+/// available to the layer that will mean something by it.
+#[test]
+fn the_reserved_identifier_is_recognized_and_never_supplied() {
+    assert_eq!(only("[[vault://Note]]").protocol.as_deref(), Some("vault"));
+    assert_eq!(only("[[Note]]").protocol, None);
+    assert_eq!(only("[[vault:Note]]").protocol, None);
+    assert_eq!(
+        reconstruct_wikilink(&only("[[Note]]"), "Other").as_deref(),
+        Some("[[Other]]")
+    );
+}
