@@ -521,17 +521,23 @@ pub(crate) fn classify_value(
         .find(|(_, ch)| !ch.is_whitespace())
         .map(|(index, _)| index);
 
-    let Some(value_offset) = value_offset else {
-        // Nothing but whitespace after the colon. The span is the insertion
-        // point a set splices into, and it covers the trailing whitespace so
-        // `status:   ` does not become `status: draft   `.
+    // Nothing after the colon but whitespace, or whitespace and a comment: the
+    // key is a stub, and the span is the insertion point a set splices into.
+    // With nothing but whitespace it covers that whitespace, so `status:   `
+    // does not become `status: draft   `. With a comment it is zero-width at
+    // the colon, so the padding and the comment both stay where their author
+    // put them.
+    let comment_only = value_offset.is_none_or(|index| rest.as_bytes()[index] == b'#');
+    if comment_only {
         let start = line_start + after_colon;
-        return (
-            Some(start..start + rest.len()),
-            ValueStyle::EmptyValue,
-            false,
-        );
-    };
+        let width = if value_offset.is_some() {
+            0
+        } else {
+            rest.len()
+        };
+        return (Some(start..start + width), ValueStyle::EmptyValue, false);
+    }
+    let value_offset = value_offset.expect("a comment-only value returned above");
 
     let value_start = line_start + after_colon + value_offset;
     let value_text = &rest[value_offset..];

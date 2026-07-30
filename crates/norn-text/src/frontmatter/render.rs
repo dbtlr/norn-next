@@ -65,9 +65,6 @@ pub enum RenderError {
     /// A map, or a collection nested inside a sequence. The frontmatter edit
     /// surface writes scalars and flat sequences.
     NonScalarValue { kind: &'static str },
-    /// The field's current value is written in a style no in-place edit can
-    /// replace.
-    StructuredStyle(ValueStyle),
     /// A sequence was offered for a field currently holding a scalar. Remove
     /// the field and write it afresh rather than silently restyling it.
     SequenceIntoScalar,
@@ -83,9 +80,6 @@ impl fmt::Display for RenderError {
             RenderError::NonScalarValue { kind } => {
                 write!(f, "a {kind} value cannot be written here")
             }
-            RenderError::StructuredStyle(style) => {
-                write!(f, "a value written as {style:?} cannot be edited in place")
-            }
             RenderError::SequenceIntoScalar => f.write_str(
                 "a sequence cannot replace a scalar field; remove the field and write it afresh",
             ),
@@ -100,69 +94,68 @@ const RANK_PLAIN: u8 = 0;
 const RANK_SINGLE: u8 = 1;
 const RANK_DOUBLE: u8 = 2;
 
+/// The quoting a scalar already carries, and so the floor its replacement is
+/// emitted at.
+///
+/// Only the three scalar spellings exist here, and that is the point: a value
+/// written as a block scalar or a collection has no value span, so there is no
+/// in-place replacement to render and no way to ask for one. What the field
+/// layer cannot name, this layer cannot be handed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScalarStyle {
+    Plain,
+    SingleQuoted,
+    DoubleQuoted,
+}
+
+impl ScalarStyle {
+    /// The scalar spelling `style` carries, or `None` when the style names no
+    /// replaceable span.
+    pub(crate) fn of(style: ValueStyle) -> Option<Self> {
+        match style {
+            // A stubbed key has no quoting yet, so its replacement starts at
+            // the least-quoted rank like a plain value does.
+            ValueStyle::Plain | ValueStyle::EmptyValue => Some(ScalarStyle::Plain),
+            ValueStyle::SingleQuoted => Some(ScalarStyle::SingleQuoted),
+            ValueStyle::DoubleQuoted => Some(ScalarStyle::DoubleQuoted),
+            _ => None,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            ScalarStyle::Plain => RANK_PLAIN,
+            ScalarStyle::SingleQuoted => RANK_SINGLE,
+            ScalarStyle::DoubleQuoted => RANK_DOUBLE,
+        }
+    }
+}
+
 /// The bytes that replace a field's `value_range`, keeping the author's
 /// quoting where the new value permits it and upgrading where it does not.
-pub(crate) fn render_value_in_style(
+pub(crate) fn render_scalar_in_span(
     value: &Value,
-    original: ValueStyle,
-    line_ending: LineEnding,
+    original: ScalarStyle,
 ) -> Result<String, RenderError> {
     match value {
-        Value::Sequence(items) => return render_sequence(items, original, line_ending),
-        Value::Map(_) => return Err(RenderError::NonScalarValue { kind: "map" }),
-        _ => {}
-    }
-
-    match original {
-        ValueStyle::BlockLiteral
-        | ValueStyle::BlockFolded
-        | ValueStyle::FlowSequence
-        | ValueStyle::FlowMapping
-        | ValueStyle::BlockSequence
-        | ValueStyle::BlockMapping => return Err(RenderError::StructuredStyle(original)),
-        _ => {}
-    }
-
-    render_scalar(value, starting_rank(original), ScalarContext::Block)
-}
-
-fn starting_rank(original: ValueStyle) -> u8 {
-    match original {
-        ValueStyle::DoubleQuoted => RANK_DOUBLE,
-        ValueStyle::SingleQuoted => RANK_SINGLE,
-        _ => RANK_PLAIN,
+        Value::Sequence(_) => Err(RenderError::SequenceIntoScalar),
+        Value::Map(_) => Err(RenderError::NonScalarValue { kind: "map" }),
+        scalar => render_scalar(scalar, original.rank(), ScalarContext::Block),
     }
 }
 
-/// A sequence written in the field's current style: flow inline, block as the
-/// key-less item lines the caller emits under a `key:` line.
-fn render_sequence(
-    items: &[Value],
-    original: ValueStyle,
-    line_ending: LineEnding,
-) -> Result<String, RenderError> {
-    match original {
-        ValueStyle::BlockSequence => render_block_items(items, line_ending),
-        ValueStyle::FlowSequence => {
-            let mut out = String::from("[");
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&render_scalar(item, RANK_PLAIN, ScalarContext::Flow)?);
-            }
-            out.push(']');
-            Ok(out)
+/// A sequence written inline: `[one, two]`. Each item is verified as a flow
+/// item, where a comma splits and a bracket breaks the document.
+pub(crate) fn render_flow_sequence(items: &[Value]) -> Result<String, RenderError> {
+    let mut out = String::from("[");
+    for (index, item) in items.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
         }
-        ValueStyle::Plain
-        | ValueStyle::SingleQuoted
-        | ValueStyle::DoubleQuoted
-        | ValueStyle::EmptyValue => Err(RenderError::SequenceIntoScalar),
-        ValueStyle::BlockLiteral
-        | ValueStyle::BlockFolded
-        | ValueStyle::FlowMapping
-        | ValueStyle::BlockMapping => Err(RenderError::StructuredStyle(original)),
+        out.push_str(&render_scalar(item, RANK_PLAIN, ScalarContext::Flow)?);
     }
+    out.push(']');
+    Ok(out)
 }
 
 /// A whole `field: <sequence>` entry, its terminator included.

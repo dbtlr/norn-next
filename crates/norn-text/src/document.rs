@@ -8,7 +8,8 @@ use crate::diagnostic::Diagnostic;
 use crate::frontmatter::extract::{BOM, extract};
 use crate::frontmatter::fields::{Field, ValueStyle, classify_value, field_spans, reparse};
 use crate::frontmatter::render::{
-    RenderError, render_scalar_entry, render_sequence_entry, render_value_in_style,
+    RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
+    render_scalar_in_span, render_sequence_entry,
 };
 use crate::line_ending::LineEnding;
 use crate::section::{SectionAddress, SectionError, SectionSpan};
@@ -306,6 +307,9 @@ impl<'a> Document<'a> {
     /// lines and comments around it stay: they are the document's, not the
     /// field's.
     pub fn remove_field(&self, field: &str) -> Result<String, EditError> {
+        if self.frontmatter_broken() {
+            return Err(EditError::FrontmatterUnreadable);
+        }
         let Some(located) = self.field(field) else {
             return Err(self.absent_or_not_editable(field));
         };
@@ -473,8 +477,8 @@ impl<'a> Document<'a> {
             let entry = if located.style == ValueStyle::FlowSequence {
                 format!(
                     "{}: {}{}",
-                    crate::frontmatter::render::render_key(&located.name)?,
-                    render_value_in_style(value, ValueStyle::FlowSequence, self.line_ending)?,
+                    render_key(&located.name)?,
+                    render_flow_sequence(items)?,
                     self.line_ending.as_str()
                 )
             } else {
@@ -487,12 +491,13 @@ impl<'a> Document<'a> {
             ));
         }
 
-        let Some(range) = &located.value_range else {
+        let (Some(range), Some(style)) = (&located.value_range, ScalarStyle::of(located.style))
+        else {
             return Err(EditError::FieldNotEditable {
                 field: located.name.clone(),
             });
         };
-        let mut rendered = render_value_in_style(value, located.style, self.line_ending)?;
+        let mut rendered = render_scalar_in_span(value, style)?;
         if located.style == ValueStyle::EmptyValue {
             // The span is the point just past the colon, so the separating
             // space is part of what the splice writes.
