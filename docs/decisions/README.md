@@ -13,3 +13,4 @@ The durable decisions that govern `norn`. Status and date describe the decision 
 | [0007](0007-authored-measurement-thresholds.md) | Measurement thresholds are authored constraints | Accepted | 2026-07-28 | A measurement-derived threshold would ratify drift and depend on history that may disappear. |
 | [0008](0008-present-crate-dependency-equality.md) | Dependency equality is restricted to present crates | Accepted | 2026-07-28 | The target crate map must stay ahead of implementation without requiring unearned edges or permitting stale ones. |
 | [0009](0009-regression-properties-not-recordings.md) | Regression behavior is expressed as properties | Accepted | 2026-07-27 | Recorded-byte equality cannot reveal behavioral shape, scope, or cost. |
+| [0010](0010-vault-value-model.md) | The vault value model is derived from its consumers | Accepted | 2026-07-29 | Fidelity no consumer can hold would relocate coercion from one parse boundary to every consumer. |

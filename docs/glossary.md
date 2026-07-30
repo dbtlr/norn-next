@@ -16,6 +16,10 @@ _Avoid_: Note, file (when the distinction matters)
 User-authored rules defining the valid structure and values of vault documents.
 _Avoid_: Doctrine, schema (unqualified)
 
+**Vault value model**:
+The value shapes a vault document's frontmatter can carry: null, booleans, integers, floats, strings, sequences, and string-keyed maps. Frontmatter syntax expressing anything outside the model is reported, never carried.
+_Avoid_: JSON value, YAML value (for parsed frontmatter values)
+
 **Derived state**:
 Rebuildable state computed from vault documents. It is never the source of truth.
 
