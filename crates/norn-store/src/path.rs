@@ -263,6 +263,20 @@ impl ClassKey {
         &self.0
     }
 
+    /// The probe over exactly this class: one range, this key as its lower
+    /// bound.
+    ///
+    /// A class key **is** a probe's lower bound, so this is the round trip back.
+    /// It is what findings maintenance ranges over once a changed path has named
+    /// the class it affects, and building the range here rather than from the
+    /// stem again is what keeps the key that is reported and the key that is
+    /// discarded the same bytes.
+    pub(crate) fn probe(&self) -> SuffixProbe {
+        SuffixProbe {
+            ranges: vec![bounded(self.0.clone())],
+        }
+    }
+
     /// A probe prefix as the class key it is.
     ///
     /// The prefix comes from [`bounded`], which holds the terminator, and its
@@ -404,7 +418,7 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
 /// The refusals mirror [`ClassKey::new`] and [`suffix_probe`]: an empty stem,
 /// one carrying the separator (a stem is one segment, never a path), one that
 /// is a `.` or `..` name, and one carrying a control byte. Formatting an
-/// unrefused stem into a lower bound is what [`ClassKey::of_prefix`]'s debug
+/// unrefused stem into a lower bound is what the class key's own debug
 /// assertion trusts, so a caller-supplied stem is checked here rather than
 /// left to trip that assertion later.
 pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {

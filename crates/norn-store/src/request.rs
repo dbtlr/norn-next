@@ -1,36 +1,35 @@
 //! One request against one store, and everything it derived.
 //!
-//! # A request is an attribution scope, not an atomicity scope
+//! # A request is an attribution scope; the increment is the atomicity scope
 //!
 //! Every operation the store performs happens inside a request, and what that
 //! buys is attribution: the counters belong to the request rather than to the
 //! process, so "what did this cost" is answerable without subtracting two
 //! readings of a shared number.
 //!
-//! It buys nothing about atomicity. **Each operation opens and commits its own
-//! transaction**, so a request that performed three writes and then failed has
-//! three writes at rest. Every one of them is individually whole — a document
-//! and its fact rows land together or not at all — and the store's own
-//! consistency never depends on a caller finishing. What does not exist yet is a
-//! transaction that spans several operations; that is the changeset seam, and it
-//! will re-cut this boundary rather than reuse it.
+//! It buys nothing about atomicity, and it is not where atomicity is decided.
+//! **[`Request::apply_increment`] is where documents are written, and a
+//! changeset lands whole or not at all** — that entry point states the shape of
+//! the guarantee in full. Every other write here is whole on its own: a finding
+//! and its candidate and class rows, a schema pin and the discard the new key
+//! implies, a vector. So a request that performed three acts and then failed has
+//! three whole acts at rest, and what a request never was is a way to group them
+//! into one.
 //!
 //! # Writes replace one document's facts wholesale
 //!
 //! A document is re-derived by writing its row and replacing every fact row
-//! derived from it, in one transaction. Nothing diffs and nothing merges: the
-//! text layer's output for a document is the complete answer for that document,
-//! so replacing is both correct and the only shape in which a fact row's
-//! ordinal means what it says.
+//! derived from it. Nothing diffs and nothing merges: the text layer's output
+//! for a document is the complete answer for that document, so replacing is both
+//! correct and the only shape in which a fact row's ordinal means what it says.
 //!
 //! **The document row keeps its identity across a re-derivation.** It is updated
 //! rather than replaced, which is what lets a vector reference a document that
 //! has been re-read since.
 //!
-//! What is *not* here is the increment: which documents a change reaches, how a
-//! changeset is ordered, how a torn write is detected, and when a tombstone has
-//! outlived its purpose. Those compose these operations rather than replacing
-//! them.
+//! What is *not* here is retention: when a tombstone has outlived the disorder
+//! it was recorded to survive is a policy over generations, and nothing in this
+//! crate decides it.
 //!
 //! # Reads at rest, and the read builders that are not here
 //!
@@ -43,9 +42,10 @@
 //! [`Request::findings_in_class`] — are the range reads the resolution ladder
 //! and the findings pillar are defined in terms of. They take a
 //! [`SuffixProbe`], which is a set of index bounds, and read exactly the class it
-//! opens. [`Request::probe_reader_plan`] hands their emitted SQL and its query
-//! plan out, because a plan bar over hand-copied SQL judges a string nobody runs
-//! — and no crate outside this one may open a connection to take a plan itself.
+//! opens. [`Request::emitted_plan`] hands a named statement's own SQL and its
+//! query plan out, because a plan bar over hand-copied SQL judges a string
+//! nobody runs — and no crate outside this one may open a connection to take a
+//! plan itself.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
@@ -61,11 +61,11 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, Deletion, DocumentFacts, FindingFacts, HeadingFact,
-    Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
-    StoredFacts, StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, FindingFacts, HeadingFact, Invalidation, LinkFact,
+    LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
+    StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
-use crate::json;
+use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
@@ -117,267 +117,121 @@ impl<'a> Request<'a> {
 
     // ---- writes ----
 
-    /// Write one document's facts, replacing everything derived from it.
+    /// Apply one changeset — document upserts and deaths — and report what it
+    /// did.
     ///
-    /// One transaction, taken `IMMEDIATE` so that the write lock is held from
-    /// the first statement: a deferred transaction that upgrades halfway through
-    /// can fail after the fact rows have been discarded.
-    pub fn upsert_document(&mut self, facts: &DocumentFacts) -> Result<(), StoreError> {
-        let projection = facts
-            .frontmatter
-            .as_ref()
-            .map(json::canonical_json)
-            .transpose()?;
-        let derived_at = unix_seconds();
-        let transaction = self
-            .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the upsert transaction", error))?;
-        let generation = store::next_generation(&transaction)?;
-
-        let document: i64 = transaction
-            .query_row(
-                "INSERT INTO documents (
-                     path, suffix_key, content_hash, byte_length, body, body_offset, frontmatter,
-                     frontmatter_diagnostic_count, generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(path) DO UPDATE SET
-                     suffix_key                   = excluded.suffix_key,
-                     content_hash                 = excluded.content_hash,
-                     byte_length                  = excluded.byte_length,
-                     body                         = excluded.body,
-                     body_offset                  = excluded.body_offset,
-                     frontmatter                  = excluded.frontmatter,
-                     frontmatter_diagnostic_count = excluded.frontmatter_diagnostic_count,
-                     generation                   = excluded.generation,
-                     derived_at                   = excluded.derived_at
-                 RETURNING id",
-                params![
-                    facts.path.as_str(),
-                    facts.path.suffix_key(),
-                    facts.content_hash,
-                    facts.byte_length,
-                    facts.body,
-                    facts.body_offset,
-                    projection,
-                    facts.frontmatter_diagnostic_count,
-                    generation,
-                    derived_at,
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|error| error::sql("writing a document row", error))?;
-
-        let mut discarded = 0_u64;
-        for statement in [
-            "DELETE FROM links WHERE document = ?1",
-            "DELETE FROM headings WHERE document = ?1",
-            "DELETE FROM blocks WHERE document = ?1",
-            "DELETE FROM document_tags WHERE document = ?1",
-        ] {
-            discarded += transaction
-                .execute(statement, params![document])
-                .map_err(|error| error::sql("discarding a document's fact rows", error))?
-                as u64;
-        }
-
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO links (
-                         document, ordinal, family, embed, protocol, target, title, anchor,
-                         block_ref, span_line, span_column, span_offset
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                )
-                .map_err(|error| error::sql("preparing a link write", error))?;
-            for (ordinal, link) in facts.links.iter().enumerate() {
-                insert
-                    .execute(params![
-                        document,
-                        ordinal as i64,
-                        link.family.as_str(),
-                        link.embed,
-                        link.protocol,
-                        link.target,
-                        link.title,
-                        link.anchor,
-                        link.block_ref,
-                        link.span.line,
-                        link.span.column,
-                        link.span.byte_offset,
-                    ])
-                    .map_err(|error| error::sql("writing a link row", error))?;
-            }
-        }
-
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO headings (
-                         document, ordinal, text, slug, level, span_line, span_column,
-                         span_offset, body_offset, inside_container
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                )
-                .map_err(|error| error::sql("preparing a heading write", error))?;
-            for (ordinal, heading) in facts.headings.iter().enumerate() {
-                insert
-                    .execute(params![
-                        document,
-                        ordinal as i64,
-                        heading.text,
-                        heading.slug,
-                        heading.level,
-                        heading.span.line,
-                        heading.span.column,
-                        heading.span.byte_offset,
-                        heading.body_offset,
-                        heading.inside_container,
-                    ])
-                    .map_err(|error| error::sql("writing a heading row", error))?;
-            }
-        }
-
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO blocks (
-                         document, ordinal, block_id, span_line, span_column, span_offset
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )
-                .map_err(|error| error::sql("preparing a block write", error))?;
-            for (ordinal, block) in facts.blocks.iter().enumerate() {
-                insert
-                    .execute(params![
-                        document,
-                        ordinal as i64,
-                        block.block_id,
-                        block.span.map(|span| span.line),
-                        block.span.map(|span| span.column),
-                        block.span.map(|span| span.byte_offset),
-                    ])
-                    .map_err(|error| error::sql("writing a block row", error))?;
-            }
-        }
-
-        {
-            let mut insert = transaction
-                .prepare(
-                    "INSERT INTO document_tags (
-                         document, ordinal, name, source, span_line, span_column, span_offset
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                )
-                .map_err(|error| error::sql("preparing a tag write", error))?;
-            for (ordinal, tag) in facts.tags.iter().enumerate() {
-                insert
-                    .execute(params![
-                        document,
-                        ordinal as i64,
-                        tag.name,
-                        tag.source.as_str(),
-                        tag.span.map(|span| span.line),
-                        tag.span.map(|span| span.column),
-                        tag.span.map(|span| span.byte_offset),
-                    ])
-                    .map_err(|error| error::sql("writing a tag row", error))?;
-            }
-        }
-
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing a document write", error))?;
-
-        // Counters record what happened, so they move after the commit that
-        // made it happen.
-        self.counters.add(Counter::DocumentsUpserted, 1);
-        self.counters.add(Counter::FactRowsDiscarded, discarded);
-        self.counters
-            .add(Counter::LinkRowsWritten, facts.links.len() as u64);
-        self.counters
-            .add(Counter::HeadingRowsWritten, facts.headings.len() as u64);
-        self.counters
-            .add(Counter::BlockRowsWritten, facts.blocks.len() as u64);
-        self.counters
-            .add(Counter::TagRowsWritten, facts.tags.len() as u64);
-        if projection.is_some() {
-            self.counters.add(Counter::FrontmatterProjections, 1);
-        }
-        Ok(())
-    }
-
-    /// Delete one document and record its death.
+    /// This is the store's one way in for document facts, and the whole of the
+    /// increment's contract is stated here.
     ///
-    /// The document row goes, the cascade takes every fact row derived from it,
-    /// and a tombstone records the path, the hash it was last derived at, and
-    /// where the news came from — all in one transaction, so there is no instant
-    /// at which the document is gone and nothing says why.
+    /// # The changeset is the unit of atomicity
     ///
-    /// A path nothing had derived still gets a tombstone. The ordering it
-    /// carries is the point, and it is worth most exactly when a derivation
-    /// never happened: a late event then has something to compare against
-    /// instead of guessing.
+    /// Every entry lands, or none of them does. There is no scope to open and
+    /// add writes to, because this entry point's granularity *is* the
+    /// guarantee: a caller that needs two changes to land together hands them
+    /// over together, and a caller that needs them to land separately calls
+    /// twice. Internally it is one `IMMEDIATE` transaction, so the write lock is
+    /// held from the first statement — a deferred transaction that upgrades
+    /// halfway through can fail after fact rows have already been discarded.
     ///
-    /// A path that dies twice **keeps the hash already recorded** where the
-    /// second death has none of its own. The recorded hash is the comparison
-    /// basis the tombstone exists to carry, and a death learned from an absent
-    /// file carries nothing better to put in its place.
-    pub fn delete_document(
+    /// What that buys is the rung-2 story: a process that dies partway through
+    /// leaves the previous generation whole, so nothing is ever at rest saying a
+    /// document was re-derived while the fact rows derived from it were not. A
+    /// transaction that never committed rolls back with the process that died in
+    /// it, so nothing partial is ever at rest — there is nothing to detect and
+    /// nothing to repair. The work the tear lost comes back the way any
+    /// unapplied work does, through the attach heal comparing content hashes and
+    /// finding the store's copy stale.
+    ///
+    /// # One generation stamps everything the changeset wrote
+    ///
+    /// The generation is taken once, before the first entry, and every row the
+    /// changeset writes carries it. Generations order writes in the store, and a
+    /// changeset is one write however many documents it names — so a reader
+    /// comparing generations sees it arrive at an instant rather than as a run
+    /// of numbers it has to recognize as one act.
+    ///
+    /// An **empty changeset takes no generation.** It writes nothing, so moving
+    /// the store's write sequence for it would make the sequence report an act
+    /// that never happened; the outcome says so by carrying no generation at
+    /// all.
+    ///
+    /// # Entries apply in order, and the last entry for a path decides
+    ///
+    /// A changeset may name one path more than once, and entries apply in the
+    /// order they arrive. An upsert followed by a death for the same path leaves
+    /// a tombstone and no document; the reverse leaves the document, beside the
+    /// tombstone the death recorded. Nothing is coalesced ahead of time, because
+    /// coalescing would have to decide which of two facts about one path is the
+    /// true one — and the caller already said, by ordering them.
+    ///
+    /// So a document and a tombstone for one path can stand at the **same
+    /// generation**, and comparing the two generations then says nothing.
+    /// **Row presence is what decides liveness**: `documents` holds the live
+    /// vault, and a tombstone beside a live document is a death that a later
+    /// entry of the same changeset superseded.
+    ///
+    /// # Dependent state is composed inside the same act
+    ///
+    /// **Full text is trigger-maintained.** Three triggers on `documents` carry
+    /// `documents_fts`, the store schema's full-text pillar, so the document
+    /// statements a changeset runs are the whole of its full-text maintenance.
+    /// There is no explicit index write, and adding one would be a second
+    /// maintainer of the same rows.
+    ///
+    /// **Findings are discarded on two axes**, both inside the one transaction:
+    ///
+    /// - *By subject path.* Every changed path — upserted or dead — takes the
+    ///   findings recorded about it. A re-derivation's findings were read off
+    ///   facts the changeset has just replaced, and a death's describe a
+    ///   document that is gone.
+    /// - *By affected ambiguity class.* Every changed path also names the class
+    ///   it belongs to, and the findings in the union of those classes go with
+    ///   it — the resolution axis, where a document joining or leaving a class
+    ///   invalidates findings written in documents that did not change.
+    ///
+    /// The two axes are what make **discard-then-record** total. The store
+    /// discards and never records: minting a finding is a reading of the vault
+    /// the caller performs, so [`IncrementOutcome::affected_classes`] reports
+    /// the class scope, and the subject scope needs no report because it is the
+    /// changeset the caller just built, entry by entry.
+    ///
+    /// A finding in no class — a vault-schema violation, say — is outside the
+    /// resolution axis and reachable on the subject axis alone: it dies when the
+    /// document it is about changes, and survives every change to any other.
+    /// None of this is a cascade. Nothing in the schema references `documents`
+    /// from `findings`, so a finding about a path no document has is recordable
+    /// and no row-existence ordering matters; what takes a finding is a
+    /// statement the store runs and counts.
+    ///
+    /// # Streaming, and what a changeset holds
+    ///
+    /// Entries are consumed from the iterator one at a time and nothing collects
+    /// them, so a caller streaming a heal hands over something that yields
+    /// documents and the store holds one. What lives across entries is the
+    /// prepared statements, which are a fixed cost, the running tally, which is
+    /// scalars, and [`IncrementOutcome::affected_classes`] — the one
+    /// changeset-sized accumulation, holding a key per distinct stem among the
+    /// changed paths.
+    ///
+    /// **The write lock is held across the caller's whole iterator.** A
+    /// changeset is atomic because it is one transaction, so however long the
+    /// caller takes to produce its entries is how long no other writer on the
+    /// database proceeds. A heal-scale changeset is therefore **chunked**: each
+    /// chunk is its own atomic changeset, which bounds both the lock and the
+    /// class set by the chunk rather than by the vault. Serializing writers
+    /// across *processes* is a per-vault file lock that is carved and not built
+    /// (NORN-33); within one process the store's single connection is what
+    /// serializes.
+    ///
+    /// `provenance` marks where the post-state came from. It changes no
+    /// statement the store runs, and what it binds is how a counter reading is
+    /// read — see [`crate::DerivationCounters`].
+    pub fn apply_increment(
         &mut self,
-        path: &DocumentPath,
-        provenance: Provenance,
-    ) -> Result<Deletion, StoreError> {
-        let recorded_at = unix_seconds();
-        let transaction = self
-            .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the delete transaction", error))?;
-        let generation = store::next_generation(&transaction)?;
-
-        let last_content_hash: Option<String> = transaction
-            .query_row(
-                "DELETE FROM documents WHERE path = ?1 RETURNING content_hash",
-                params![path.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error::sql("deleting a document row", error))?;
-        let removed = last_content_hash.is_some();
-
-        transaction
-            .execute(
-                "INSERT INTO tombstones (
-                     path, last_content_hash, provenance, generation, recorded_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(path) DO UPDATE SET
-                     last_content_hash = COALESCE(
-                         excluded.last_content_hash, tombstones.last_content_hash
-                     ),
-                     provenance        = excluded.provenance,
-                     generation        = excluded.generation,
-                     recorded_at       = excluded.recorded_at",
-                params![
-                    path.as_str(),
-                    last_content_hash,
-                    provenance.as_str(),
-                    generation,
-                    recorded_at,
-                ],
-            )
-            .map_err(|error| error::sql("recording a tombstone", error))?;
-
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing a document delete", error))?;
-
-        if removed {
-            self.counters.add(Counter::DocumentsDeleted, 1);
-        }
-        self.counters.add(Counter::TombstonesRecorded, 1);
-        Ok(Deletion {
-            removed,
-            generation,
-        })
+        _provenance: IncrementProvenance,
+        changes: impl IntoIterator<Item = Change>,
+    ) -> Result<IncrementOutcome, StoreError> {
+        increment::apply(self.store, &mut self.counters, changes)
     }
 
     /// Record one finding, with the head of its candidates.
@@ -485,13 +339,19 @@ impl<'a> Request<'a> {
 
     /// Discard every finding in the class a probe opens, and report what went.
     ///
-    /// The write side of class-scoped maintenance, and the reason findings need
-    /// no cascade: a finding is keyed by path and class, outlives the document it
-    /// is about, and leaves the table through this verb — counted, rather than as
-    /// a side effect of a delete somewhere else.
+    /// The write side of class-scoped maintenance reached **by a class rather
+    /// than by a change**: a caller that knows which class to re-derive says so
+    /// here, where a changeset says it by naming the paths that moved and
+    /// [`Request::apply_increment`] discards the classes those paths are in.
+    /// Both run the same statement.
+    ///
+    /// This is also the reason findings need no cascade: a finding is keyed by
+    /// path and class, outlives the document it is about, and leaves the table
+    /// through this discard — counted, rather than as a side effect of a delete
+    /// somewhere else.
     ///
     /// **Discard, then record, is the idempotence story.** Re-deriving a class is
-    /// this call followed by a [`Request::record_finding`] for each finding that
+    /// a discard followed by a [`Request::record_finding`] for each finding that
     /// holds now, so two derivations of one class cannot leave two copies and
     /// there is no dedupe rule for a caller to keep.
     ///
@@ -503,16 +363,13 @@ impl<'a> Request<'a> {
         &mut self,
         probe: &SuffixProbe,
     ) -> Result<Invalidation, StoreError> {
-        let sql = format!(
-            "DELETE FROM findings WHERE id IN (
-                 SELECT finding FROM finding_classes WHERE {}
-             )",
-            range_predicate("class_key", probe.range_count())
-        );
         let discarded = self
             .store
             .connection
-            .execute(&sql, probe_parameters(probe))
+            .execute(
+                &class_discard_sql(probe.range_count()),
+                probe_parameters(probe),
+            )
             .map_err(|error| error::sql("discarding a class's findings", error))?
             as u64;
         self.counters.add(Counter::FindingsDiscarded, discarded);
@@ -876,36 +733,55 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The statement one probe reader emits for one probe, with the query plan
-    /// SQLite reported for **that** statement.
+    /// One named statement as this crate emits it, with the query plan SQLite
+    /// reported for **that** statement.
     ///
     /// A plan bar is worth something only against the SQL that actually ran, and
     /// no crate outside this one may open a connection to take a plan of its own.
-    /// So the store hands the pair out: the reader chooses the statement, the
+    /// So the store hands the pair out: the crate chooses the statement, the
     /// caller judges the plan. It is deliberately not a way to explain arbitrary
-    /// SQL — the readers are named, and their statements stay this crate's.
-    pub fn probe_reader_plan(
+    /// SQL — the statements are named, and each of them carries the parameters
+    /// its own execution site binds.
+    pub fn emitted_plan(
         &self,
-        reader: ProbeReader,
-        probe: &SuffixProbe,
+        statement: ExplainedStatement<'_>,
     ) -> Result<EmittedPlan, StoreError> {
-        let sql = match reader {
-            ProbeReader::SuffixCandidates => suffix_candidates_sql(probe.range_count()),
-            ProbeReader::FindingsInClass => findings_in_class_sql(probe.range_count()),
+        let sql = match statement {
+            ExplainedStatement::SuffixCandidates(probe) => {
+                suffix_candidates_sql(probe.range_count())
+            }
+            ExplainedStatement::FindingsInClass(probe) => {
+                findings_in_class_sql(probe.range_count())
+            }
+            ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
+            ExplainedStatement::SubjectDiscard(_) => SUBJECT_DISCARD_SQL.to_string(),
         };
-        let steps = Self::read_all(
-            &self.store.connection,
-            &format!("EXPLAIN QUERY PLAN {sql}"),
-            probe_parameters(probe),
-            |row| {
-                Ok(Ok(PlanStep {
-                    id: row.get(0)?,
-                    parent: row.get(1)?,
-                    detail: row.get(3)?,
-                }))
-            },
-            "explaining a probe reader",
-        )?;
+        let read = |row: &Row<'_>| {
+            Ok(Ok(PlanStep {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                detail: row.get(3)?,
+            }))
+        };
+        let explained = format!("EXPLAIN QUERY PLAN {sql}");
+        let steps = match statement {
+            ExplainedStatement::SuffixCandidates(probe)
+            | ExplainedStatement::FindingsInClass(probe)
+            | ExplainedStatement::ClassDiscard(probe) => Self::read_all(
+                &self.store.connection,
+                &explained,
+                probe_parameters(probe),
+                read,
+                "explaining an emitted statement",
+            )?,
+            ExplainedStatement::SubjectDiscard(path) => Self::read_all(
+                &self.store.connection,
+                &explained,
+                params![path.as_str()],
+                read,
+                "explaining an emitted statement",
+            )?,
+        };
         Ok(EmittedPlan { sql, steps })
     }
 
@@ -1017,13 +893,25 @@ impl<'a> Request<'a> {
     }
 }
 
-/// Which probe reader [`Request::probe_reader_plan`] is asked about.
+/// Which statement [`Request::emitted_plan`] is asked about, with what that
+/// statement is bound to.
+///
+/// The parameters ride the variant because a plan is taken of a statement as it
+/// is executed: the probe readers range over a [`SuffixProbe`], and the
+/// increment's subject-axis discard is keyed by one path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProbeReader {
+pub enum ExplainedStatement<'a> {
     /// [`Request::suffix_candidates`].
-    SuffixCandidates,
+    SuffixCandidates(&'a SuffixProbe),
     /// [`Request::findings_in_class`].
-    FindingsInClass,
+    FindingsInClass(&'a SuffixProbe),
+    /// The class-scoped discard: [`Request::discard_findings_in_class`] runs it
+    /// over a probe a caller named, and [`Request::apply_increment`] runs it
+    /// over each class its changed paths are in.
+    ClassDiscard(&'a SuffixProbe),
+    /// The subject-scoped discard [`Request::apply_increment`] runs once per
+    /// changed path.
+    SubjectDiscard(&'a DocumentPath),
 }
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
@@ -1065,6 +953,29 @@ fn findings_in_class_sql(ranges: usize) -> String {
     )
 }
 
+/// The statement that discards every finding in the classes a probe of `ranges`
+/// ranges opens.
+///
+/// One builder, two execution sites: [`Request::discard_findings_in_class`] runs
+/// it over a probe a caller named, and an increment runs it over each class its
+/// changed paths are in. A second spelling of it would be a second answer to
+/// "which findings does re-deriving a class take".
+pub(crate) fn class_discard_sql(ranges: usize) -> String {
+    format!(
+        "DELETE FROM findings WHERE id IN (
+             SELECT finding FROM finding_classes WHERE {}
+         )",
+        range_predicate("class_key", ranges)
+    )
+}
+
+/// The statement that discards every finding recorded **about** one path.
+///
+/// The subject axis of findings maintenance, run once per changed path by
+/// [`Request::apply_increment`]. It seeks `findings_path`, which is the index
+/// that keeps the discard costing the path's own findings rather than the table.
+pub(crate) const SUBJECT_DISCARD_SQL: &str = "DELETE FROM findings WHERE path = ?1";
+
 /// The predicate one probe's ranges open over `column`: a half-open range per
 /// range, `OR`ed, each bound its own parameter.
 ///
@@ -1082,7 +993,7 @@ fn range_predicate(column: &str, ranges: usize) -> String {
 }
 
 /// A probe's bounds in the order [`range_predicate`] numbers them.
-fn probe_parameters(probe: &SuffixProbe) -> impl Params {
+pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
     params_from_iter(
         probe
             .ranges()
@@ -1272,7 +1183,7 @@ fn unreadable(column: &str, written: &str) -> StoreError {
 }
 
 /// Unix seconds, for the columns a person reads. Nothing orders by it.
-fn unix_seconds() -> i64 {
+pub(crate) fn unix_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs() as i64)

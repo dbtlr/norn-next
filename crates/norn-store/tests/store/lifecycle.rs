@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use norn_store::{OpenOutcome, RebuildReason, Store, StoreError, StoreMode, ddl, induced_failure};
 
-use crate::common::{Scratch, document, path};
+use crate::common::{Scratch, document, path, write_document};
 
 /// Write bytes at `path`, preparing its parent.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a file a store has to judge.
@@ -96,10 +96,10 @@ fn a_ddl_fingerprint_this_build_did_not_write_is_rebuilt_from_zero() {
     let document_path = path("docs/norn/glossary.md");
 
     let mut store = Store::open(&database).expect("creating a store");
-    store
-        .begin_request()
-        .upsert_document(&document(document_path.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(document_path.as_str(), "hash-1", "a body\n"),
+    );
     induced_failure::record_store_schema_out_of_band(
         &mut store,
         ddl::STORE_SCHEMA_VERSION,
@@ -166,10 +166,10 @@ fn a_schema_that_no_longer_holds_what_it_was_created_with_is_rebuilt_from_zero()
     let subject = path("docs/norn/glossary.md");
 
     let mut store = Store::open(&database).expect("creating a store");
-    store
-        .begin_request()
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     let recorded = store.recorded_store_schema().expect("the recorded schema");
 
     // The unique index on `path` is what makes a path one document. Without it a
@@ -231,10 +231,10 @@ fn a_store_whose_pages_were_overwritten_is_rebuilt_from_zero() {
     let database = scratch.database();
 
     let mut store = Store::open(&database).expect("creating a store");
-    store
-        .begin_request()
-        .upsert_document(&document("glossary.md", "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document("glossary.md", "hash-1", "a body\n"),
+    );
     drop(store);
 
     // The header stays a SQLite header and the schema pages behind it do not,
@@ -283,10 +283,10 @@ fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
     let subject = path("docs/norn/glossary.md");
 
     let mut store = Store::open(&database).expect("creating a store");
-    store
-        .begin_request()
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     drop(store);
 
     induced_failure::fail_next_meta_read_as_busy();
@@ -383,10 +383,10 @@ fn a_throwaway_store_refuses_to_adopt_a_durable_one() {
     let subject = path("docs/norn/glossary.md");
 
     let mut durable = Store::open(&database).expect("creating a durable store");
-    durable
-        .begin_request()
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut durable.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     drop(durable);
 
     let error = Store::open_throwaway(&database).expect_err("a throwaway over a durable store");
@@ -420,10 +420,10 @@ fn a_throwaway_store_refuses_to_adopt_an_unrecorded_mode() {
     let subject = path("docs/norn/glossary.md");
 
     let mut store = Store::open(&database).expect("creating a durable store");
-    store
-        .begin_request()
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_mode'")
         .expect("deleting the store_mode row");
     drop(store);
@@ -492,10 +492,10 @@ fn a_discarded_store_is_gone_and_the_next_open_creates() {
     let document_path = path("glossary.md");
 
     let mut store = Store::open(&database).expect("creating a store");
-    store
-        .begin_request()
-        .upsert_document(&document(document_path.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(document_path.as_str(), "hash-1", "a body\n"),
+    );
     // A rollback journal beside a store this build did not write, which is the
     // kind of file rung 3 is reached for.
     write_file(&sidecar(&database, "-journal"), b"a stale rollback journal");

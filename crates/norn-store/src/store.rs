@@ -16,8 +16,8 @@
 //! a property of the vault rather than of the handle; it is carved and not built
 //! (NORN-33).
 //!
-//! **A read-only request will take `&self`.** The ruling is recorded here because
-//! it is the other half of the writer discipline: when the read builders arrive,
+//! **A read-only request will take `&self`.** That is recorded here because it is
+//! the other half of the writer discipline: when the read builders arrive,
 //! a read-only request takes a shared borrow over its own connection, opened
 //! inside this crate so the substrate seam holds, and `&mut` stays what a writer
 //! takes. Nothing implements it yet — every request here is `&mut`.
@@ -92,6 +92,18 @@ const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
 /// The two names SQLite reads as something other than a file, whatever the URI
 /// flag says: the in-memory database, and the anonymous temporary one.
 const NOT_A_FILE: &[&str] = &[":memory:", ""];
+
+/// How many compiled statements a connection keeps.
+///
+/// Compiling SQL is a material share of what a small changeset costs, and the
+/// increment prepares thirteen statements — the document write, one discard per
+/// fact table, one insert per fact table, the document delete, the tombstone
+/// write and the two findings discards — every time it runs. The cache is what
+/// makes that a per-connection cost rather than a per-changeset one, so the
+/// capacity is set above the widest write path's count rather than left at the
+/// driver's default of sixteen, which the next statement to join that path would
+/// take the store over.
+const PREPARED_STATEMENT_CACHE: usize = 32;
 
 /// Whether the store's file outlives the store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -462,8 +474,10 @@ impl Drop for Store {
 /// does.
 ///
 /// The whole module lives behind the `induced-failure` feature, off by
-/// default, so a shipped build carries neither the out-of-band executor here
-/// nor the busy-injection hook a pinned-scalar read checks on every call.
+/// default, so a shipped build carries none of the three hooks these
+/// arrangements reach: the out-of-band executor here, the busy-injection a
+/// pinned-scalar read checks on every call, and the tear the increment checks
+/// between two entries.
 #[cfg(feature = "induced-failure")]
 #[doc(hidden)]
 pub mod induced_failure {
@@ -507,7 +521,10 @@ pub mod induced_failure {
     /// revoked permission or a read-only mount looks like from inside a statement.
     /// That is not damage and the store must not answer it as damage — a verdict
     /// of `Damaged` authorizes discarding the database — so arranging it is how
-    /// the distinction gets tested at all.
+    /// the distinction gets tested at all. `PRAGMA cache_size` is the other one:
+    /// a page cache smaller than an open transaction's dirty pages is what makes
+    /// that transaction spill into the write-ahead log, so an atomicity case can
+    /// be about the file rather than about one process's memory.
     pub fn execute_out_of_band(store: &mut Store, sql: &str) -> Result<(), StoreError> {
         store
             .connection
@@ -525,6 +542,20 @@ pub mod induced_failure {
     /// The arrangement is per-thread and one-shot.
     pub fn fail_next_meta_read_as_busy() {
         super::NEXT_META_READ_FAILS.set(true);
+    }
+
+    /// Kill this process partway through the next changeset, once `entries` of
+    /// its entries have been applied.
+    ///
+    /// **A process killed mid-increment is a rung-2 injection, and it cannot be
+    /// arranged from outside.** The abort happens with the transaction open and
+    /// nothing committed — no unwinding, no rollback, no destructor — which is
+    /// what a `SIGKILL` between two entries looks like to the database, and the
+    /// only way to put a store's file in that state deliberately. The
+    /// arrangement is per-thread, and the process does not survive it, so there
+    /// is nothing to clear.
+    pub fn abort_after_changeset_entries(entries: u64) {
+        super::TEAR_CHANGESET_AFTER.set(Some(entries));
     }
 }
 
@@ -578,6 +609,7 @@ fn connect(path: &Path) -> Result<Attempt, StoreError> {
     connection
         .busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| error::sql("setting the busy timeout", error))?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
 
     let journal: String =
         match connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0)) {
@@ -872,6 +904,25 @@ std::thread_local! {
     /// by [`induced_failure::fail_next_meta_read_as_busy`], and cleared by the
     /// read it fails.
     static NEXT_META_READ_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// How many entries a changeset applies before this process aborts. Set
+    /// only by [`induced_failure::abort_after_changeset_entries`]; nothing
+    /// clears it, because nothing runs after the abort it arms.
+    static TEAR_CHANGESET_AFTER: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// End the process where an arrangement asked for a changeset to be torn after
+/// this many entries.
+///
+/// The abort is deliberate rather than a panic: a panic unwinds, and an unwind
+/// rolls the transaction back through the driver's own destructor — which is the
+/// tidy end, not the one rung 2 has to survive.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn abort_if_the_changeset_is_torn(applied: u64) {
+    if TEAR_CHANGESET_AFTER.get() == Some(applied) {
+        std::process::abort();
+    }
 }
 
 /// The next write generation, taken inside whatever transaction is open.

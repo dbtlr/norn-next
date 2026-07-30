@@ -8,15 +8,15 @@
 
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, classes, document, document_with_every_fact,
-    path, vector, violation,
+    path, record_death, vector, violation, write_document, write_documents,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, ProbeReader, Provenance, StoreError, class_probe,
+    CANDIDATE_HEAD, CandidateFact, ExplainedStatement, Provenance, StoreError, class_probe,
     induced_failure, suffix_probe,
 };
 use norn_testkit::explain::{PlanRow, QueryPlan};
 
-/// The plan the store reported for one of its probe readers, in the shape the
+/// The plan the store reported for one of its named statements, in the shape the
 /// harness asserts over. The pairing is the store's: a plan bar over SQL nobody
 /// ran judges a string, and no crate outside the store may take a plan itself.
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -40,9 +40,10 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     let subject = path("docs/norn/glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "the first body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-1", "the first body\n"),
+    );
     assert_eq!(
         request.full_text_matches("first").expect("matches"),
         vec![subject.clone()]
@@ -51,13 +52,10 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     store.verify_integrity().expect("after an insert");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(
-            subject.as_str(),
-            "hash-2",
-            "an entirely new body\n",
-        ))
-        .expect("re-deriving with a new body");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-2", "an entirely new body\n"),
+    );
     // The old terms are gone from the index and the new ones are in it, which is
     // what the delete-then-insert pair in the update trigger is for.
     assert!(
@@ -73,16 +71,16 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     request.finish();
     store.verify_integrity().expect("after an update");
 
-    // A re-derivation that did not change the body does no index work, and the
-    // index still agrees.
+    // A re-derivation that did not change the body leaves the index agreeing
+    // with the column. The update trigger's `WHEN old.body IS NOT new.body`
+    // guard is what makes that free rather than a delete and an insert of the
+    // same terms — a cost difference rather than a behavioural one, since no
+    // read distinguishes the two. What is asserted here is the agreement.
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(
-            subject.as_str(),
-            "hash-3",
-            "an entirely new body\n",
-        ))
-        .expect("re-deriving with the same body");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-3", "an entirely new body\n"),
+    );
     assert_eq!(
         request.full_text_matches("entirely").expect("matches"),
         vec![subject.clone()]
@@ -91,9 +89,7 @@ fn the_full_text_index_stays_consistent_across_every_write() {
     store.verify_integrity().expect("after an unchanged body");
 
     let mut request = store.begin_request();
-    request
-        .delete_document(&subject, Provenance::PlanDelete)
-        .expect("deleting a document");
+    record_death(&mut request, &subject, Provenance::PlanDelete);
     assert!(
         request
             .full_text_matches("entirely")
@@ -117,10 +113,10 @@ fn a_full_text_index_that_drifted_from_its_column_is_damage() {
     let mut store = scratch.open();
     let subject = path("docs/norn/glossary.md");
 
-    store
-        .begin_request()
-        .upsert_document(&document(subject.as_str(), "hash-1", "the first body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "the first body\n"),
+    );
     store.verify_integrity().expect("a store just written to");
 
     // The triggers are the only thing that writes to the index, so dropping them
@@ -160,10 +156,10 @@ fn a_full_text_index_holding_a_deleted_document_is_damage() {
     let scratch = Scratch::new("full-text-orphan");
     let mut store = scratch.open();
 
-    store
-        .begin_request()
-        .upsert_document(&document("notes.md", "hash-1", "the only body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document("notes.md", "hash-1", "the only body\n"),
+    );
     induced_failure::execute_out_of_band(
         &mut store,
         "DROP TRIGGER documents_fts_delete; DELETE FROM documents",
@@ -195,14 +191,15 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
         let scratch = Scratch::new("vocabulary");
         let mut store = scratch.open();
         let subject = path("docs/norn/glossary.md");
-        store
-            .begin_request()
-            .upsert_document(&document_with_every_fact(subject.as_str(), "hash-1"))
-            .expect("writing a document");
-        store
-            .begin_request()
-            .delete_document(&path("gone.md"), Provenance::HealPrune)
-            .expect("recording a death");
+        write_document(
+            &mut store.begin_request(),
+            &document_with_every_fact(subject.as_str(), "hash-1"),
+        );
+        record_death(
+            &mut store.begin_request(),
+            &path("gone.md"),
+            Provenance::HealPrune,
+        );
         store.verify_integrity().expect("a store just written to");
 
         induced_failure::execute_out_of_band(&mut store, arrange)
@@ -224,9 +221,10 @@ fn a_vector_belongs_to_a_document_and_a_model() {
     let subject = path("docs/norn/glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     request
         .store_vector(&vector(subject.as_str(), "hash-1"))
         .expect("storing a vector");
@@ -246,9 +244,7 @@ fn a_vector_belongs_to_a_document_and_a_model() {
     assert_eq!(request.pillars().expect("a pillar report").vectors, 2);
     assert_eq!(request.counters().get("vectors_written"), Some(3));
 
-    request
-        .delete_document(&subject, Provenance::PlanDelete)
-        .expect("deleting a document");
+    record_death(&mut request, &subject, Provenance::PlanDelete);
     assert_eq!(request.pillars().expect("a pillar report").vectors, 0);
 
     request.finish();
@@ -280,9 +276,10 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
     let citing = path("docs/index.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(citing.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut request,
+        &document(citing.as_str(), "hash-1", "a body\n"),
+    );
     let finding = ambiguity(
         citing.as_str(),
         "glossary",
@@ -420,9 +417,10 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
     .iter()
     .enumerate()
     {
-        request
-            .upsert_document(&document(at, &format!("hash-{index}"), "a body\n"))
-            .expect("writing a document");
+        write_document(
+            &mut request,
+            &document(at, &format!("hash-{index}"), "a body\n"),
+        );
     }
 
     let paths = |probe| {
@@ -496,9 +494,10 @@ fn a_target_whose_leaf_carries_a_dot_reaches_both_readings_of_it() {
     .iter()
     .enumerate()
     {
-        request
-            .upsert_document(&document(at, &format!("hash-{index}"), "a body\n"))
-            .expect("writing a document");
+        write_document(
+            &mut request,
+            &document(at, &format!("hash-{index}"), "a body\n"),
+        );
     }
 
     let paths = |target: &str| {
@@ -539,9 +538,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     // neither their path order nor its reverse. Their suffix keys differ only
     // past the shared class prefix, so the tie is what decides.
     for at in ["one/tie.md", "three/tie.md", "two/tie.md"] {
-        request
-            .upsert_document(&document(at, "hash-1", "a body\n"))
-            .expect("writing a document");
+        write_document(&mut request, &document(at, "hash-1", "a body\n"));
     }
     let ladder = |request: &norn_store::Request<'_>| {
         request
@@ -559,9 +556,10 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
 
     // Re-deriving the row that happened to be written first changes nothing,
     // because the order is the keys rather than the rows' history.
-    request
-        .upsert_document(&document("one/tie.md", "hash-2", "another body\n"))
-        .expect("re-deriving");
+    write_document(
+        &mut request,
+        &document("one/tie.md", "hash-2", "another body\n"),
+    );
     assert_eq!(
         before,
         ladder(&request),
@@ -569,19 +567,26 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     );
 }
 
-/// **Both probe readers reach their rows through the index the probe is bounds
-/// for.** The bar is asserted against the statement the reader actually emitted,
-/// which is why the store hands the pair out rather than the caller re-spelling
-/// the SQL.
+/// **Every statement findings maintenance runs reaches its rows through an
+/// index.** The bar is asserted against the statement the store actually
+/// emitted, which is why the store hands the pair out rather than the caller
+/// re-spelling the SQL.
 #[test]
-fn both_probe_readers_search_the_index_the_probe_opens() {
+fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
     let scratch = Scratch::new("plans");
     let mut store = scratch.open();
     let mut request = store.begin_request();
+    // The documents go in one changeset and the findings after it. A changeset
+    // discards the findings in every class its paths are in, so writing the
+    // second document between the two findings would take the first one.
+    write_documents(
+        &mut request,
+        &[
+            document("one/glossary.md", "hash-1", "a body\n"),
+            document("two/glossary.md", "hash-1", "a body\n"),
+        ],
+    );
     for at in ["one/glossary.md", "two/glossary.md"] {
-        request
-            .upsert_document(&document(at, "hash-1", "a body\n"))
-            .expect("writing a document");
         request
             .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 2))
             .expect("recording a finding");
@@ -589,10 +594,9 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let candidates = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::SuffixCandidates,
+            .emitted_plan(ExplainedStatement::SuffixCandidates(
                 &class_probe("glossary").expect("a class stem"),
-            )
+            ))
             .expect("a query plan"),
     );
     candidates.assert_no_full_scan_of("documents");
@@ -601,10 +605,9 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let findings = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::FindingsInClass,
+            .emitted_plan(ExplainedStatement::FindingsInClass(
                 &class_probe("glossary").expect("a class stem"),
-            )
+            ))
             .expect("a query plan"),
     );
     findings.assert_no_full_scan_of("findings");
@@ -614,13 +617,38 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
     // row id, which is the order the reader states — so nothing sorts.
     findings.assert_no_temp_btree();
 
+    // The class-scoped discard reads the same membership range as the read
+    // beside it: an increment runs it once per affected class, so a class it
+    // does not name costs nothing.
+    let class_discard = plan(
+        request
+            .emitted_plan(ExplainedStatement::ClassDiscard(
+                &class_probe("glossary").expect("a class stem"),
+            ))
+            .expect("a query plan"),
+    );
+    class_discard.assert_no_full_scan_of("findings");
+    class_discard.assert_no_full_scan_of("finding_classes");
+    class_discard.assert_uses_index("finding_classes_class_key");
+
+    // The subject-scoped discard an increment runs once per changed path seeks
+    // `findings_path`, so a changeset of fifty thousand entries is that many
+    // seeks rather than that many reads of the table.
+    let subject_discard = plan(
+        request
+            .emitted_plan(ExplainedStatement::SubjectDiscard(&path("one/glossary.md")))
+            .expect("a query plan"),
+    );
+    subject_discard.assert_no_full_scan_of("findings");
+    subject_discard.assert_searches("findings");
+    subject_discard.assert_uses_index("findings_path");
+
     // A two-reduction probe is two seeks rather than one wider read.
     let two = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::SuffixCandidates,
+            .emitted_plan(ExplainedStatement::SuffixCandidates(
                 &suffix_probe("glossary.md").expect("a suffix target"),
-            )
+            ))
             .expect("a query plan"),
     );
     two.assert_no_full_scan_of("documents");
@@ -670,9 +698,7 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     let mut request = store.begin_request();
 
     for at in ["one.md", "two.md", "three.md"] {
-        request
-            .upsert_document(&document(at, "hash-1", "a body\n"))
-            .expect("writing a document");
+        write_document(&mut request, &document(at, "hash-1", "a body\n"));
     }
     // Two findings about the same class, written in different documents, plus
     // one about a longer suffix in the same class and one about another class.
@@ -762,9 +788,10 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         let mut request = store.begin_request();
         let subject = path(at);
         let probe = suffix_probe(target).expect("a suffix target");
-        request
-            .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-            .expect("writing a document");
+        write_document(
+            &mut request,
+            &document(subject.as_str(), "hash-1", "a body\n"),
+        );
         assert!(
             request
                 .suffix_candidates(&probe)
@@ -894,12 +921,11 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
     let subject = path("docs/norn/glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
-    request
-        .delete_document(&subject, Provenance::HealPrune)
-        .expect("deleting a document");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
+    record_death(&mut request, &subject, Provenance::HealPrune);
 
     let tombstone = request
         .stored_tombstone(&subject)
@@ -921,20 +947,30 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
     );
 }
 
-/// **Findings outlive their subject uniformly.** A finding is keyed by path and
-/// class, so deleting the document it happens to be about takes nothing with it —
-/// which is the only reading under which a finding about a path no document has
-/// and a finding about one that was just deleted are the same kind of row.
+/// **A finding is not coupled to a document row; maintenance is what takes it.**
+/// Nothing in the schema references `documents` from `findings`, so a finding is
+/// recordable about a path nothing has ever derived, no row-existence ordering
+/// applies to writing one, and no delete cascades into the table. What removes a
+/// finding is a statement the store runs and counts.
+///
+/// The two findings here are in classes the death names none of, so the class
+/// axis reaches neither and the axes are told apart. The finding about
+/// `docs/index.md` goes on the **subject** axis, because it describes a document
+/// that is now gone. The finding about `never/derived.md` stays: it was recorded
+/// against a path with no row at all, and it is untouched by a change to a
+/// different path.
 #[test]
-fn a_finding_outlives_the_document_it_is_about() {
-    let scratch = Scratch::new("findings-outlive");
+fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
+    let scratch = Scratch::new("findings-maintenance");
     let mut store = scratch.open();
     let subject = path("docs/index.md");
+    let never_derived = path("never/derived.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
     request
         .record_finding(&ambiguity(
             subject.as_str(),
@@ -945,32 +981,48 @@ fn a_finding_outlives_the_document_it_is_about() {
         ))
         .expect("a finding about a stored document");
     request
-        .record_finding(&ambiguity("never/derived.md", "index", "index/", &[], 2))
+        .record_finding(&ambiguity(
+            never_derived.as_str(),
+            "notes",
+            "notes/",
+            &[],
+            2,
+        ))
         .expect("a finding about a path nothing derived");
     assert_eq!(request.pillars().expect("a pillar report").findings, 2);
 
-    request
-        .delete_document(&subject, Provenance::PlanDelete)
-        .expect("deleting a document");
+    let death = record_death(&mut request, &subject, Provenance::PlanDelete);
     assert_eq!(
-        request.pillars().expect("a pillar report").findings,
-        2,
-        "a delete cascaded into findings"
+        death.affected_classes,
+        classes(&["index/"]),
+        "the death names a class one of the findings is in, so the axes are not told apart"
     );
     assert_eq!(
+        death.invalidated.findings_discarded, 1,
+        "the death took a finding that is not about the path that died"
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
+    assert!(
         request
             .stored_findings(&subject)
             .expect("reading findings")
+            .is_empty(),
+        "a finding about the dead path survived the death"
+    );
+    assert_eq!(
+        request
+            .stored_findings(&never_derived)
+            .expect("reading findings")
             .len(),
         1,
-        "the finding is no longer reachable by the path it is about"
+        "a finding about a path nothing derived was reached by another path's death"
     );
-    assert_eq!(request.counters().get("findings_discarded"), Some(0));
+    assert_eq!(request.pillars().expect("a pillar report").findings, 1);
 
     request.finish();
     store
         .verify_integrity()
-        .expect("a store whose findings outlived a document");
+        .expect("a store whose findings left through maintenance");
 }
 
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
@@ -1083,7 +1135,7 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
     assert_eq!(pin.generation, pinned.generation);
 
     let facts = document_with_every_fact(subject.as_str(), "hash-1");
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     request
         .record_finding(&violation(subject.as_str()))
         .expect("recording a finding");
@@ -1256,10 +1308,10 @@ fn the_migration_ledger_is_empty_through_the_pre_release_build() {
 fn a_verification_that_cannot_write_is_refused_rather_than_called_damage() {
     let scratch = Scratch::new("read-only");
     let mut store = scratch.open();
-    store
-        .begin_request()
-        .upsert_document(&document("notes.md", "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(
+        &mut store.begin_request(),
+        &document("notes.md", "hash-1", "a body\n"),
+    );
     store.verify_integrity().expect("a store just written to");
 
     // The connection can read and cannot write, which is what a revoked

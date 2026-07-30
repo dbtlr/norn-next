@@ -52,6 +52,17 @@ pub enum StoreError {
         limit: usize,
         given: usize,
     },
+    /// One entry of a changeset was refused, named by where it sits and what it
+    /// is about. A streaming heal hands over tens of thousands of entries and
+    /// fails on whichever one is pathological, so the refusal that reaches the
+    /// caller has to say which — the operation alone reads the same for entry
+    /// one and entry fifty thousand.
+    Entry {
+        /// The entry's position in the changeset, counting from zero.
+        index: usize,
+        path: String,
+        problem: Box<StoreError>,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -73,11 +84,29 @@ impl fmt::Display for StoreError {
             StoreError::Bound { what, limit, given } => {
                 write!(f, "{what} holds at most {limit}, and {given} were given")
             }
+            StoreError::Entry {
+                index,
+                path,
+                problem,
+            } => write!(f, "changeset entry {index}, `{path}`: {problem}"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+/// The refusal for a changeset entry, naming which entry it was.
+pub(crate) fn in_entry(
+    index: usize,
+    path: &crate::path::DocumentPath,
+    problem: StoreError,
+) -> StoreError {
+    StoreError::Entry {
+        index,
+        path: path.as_str().to_string(),
+        problem: Box::new(problem),
+    }
+}
 
 /// The refusal for a driver error met while `operation` was running.
 pub(crate) fn sql(operation: &'static str, error: rusqlite::Error) -> StoreError {

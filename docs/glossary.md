@@ -55,6 +55,10 @@ The set of vault documents satisfying the same resolution target when that targe
 The internal structure and version of Norn's rebuildable derived state.
 _Avoid_: Schema (unqualified), vault schema
 
+**Changeset**:
+A group of document derivations and deaths submitted together for one atomic application.
+_Avoid_: Batch, diff
+
 **Vault entry**:
 The host's runtime state for one attached vault, including the resources and trust state used to serve it.
 

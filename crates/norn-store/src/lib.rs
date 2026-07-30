@@ -17,9 +17,11 @@
 //! - [`Store`] — open, create or rebuild a per-vault store, and own its file.
 //! - [`Store::begin_request`] — everything the store does happens inside a
 //!   [`Request`], which is what makes derivation attributable. A request is an
-//!   **attribution scope and not an atomicity scope**: each operation commits
-//!   its own transaction, so what a request groups is the accounting rather than
-//!   the writes.
+//!   **attribution scope**: what it groups is the accounting, never the writes.
+//! - [`Request::apply_increment`] — the write-through increment, and the store's
+//!   one way in for document facts. **A changeset is the unit of atomicity**: it
+//!   lands whole or not at all, and that entry point states the contract in
+//!   full.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -39,18 +41,19 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! - **The increment**, and with it the transaction that spans more than one
-//!   operation. Which documents a change reaches, how a changeset is ordered,
-//!   how a torn write is detected, and when a tombstone has outlived its
-//!   purpose: all of it composes [`Request`]'s operations rather than replacing
-//!   them, and the store schema is shaped for it — tombstones, provenance, and
-//!   wholesale row replacement in one transaction.
+//! - **Which documents a change reaches.** An increment applies the changeset it
+//!   is handed; deciding what belongs in one — what the watcher's facts imply,
+//!   what a plan's blast radius is — is orchestration's, and so is re-recording
+//!   the findings the increment discarded by class.
+//! - **Tombstone retention.** When a death has outlived the disorder it was
+//!   recorded to survive is a policy over generations, and nothing here decides
+//!   it: a tombstone is kept until something says otherwise.
 //! - **The read builders.** Compiling request parameters into SQL, with the
 //!   `EXPLAIN` bars that judge the SQL a builder actually emitted, is Layer 3.
 //!   The probe readers here are the range primitives those builders compose;
 //!   they take index bounds, never parameters. What is here already is the seam
-//!   those bars are asserted through — [`Request::probe_reader_plan`] — because
-//!   a plan cannot be taken by a crate that may not open a connection.
+//!   those bars are asserted through — [`Request::emitted_plan`] — because a
+//!   plan cannot be taken by a crate that may not open a connection.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -58,6 +61,7 @@ pub mod ddl;
 mod counters;
 mod error;
 mod facts;
+mod increment;
 mod json;
 mod path;
 mod request;
@@ -66,13 +70,14 @@ mod store;
 pub use counters::DerivationCounters;
 pub use error::StoreError;
 pub use facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, Deletion, DocumentFacts, FindingFacts, HeadingFact,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
     Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
     StoredFacts, StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
+pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use path::{ClassKey, DocumentPath, SuffixProbe, class_probe, suffix_probe};
-pub use request::{EmittedPlan, PlanStep, ProbeReader, Request};
+pub use request::{EmittedPlan, ExplainedStatement, PlanStep, Request};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
 pub use store::{OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode};

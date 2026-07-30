@@ -24,6 +24,36 @@
 //! whole mechanism behind the zero-on-warm bar: a request that only reads
 //! finishes with every counter at zero, and it does so by construction rather
 //! than by a rule the read paths have to keep.
+//!
+//! An *act* is not a counter either. Nothing counts increments applied or
+//! requests opened: those are things that happened, not work that was done, and
+//! a counter that moves for an act nobody paid for makes the readings answer a
+//! different question than the bars ask of them.
+//!
+//! # The Composed bar, and why the projection is not on the wrong side of it
+//!
+//! A changeset carries a mark saying where its post-state came from
+//! ([`crate::IncrementProvenance`]), and **a `Composed` increment must record no
+//! store-side recomputation of state the applier already composed.** The bar is
+//! read off these counters, so which of them can move under `Composed` is the
+//! whole of it.
+//!
+//! [`Counter::FrontmatterProjections`] is the only counter here that names a
+//! computation, and **canonical-JSON projection is storage encoding rather than
+//! recomputation.** A value tree is what the caller
+//! supplied; projecting it to canonical JSON is how a value tree is written into
+//! a `TEXT` column, the same act as binding a length to an integer column and
+//! only larger. It learns nothing about the document that the caller did not
+//! hand over, so it derives nothing — and it is the identical code path under
+//! either mark, which means a reading that counted it as derivation would fail
+//! the bar for every document with frontmatter regardless of where its facts
+//! came from.
+//!
+//! So the bar binds where the two marks could differ, and today they do not:
+//! **the same changeset reads the same counters under either mark.** That is the
+//! statement the store makes true by composing supplied facts under both and
+//! re-deriving under neither, and it is what a suite asserts rather than a
+//! promise a reviewer has to take.
 
 /// One derivation counter.
 ///
@@ -38,6 +68,8 @@ pub(crate) enum Counter {
     BlockRowsWritten,
     TagRowsWritten,
     FactRowsDiscarded,
+    /// Frontmatter value trees written as canonical JSON. **Storage encoding,
+    /// not derivation** — see this module's Composed bar.
     FrontmatterProjections,
     TombstonesRecorded,
     FindingsWritten,

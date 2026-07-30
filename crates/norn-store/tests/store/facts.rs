@@ -6,10 +6,12 @@
 //! query that needed it. The fact types go in and come back, which is what makes
 //! the comparison a statement about the store rather than about the assertion.
 
-use crate::common::{Scratch, document, document_with_every_fact, path, span};
+use crate::common::{
+    Scratch, document, document_with_every_fact, path, record_death, span, write_document,
+};
 use norn_store::{
-    BlockFact, DocumentFacts, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance,
-    StoreError, TagFact, TagSource, ddl,
+    BlockFact, Change, DocumentFacts, FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact,
+    LinkFamily, Provenance, StoreError, TagFact, TagSource, ddl,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -22,7 +24,7 @@ fn every_fact_shape_survives_the_round_trip() {
     let facts = document_with_every_fact("docs/norn/glossary.md", "hash-1");
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_facts(&facts.path)
         .expect("reading a document")
@@ -61,7 +63,7 @@ fn a_stored_document_carries_the_derived_path_forms() {
     let facts = document("docs/norn/glossary.md", "hash-1", "a body\n");
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_document(&facts.path)
         .expect("reading a document")
@@ -82,10 +84,8 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
     empty.frontmatter = Some(FrontmatterValue::Map(Vec::new()));
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&absent)
-        .expect("writing a document");
-    request.upsert_document(&empty).expect("writing a document");
+    write_document(&mut request, &absent);
+    write_document(&mut request, &empty);
 
     assert_eq!(
         request
@@ -110,9 +110,10 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
 }
 
 /// **A refused frontmatter projection stays a refusal all the way out of the
-/// scope that took it.** The write refuses a value nested past the bound and hands
-/// the facts back, and freeing them is a walk with an explicit stack — a recursive
-/// drop would abort the process after the caller had already read the error.
+/// scope that took it.** The changeset owns the entry it was handed, so a value
+/// nested past the bound is refused and freed inside the refusal — and freeing
+/// it is a walk with an explicit stack, because a recursive drop would abort the
+/// process at the far end of the call that refused.
 #[test]
 fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
     let scratch = Scratch::new("deep-frontmatter");
@@ -123,22 +124,35 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
         value = FrontmatterValue::Sequence(vec![value]);
     }
     facts.frontmatter = Some(value);
+    let subject = facts.path.clone();
 
     let error = store
         .begin_request()
-        .upsert_document(&facts)
+        .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)])
         .expect_err("a document whose frontmatter nests past the bound");
-    assert!(matches!(error, StoreError::Bound { .. }), "{error:?}");
-    // Nothing was written, and the facts are freed here rather than leaked past
-    // the assertion.
+    let StoreError::Entry {
+        index,
+        path,
+        problem,
+    } = &error
+    else {
+        panic!("the refusal does not say which entry it came from: {error:?}");
+    };
+    assert_eq!(*index, 0);
+    assert_eq!(path, subject.as_str());
+    let StoreError::Bound { what, .. } = &**problem else {
+        panic!("the nesting depth was not refused as a bound: {problem:?}");
+    };
+    assert!(what.contains("nesting"), "{what}");
+    // Nothing was written, and the changeset freed what it was refusing rather
+    // than leaking it past the error.
     assert_eq!(
         store
             .begin_request()
-            .stored_document(&facts.path)
+            .stored_document(&subject)
             .expect("reading a document"),
         None
     );
-    drop(facts);
 }
 
 /// A re-derivation replaces a document's fact rows wholesale and keeps the
@@ -150,7 +164,7 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
     let first = document_with_every_fact("docs/norn/glossary.md", "hash-1");
 
     let mut request = store.begin_request();
-    request.upsert_document(&first).expect("writing a document");
+    write_document(&mut request, &first);
     let before = request
         .stored_document(&first.path)
         .expect("reading a document")
@@ -165,7 +179,7 @@ fn a_re_derivation_replaces_fact_rows_wholesale() {
         body_offset: 10,
         inside_container: false,
     }];
-    request.upsert_document(&second).expect("re-deriving");
+    write_document(&mut request, &second);
 
     let after = request
         .stored_facts(&second.path)
@@ -221,7 +235,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
         .collect();
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_facts(&facts.path)
         .expect("reading a document")
@@ -230,7 +244,7 @@ fn fact_rows_keep_the_emission_order_they_were_handed() {
 
     // Writing the same document again produces the same rows rather than a
     // second copy of them.
-    request.upsert_document(&facts).expect("re-deriving");
+    write_document(&mut request, &facts);
     let again = request
         .stored_facts(&facts.path)
         .expect("reading a document")
@@ -443,11 +457,10 @@ fn a_delete_takes_the_derived_rows_and_leaves_a_tombstone() {
     let facts = document_with_every_fact("docs/norn/glossary.md", "hash-1");
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
-    let deletion = request
-        .delete_document(&facts.path, Provenance::HealPrune)
-        .expect("deleting a document");
-    assert!(deletion.removed);
+    write_document(&mut request, &facts);
+    let deletion = record_death(&mut request, &facts.path, Provenance::HealPrune);
+    assert_eq!(deletion.documents_deleted, 1);
+    assert_eq!(deletion.tombstones_recorded, 1);
 
     assert_eq!(
         request
@@ -462,7 +475,7 @@ fn a_delete_takes_the_derived_rows_and_leaves_a_tombstone() {
     assert_eq!(tombstone.path, facts.path);
     assert_eq!(tombstone.last_content_hash.as_deref(), Some("hash-1"));
     assert_eq!(tombstone.provenance, Provenance::HealPrune);
-    assert_eq!(tombstone.generation, deletion.generation);
+    assert_eq!(Some(tombstone.generation), deletion.generation);
 
     let pillars = request.pillars().expect("a pillar report");
     assert_eq!(pillars.documents, 0);
@@ -483,10 +496,9 @@ fn a_death_learned_for_an_underived_path_is_still_recorded() {
     let missing = path("never/derived.md");
 
     let mut request = store.begin_request();
-    let deletion = request
-        .delete_document(&missing, Provenance::WatcherRemoval)
-        .expect("recording a death");
-    assert!(!deletion.removed);
+    let deletion = record_death(&mut request, &missing, Provenance::WatcherRemoval);
+    assert_eq!(deletion.documents_deleted, 0);
+    assert_eq!(deletion.tombstones_recorded, 1);
 
     let tombstone = request
         .stored_tombstone(&missing)
@@ -507,19 +519,11 @@ fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() 
     let subject = path("glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "one\n"))
-        .expect("writing a document");
-    let first = request
-        .delete_document(&subject, Provenance::WatcherRemoval)
-        .expect("deleting a document");
+    write_document(&mut request, &document(subject.as_str(), "hash-1", "one\n"));
+    let first = record_death(&mut request, &subject, Provenance::WatcherRemoval);
 
-    request
-        .upsert_document(&document(subject.as_str(), "hash-2", "two\n"))
-        .expect("recreating the document");
-    let second = request
-        .delete_document(&subject, Provenance::PlanDelete)
-        .expect("deleting it again");
+    write_document(&mut request, &document(subject.as_str(), "hash-2", "two\n"));
+    let second = record_death(&mut request, &subject, Provenance::PlanDelete);
 
     let tombstone = request
         .stored_tombstone(&subject)
@@ -527,15 +531,16 @@ fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() 
         .expect("a tombstone");
     assert_eq!(tombstone.last_content_hash.as_deref(), Some("hash-2"));
     assert_eq!(tombstone.provenance, Provenance::PlanDelete);
-    assert_eq!(tombstone.generation, second.generation);
+    assert_eq!(Some(tombstone.generation), second.generation);
     assert!(second.generation > first.generation);
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 
     // Recreated, the path has a document row and a tombstone at once. The
     // document row is the one that says what is there now.
-    request
-        .upsert_document(&document(subject.as_str(), "hash-3", "three\n"))
-        .expect("recreating the document");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-3", "three\n"),
+    );
     assert!(
         request
             .stored_document(&subject)
@@ -561,19 +566,16 @@ fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
     let subject = path("glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "one\n"))
-        .expect("writing a document");
-    request
-        .delete_document(&subject, Provenance::WatcherRemoval)
-        .expect("deleting a document");
+    write_document(&mut request, &document(subject.as_str(), "hash-1", "one\n"));
+    record_death(&mut request, &subject, Provenance::WatcherRemoval);
 
     // A second death for the same path, learned when nothing is there to hash:
     // the heal found it absent after the watcher had already reported it gone.
-    let again = request
-        .delete_document(&subject, Provenance::HealPrune)
-        .expect("recording the death again");
-    assert!(!again.removed, "there was a document row to remove");
+    let again = record_death(&mut request, &subject, Provenance::HealPrune);
+    assert_eq!(
+        again.documents_deleted, 0,
+        "there was a document row to remove"
+    );
 
     let tombstone = request
         .stored_tombstone(&subject)
@@ -586,15 +588,11 @@ fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
     );
     // Everything the second death did know is the most recent answer.
     assert_eq!(tombstone.provenance, Provenance::HealPrune);
-    assert_eq!(tombstone.generation, again.generation);
+    assert_eq!(Some(tombstone.generation), again.generation);
 
     // And a re-death that does have a hash still replaces it.
-    request
-        .upsert_document(&document(subject.as_str(), "hash-2", "two\n"))
-        .expect("recreating the document");
-    request
-        .delete_document(&subject, Provenance::PlanDelete)
-        .expect("deleting it again");
+    write_document(&mut request, &document(subject.as_str(), "hash-2", "two\n"));
+    record_death(&mut request, &subject, Provenance::PlanDelete);
     assert_eq!(
         request
             .stored_tombstone(&subject)
@@ -624,13 +622,58 @@ fn byte_length_is_the_document_and_not_the_body() {
     );
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_document(&facts.path)
         .expect("reading a document")
         .expect("a document");
     assert_eq!(stored.byte_length, facts.byte_length);
     assert_eq!(stored.body_offset, facts.body_offset);
+}
+
+/// **A document whose frame and body do not account for its size is refused.**
+/// The body runs to the end of the document, so the three numbers are checkable
+/// against one another — and a body offset past the end of the document would
+/// turn every span stored beside it into an offset outside the file. This is the
+/// one write path for a document row, so it is where the check lives.
+#[test]
+fn a_document_whose_numbers_do_not_add_up_is_refused() {
+    let scratch = Scratch::new("document-size");
+    let mut store = scratch.open();
+    let subject = path("docs/norn/glossary.md");
+
+    for (body_offset, byte_length) in [
+        // A frame past the end of the document it claims to be inside.
+        (1_000, 3),
+        // A document larger than the frame and body that account for it.
+        (0, 4_096),
+        // And smaller.
+        (4, 5),
+    ] {
+        let mut facts = document(subject.as_str(), "hash-1", "a body\n");
+        facts.body_offset = body_offset;
+        facts.byte_length = byte_length;
+        let error = store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)])
+            .expect_err("a document whose numbers do not add up");
+        let StoreError::Entry { problem, .. } = &error else {
+            panic!("the refusal does not say which entry it came from: {error:?}");
+        };
+        let StoreError::Bound { what, .. } = &**problem else {
+            panic!("body_offset {body_offset} and byte_length {byte_length}: {problem:?}");
+        };
+        assert!(what.contains("byte length"), "{what}");
+    }
+
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_document(&subject)
+            .expect("reading a document"),
+        None,
+        "a refused document reached the table"
+    );
 }
 
 /// Generations order every write in the store, across documents and across
@@ -643,9 +686,10 @@ fn every_write_takes_the_next_generation() {
 
     let mut generations = Vec::new();
     for (index, name) in ["one.md", "two.md", "three.md"].iter().enumerate() {
-        request
-            .upsert_document(&document(name, &format!("hash-{index}"), "a body\n"))
-            .expect("writing a document");
+        write_document(
+            &mut request,
+            &document(name, &format!("hash-{index}"), "a body\n"),
+        );
         generations.push(
             request
                 .stored_document(&path(name))
@@ -695,7 +739,7 @@ fn a_tag_is_stored_as_written_and_says_which_home_it_came_from() {
     ];
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_facts(&facts.path)
         .expect("reading a document")
@@ -722,7 +766,7 @@ fn a_block_id_with_no_span_is_stored_without_one() {
     ];
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let stored = request
         .stored_facts(&facts.path)
         .expect("reading a document")

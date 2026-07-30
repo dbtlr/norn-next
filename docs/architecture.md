@@ -100,7 +100,7 @@ following:
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** The torn increment is detected at the next attach and the entry re-heals. A partial increment is never treated as complete. |
+| Process killed mid-increment | **Handled at rung 2.** Nothing partial is ever at rest: the increment is one transaction, so a process that dies inside one leaves the previous generation whole and there is nothing to detect. The work the tear lost returns through the attach heal's ordinary content-hash comparison. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
@@ -583,7 +583,7 @@ sequenceDiagram
   W->>F: fingerprint → shadow → verify → swap (protocol owned by norn-fs)
   Note over W,F: drift detected → refuse-and-refresh (fresh forecast, hash-CAS confirm)
   W->>D: write-through increment, scoped to blast radius
-  Note over W,D: re-derivation of composed state counter-guarded to zero
+  Note over W,D: mark-invariant — the same counters under either mark
   W-->>H: outcome
   H-->>S: report (wire)
   S-->>C: HTTP response
@@ -597,8 +597,12 @@ snapshot.
 Two contracts inside that flow carry weight:
 
 - **Write-through.** The worker composed the post-state, so the increment writes it —
-  database updates scoped to the blast radius, with re-derivation of composed state
-  counter-guarded to zero.
+  database updates scoped to the blast radius, composing supplied facts and re-deriving
+  nothing. The bar is **mark-invariance**: the same changeset reads the same derivation
+  counters whether it is marked derived or composed. The one counter that names a
+  computation is the canonical-JSON projection of supplied frontmatter, which is storage
+  encoding rather than recomputation and runs the identical code path under both marks — so
+  the bar binds on the counters that could differ.
 - **Refuse-and-refresh.** Detected drift refuses and returns a fresh forecast whose content
   hash rides the confirmation as an implicit compare-and-swap. Auto-rebase on drift is
   deliberately rejected: a changed world deserves a re-plan.

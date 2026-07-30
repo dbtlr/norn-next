@@ -10,14 +10,11 @@
 //! the shape the future bars read them in: the store owns the counters and
 //! `norn-testkit` owns the assertions over them.
 
-use crate::common::{Scratch, document, document_with_every_fact, path, vector, violation};
-use norn_store::{DerivationCounters, Provenance};
-use norn_testkit::counters::CounterSnapshot;
-
-/// A snapshot of a request's reading, in the shape the harness compares.
-fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
-    counters.readings().collect()
-}
+use crate::common::{
+    Scratch, document, document_with_every_fact, path, record_death, snapshot, vector, violation,
+    write_document,
+};
+use norn_store::Provenance;
 
 /// Every counter is present in every reading, whatever its value. A counter that
 /// appears in one reading and not another is a difference rather than a zero,
@@ -31,9 +28,7 @@ fn every_reading_carries_every_counter() {
 
     let empty = store.begin_request().finish();
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document("notes.md", "hash-1", "a body\n"))
-        .expect("writing a document");
+    write_document(&mut request, &document("notes.md", "hash-1", "a body\n"));
     let worked = request.finish();
 
     let names: Vec<&str> = empty.readings().map(|(name, _)| name).collect();
@@ -73,7 +68,7 @@ fn a_document_write_counts_what_it_wrote() {
     let facts = document_with_every_fact("docs/norn/glossary.md", "hash-1");
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
+    write_document(&mut request, &facts);
     let reading = snapshot(&request.finish());
 
     assert_eq!(
@@ -102,17 +97,13 @@ fn a_second_request_is_not_charged_for_the_first_ones_work() {
     let mut store = scratch.open();
 
     let mut first = store.begin_request();
-    first
-        .upsert_document(&document_with_every_fact("one.md", "hash-1"))
-        .expect("writing a document");
+    write_document(&mut first, &document_with_every_fact("one.md", "hash-1"));
     let first = first.finish();
     assert_eq!(first.get("documents_upserted"), Some(1));
     assert_eq!(first.get("link_rows_written"), Some(2));
 
     let mut second = store.begin_request();
-    second
-        .upsert_document(&document("two.md", "hash-2", "a body\n"))
-        .expect("writing a document");
+    write_document(&mut second, &document("two.md", "hash-2", "a body\n"));
     let second = second.finish();
     assert_eq!(second.get("documents_upserted"), Some(1));
     assert_eq!(
@@ -133,9 +124,10 @@ fn a_request_that_only_reads_finishes_at_zero() {
     let subject = path("docs/norn/glossary.md");
 
     let mut warming = store.begin_request();
-    warming
-        .upsert_document(&document_with_every_fact(subject.as_str(), "hash-1"))
-        .expect("writing a document");
+    write_document(
+        &mut warming,
+        &document_with_every_fact(subject.as_str(), "hash-1"),
+    );
     warming
         .record_finding(&violation(subject.as_str()))
         .expect("recording a finding");
@@ -159,10 +151,9 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
-        .probe_reader_plan(
-            norn_store::ProbeReader::SuffixCandidates,
+        .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
             &norn_store::class_probe("glossary").expect("a class stem"),
-        )
+        ))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
     let _ = warm.pillars().expect("a pillar report");
@@ -182,8 +173,8 @@ fn a_re_derivation_counts_what_it_discarded() {
     let facts = document_with_every_fact("docs/norn/glossary.md", "hash-1");
 
     let mut request = store.begin_request();
-    request.upsert_document(&facts).expect("writing a document");
-    request.upsert_document(&facts).expect("re-deriving");
+    write_document(&mut request, &facts);
+    write_document(&mut request, &facts);
     let reading = request.finish();
 
     assert_eq!(reading.get("documents_upserted"), Some(2));
@@ -199,28 +190,31 @@ fn the_same_operation_reads_the_same_counters_whatever_else_is_stored() {
     let mut store = scratch.open();
 
     let mut first = store.begin_request();
-    first
-        .upsert_document(&document_with_every_fact("small/one.md", "hash-1"))
-        .expect("writing a document");
+    write_document(
+        &mut first,
+        &document_with_every_fact("small/one.md", "hash-1"),
+    );
     let small = snapshot(&first.finish());
 
     // Fill the store, then perform the same operation again.
     let mut filling = store.begin_request();
     for index in 0..50 {
-        filling
-            .upsert_document(&document(
+        write_document(
+            &mut filling,
+            &document(
                 &format!("bulk/note-{index}.md"),
                 &format!("hash-{index}"),
                 "a body\n",
-            ))
-            .expect("writing a document");
+            ),
+        );
     }
     filling.finish();
 
     let mut second = store.begin_request();
-    second
-        .upsert_document(&document_with_every_fact("large/one.md", "hash-1"))
-        .expect("writing a document");
+    write_document(
+        &mut second,
+        &document_with_every_fact("large/one.md", "hash-1"),
+    );
     let large = snapshot(&second.finish());
 
     small.assert_equal_counts(&large, "writing one document of the same shape");
@@ -235,15 +229,16 @@ fn a_delete_counts_the_death_and_the_tombstone() {
     let subject = path("glossary.md");
 
     let mut request = store.begin_request();
-    request
-        .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
-        .expect("writing a document");
-    request
-        .delete_document(&subject, Provenance::HealPrune)
-        .expect("deleting a document");
-    request
-        .delete_document(&path("never/derived.md"), Provenance::WatcherRemoval)
-        .expect("recording a death");
+    write_document(
+        &mut request,
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
+    record_death(&mut request, &subject, Provenance::HealPrune);
+    record_death(
+        &mut request,
+        &path("never/derived.md"),
+        Provenance::WatcherRemoval,
+    );
     let reading = request.finish();
 
     assert_eq!(reading.get("documents_deleted"), Some(1));
