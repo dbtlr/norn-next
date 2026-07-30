@@ -34,6 +34,14 @@
 //! context-aware round-trip requires — see [`RenderError`]. An explicit quote
 //! style is a floor and is never weakened.
 //!
+//! **Where the construct ends is where the boundary is.** A scalar set
+//! replaces the value's bytes, so a comment sharing that line survives. A
+//! sequence set replaces the whole entry — a list's items are not separately
+//! addressable, and rewriting the items around interleaved comments would be
+//! guesswork — so a comment written *inside* that entry is replaced with it. A
+//! comment on its own line between two entries belongs to neither and always
+//! survives.
+//!
 //! **What cannot be proven is refused.** Every emitted scalar is re-parsed in
 //! the lexical context it will live in and compared against the value it came
 //! from, and every edit re-reads the document it produced before returning it.

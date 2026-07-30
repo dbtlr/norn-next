@@ -241,3 +241,26 @@ fn a_block_whose_spans_are_untrusted_reports_no_strings() {
         Some(&Value::Map([("title", "t")].into_iter().collect()))
     );
 }
+
+/// Frontmatter values are handed out as text plus the bytes that produced
+/// them, and this crate reads no syntax inside them. A caller that wants the
+/// links in a frontmatter value scans the text itself, through the one token
+/// parser, and maps the result back through the range.
+#[test]
+fn frontmatter_values_are_text_this_crate_reads_no_syntax_in() {
+    let source = "---\nsee: \"[[Target|Shown]]\"\nmd: \"[text](target.md)\"\n---\nbody\n";
+    let document = Document::parse(source);
+    let entries = document.field_texts();
+    assert_eq!(entries.len(), 2);
+    // Neither value is decomposed here; both are strings.
+    assert_eq!(entries[0].text, "[[Target|Shown]]");
+    assert_eq!(entries[1].text, "[text](target.md)");
+    // A caller scans the text and locates the result through the range.
+    let links = norn_text::parse_wikilinks_in_text(entries[0].text);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target, "Target");
+    assert_eq!(links[0].title.as_deref(), Some("Shown"));
+    // The Markdown-link value holds no wikilink, and this crate reads no other
+    // link syntax.
+    assert!(norn_text::parse_wikilinks_in_text(entries[1].text).is_empty());
+}

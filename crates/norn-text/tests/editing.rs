@@ -474,6 +474,38 @@ fn an_empty_sequence_is_written_so_it_reads_back_as_a_sequence() {
     );
 }
 
+/// Where the construct ends is where the boundary is. A scalar set replaces
+/// the value's bytes, so a comment sharing that line survives; a sequence set
+/// replaces the whole entry, so a comment written inside it is replaced with
+/// it. A comment on its own line belongs to neither entry and always survives.
+#[test]
+fn a_comment_inside_a_replaced_entry_goes_with_it_and_one_outside_stays() {
+    assert_eq!(
+        set(
+            "---\ntitle: hello # note\n---\n",
+            "title",
+            Value::String("new".into())
+        ),
+        Ok("---\ntitle: new # note\n---\n".to_string())
+    );
+    assert_eq!(
+        set(
+            "---\ntags: [a] # note\nother: x\n---\n",
+            "tags",
+            Value::Sequence(vec!["z".into()])
+        ),
+        Ok("---\ntags: [z]\nother: x\n---\n".to_string())
+    );
+    assert_eq!(
+        set(
+            "---\ntags: [a]\n# a standing note\nother: x\n---\n",
+            "tags",
+            Value::Sequence(vec!["z".into()])
+        ),
+        Ok("---\ntags: [z]\n# a standing note\nother: x\n---\n".to_string())
+    );
+}
+
 /// The fidelity boundary, stated as bytes: a set moves the value span and
 /// nothing else, and a remove moves the entry and nothing else.
 #[test]

@@ -360,6 +360,24 @@ fn an_inline_markdown_link_is_not_a_wikilink() {
     assert!(parse_wikilinks_in_text("[text](target.md)").is_empty());
 }
 
+/// A target is reported exactly as it was written. This crate applies no
+/// normalization to it — no extension stripping, no path-stem semantics — so
+/// nothing here can turn `v1.2` into `v1`. Normalizing a target is resolution's
+/// job, and resolution is not in this crate.
+#[test]
+fn a_target_is_reported_verbatim_and_never_normalized() {
+    for raw in [
+        "[[Note.md]]",
+        "[[folder/Note.md]]",
+        "[[v1.2]]",
+        "[[Note.markdown]]",
+    ] {
+        let link = only(raw);
+        let inner = &raw[2..raw.len() - 2];
+        assert_eq!(link.target, inner, "target of {raw:?}");
+    }
+}
+
 /// A `#tag` in a body is ordinary text today.
 #[test]
 fn a_hash_tag_is_not_a_token_this_crate_recognizes() {
