@@ -211,7 +211,7 @@ fn a_class_key_is_the_stem_with_the_separator() {
     let document = DocumentPath::new("docs/norn/glossary.md").expect("a document path");
     assert_eq!(document.class_key().as_str(), "glossary/");
 
-    let class = class_probe("glossary");
+    let class = class_probe("glossary").expect("a class stem");
     assert_eq!(class.range_count(), 1);
     let (lower, upper) = class.ranges().next().expect("a range");
     assert_eq!(lower, "glossary/");
@@ -289,6 +289,31 @@ fn a_class_key_that_no_probe_opens_is_refused() {
         assert!(
             problem.contains(needle),
             "`{text}` was refused for `{problem}`, which does not name {needle}"
+        );
+    }
+}
+
+/// **`class_probe` validates like every other public constructor here.** A
+/// stem handed over unvalidated would format into a lower bound
+/// [`ClassKey::of_prefix`] trusts, tripping its debug assertion downstream
+/// instead of being refused at the boundary that took it.
+#[test]
+fn a_class_probe_refuses_what_no_class_opens() {
+    for (stem, needle) in [
+        ("", "empty"),
+        ("glossary/norn", "separator"),
+        (".", "`.` or `..`"),
+        ("..", "`.` or `..`"),
+        ("gloss\0ary", "NUL"),
+        ("gloss\u{7}ary", "control"),
+    ] {
+        let error = class_probe(stem).expect_err("not a class stem");
+        let StoreError::Path { problem, .. } = &error else {
+            panic!("`{stem}` was refused as {error:?} rather than as a path");
+        };
+        assert!(
+            problem.contains(needle),
+            "`{stem}` was refused for `{problem}`, which does not name {needle}"
         );
     }
 }

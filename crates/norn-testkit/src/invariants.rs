@@ -115,7 +115,15 @@ pub const LINT_RULES: &[LintRule] = &[
             ),
             (
                 "disallowed-methods",
+                "rusqlite::Connection::open_with_flags_and_vfs",
+            ),
+            (
+                "disallowed-methods",
                 "rusqlite::Connection::open_in_memory_with_flags",
+            ),
+            (
+                "disallowed-methods",
+                "rusqlite::Connection::open_in_memory_with_flags_and_vfs",
             ),
             // Adopting a raw `sqlite3*` is opening a connection through a
             // constructor that does not read as an open.

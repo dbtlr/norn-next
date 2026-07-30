@@ -205,7 +205,12 @@ impl DocumentPath {
     /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
     /// that carries it.
     pub fn class_key(&self) -> ClassKey {
-        ClassKey::of_prefix(&class_probe(&self.stem).ranges[0].lower)
+        // A document's own stem already passed every refusal `class_probe`
+        // applies — it came from a leaf segment `DocumentPath::new` already
+        // checked for a `.`/`..` reduction and a control byte, and a leaf
+        // segment carries no separator by construction.
+        let probe = class_probe(&self.stem).expect("a document's own stem is a valid class probe");
+        ClassKey::of_prefix(&probe.ranges[0].lower)
     }
 }
 
@@ -395,10 +400,35 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
 /// Every document whose leaf reduces to `stem` is in the range, whatever
 /// directory it sits in, and so is every finding whose class key opens with it.
 /// One reduction and therefore one range: a stem is already reduced.
-pub fn class_probe(stem: &str) -> SuffixProbe {
-    SuffixProbe {
-        ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
+///
+/// The refusals mirror [`ClassKey::new`] and [`suffix_probe`]: an empty stem,
+/// one carrying the separator (a stem is one segment, never a path), one that
+/// is a `.` or `..` name, and one carrying a control byte. Formatting an
+/// unrefused stem into a lower bound is what [`ClassKey::of_prefix`]'s debug
+/// assertion trusts, so a caller-supplied stem is checked here rather than
+/// left to trip that assertion later.
+pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
+    let refuse = |problem| {
+        Err(StoreError::Path {
+            path: stem.to_string(),
+            problem,
+        })
+    };
+    if stem.is_empty() {
+        return refuse("it is empty");
     }
+    if stem.contains(SEPARATOR) {
+        return refuse("it carries a separator, and a stem is one segment");
+    }
+    if stem == "." || stem == ".." {
+        return refuse("it is a `.` or `..` name, which names no class");
+    }
+    if let Some(problem) = control_byte_problem(stem) {
+        return refuse(problem);
+    }
+    Ok(SuffixProbe {
+        ranges: vec![bounded(format!("{stem}{SEPARATOR}"))],
+    })
 }
 
 /// The prefix, and the key just past everything it opens.

@@ -332,6 +332,18 @@ fn a_nullable_span_triple_is_declared_whole() {
     }
 }
 
+/// Whether `declared` names `column` as one of its own tokens.
+///
+/// Punctuation and whitespace are both boundaries, so the check does not
+/// depend on how a `CREATE TABLE` statement happens to be indented, and it
+/// does not fire on a column whose name merely contains `column` as a
+/// substring — `system` does not carry a `stem` column.
+fn declares_column(declared: &str, column: &str) -> bool {
+    declared
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|token| token == column)
+}
+
 /// The columns nothing reads are not columns. The stem and the segment count are
 /// functions of the path, derived where the path is read, so a second home for
 /// either is a spelling that can disagree with it.
@@ -342,9 +354,15 @@ fn a_derived_path_form_has_one_home() {
         .iter()
         .find(|statement| statement.contains("CREATE TABLE documents "))
         .expect("the documents table");
+    // The positive control: a column the table does carry, so the check above
+    // is known to be able to find one rather than vacuously finding none.
+    assert!(
+        declares_column(documents, "path"),
+        "the column detector cannot find `path`, which `documents` does carry: {documents}"
+    );
     for absent in ["stem", "depth"] {
         assert!(
-            !documents.contains(&format!("    {absent} ")),
+            !declares_column(documents, absent),
             "`documents` carries a `{absent}` column: {documents}"
         );
     }
@@ -354,7 +372,7 @@ fn a_derived_path_form_has_one_home() {
         .expect("the tombstones table");
     for absent in ["stem", "suffix_key"] {
         assert!(
-            !tombstones.contains(&format!("    {absent} ")),
+            !declares_column(tombstones, absent),
             "`tombstones` carries a `{absent}` column: {tombstones}"
         );
     }

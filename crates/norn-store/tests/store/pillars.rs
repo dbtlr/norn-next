@@ -393,7 +393,7 @@ fn a_finding_cannot_carry_a_class_key_no_probe_opens() {
         .expect("recording a finding");
     assert_eq!(
         request
-            .findings_in_class(&class_probe("glossary"))
+            .findings_in_class(&class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -436,7 +436,7 @@ fn the_full_candidate_enumeration_is_a_range_over_the_suffix_key() {
 
     // The whole class of the stem: every `**/glossary.md`, and nothing whose
     // leaf merely starts the same way.
-    let mut whole_class = paths(class_probe("glossary"));
+    let mut whole_class = paths(class_probe("glossary").expect("a class stem"));
     whole_class.sort();
     assert_eq!(
         whole_class,
@@ -545,7 +545,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     }
     let ladder = |request: &norn_store::Request<'_>| {
         request
-            .suffix_candidates(&class_probe("tie"))
+            .suffix_candidates(&class_probe("tie").expect("a class stem"))
             .expect("reading candidates")
             .iter()
             .map(|path| path.as_str().to_string())
@@ -589,7 +589,10 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let candidates = plan(
         request
-            .probe_reader_plan(ProbeReader::SuffixCandidates, &class_probe("glossary"))
+            .probe_reader_plan(
+                ProbeReader::SuffixCandidates,
+                &class_probe("glossary").expect("a class stem"),
+            )
             .expect("a query plan"),
     );
     candidates.assert_no_full_scan_of("documents");
@@ -598,7 +601,10 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let findings = plan(
         request
-            .probe_reader_plan(ProbeReader::FindingsInClass, &class_probe("glossary"))
+            .probe_reader_plan(
+                ProbeReader::FindingsInClass,
+                &class_probe("glossary").expect("a class stem"),
+            )
             .expect("a query plan"),
     );
     findings.assert_no_full_scan_of("findings");
@@ -698,7 +704,7 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     // A change to any `**/glossary.md` reaches the class and the suffixes inside
     // it, whichever document each finding was written in.
     let affected = request
-        .findings_in_class(&class_probe("glossary"))
+        .findings_in_class(&class_probe("glossary").expect("a class stem"))
         .expect("reading findings");
     let mut targets: Vec<&str> = affected
         .iter()
@@ -709,7 +715,7 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
 
     // And it reaches nothing outside the class.
     let other = request
-        .findings_in_class(&class_probe("index"))
+        .findings_in_class(&class_probe("index").expect("a class stem"))
         .expect("reading findings");
     assert_eq!(other.len(), 1);
     assert_eq!(other[0].target.as_deref(), Some("index"));
@@ -783,7 +789,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
             "a finding about `{target}` is not in the class `{at}` is in"
         );
         let stored = request
-            .findings_in_class(&class_probe(subject.stem()))
+            .findings_in_class(&class_probe(subject.stem()).expect("a class stem"))
             .expect("reading findings");
         assert_eq!(
             stored.len(),
@@ -801,7 +807,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
                 .expect("a class key is separator-terminated");
             assert_eq!(
                 request
-                    .findings_in_class(&class_probe(stem))
+                    .findings_in_class(&class_probe(stem).expect("a class stem"))
                     .expect("reading findings")
                     .len(),
                 1,
@@ -814,7 +820,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
         // whole finding — every membership row it had included, so no other class
         // still holds it and nothing is left referencing a finding that is gone.
         let invalidation = request
-            .discard_findings_in_class(&class_probe(subject.stem()))
+            .discard_findings_in_class(&class_probe(subject.stem()).expect("a class stem"))
             .expect("discarding a class");
         assert_eq!(
             invalidation.findings_discarded, 1,
@@ -824,7 +830,7 @@ fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
             let stem = key.as_str().strip_suffix('/').expect("a class key");
             assert!(
                 request
-                    .findings_in_class(&class_probe(stem))
+                    .findings_in_class(&class_probe(stem).expect("a class stem"))
                     .expect("reading findings")
                     .is_empty(),
                 "the finding survives in `{}` after its class was discarded",
@@ -908,7 +914,7 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
         .expect("recording a finding");
     assert_eq!(
         request
-            .findings_in_class(&class_probe(tombstone.path.stem()))
+            .findings_in_class(&class_probe(tombstone.path.stem()).expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -998,18 +1004,18 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // The class discard takes the whole class, longer suffixes inside it
     // included, and nothing outside it.
     let invalidation = request
-        .discard_findings_in_class(&class_probe("glossary"))
+        .discard_findings_in_class(&class_probe("glossary").expect("a class stem"))
         .expect("discarding a class");
     assert_eq!(invalidation.findings_discarded, 3);
     assert!(
         request
-            .findings_in_class(&class_probe("glossary"))
+            .findings_in_class(&class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .is_empty()
     );
     assert_eq!(
         request
-            .findings_in_class(&class_probe("index"))
+            .findings_in_class(&class_probe("index").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -1027,7 +1033,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // dedupe rule to make that true.
     for _ in 0..2 {
         request
-            .discard_findings_in_class(&class_probe("glossary"))
+            .discard_findings_in_class(&class_probe("glossary").expect("a class stem"))
             .expect("discarding a class");
         request
             .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 2))
@@ -1035,7 +1041,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     }
     assert_eq!(
         request
-            .findings_in_class(&class_probe("glossary"))
+            .findings_in_class(&class_probe("glossary").expect("a class stem"))
             .expect("reading findings")
             .len(),
         1
@@ -1044,7 +1050,7 @@ fn re_deriving_a_class_is_a_discard_and_a_record() {
     // Discarding a class that holds nothing is a no-op rather than an error.
     assert_eq!(
         request
-            .discard_findings_in_class(&class_probe("absent"))
+            .discard_findings_in_class(&class_probe("absent").expect("a class stem"))
             .expect("discarding an empty class")
             .findings_discarded,
         0
