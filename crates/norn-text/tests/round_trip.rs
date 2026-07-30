@@ -217,6 +217,20 @@ fn frontmatter_blocks(source: &str) -> usize {
     1 + frontmatter_blocks(document.body())
 }
 
+/// How many lines of `source` are `---` and nothing else but whitespace.
+///
+/// Counted by looking at the text rather than by asking this crate, which is
+/// the point: the block count above is blind to a fence the reader does not
+/// recognize, and that is exactly the case where an edit synthesizes a second
+/// block. A count that reads the bytes sees the fences either way.
+fn fence_lines(source: &str) -> usize {
+    source
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter(|line| line.trim_end_matches(['\r', ' ', '\t']) == "---")
+        .count()
+}
+
 fn headings_of(source: &str) -> Vec<(u8, String)> {
     Document::parse(source)
         .scan_body()
@@ -227,16 +241,20 @@ fn headings_of(source: &str) -> Vec<(u8, String)> {
 }
 
 /// An accepted field edit leaves exactly one frontmatter block — the one it
-/// wrote into, or the one it synthesized for a document that had none — and
-/// leaves every heading the body already had.
+/// wrote into, or the one it synthesized for a document that had none — writes
+/// a pair of fences only into a document that had none, and leaves every
+/// heading the body already had.
 ///
-/// Both are corpus-wide because both are ways an edit corrupts a document
-/// without failing any per-field assertion: a second block shadows the real
-/// one, and a heading that stopped parsing means the body's structure moved
-/// under an edit that was only supposed to touch the block.
+/// All three are corpus-wide because all three are ways an edit corrupts a
+/// document without failing any per-field assertion: a second block shadows
+/// the real one, a pair of fences written above a fence the reader missed is
+/// how the second block gets there, and a heading that stopped parsing means
+/// the body's structure moved under an edit that was only supposed to touch
+/// the block.
 fn an_accepted_edit_keeps_one_block_and_every_heading(source: &str, label: &str) -> usize {
     let document = Document::parse(source);
     let headings_before = headings_of(source);
+    let fences_before = fence_lines(source);
     let mut checked = 0;
     let judge = |edited: &str, what: &str| {
         assert_eq!(
@@ -244,6 +262,13 @@ fn an_accepted_edit_keeps_one_block_and_every_heading(source: &str, label: &str)
             1,
             "{label}: {what} left {} frontmatter blocks",
             frontmatter_blocks(edited)
+        );
+        let fences_after = fence_lines(edited);
+        let synthesized = fences_after.saturating_sub(fences_before);
+        assert!(
+            synthesized == 0 || (synthesized == 2 && fences_before == 0),
+            "{label}: {what} wrote {synthesized} fence lines into a document that had \
+             {fences_before}"
         );
         let after = headings_of(edited);
         for heading in &headings_before {
