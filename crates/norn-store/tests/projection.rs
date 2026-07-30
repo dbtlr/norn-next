@@ -191,16 +191,30 @@ fn a_value_at_the_nesting_bound_projects_and_one_past_it_is_refused() {
     assert!(given > limit, "{given} is not past {limit}");
 }
 
-/// The bound is measured rather than recursed into, so a value far past it is
-/// refused instead of overflowing the stack a recursive measurement would use.
+/// **A value far past the bound is refused and then freed, neither step recursing
+/// once per level.** The measurement is a walk with an explicit stack and the
+/// value's own drop is another, so a caller that composed a deep tree reads the
+/// refusal and then goes on running — a recursive drop would abort the process at
+/// the end of the scope that took the error. The same value carried through the
+/// store's own write is `store/facts.rs`'s case.
 #[test]
-fn a_value_far_past_the_bound_is_refused_rather_than_overflowing() {
+fn a_value_far_past_the_bound_is_refused_and_dropped_without_overflowing() {
     let pathological = nested(100_000);
     let error = canonical_json(&pathological).expect_err("a pathologically nested value");
     assert!(matches!(error, StoreError::Bound { .. }), "{error:?}");
-    // Dropping it is the same recursion, and it belongs to the value's owner
-    // rather than to the projection this case is about.
-    std::mem::forget(pathological);
+    drop(pathological);
+}
+
+/// A map nests as deeply as a sequence and is freed the same way, so the iterative
+/// drop is about nesting rather than about which container does it. Built by moving
+/// rather than through `map`, which clones what it is handed.
+#[test]
+fn a_deep_map_is_dropped_without_overflowing() {
+    let mut value = Value::Null;
+    for _ in 0..100_000 {
+        value = Value::Map(vec![("k".to_string(), value)]);
+    }
+    drop(value);
 }
 
 /// A map nests as a sequence does, so the bound is about nesting rather than

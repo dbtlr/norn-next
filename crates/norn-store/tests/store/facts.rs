@@ -9,7 +9,7 @@
 use crate::common::{Scratch, document, document_with_every_fact, path, span};
 use norn_store::{
     BlockFact, DocumentFacts, FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Provenance,
-    TagFact, TagSource, ddl,
+    StoreError, TagFact, TagSource, ddl,
 };
 
 /// One of every fact shape, written and read back unchanged — including the
@@ -107,6 +107,38 @@ fn an_absent_frontmatter_block_and_an_empty_one_are_different_values() {
 
     // Only the projection that exists was made.
     assert_eq!(request.counters().get("frontmatter_projections"), Some(1));
+}
+
+/// **A refused frontmatter projection stays a refusal all the way out of the
+/// scope that took it.** The write refuses a value nested past the bound and hands
+/// the facts back, and freeing them is a walk with an explicit stack — a recursive
+/// drop would abort the process after the caller had already read the error.
+#[test]
+fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
+    let scratch = Scratch::new("deep-frontmatter");
+    let mut store = scratch.open();
+    let mut facts = document("docs/deep.md", "hash-1", "a body\n");
+    let mut value = FrontmatterValue::Null;
+    for _ in 0..100_000 {
+        value = FrontmatterValue::Sequence(vec![value]);
+    }
+    facts.frontmatter = Some(value);
+
+    let error = store
+        .begin_request()
+        .upsert_document(&facts)
+        .expect_err("a document whose frontmatter nests past the bound");
+    assert!(matches!(error, StoreError::Bound { .. }), "{error:?}");
+    // Nothing was written, and the facts are freed here rather than leaked past
+    // the assertion.
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_document(&facts.path)
+            .expect("reading a document"),
+        None
+    );
+    drop(facts);
 }
 
 /// A re-derivation replaces a document's fact rows wholesale and keeps the

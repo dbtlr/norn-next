@@ -57,6 +57,13 @@
 //! and below what SQLite accepts, so nothing a parsed document carries reaches
 //! it. The API is public, though, and a caller composing a value tree is not
 //! bounded by a parser at all.
+//!
+//! Which is why **every walk over a value is iterative**, the measurement and the
+//! value's own [`Drop`] alike. A value past the bound is refused rather than
+//! written, and it then still has to be *freed*: a recursive drop would recurse
+//! once per level and abort the process on a value this API accepted, which would
+//! make the refusal a crash one statement later rather than an error a caller
+//! reads.
 
 /// A frontmatter value, as the store takes it.
 ///
@@ -67,6 +74,16 @@
 /// A map is a list of pairs rather than a sorted structure because the caller
 /// hands over what it read, in the order it read it; sorting is
 /// [`canonical_json`]'s job and happens once, where the bytes are written.
+///
+/// **Its `Drop` is iterative**, because a value this type can hold is not bounded
+/// by what this crate will project: nesting deeper than
+/// [`MAX_FRONTMATTER_DEPTH`] is refused, and the refused value is still the
+/// caller's to drop. A derived recursive drop would recurse once per level and
+/// abort the process on a deep one — turning a refusal into a crash, at the far
+/// end of the call that refused. Dropping is the one traversal that happens
+/// whether or not anything asked for it; the derived `Clone`, `Debug` and
+/// `PartialEq` recurse, and a caller that asks one of them for a value past the
+/// bound is asking for that depth.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FrontmatterValue {
     Null,
@@ -76,6 +93,33 @@ pub enum FrontmatterValue {
     String(String),
     Sequence(Vec<FrontmatterValue>),
     Map(Vec<(String, FrontmatterValue)>),
+}
+
+impl Drop for FrontmatterValue {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        take_children(self, &mut pending);
+        // Each value taken out of the worklist has had its own children moved
+        // into the worklist, so the drop that runs when it leaves this scope has
+        // an empty container to free and recurses no further.
+        while let Some(mut value) = pending.pop() {
+            take_children(&mut value, &mut pending);
+        }
+    }
+}
+
+/// Move a value's children onto `pending`, leaving an empty container behind.
+///
+/// A map's keys are dropped here rather than carried: a `String` holds no
+/// [`FrontmatterValue`], so it is not part of the walk.
+fn take_children(value: &mut FrontmatterValue, pending: &mut Vec<FrontmatterValue>) {
+    match value {
+        FrontmatterValue::Sequence(items) => pending.append(items),
+        FrontmatterValue::Map(entries) => {
+            pending.extend(std::mem::take(entries).into_iter().map(|(_, value)| value));
+        }
+        _ => {}
+    }
 }
 
 /// How deeply a frontmatter projection may nest.
