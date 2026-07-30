@@ -140,7 +140,7 @@ pub use frontmatter::{Field, RenderError, ScalarContext, ValueStyle, render_docu
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
 pub use link::{
-    Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
+    BlockId, Link, LinkFamily, Resolution, parse_wikilinks_in_text, reconstruct_wikilink,
     splice_wikilinks_in_text, wikilink_target_is_representable,
 };
 pub use section::{SectionAddress, SectionError, SectionSpan};
