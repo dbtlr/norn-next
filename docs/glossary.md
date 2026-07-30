@@ -56,7 +56,7 @@ The internal structure and version of Norn's rebuildable derived state.
 _Avoid_: Schema (unqualified), vault schema
 
 **Changeset**:
-The document derivations and deaths one write-through increment applies together. The increment is the act; the changeset is what it is handed.
+A group of document derivations and deaths submitted together for one atomic application.
 _Avoid_: Batch, diff
 
 **Vault entry**:
