@@ -23,9 +23,9 @@ impl SourceSpan {
     /// the `\r`. The clamped value is what the returned `byte_offset` carries,
     /// so slicing `content` at it is always sound.
     ///
-    /// Counting is from the start of `content`, so this costs the offset. A
-    /// caller asking for many spans in ascending order uses [`LineCursor`],
-    /// which carries the count forward instead.
+    /// Counting is from the start of `content`, so this costs the offset. The
+    /// crate's own scans ask for many spans in ascending order and carry the
+    /// count forward across them instead, which is linear in the content.
     pub fn at(content: &str, byte_offset: usize) -> Self {
         LineCursor::new(content).span_at(byte_offset)
     }
