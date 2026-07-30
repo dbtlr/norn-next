@@ -71,7 +71,12 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         let body = &content[body_start..];
         let mut strip = StripReport::default();
         let value = match serde_yaml::from_str::<serde_yaml::Value>(&content[range.clone()]) {
-            Ok(parsed) => Some(from_yaml(parsed, "", diagnostics, &mut strip)),
+            Ok(parsed) => Some(from_yaml(
+                parsed,
+                &mut String::new(),
+                diagnostics,
+                &mut strip,
+            )),
             Err(error) => {
                 diagnostics.push(
                     Diagnostic::warning(

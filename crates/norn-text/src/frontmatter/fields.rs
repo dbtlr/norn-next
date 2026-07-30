@@ -239,7 +239,7 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
     let parsed: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
     let mut discarded = Vec::new();
     let mut strip = StripReport::default();
-    let value = crate::value::from_yaml(parsed, "", &mut discarded, &mut strip);
+    let value = crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip);
     strip.is_clean().then_some(value)
 }
 

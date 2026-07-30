@@ -25,7 +25,7 @@
 //! - **Duplicate keys** are not a value-model question at all: the block is
 //!   not well-formed, so it does not parse and no value exists.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use crate::diagnostic::Diagnostic;
 
@@ -119,6 +119,12 @@ impl From<f64> for Value {
 /// Document order is information — it is the order a rendered document emits
 /// fields in — so the map keeps it rather than sorting keys away. Keys are
 /// unique: inserting an existing key replaces its value in place.
+///
+/// Lookup is a scan, which is the right shape for what this holds: a
+/// frontmatter block is a handful of fields, and a hash map over that many
+/// short strings costs more in hashing and allocation than the scan does in
+/// comparisons — while giving up the ordering that makes an edit preserve key
+/// order.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mapping {
     entries: Vec<(String, Value)>,
@@ -160,6 +166,15 @@ impl Mapping {
                 None
             }
         }
+    }
+
+    /// Append an entry whose key is known to be new, skipping the scan
+    /// `insert` does to find an existing one. The parse boundary is the caller:
+    /// a block with two entries under one key is not well-formed and never
+    /// reaches the value model.
+    pub(crate) fn append_unique(&mut self, key: String, value: Value) {
+        debug_assert!(!self.contains_key(&key), "append_unique on a repeated key");
+        self.entries.push((key, value));
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -259,9 +274,13 @@ impl StripReport {
 
 /// Convert a parsed YAML value into the vault value model, reporting every
 /// construct the model has no shape for.
+///
+/// `path` is a scratch buffer naming where the walk currently is. It is
+/// extended and truncated in place rather than rebuilt per node, so a document
+/// with no strippable construct in it pays nothing to be able to name one.
 pub(crate) fn from_yaml(
     value: serde_yaml::Value,
-    path: &str,
+    path: &mut String,
     diagnostics: &mut Vec<Diagnostic>,
     report: &mut StripReport,
 ) -> Value {
@@ -270,15 +289,16 @@ pub(crate) fn from_yaml(
         serde_yaml::Value::Bool(value) => Value::Bool(value),
         serde_yaml::Value::Number(number) => number_from_yaml(number, path, diagnostics),
         serde_yaml::Value::String(text) => Value::String(text),
-        serde_yaml::Value::Sequence(items) => Value::Sequence(
-            items
-                .into_iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    from_yaml(item, &format!("{path}[{index}]"), diagnostics, report)
-                })
-                .collect(),
-        ),
+        serde_yaml::Value::Sequence(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (index, item) in items.into_iter().enumerate() {
+                let mark = path.len();
+                let _ = write!(path, "[{index}]");
+                out.push(from_yaml(item, path, diagnostics, report));
+                path.truncate(mark);
+            }
+            Value::Sequence(out)
+        }
         serde_yaml::Value::Mapping(mapping) => {
             let mut map = Mapping::new();
             for (key, value) in mapping {
@@ -290,17 +310,18 @@ pub(crate) fn from_yaml(
                             "an entry keyed by a non-string was dropped; the vault value model \
                              addresses fields by string key",
                         )
-                        .with_detail(format!("at {path}")),
+                        .with_detail(location(path)),
                     );
                     continue;
                 };
-                let child = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{path}.{key}")
-                };
-                let value = from_yaml(value, &child, diagnostics, report);
-                map.insert(key, value);
+                let mark = path.len();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(&key);
+                let value = from_yaml(value, path, diagnostics, report);
+                path.truncate(mark);
+                map.append_unique(key, value);
             }
             Value::Map(map)
         }
@@ -311,10 +332,19 @@ pub(crate) fn from_yaml(
                     "an explicit YAML tag was dropped and its value kept; the vault value model \
                      carries no tags",
                 )
-                .with_detail(format!("`{}` at {path}", tagged.tag)),
+                .with_detail(format!("`{}` {}", tagged.tag, location(path))),
             );
             from_yaml(tagged.value, path, diagnostics, report)
         }
+    }
+}
+
+/// Where in the block a diagnostic is about, for a reader who has to find it.
+fn location(path: &str) -> String {
+    if path.is_empty() {
+        "at the top level".to_string()
+    } else {
+        format!("at `{path}`")
     }
 }
 
@@ -332,7 +362,7 @@ fn number_from_yaml(
                 "frontmatter-integer-out-of-range",
                 "an integer outside the range of a 64-bit signed integer is carried as a float",
             )
-            .with_detail(format!("`{value}` at {path}")),
+            .with_detail(format!("`{value}` {}", location(path))),
         );
         return Value::Float(value as f64);
     }
