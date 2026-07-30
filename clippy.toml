@@ -94,13 +94,18 @@ disallowed-methods = [
     # No SQLite connection opened outside norn-store. Opening is the act the
     # rule is about, so the constructors are its subject rather than the
     # `Connection` type: norn-store names that type throughout, and a crate-wide
-    # allow on it would erase the marker this rule exists to leave.
+    # allow on it would erase the marker this rule exists to leave. The
+    # `from_handle` pair is in the set because adopting a raw `sqlite3*` produces
+    # a live connection without naming a path — the same effect through a
+    # constructor that does not read as an open.
     { path = "rusqlite::Connection::open", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::open_in_memory", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::open_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::from_handle", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
+    { path = "rusqlite::Connection::from_handle_owned", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
 ]
 
 # The types that open a filesystem handle. A type only ever obtained from a
