@@ -38,9 +38,10 @@
 //! # Dependent state is composed inside the same act
 //!
 //! **Full text is trigger-maintained.** Three triggers on `documents` carry
-//! `documents_fts` ([`crate::ddl::fts`]), so the document statements a changeset
-//! runs are the whole of its full-text maintenance. There is no explicit index
-//! write here, and adding one would be a second maintainer of the same rows.
+//! `documents_fts`, the store schema's full-text pillar, so the document
+//! statements a changeset runs are the whole of its full-text maintenance. There
+//! is no explicit index write here, and adding one would be a second maintainer
+//! of the same rows.
 //!
 //! **Findings are discarded by affected class.** Every changed path — upserted
 //! or dead — names the ambiguity class it belongs to, and the findings in the
@@ -67,7 +68,7 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, Invalidation, Provenance};
 use crate::json;
-use crate::path::ClassKey;
+use crate::path::{ClassKey, DocumentPath};
 use crate::request;
 use crate::store::{self, Store};
 
@@ -86,7 +87,7 @@ pub enum Change {
     /// for a path nothing had derived has none, and keeps the one already
     /// recorded where a tombstone is already there.
     Death {
-        path: crate::path::DocumentPath,
+        path: DocumentPath,
         provenance: Provenance,
     },
 }
@@ -177,11 +178,13 @@ pub(crate) fn apply(
     let mut tally = Tally::default();
     {
         let mut statements = Statements::prepare(&transaction)?;
-        for (applied, change) in std::iter::once(first).chain(entries).enumerate() {
+        for (index, change) in std::iter::once(first).chain(entries).enumerate() {
             match change {
                 Change::Upsert(facts) => {
                     upsert(&mut statements, generation, recorded_at, &facts, &mut tally)?;
                 }
+                // The death's own provenance, which is a different thing from
+                // the changeset's mark this function was called with.
                 Change::Death { path, provenance } => {
                     record_death(
                         &mut statements,
@@ -193,7 +196,7 @@ pub(crate) fn apply(
                     )?;
                 }
             }
-            torn_here(applied + 1);
+            torn_here(index + 1);
         }
         let discarded =
             discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
@@ -518,7 +521,7 @@ fn record_death(
     statements: &mut Statements<'_>,
     generation: i64,
     recorded_at: i64,
-    path: &crate::path::DocumentPath,
+    path: &DocumentPath,
     provenance: Provenance,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {

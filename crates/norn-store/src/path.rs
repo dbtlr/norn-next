@@ -418,7 +418,7 @@ pub fn suffix_probe(target: &str) -> Result<SuffixProbe, StoreError> {
 /// The refusals mirror [`ClassKey::new`] and [`suffix_probe`]: an empty stem,
 /// one carrying the separator (a stem is one segment, never a path), one that
 /// is a `.` or `..` name, and one carrying a control byte. Formatting an
-/// unrefused stem into a lower bound is what [`ClassKey::of_prefix`]'s debug
+/// unrefused stem into a lower bound is what the class key's own debug
 /// assertion trusts, so a caller-supplied stem is checked here rather than
 /// left to trip that assertion later.
 pub fn class_probe(stem: &str) -> Result<SuffixProbe, StoreError> {
