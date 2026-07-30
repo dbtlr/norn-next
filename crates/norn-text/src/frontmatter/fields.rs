@@ -13,7 +13,7 @@
 //! validated against it:
 //!
 //! - **A field exists only if the parser has that key.** A merge key the
-//!   parser folds away, or a quoted key whose decode diverges from the
+//!   extraction folds away, or a quoted key whose decode diverges from the
 //!   parser's, produces no field, and a set or remove then reports it absent
 //!   rather than editing a line the parser reads differently.
 //! - **A value span survives only if its bytes re-parse to exactly the parsed
@@ -40,9 +40,15 @@
 //! that trails it, so removing a field leaves the blank structure and the
 //! comments around it standing. Indented tails are still absorbed — a blank
 //! line inside a folded scalar is part of that scalar, and the run is measured
-//! from the end of the range backwards, so it never reaches one. A block
-//! scalar with keep-chomping (`|+`, `>+`) owns its trailing blank lines as
-//! content, so its range is not trimmed at all.
+//! from the end of the range backwards, so it never reaches one.
+//!
+//! A block scalar with keep-chomping (`|+`, `>+`) owns trailing blank lines as
+//! content, and owns exactly as many as its parsed value carries: the value's
+//! own trailing newlines are the proof, and everything past them — a standing
+//! comment, the blanks below it — is the document's. Whether the header asks
+//! for keep-chomping is read from the header itself, where the chomping
+//! indicator sits before any comment, so a `+` written in a trailing comment
+//! is a comment.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -116,26 +122,36 @@ pub(crate) fn field_spans(
         return Vec::new();
     }
 
-    let confirmed: Vec<&RawKeyLine> = candidates
+    // An entry ends where the next one begins. A merge-key line begins no
+    // entry — expansion folded it away, so no parsed key names it — but it
+    // still bounds the entry above it: absorbing it would hand a directive's
+    // bytes to an unrelated field's remove. Every other unconfirmed candidate
+    // is a `key:` lookalike inside the value above it and is absorbed on
+    // purpose.
+    let boundaries: Vec<&RawKeyLine> = candidates
         .iter()
-        .filter(|candidate| map.contains_key(&candidate.name))
+        .filter(|candidate| map.contains_key(&candidate.name) || candidate.name == MERGE_KEY)
         .collect();
 
-    let mut fields = Vec::with_capacity(confirmed.len());
-    for (index, candidate) in confirmed.iter().enumerate() {
-        let entry_end = confirmed
+    let mut fields = Vec::with_capacity(boundaries.len());
+    for (index, candidate) in boundaries.iter().enumerate() {
+        if candidate.name == MERGE_KEY {
+            continue;
+        }
+        let entry_end = boundaries
             .get(index + 1)
             .map(|next| next.key_line_start)
             .unwrap_or(frontmatter_range.end);
-        let line_end = if candidate.owns_trailing_blanks {
-            entry_end
-        } else {
-            entry_end - trailing_separator_bytes(&content[candidate.key_line_end..entry_end])
-        };
 
         let parsed = map
             .get(&candidate.name)
-            .expect("a confirmed candidate is a parsed key");
+            .expect("a boundary that is not the merge key is a parsed key");
+        let trailing = &content[candidate.key_line_end..entry_end];
+        let line_end = if candidate.keeps_trailing_blanks {
+            entry_end - unowned_trailing_bytes(trailing, owned_blank_lines(parsed))
+        } else {
+            entry_end - trailing_separator_bytes(trailing)
+        };
         let (value_range, style) = resolve_value(content, candidate, parsed);
 
         fields.push(Field {
@@ -149,19 +165,65 @@ pub(crate) fn field_spans(
     fields
 }
 
-/// The trailing bytes of `slice` that are whole blank lines or column-0
-/// comment lines.
-fn trailing_separator_bytes(slice: &str) -> usize {
-    let mut bytes = 0;
+/// The key a merge directive is written under.
+const MERGE_KEY: &str = "<<";
+
+/// The trailing lines of `slice` that are whole blank lines or column-0
+/// comment lines, in document order.
+fn trailing_separator_run(slice: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = Vec::new();
     for line in slice.split_inclusive('\n').rev() {
         let text = line.trim_end_matches(['\r', '\n']);
         if text.trim().is_empty() || text.starts_with('#') {
-            bytes += line.len();
+            lines.push(line);
         } else {
             break;
         }
     }
-    bytes
+    lines.reverse();
+    lines
+}
+
+/// The trailing bytes of `slice` that are whole blank lines or column-0
+/// comment lines.
+fn trailing_separator_bytes(slice: &str) -> usize {
+    trailing_separator_run(slice)
+        .iter()
+        .map(|line| line.len())
+        .sum()
+}
+
+/// The trailing separator bytes a keep-chomped block scalar does not own: the
+/// run past the first `owned` blank lines of it.
+///
+/// A comment is never one of them. Keep-chomping asks for the blank lines
+/// below the value, and a column-0 comment ends the scalar rather than
+/// extending it, so a standing comment under a `|+` block — and everything
+/// after it — belongs to the document and survives the field's removal.
+fn unowned_trailing_bytes(slice: &str, owned: usize) -> usize {
+    let run = trailing_separator_run(slice);
+    let mut kept = 0;
+    while kept < owned && run.get(kept).is_some_and(|line| line.trim().is_empty()) {
+        kept += 1;
+    }
+    run[kept..].iter().map(|line| line.len()).sum()
+}
+
+/// How many blank lines a keep-chomped value's own bytes prove it owns.
+///
+/// Every trailing newline past the one terminating the value's last line is an
+/// empty line the value carries. A value that is nothing but newlines carries
+/// all of them.
+fn owned_blank_lines(parsed: &Value) -> usize {
+    let Value::String(text) = parsed else {
+        return 0;
+    };
+    let trailing = text.bytes().rev().take_while(|byte| *byte == b'\n').count();
+    if trailing == text.len() {
+        trailing
+    } else {
+        trailing - 1
+    }
 }
 
 /// A column-0 mapping key line the scanner proposes, before validation.
@@ -173,8 +235,9 @@ struct RawKeyLine {
     name: String,
     proposed_value_range: Option<Range<usize>>,
     proposed_style: ValueStyle,
-    /// A block scalar with keep-chomping owns the blank lines that trail it.
-    owns_trailing_blanks: bool,
+    /// A block scalar whose header asks for keep-chomping, which makes the
+    /// blank lines trailing it content rather than separators.
+    keeps_trailing_blanks: bool,
 }
 
 /// Decide a candidate's final value range and style against the parsed value.
@@ -236,7 +299,7 @@ fn is_null_token(text: &str) -> bool {
 /// Re-parse a value slice through the same pipeline the block went through, so
 /// `12:30`, `1.10` and `yes` are read identically on both sides.
 pub(crate) fn reparse(text: &str) -> Option<Value> {
-    let parsed: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+    let parsed = crate::frontmatter::extract::parse_block(text).ok()?;
     let mut discarded = Vec::new();
     let mut strip = StripReport::default();
     let value = crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip);
@@ -285,7 +348,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
             name,
             proposed_value_range,
             proposed_style,
-            owns_trailing_blanks: keeps_trailing_blanks(proposed_style, rest),
+            keeps_trailing_blanks: keeps_trailing_blanks(proposed_style, rest),
         });
 
         index += 1;
@@ -298,10 +361,31 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
 }
 
 /// Whether a block scalar's header asks for the blank lines below it to be
-/// kept as content (`|+`, `>+`).
+/// kept as content (`|+`, `>+`, `|2+`, `|+2`).
+///
+/// The header is the indicator, then an optional indentation digit and an
+/// optional chomping indicator in either order, and it ends at the first byte
+/// that is neither — a space, and therefore any comment. A `+` past that point
+/// is prose: reading it as keep-chomping hands the field the blank lines and
+/// the standing comment below it, and the next remove deletes both.
 fn keeps_trailing_blanks(style: ValueStyle, rest: &str) -> bool {
-    matches!(style, ValueStyle::BlockLiteral | ValueStyle::BlockFolded)
-        && rest.trim_start().contains('+')
+    if !matches!(style, ValueStyle::BlockLiteral | ValueStyle::BlockFolded) {
+        return false;
+    }
+    let mut header = rest.trim_start().bytes();
+    if !matches!(header.next(), Some(b'|') | Some(b'>')) {
+        return false;
+    }
+    let mut keep = false;
+    for byte in header {
+        match byte {
+            b'0'..=b'9' => {}
+            b'+' => keep = true,
+            b'-' => return false,
+            _ => break,
+        }
+    }
+    keep
 }
 
 /// Advance past the continuation lines of a value that opened on the key line

@@ -35,7 +35,16 @@ const ADVERSARIAL: &[&str] = &[
     "---\nitems:\n- name: one\n- name: two\ntitle: t\n---\n",
     "---\nnote: \"first\nkey: not a key\"\ntitle: t\n---\n",
     "---\nanchored: &base\n  k: 1\nreferenced: *base\n---\n",
+    "---\na: &x 1\nb: *x\n---\nbody\n",
     "---\n<<: {a: 1}\ntitle: t\n---\n",
+    "---\nbase: &b {title: x}\n<<: *b\ntitle: t\n---\n",
+    "---\nratio: .nan\nup: .inf\ndown: -.inf\ntitle: t\n---\nbody\n",
+    "---   \ntitle: loose opener\n---\nbody\n",
+    "---\ntitle: loose closer\n---   \nbody\n",
+    "---\t\ntitle: both loose\n---\t\nbody\n",
+    "---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\none\r\ntwo\r\n\r\n## Beta\r\nb\r\n",
+    "---\ntext: |+\n  a\n\n# a standing comment\nother: x\n---\n",
+    "---\ntext: | # a note with a + in it\n  a\n\n# a standing comment\nother: x\n---\n",
     "---\ntitle: t\n---\nAlpha\n=====\n\nbody\n\n## Beta\n\n^block-id\n",
     "---\ntitle: t\n---\n## Tail",
     "---\nunclosed: hello\nno closing fence\n",
@@ -80,8 +89,11 @@ fn reading_loses_nothing(source: &str, label: &str) -> usize {
             range.end <= source.len(),
             "{label}: the block range overruns"
         );
+        let opener = source[..range.start]
+            .trim_end_matches(['\r', '\n'])
+            .trim_end_matches([' ', '\t']);
         assert!(
-            source[..range.start].ends_with("---\n") || source[..range.start].ends_with("---\r\n"),
+            opener.ends_with("---"),
             "{label}: the block does not begin after an opening fence"
         );
     }
@@ -195,6 +207,72 @@ fn an_edit_is_a_one_construct_diff(source: &str, label: &str) -> usize {
     checked
 }
 
+/// How many frontmatter blocks a document holds, counted by reading the body
+/// of each for another one.
+///
+/// A document has one block or none. Two is the shape a fence the reader did
+/// not recognize produces: the fields go into a block synthesized above the
+/// real one, and the re-read finds the synthesized block first and approves an
+/// edit that shadowed everything the document said.
+fn frontmatter_blocks(source: &str) -> usize {
+    let document = Document::parse(source);
+    if document.frontmatter_range().is_none() {
+        return 0;
+    }
+    1 + frontmatter_blocks(document.body())
+}
+
+fn headings_of(source: &str) -> Vec<(u8, String)> {
+    Document::parse(source)
+        .scan_body()
+        .headings()
+        .iter()
+        .map(|heading| (heading.level, heading.text.clone()))
+        .collect()
+}
+
+/// An accepted field edit leaves exactly one frontmatter block — the one it
+/// wrote into, or the one it synthesized for a document that had none — and
+/// leaves every heading the body already had.
+///
+/// Both are corpus-wide because both are ways an edit corrupts a document
+/// without failing any per-field assertion: a second block shadows the real
+/// one, and a heading that stopped parsing means the body's structure moved
+/// under an edit that was only supposed to touch the block.
+fn an_accepted_edit_keeps_one_block_and_every_heading(source: &str, label: &str) -> usize {
+    let document = Document::parse(source);
+    let headings_before = headings_of(source);
+    let mut checked = 0;
+    let judge = |edited: &str, what: &str| {
+        assert_eq!(
+            frontmatter_blocks(edited),
+            1,
+            "{label}: {what} left {} frontmatter blocks",
+            frontmatter_blocks(edited)
+        );
+        let after = headings_of(edited);
+        for heading in &headings_before {
+            assert!(
+                after.contains(heading),
+                "{label}: {what} lost the heading {heading:?}"
+            );
+        }
+    };
+    for name in ["title", "status", "a brand new field"] {
+        if let Ok(edited) = document.set_field(name, &Value::String("sentinel".into())) {
+            judge(&edited, "setting a field");
+            checked += 1;
+        }
+    }
+    for field in document.fields() {
+        if let Ok(edited) = document.remove_field(&field.name) {
+            judge(&edited, "removing a field");
+            checked += 1;
+        }
+    }
+    checked
+}
+
 /// Replacing a section with what it already holds is a no-op too.
 fn writing_a_section_back_changes_nothing(source: &str, label: &str) -> usize {
     let document = Document::parse(source);
@@ -258,6 +336,17 @@ fn adversarial_document_edits_are_one_construct_diffs() {
     assert!(checked >= 40, "only {checked} one-construct edits ran");
 }
 
+#[test]
+fn adversarial_document_edits_keep_one_block_and_every_heading() {
+    let checked: usize = ADVERSARIAL
+        .iter()
+        .map(|source| {
+            an_accepted_edit_keeps_one_block_and_every_heading(source, &format!("{source:?}"))
+        })
+        .sum();
+    assert!(checked >= 60, "only {checked} accepted edits were judged");
+}
+
 /// The same three properties over documents nobody hand-picked. The generator
 /// is independent of this crate — it links nothing here and shares no parser —
 /// so the trees it writes are inputs rather than a mirror of these
@@ -275,6 +364,7 @@ fn generated_documents_hold_the_same_properties() {
         checked += reading_loses_nothing(source, &label);
         checked += writing_a_value_back_changes_nothing(source, &label);
         checked += an_edit_is_a_one_construct_diff(source, &label);
+        checked += an_accepted_edit_keeps_one_block_and_every_heading(source, &label);
         checked += writing_a_section_back_changes_nothing(source, &label);
     }
     assert!(

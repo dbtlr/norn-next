@@ -39,29 +39,23 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         content
     };
 
-    let absent = |diagnostics: &mut Vec<Diagnostic>| {
-        let _ = diagnostics;
-        Extraction {
-            value: None,
-            range: None,
-            body: content,
-            body_start: 0,
-            byte_order_mark,
-            strip: StripReport::default(),
-        }
+    let absent = || Extraction {
+        value: None,
+        range: None,
+        body: content,
+        body_start: 0,
+        byte_order_mark,
+        strip: StripReport::default(),
     };
 
-    let Some(after_open) = after_bom
-        .strip_prefix("---\n")
-        .or_else(|| after_bom.strip_prefix("---\r\n"))
-    else {
-        return absent(diagnostics);
+    let Some(after_open) = strip_opening_fence(after_bom) else {
+        return absent();
     };
 
     let mut offset = content.len() - after_open.len();
     let yaml_start = offset;
     for line in after_open.split_inclusive('\n') {
-        if line.trim_end_matches(['\r', '\n']) != "---" {
+        if !is_fence(line) {
             offset += line.len();
             continue;
         }
@@ -70,7 +64,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         let body_start = offset + line.len();
         let body = &content[body_start..];
         let mut strip = StripReport::default();
-        let value = match serde_yaml::from_str::<serde_yaml::Value>(&content[range.clone()]) {
+        let value = match parse_block(&content[range.clone()]) {
             Ok(parsed) => Some(from_yaml(
                 parsed,
                 &mut String::new(),
@@ -83,7 +77,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
                         "frontmatter-parse-failed",
                         "frontmatter could not be parsed",
                     )
-                    .with_detail(error.to_string()),
+                    .with_detail(error),
                 );
                 None
             }
@@ -102,5 +96,45 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         "frontmatter-unclosed",
         "frontmatter opening delimiter has no closing delimiter",
     ));
-    absent(diagnostics)
+    absent()
+}
+
+/// The bytes after an opening `---` fence, or `None` when `text` does not open
+/// one.
+///
+/// A fence is `---` plus any spaces or tabs, then a line break. The trailing
+/// whitespace is accepted for the reason the closing fence accepts it — the
+/// two are one delimiter written twice, and an editor that trims neither
+/// writes both. Refusing it is not a smaller contract but a corrupting one: a
+/// document whose block goes unrecognized has its fields written into a
+/// *second* block synthesized above the first, and the re-read then finds the
+/// synthesized one and approves.
+fn strip_opening_fence(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---")?.trim_start_matches([' ', '\t']);
+    rest.strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+}
+
+/// Whether `line` is a `---` delimiter: the three dashes, then nothing but
+/// spaces, tabs and the line terminator.
+fn is_fence(line: &str) -> bool {
+    let text = line.trim_end_matches(['\r', '\n']);
+    text.strip_prefix("---")
+        .is_some_and(|rest| rest.bytes().all(|byte| byte == b' ' || byte == b'\t'))
+}
+
+/// Parse the YAML between the delimiters, expanding merge keys.
+///
+/// `<<` is a merge directive rather than a field: the mapping it names is
+/// folded into the one holding it, and the vault value model — which addresses
+/// fields by string key — has no shape for the directive itself. Expansion
+/// happens here, before a value exists, so the model holds the merged mapping
+/// and `<<` never becomes a field. A `<<` that names no mapping is not a merge
+/// and cannot be expanded, so the block is refused rather than read with a
+/// directive silently carried as a field.
+pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, String> {
+    let mut parsed: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(|error| error.to_string())?;
+    parsed.apply_merge().map_err(|error| error.to_string())?;
+    Ok(parsed)
 }

@@ -65,6 +65,52 @@ fn a_document_with_no_line_break_at_all_reads_as_lf() {
     );
 }
 
+/// A fence carrying trailing spaces or tabs is a fence, at both ends. An
+/// editor that trims neither writes both, and a fence this reader does not
+/// recognize is not a smaller contract but a corrupting one: the fields go
+/// into a second block synthesized above the real one.
+#[test]
+fn a_fence_with_trailing_whitespace_is_still_a_fence() {
+    for (source, label) in [
+        ("---   \ntitle: hello\n---\nbody\n", "loose opener"),
+        ("---\ttitle\n", "not a fence at all"),
+        ("---\ntitle: hello\n---   \nbody\n", "loose closer"),
+        (
+            "---\t\ntitle: hello\n---\t\nbody\n",
+            "both loose, with tabs",
+        ),
+        (
+            "---\r\ntitle: hello\r\n--- \r\nbody\r\n",
+            "loose CRLF closer",
+        ),
+    ] {
+        let document = Document::parse(source);
+        if label == "not a fence at all" {
+            assert_eq!(document.frontmatter(), None, "{label}");
+            continue;
+        }
+        assert_eq!(
+            document.frontmatter(),
+            Some(&Value::Map([("title", "hello")].into_iter().collect())),
+            "{label}"
+        );
+        assert!(document.diagnostics().is_empty(), "{label}");
+        assert!(document.body().starts_with("body"), "{label}");
+    }
+    // Four dashes is not a fence, and neither is a fence with anything but
+    // whitespace after it.
+    for source in [
+        "----\ntitle: hello\n---\n",
+        "--- x\ntitle: hello\n---\n",
+        "---\ntitle: hello\n--- x\n",
+    ] {
+        assert!(
+            !matches!(Document::parse(source).frontmatter(), Some(Value::Map(_))),
+            "{source:?} is not a block"
+        );
+    }
+}
+
 #[test]
 fn an_unclosed_block_is_diagnosed_and_the_whole_document_stays_body() {
     let source = "---\ntitle: hello\n# heading (no close)\n";
@@ -282,12 +328,64 @@ fn an_anchor_and_its_alias_read_as_the_expanded_value() {
     assert_eq!(document.field("b").expect("b").value_range, None);
 }
 
-/// The merge key is not folded away by this parser, so `<<` is an ordinary
-/// string key holding an ordinary mapping.
+/// A merge key is a directive, not a field. It is expanded before a value
+/// exists, so the model holds the merged mapping and `<<` is never a key in
+/// it — carrying one would be a field naming a document construct rather than
+/// a document's data.
 #[test]
-fn a_merge_key_reads_as_a_field_named_by_its_own_bytes() {
-    let map = map_of("---\n<<: {a: 1}\nb: 2\n---\n");
-    assert_eq!(map.keys().collect::<Vec<_>>(), ["<<", "b"]);
+fn a_merge_key_is_expanded_and_never_becomes_a_field() {
+    let source = "---\n<<: {a: 1}\nb: 2\n---\n";
+    let document = Document::parse(source);
+    let map = map_of(source);
+    assert!(!map.contains_key("<<"));
+    assert_eq!(map.get("a"), Some(&Value::Int(1)));
+    assert_eq!(map.get("b"), Some(&Value::Int(2)));
+    assert!(
+        !document.fields().iter().any(|field| field.name == "<<"),
+        "the merge key is not a field"
+    );
+    // Expansion itself is silent: the only thing said about the block is that
+    // its per-field split cannot be trusted, which is why every field edit in
+    // it refuses.
+    assert_eq!(codes(&document), ["frontmatter-not-editable"]);
+}
+
+/// An alias merge expands the same way, at any depth.
+#[test]
+fn a_merge_key_expands_through_an_alias_and_inside_a_nested_mapping() {
+    let map = map_of("---\nbase: &b\n  a: 1\nouter:\n  <<: *b\n  c: 3\n---\n");
+    assert_eq!(
+        map.get("outer"),
+        Some(&Value::Map(
+            [("c", Value::Int(3)), ("a", Value::Int(1))]
+                .into_iter()
+                .collect()
+        ))
+    );
+}
+
+/// A `<<` naming something that is not a mapping is not a merge, and there is
+/// no honest reading of it: expanding is impossible and carrying it as a field
+/// is the phantom the expansion exists to prevent. The block is refused.
+#[test]
+fn a_merge_key_that_names_no_mapping_refuses_the_block() {
+    let document = Document::parse("---\n<<: 1\ntitle: t\n---\n");
+    assert_eq!(codes(&document), ["frontmatter-parse-failed"]);
+    assert_eq!(document.frontmatter(), None);
+}
+
+/// A merge line belongs to no field, so no field's range may absorb it. It
+/// bounds the entry above it instead, and the block it sits in refuses every
+/// field edit — reading is unaffected and the bytes round-trip.
+#[test]
+fn a_merge_line_is_never_absorbed_into_a_neighbouring_field() {
+    // The merge contributes nothing new here, so every parsed key is locatable
+    // and the entry above the merge line stops at it rather than swallowing it.
+    let source = "---\nbase: &b {title: x}\n<<: *b\ntitle: t\n---\n";
+    let document = Document::parse(source);
+    let base = document.field("base").expect("base is a field");
+    assert_eq!(&source[base.line_range.clone()], "base: &b {title: x}\n");
+    assert!(!document.fields().iter().any(|field| field.name == "<<"));
 }
 
 // ── Field spans ──────────────────────────────────────────────────────────

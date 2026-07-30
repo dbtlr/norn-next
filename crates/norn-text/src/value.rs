@@ -2,8 +2,22 @@
 //!
 //! Seven shapes, and no eighth: null, bool, integer, float, string, sequence,
 //! and a string-keyed map. The model is derived from what a consumer of a
-//! parsed value can hold, not from what a frontmatter dialect can express, so
-//! the dialect stays an implementation detail no public signature names.
+//! parsed value can hold, not from what a frontmatter dialect can express: no
+//! shape here is a YAML shape, and a caller holding a [`Value`] holds nothing
+//! it has to know YAML to read. The *style* vocabulary beside it — see
+//! [`crate::ValueStyle`] and [`crate::ScalarContext`] — is YAML's, and says so:
+//! a host that wants to preserve how a value was written is asking a question
+//! about the dialect the document is in.
+//!
+//! # Scalar resolution is the YAML 1.2 core schema
+//!
+//! Which bytes read as which shape is a stated contract, pinned by tests, and
+//! not an accident of the parser behind the seam. `publish: no` is the string
+//! `"no"`, not `false`; `0777` is a string, not octal; `12:34:56` is a string,
+//! not a sexagesimal integer; `1_000` and `2026-07-29` are strings. `true`,
+//! `false`, `null`, `~`, decimal integers, `0x`/`0o` integers and
+//! exponent-shaped floats resolve to their core-schema shapes. Changing this
+//! is a deliberate contract change, visible as a suite change.
 //!
 //! # Expressiveness outside the model is stripped once, here
 //!
@@ -16,12 +30,20 @@
 //!   would invent a field the document does not contain.
 //! - **An explicit tag** — `!foo bar` — is dropped and its value kept, with a
 //!   `frontmatter-tag-stripped` diagnostic.
-//! - **An integer outside `i64`** is carried as a float, with a
-//!   `frontmatter-integer-out-of-range` diagnostic.
+//! - **An integer past `i64` but inside `u64`** is carried as a float, with a
+//!   `frontmatter-integer-out-of-range` diagnostic. Past `u64`, or below
+//!   `i64`, the block does not parse at all: the refusal is
+//!   `frontmatter-parse-failed`, and no value exists to carry.
 //! - **Anchors and aliases** are expanded by the parser before a value exists,
 //!   so there is nothing here to strip: the model holds the expansion. The
 //!   marker bytes themselves are never rewritten, because the field layer
 //!   refuses an in-place edit of a value that begins with `&`, `*` or `!`.
+//! - **A merge key** — `<<: *base` — is a directive rather than a field, and
+//!   is expanded the same way and for the same reason: the extraction folds
+//!   the merged mapping in before a value exists, so `<<` is never a field and
+//!   never a phantom one. Its bytes are never rewritten either — a block
+//!   carrying one has no trustworthy per-field split, so every field edit in
+//!   it refuses.
 //! - **Duplicate keys** are not a value-model question at all: the block is
 //!   not well-formed, so it does not parse and no value exists.
 
@@ -30,7 +52,7 @@ use std::fmt::{self, Write as _};
 use crate::diagnostic::Diagnostic;
 
 /// A frontmatter value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -80,6 +102,36 @@ impl Value {
         match self {
             Value::Map(map) => Some(map),
             _ => None,
+        }
+    }
+}
+
+/// Equality over the value model, with floats compared by
+/// [`f64::total_cmp`]'s ordering rather than IEEE 754's.
+///
+/// This crate proves an edit by comparing the value it read back against the
+/// value it was given, so a value that is not equal to itself is a value no
+/// edit can be proven for. IEEE equality makes `.nan` exactly that: a document
+/// holding one could not be edited at all, and this crate could not re-emit a
+/// document it had just read. Total ordering fixes it — every value equals
+/// itself, `.nan` included.
+///
+/// The other place the two differ is signed zero, and total ordering is the
+/// answer there too: `0.0` and `-0.0` are written differently, read back
+/// differently, and so are different values here. An emission of `-0.0` that
+/// read back as `0.0` would be a silent rewrite, and comparing by bits is what
+/// catches it.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(left), Value::Bool(right)) => left == right,
+            (Value::Int(left), Value::Int(right)) => left == right,
+            (Value::Float(left), Value::Float(right)) => left.total_cmp(right).is_eq(),
+            (Value::String(left), Value::String(right)) => left == right,
+            (Value::Sequence(left), Value::Sequence(right)) => left == right,
+            (Value::Map(left), Value::Map(right)) => left == right,
+            _ => false,
         }
     }
 }

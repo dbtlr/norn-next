@@ -72,6 +72,65 @@ fn removing_a_keep_chomping_block_takes_the_blank_lines_it_owns() {
         remove(source, "text"),
         Ok("---\nother: x\n---\n".to_string())
     );
+    // It owns exactly as many as its value carries — two here, and no more.
+    assert_eq!(
+        remove("---\ntext: |+\n  a\n\n\nother: x\n---\n", "text"),
+        Ok("---\nother: x\n---\n".to_string())
+    );
+}
+
+/// NRN-434, again: a `+` in a comment trailing a block-scalar header is prose.
+/// Reading it as keep-chomping hands the field the blank lines and the
+/// standing comment below it, and the remove deletes both.
+#[test]
+fn a_plus_in_a_block_scalar_header_comment_is_not_keep_chomping() {
+    let source = "---\ntext: | # keep this, and note the +\n  a\n\n# a standing comment\nother: \
+                  x\n---\n";
+    assert_eq!(
+        remove(source, "text"),
+        Ok("---\n\n# a standing comment\nother: x\n---\n".to_string())
+    );
+}
+
+/// Keep-chomping owns blank lines, and a comment is not a blank line. A
+/// column-0 comment ends the block scalar, so it and everything below it are
+/// the document's.
+#[test]
+fn a_keep_chomping_block_does_not_own_the_comment_below_its_blank_lines() {
+    let source = "---\ntext: |+\n  a\n\n# a standing comment\nother: x\n---\n";
+    assert_eq!(
+        remove(source, "text"),
+        Ok("---\n# a standing comment\nother: x\n---\n".to_string())
+    );
+}
+
+/// The chomping indicator crossed with what may follow it on the header line.
+/// Each row states what removing the field leaves standing, which is the only
+/// thing chomping decides here: whether the blank line below the value is the
+/// value's or the document's.
+#[test]
+fn every_chomping_indicator_owns_only_what_its_value_carries() {
+    for (header, expected) in [
+        // Clip and strip own no trailing blank line, with or without a comment
+        // — and the `+` inside the comment changes nothing.
+        ("|", "---\n\n# note\nother: x\n---\n"),
+        ("| # trailing +", "---\n\n# note\nother: x\n---\n"),
+        ("|-", "---\n\n# note\nother: x\n---\n"),
+        ("|- # trailing +", "---\n\n# note\nother: x\n---\n"),
+        // Keep owns the blank line and never the comment, however the header
+        // spells itself.
+        ("|+", "---\n# note\nother: x\n---\n"),
+        ("|+ # trailing +", "---\n# note\nother: x\n---\n"),
+        ("|2+", "---\n# note\nother: x\n---\n"),
+        ("|+2 # trailing +", "---\n# note\nother: x\n---\n"),
+    ] {
+        let source = format!("---\ntext: {header}\n  a\n\n# note\nother: x\n---\n");
+        assert_eq!(
+            remove(&source, "text").as_deref(),
+            Ok(expected),
+            "for header {header:?}"
+        );
+    }
 }
 
 /// NRN-133: a column-0 block-sequence item is `key:`-shaped but is not a key.
@@ -94,6 +153,29 @@ fn a_key_shaped_line_inside_a_quoted_value_is_part_of_that_value() {
         remove(source, "note"),
         Ok("---\ntitle: t\n---\n".to_string())
     );
+}
+
+// ── One block, before and after (NRN-25) ─────────────────────────────────
+
+/// A fence the reader does not recognize is a corruption, not a limitation:
+/// the document has no block as far as the reader is concerned, so the edit
+/// synthesizes one above the real one, the re-read finds the synthesized block
+/// first, and everything the document actually said is shadowed.
+#[test]
+fn an_edit_into_a_loose_fenced_document_writes_into_the_block_that_is_there() {
+    let source = "---   \na: 1\n---\nbody\n";
+    let edited = set(source, "k", Value::String("v".into())).expect("an edit");
+    assert_eq!(edited, "---   \na: 1\nk: v\n---\nbody\n");
+    let reread = Document::parse(&edited);
+    assert_eq!(
+        reread.frontmatter(),
+        Some(&Value::Map(
+            [("a", Value::Int(1)), ("k", Value::String("v".into()))]
+                .into_iter()
+                .collect()
+        ))
+    );
+    assert_eq!(reread.body(), "body\n");
 }
 
 // ── Line terminators survive (NRN-143) ───────────────────────────────────
@@ -363,6 +445,35 @@ fn a_value_no_span_can_name_refuses_an_in_place_edit_and_stays_removable() {
             "for {source:?}"
         );
     }
+}
+
+/// A merged-in field has no bytes of its own — the directive that produced it
+/// names a mapping written somewhere else — so nothing in the block it landed
+/// in can be edited in place, and the merge line is never absorbed into a
+/// neighbour's range and deleted.
+#[test]
+fn a_block_carrying_a_merge_key_refuses_every_field_edit() {
+    let source = "---\n<<: {a: 1}\ntitle: t\n---\nbody\n";
+    let document = Document::parse(source);
+    assert!(document.fields().is_empty());
+    for field in ["a", "title", "<<"] {
+        assert!(
+            document
+                .set_field(field, &Value::String("x".into()))
+                .is_err(),
+            "setting {field:?}"
+        );
+        assert!(document.remove_field(field).is_err(), "removing {field:?}");
+    }
+    // Reading is unaffected, and the bytes round-trip.
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map(
+            [("title", Value::String("t".into())), ("a", Value::Int(1))]
+                .into_iter()
+                .collect()
+        ))
+    );
 }
 
 #[test]

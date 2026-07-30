@@ -8,7 +8,8 @@
 //! refuses.
 
 use norn_text::{
-    Document, EditError, LineEnding, Mapping, RenderError, ScalarContext, Value, render_document,
+    Document, EditError, LineEnding, Mapping, RenderError, ScalarContext, Value,
+    frontmatter_reads_back, render_document,
 };
 
 /// Write `text` as a block value and read the whole document back.
@@ -364,16 +365,57 @@ fn the_non_string_scalars_read_back_as_their_own_shapes() {
     }
 }
 
-/// A float that cannot compare equal to itself cannot be proven to have read
-/// back, so writing one refuses rather than claiming a round trip it has not
-/// shown.
+/// `.nan` is a value like any other. Equality over the value model is total,
+/// so a not-a-number float equals itself, an edit that writes one can be
+/// proven, and a document already holding one is editable at all — under IEEE
+/// equality it was not, because the post-image check compared a value against
+/// itself and lost.
 #[test]
-fn a_not_a_number_float_refuses_because_it_cannot_be_proven() {
-    assert!(
-        Document::parse("---\nfield: seed\n---\n")
-            .set_field("field", &Value::Float(f64::NAN))
-            .is_err()
+fn a_not_a_number_float_round_trips_like_every_other_scalar() {
+    let edited = Document::parse("---\nfield: seed\n---\n")
+        .set_field("field", &Value::Float(f64::NAN))
+        .expect("writing .nan");
+    assert_eq!(edited, "---\nfield: .nan\n---\n");
+    assert!(frontmatter_reads_back(
+        &edited,
+        &Value::Map([("field", Value::Float(f64::NAN))].into_iter().collect())
+    ));
+
+    // A document that already holds one edits like any other document, and the
+    // untouched `.nan` beside the edit stays `.nan`.
+    let holding = "---\nratio: .nan\ntitle: t\n---\nbody\n";
+    assert_eq!(
+        Document::parse(holding).set_field("title", &Value::String("new".into())),
+        Ok("---\nratio: .nan\ntitle: new\n---\nbody\n".to_string())
     );
+    // And it re-emits from scratch: a whole document written out of what was
+    // read back reproduces the block.
+    let read = Document::parse(holding);
+    let map = read.frontmatter().and_then(Value::as_map).expect("a map");
+    assert_eq!(
+        render_document(map, "body\n", LineEnding::Lf),
+        Ok("---\nratio: .nan\ntitle: t\n---\nbody\n".to_string())
+    );
+}
+
+/// Signed zero is two values, not one. Total-ordering equality is what makes
+/// an emission of `-0.0` that read back as `0.0` a refusal rather than a
+/// silent rewrite.
+#[test]
+fn negative_zero_is_not_zero() {
+    assert_ne!(Value::Float(-0.0), Value::Float(0.0));
+    let edited = Document::parse("---\nfield: seed\n---\n")
+        .set_field("field", &Value::Float(-0.0))
+        .expect("writing -0.0");
+    assert_eq!(edited, "---\nfield: -0.0\n---\n");
+    assert!(frontmatter_reads_back(
+        &edited,
+        &Value::Map([("field", Value::Float(-0.0))].into_iter().collect())
+    ));
+    assert!(!frontmatter_reads_back(
+        &edited,
+        &Value::Map([("field", Value::Float(0.0))].into_iter().collect())
+    ));
 }
 
 // ── Whole documents written from scratch ─────────────────────────────────
