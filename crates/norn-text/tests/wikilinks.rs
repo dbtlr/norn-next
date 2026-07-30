@@ -1,16 +1,18 @@
 //! Wikilink syntax: what a `[[…]]` token decomposes into, where code makes it
 //! invisible, and what survives a target rewrite.
 //!
-//! The grammar is `[[ target [#anchor | #^block-ref] [| title] ]]`. Everything
-//! beyond that — resolving a target to a document, reading a prefix as a
-//! protocol — is somebody else's layer.
+//! The grammar is `[[ [protocol://] stem [#anchor | #^block-ref] [| title] ]]`.
+//! Protocol recognition has its own suite (`protocols.rs`) and so does the
+//! inline Markdown family (`markdown_links.rs`). Everything beyond
+//! recognition — resolving a target to a document, giving a protocol a
+//! meaning — is somebody else's layer.
 
 use norn_text::{
-    BodyScan, Wikilink, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
+    BodyScan, Link, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
     split_wikilink_target, wikilink_target_is_representable,
 };
 
-fn only(text: &str) -> Wikilink {
+fn only(text: &str) -> Link {
     let mut links = parse_wikilinks_in_text(text).into_iter();
     let link = links.next().expect("one link");
     assert!(
@@ -20,7 +22,7 @@ fn only(text: &str) -> Wikilink {
     link
 }
 
-fn targets(links: &[Wikilink]) -> Vec<&str> {
+fn targets(links: &[Link]) -> Vec<&str> {
     links.iter().map(|link| link.target.as_str()).collect()
 }
 
@@ -280,17 +282,22 @@ fn a_rewrite_keeps_the_embed_marker_the_anchor_and_the_title() {
     );
 }
 
-/// A padded link canonicalizes on rewrite: the title and anchor are re-emitted
-/// from their parsed, trimmed forms. That is a rewrite's behaviour, not a
-/// round-trip guarantee.
+/// A padded link keeps its padding on rewrite: only the stem's bytes change,
+/// so the spaces the author wrote and the title as they wrote it are outside
+/// the edited range. A rename produces a hunk that reads as exactly the
+/// rename.
 #[test]
-fn a_padded_link_canonicalizes_when_it_is_rewritten() {
+fn a_padded_link_keeps_its_padding_and_its_title_when_it_is_rewritten() {
     let link = only("[[ Target | Shown ]]");
     assert_eq!(link.target, "Target");
     assert_eq!(link.title.as_deref(), Some("Shown"));
     assert_eq!(
         reconstruct_wikilink(&link, "Target").as_deref(),
-        Some("[[Target|Shown]]")
+        Some("[[ Target | Shown ]]")
+    );
+    assert_eq!(
+        reconstruct_wikilink(&link, "New").as_deref(),
+        Some("[[ New | Shown ]]")
     );
 }
 
@@ -436,23 +443,12 @@ fn a_block_id_on_the_line_after_a_fence_is_still_an_anchor() {
     );
 }
 
-// ── Where NORN-26 picks up ───────────────────────────────────────────────
+// ── What the token parser is not ─────────────────────────────────────────
 
-/// A protocol-looking prefix is not recognized: `https://example.com` is one
-/// ordinary target, colon and slashes included. Reading a prefix as a protocol
-/// is the next task's work, and this states what the seed does until then.
-#[test]
-fn a_protocol_looking_prefix_is_part_of_the_target_today() {
-    let link = only("[[https://example.com|Home]]");
-    assert_eq!(link.target, "https://example.com");
-    assert_eq!(link.title.as_deref(), Some("Home"));
-    let prefixed = only("[[vault:Note#Heading]]");
-    assert_eq!(prefixed.target, "vault:Note");
-    assert_eq!(prefixed.anchor.as_deref(), Some("Heading"));
-}
-
-/// An inline Markdown link is not a wikilink and is not recognized as
-/// anything: the token parser sees `[[…]]` and nothing else.
+/// An inline Markdown link is not a wikilink, and the token parser sees
+/// `[[…]]` and nothing else. This is also the frontmatter contract: a
+/// frontmatter value is scanned through this entry point, so a
+/// `[title](target)` string in a property yields no link fact.
 #[test]
 fn an_inline_markdown_link_is_not_a_wikilink() {
     assert!(parse_wikilinks_in_text("[text](target.md)").is_empty());
@@ -476,10 +472,12 @@ fn a_target_is_reported_verbatim_and_never_normalized() {
     }
 }
 
-/// A `#tag` in a body is ordinary text today.
+/// A `#tag` is its own fact kind. It is never a wikilink and never a heading,
+/// and the tag family's own contract lives beside it.
 #[test]
-fn a_hash_tag_is_not_a_token_this_crate_recognizes() {
+fn a_hash_tag_is_not_a_wikilink_and_not_a_heading() {
     let scan = BodyScan::new("prose with #tag and #another\n");
     assert!(scan.wikilinks().is_empty());
     assert!(scan.headings().is_empty());
+    assert_eq!(scan.tags().len(), 2);
 }

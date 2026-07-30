@@ -13,10 +13,14 @@ use crate::frontmatter::render::{
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
+use crate::link::Link;
 use crate::section::{SectionAddress, SectionError, SectionSpan};
 use crate::span::LineCursor;
+use crate::tag::{Tag, frontmatter_tag_name};
 use crate::value::{Mapping, Value};
-use crate::wikilink::Wikilink;
+
+/// The one frontmatter field whose strings are read as tags.
+const TAGS_FIELD: &str = "tags";
 
 /// A frontmatter string value and where its bytes are.
 ///
@@ -342,12 +346,64 @@ impl<'a> Document<'a> {
     }
 
     /// Every `[[…]]` token in the body, code excluded, in source coordinates.
-    pub fn wikilinks(&self) -> Vec<Wikilink> {
-        let scan = self.scan_body();
+    pub fn wikilinks(&self) -> Vec<Link> {
+        self.rebased(self.scan_body().wikilinks())
+    }
+
+    /// Every link token in the body, both families, in document order, code
+    /// excluded, in source coordinates.
+    pub fn links(&self) -> Vec<Link> {
+        self.rebased(self.scan_body().links())
+    }
+
+    /// Every `#tag` in the body, in document order, in source coordinates.
+    ///
+    /// Frontmatter tags are a separate answer: see
+    /// [`Document::frontmatter_tags`].
+    pub fn tags(&self) -> Vec<Tag> {
         let mut cursor = LineCursor::new(self.source);
-        scan.wikilinks()
+        self.scan_body()
+            .tags()
             .into_iter()
-            .map(|link| Wikilink {
+            .map(|tag| Tag {
+                span: tag
+                    .span
+                    .map(|span| cursor.span_at(span.byte_offset + self.body_start)),
+                ..tag
+            })
+            .collect()
+    }
+
+    /// The tags the frontmatter `tags` field declares, in document order.
+    ///
+    /// Every string the field holds is read — the items of a sequence, or the
+    /// field's own value when it is a scalar string — under the same grammar
+    /// body tags follow, with the `#` marker optional: `#foo` and `foo` are
+    /// both the tag `foo`. A string the grammar does not describe produces no
+    /// tag and no complaint; judging it is validation's venue, not this
+    /// crate's. No other field is scanned, and no field is scanned for body
+    /// tokens.
+    pub fn frontmatter_tags(&self) -> Vec<Tag> {
+        let mut cursor = LineCursor::new(self.source);
+        self.field_texts()
+            .into_iter()
+            .filter(|text| text.field == TAGS_FIELD)
+            .filter_map(|text| {
+                let name = frontmatter_tag_name(text.text)?;
+                Some(Tag {
+                    name,
+                    span: text.range.map(|range| cursor.span_at(range.start)),
+                })
+            })
+            .collect()
+    }
+
+    /// Rebase body-relative link spans onto the source.
+    fn rebased(&self, links: Vec<Link>) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        links
+            .into_iter()
+            .map(|link| Link {
                 span: cursor.span_at(link.span.byte_offset + self.body_start),
                 ..link
             })

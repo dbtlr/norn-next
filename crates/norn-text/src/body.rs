@@ -1,34 +1,56 @@
 //! The document body's one CommonMark pass.
 //!
 //! Every body-level fact this crate reports — headings, section boundaries,
-//! wikilink tokens, block-id anchors — is derived from a single
-//! `pulldown-cmark` traversal held by [`BodyScan`]. One pass is both the
-//! cost story (a document is walked once, not once per question) and the
-//! correctness story: three passes are three chances for two parsers to
+//! link tokens of both families, `#tag` tokens, block-id anchors — is derived
+//! from a single `pulldown-cmark` traversal held by [`BodyScan`]. One pass is
+//! both the cost story (a document is walked once, not once per question) and
+//! the correctness story: three passes are three chances for two parsers to
 //! disagree about where a code fence is.
 //!
 //! # Code is opaque
 //!
 //! Fenced code blocks, indented code blocks and inline code spans are a
-//! different document. No token this crate extracts — a heading, a wikilink,
-//! a block id — may match inside one. What a reader sees as a literal code
-//! sample, norn reads as literal text and never as vault structure.
+//! different document. No token this crate extracts — a heading, a link, a
+//! tag, a block id — may match inside one. What a reader sees as a literal
+//! code sample, norn reads as literal text and never as vault structure.
 //!
 //! The one nuance: a `^block-id` on the line *after* a closing fence
 //! references the code block itself and stays valid. The exclusion covers what
 //! is inside the fences, not the anchor line trailing them.
+//!
+//! # The link scope fence
+//!
+//! Two written forms produce link facts: `[[…]]` and the inline Markdown link
+//! `[title](target)`. Four other forms are recognized by the CommonMark parse
+//! and deliberately produce nothing, because their target lives somewhere
+//! other than the token and emitting a fact with no rewrite story behind it
+//! would be a half-supported family:
+//!
+//! - **Images** (`![alt](x.png)`) are a different element to the parser, and a
+//!   transclusion in this vocabulary is `![[…]]`.
+//! - **Autolinks** (`<https://example.com>`) and bare email autolinks.
+//! - **Reference-style links** — `[text][label]`, collapsed `[label][]`, and
+//!   shortcut `[label]` — whose destination sits in a definition line
+//!   elsewhere in the document. The definition line itself
+//!   (`[label]: target.md`) produces no parser event at all and is invisible
+//!   here; an *undefined* reference is not a link to the parser either and
+//!   arrives as ordinary text.
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
-use crate::heading::{Heading, slugify};
+use crate::heading::{Heading, SlugCounter};
+use crate::link::{
+    Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
+};
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
 use crate::span::LineCursor;
-use crate::wikilink::{Wikilink, parse_tokens, splice_tokens};
+use crate::tag::{Tag as TagFact, scan_tags};
 
-/// One CommonMark reading of a document body: its headings and the byte
-/// ranges where code makes text opaque.
+/// One CommonMark reading of a document body: its headings, the inline
+/// Markdown links it carries, and the byte ranges where code makes text
+/// opaque.
 ///
 /// Build it once and ask it everything; each accessor is a view over the same
 /// traversal.
@@ -36,6 +58,7 @@ use crate::wikilink::{Wikilink, parse_tokens, splice_tokens};
 pub struct BodyScan<'a> {
     body: &'a str,
     headings: Vec<Heading>,
+    markdown_links: Vec<MarkdownToken>,
     code_ranges: Vec<Range<usize>>,
 }
 
@@ -43,12 +66,18 @@ impl<'a> BodyScan<'a> {
     /// Walk `body` once.
     pub fn new(body: &'a str) -> Self {
         let mut headings = Vec::new();
+        let mut markdown_links = Vec::new();
         let mut code_ranges: Vec<Range<usize>> = Vec::new();
         let mut active_heading: Option<ActiveHeading> = None;
+        let mut active_link: Option<ActiveLink> = None;
         let mut active_code_block: Option<usize> = None;
         // Headings arrive in ascending order, so their positions are counted
-        // once across the whole walk rather than once per heading.
+        // once across the whole walk rather than once per heading. Link spans
+        // are not taken here: a link inside a heading would ask for a position
+        // ahead of the one the heading asks for when it ends, and a cursor
+        // only walks forward.
         let mut cursor = LineCursor::new(body);
+        let mut slugs = SlugCounter::default();
         let mut container_depth: usize = 0;
 
         for (event, range) in Parser::new(body).into_offset_iter() {
@@ -72,7 +101,7 @@ impl<'a> BodyScan<'a> {
                         let text = active.text.trim().to_string();
                         headings.push(Heading {
                             level: active.level,
-                            slug: slugify(&text),
+                            slug: slugs.issue(&text),
                             text,
                             span: cursor.span_at(active.start),
                             // `range.end` covers the whole heading construct:
@@ -83,22 +112,54 @@ impl<'a> BodyScan<'a> {
                         });
                     }
                 }
+                // Only the inline form is a link family here; every other
+                // `LinkType` is the documented scope fence.
+                Event::Start(Tag::Link {
+                    link_type: LinkType::Inline,
+                    dest_url,
+                    ..
+                }) => {
+                    active_link = Some(ActiveLink {
+                        range: range.clone(),
+                        destination: dest_url.into_string(),
+                        text: String::new(),
+                    });
+                }
+                Event::End(TagEnd::Link) => {
+                    if let Some(active) = active_link.take() {
+                        markdown_links.push(MarkdownToken {
+                            range: active.range,
+                            destination: active.destination,
+                            text: active.text,
+                        });
+                    }
+                }
                 Event::Text(text) => {
                     if let Some(active) = active_heading.as_mut() {
+                        active.text.push_str(&text);
+                    }
+                    if let Some(active) = active_link.as_mut() {
                         active.text.push_str(&text);
                     }
                 }
                 // A setext heading's title may run across several lines. The
                 // break between them separates two words, so it contributes
                 // one, and the text — and the slug and the address derived
-                // from it — reads as the heading a human sees.
+                // from it — reads as the heading a human sees. A link's
+                // bracket text is flattened the same way.
                 Event::SoftBreak | Event::HardBreak => {
                     if let Some(active) = active_heading.as_mut() {
+                        active.text.push(' ');
+                    }
+                    if let Some(active) = active_link.as_mut() {
                         active.text.push(' ');
                     }
                 }
                 Event::Code(text) => {
                     if let Some(active) = active_heading.as_mut() {
+                        active.text.push_str(&text);
+                    }
+                    if let Some(active) = active_link.as_mut() {
                         active.text.push_str(&text);
                     }
                     push_code_range(&mut code_ranges, range);
@@ -116,6 +177,7 @@ impl<'a> BodyScan<'a> {
         BodyScan {
             body,
             headings,
+            markdown_links,
             code_ranges,
         }
     }
@@ -130,9 +192,39 @@ impl<'a> BodyScan<'a> {
         &self.headings
     }
 
+    /// Every link token in the body, both families, in document order, code
+    /// excluded.
+    ///
+    /// Ordering is by where the token starts, so a caller reading the body
+    /// once reads these in the order they were written.
+    pub fn links(&self) -> Vec<Link> {
+        let mut links = self.wikilinks();
+        links.extend(self.markdown_link_facts());
+        links.sort_by_key(|link| link.span.byte_offset);
+        links
+    }
+
     /// Every `[[…]]` token in the body, code excluded.
-    pub fn wikilinks(&self) -> Vec<Wikilink> {
+    pub fn wikilinks(&self) -> Vec<Link> {
         parse_tokens(self.body, &self.code_ranges)
+    }
+
+    /// Every inline Markdown link (`[title](target)`) in the body, in document
+    /// order.
+    ///
+    /// Code exclusion is structural: the CommonMark pass reports no link
+    /// inside a fence or a code span, so there is nothing to filter.
+    pub fn markdown_links(&self) -> Vec<Link> {
+        self.markdown_link_facts()
+    }
+
+    /// Every `#tag` in the body, in document order.
+    ///
+    /// Code is opaque to tags, and so are link tokens: the `#` in
+    /// `[[Note#Heading]]` or `[text](#frag)` is that link's fragment syntax,
+    /// not a marker.
+    pub fn tags(&self) -> Vec<TagFact> {
+        scan_tags(self.body, &self.opaque_to_tags())
     }
 
     /// Rewrite selected `[[…]]` tokens by splicing a replacement at each
@@ -144,7 +236,11 @@ impl<'a> BodyScan<'a> {
     /// span, so the embed marker, the title and the anchor survive by
     /// construction, and code-fenced samples are excluded structurally rather
     /// than by a rule somebody has to remember.
-    pub fn splice_wikilinks(&self, replace: impl FnMut(&Wikilink) -> Option<String>) -> String {
+    ///
+    /// Inline Markdown links are never touched: their targets are relative to
+    /// the document they sit in, so rewriting one is a per-document
+    /// computation rather than a token substitution.
+    pub fn splice_wikilinks(&self, replace: impl FnMut(&Link) -> Option<String>) -> String {
         splice_tokens(self.body, &self.wikilinks(), replace)
     }
 
@@ -152,7 +248,7 @@ impl<'a> BodyScan<'a> {
     /// carries one, in document order. These are the anchors a
     /// `[[Note#^block-id]]` reference points at.
     pub fn block_ids(&self) -> Vec<String> {
-        crate::wikilink::parse_block_ids_in(self.body, &self.code_ranges)
+        parse_block_ids_in(self.body, &self.code_ranges)
     }
 
     /// Resolve a heading-addressed section to the byte ranges it owns.
@@ -162,6 +258,32 @@ impl<'a> BodyScan<'a> {
     ) -> Result<SectionSpan, SectionError> {
         resolve_section_in(&self.headings, self.body, address)
     }
+
+    /// The inline Markdown links as facts, positions counted once across the
+    /// body.
+    fn markdown_link_facts(&self) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.body);
+        self.markdown_links
+            .iter()
+            .map(|token| {
+                markdown_link(
+                    &self.body[token.range.clone()],
+                    &token.destination,
+                    &token.text,
+                    cursor.span_at(token.range.start),
+                )
+            })
+            .collect()
+    }
+
+    /// The ranges a tag may not be read out of: code, plus every link token of
+    /// either family.
+    fn opaque_to_tags(&self) -> Vec<Range<usize>> {
+        let mut ranges = self.code_ranges.clone();
+        ranges.extend(wikilink_ranges(self.body, &self.code_ranges));
+        ranges.extend(self.markdown_links.iter().map(|token| token.range.clone()));
+        merge_ranges(ranges)
+    }
 }
 
 /// A heading being accumulated across the events that make it up.
@@ -170,6 +292,23 @@ struct ActiveHeading {
     text: String,
     start: usize,
     inside_container: bool,
+}
+
+/// An inline Markdown link being accumulated across the events that make it
+/// up.
+struct ActiveLink {
+    range: Range<usize>,
+    destination: String,
+    text: String,
+}
+
+/// What the one pass saw of an inline Markdown link, before it is priced into
+/// a fact with a span.
+#[derive(Debug, Clone)]
+struct MarkdownToken {
+    range: Range<usize>,
+    destination: String,
+    text: String,
 }
 
 /// Record an opaque range, dropping an empty one.
@@ -189,12 +328,33 @@ fn push_code_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
     ranges.push(range);
 }
 
+/// Sort ranges and coalesce every overlap, producing the ascending,
+/// non-overlapping, non-empty form [`overlaps_any`] requires.
+///
+/// Link tokens of the two families can overlap each other — `[[a]](b)` is one
+/// wikilink and one Markdown link sharing bytes — so a mask built from both
+/// is unioned rather than concatenated.
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| (range.start, range.end));
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if range.start >= range.end {
+            continue;
+        }
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 /// Whether `query` overlaps any of `ranges`, which are ascending,
 /// non-overlapping and non-empty.
 ///
 /// A linear scan makes every masked-construct question cost the document's
-/// code, so a document that is mostly code pays that once per wikilink, per
-/// block id and per heading. Binary search over the ordering the one pass
+/// code, so a document that is mostly code pays that once per link, per tag,
+/// per block id and per heading. Binary search over the ordering the one pass
 /// already produced answers it in a step: at most one range can start before
 /// the query ends and still reach past where it begins.
 pub(crate) fn overlaps_any(ranges: &[Range<usize>], query: &Range<usize>) -> bool {

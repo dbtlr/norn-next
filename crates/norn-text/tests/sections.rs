@@ -47,20 +47,22 @@ fn a_hash_inside_a_fence_is_not_a_heading() {
     assert_eq!(scan.headings()[0].text, "Real");
 }
 
-/// The slug is ASCII-only by construction: a heading with no ASCII
-/// alphanumerics slugs to nothing, and two headings differing only outside
-/// ASCII slug identically. Anchors are addressed by text, not by slug, so this
-/// is a property of the slug rather than of section addressing.
+/// The slug is GFM's: letters and digits survive whatever alphabet they are
+/// written in, punctuation is dropped rather than collapsed, and a space is a
+/// hyphen. A section is addressed by heading text rather than by slug, so this
+/// is a property of the slug alone.
 #[test]
-fn the_slug_keeps_ascii_alphanumerics_and_collapses_everything_else() {
+fn the_slug_is_the_gfm_anchor_form() {
     assert_eq!(slugify("Hello World"), "hello-world");
-    assert_eq!(slugify("HELLO   WORLD"), "hello-world");
     assert_eq!(slugify("hello!!! world!!!"), "hello-world");
-    assert_eq!(slugify("Heading 1.2.3"), "heading-1-2-3");
-    assert_eq!(slugify("---"), "");
-    assert_eq!(slugify("Café"), "caf");
-    assert_eq!(slugify("日本語"), "");
-    assert_eq!(slugify("日本語"), slugify("한국어"));
+    assert_eq!(slugify("Heading 1.2.3"), "heading-123");
+    assert_eq!(slugify("---"), "---");
+    assert_eq!(slugify("Café"), "café");
+    assert_eq!(slugify("日本語"), "日本語");
+    assert_ne!(slugify("日本語"), slugify("한국어"));
+
+    // Runs are not collapsed, because GFM does not collapse them.
+    assert_eq!(slugify("HELLO   WORLD"), "hello---world");
 }
 
 // ── Section boundaries ───────────────────────────────────────────────────

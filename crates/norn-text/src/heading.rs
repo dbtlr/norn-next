@@ -14,7 +14,10 @@ pub struct Heading {
     /// The heading's text with inline markup flattened: `## Use \`norn\`` is
     /// `Use norn`.
     pub text: String,
-    /// The GitHub-ish ASCII anchor form of [`Heading::text`].
+    /// The GFM anchor form of [`Heading::text`] — [`slugify`], plus the
+    /// document-order suffix that tells repeated headings apart. This is what
+    /// an inline Markdown link's `#fragment` addresses; a wikilink's addresses
+    /// [`Heading::text`] instead.
     pub slug: String,
     /// Where the heading construct begins — the `#` of an ATX heading, the
     /// first byte of a setext title line.
@@ -39,25 +42,55 @@ pub struct Heading {
     pub inside_container: bool,
 }
 
-/// Slugify heading text into an anchor: lowercase, ASCII alphanumerics kept,
-/// every other run collapsed to a single `-`, with leading and trailing dashes
-/// trimmed.
+/// Slugify heading text into a GFM anchor: surrounding whitespace trimmed,
+/// lowercased, letters and digits kept whatever alphabet they are written in,
+/// `_` and `-` kept, a space written as `-`, and everything else — punctuation
+/// and symbols — dropped.
 ///
-/// ASCII-only: a heading with no ASCII alphanumerics slugs to the empty
-/// string, and two headings differing only outside ASCII slug identically.
+/// `## What? Really!` slugs to `what-really` and `## 日本語` to `日本語`.
+/// Runs are not collapsed, because GFM does not collapse them: `A  B` slugs to
+/// `a--b`, and an anchor that agrees with the renderer is the point.
+///
+/// This answers for one text. Telling two headings with the same text apart is
+/// a property of the document they sit in, so the `-1`, `-2` suffixes are
+/// applied by the document's one pass ([`crate::BodyScan`]) and appear in
+/// [`Heading::slug`] rather than here.
 pub fn slugify(text: &str) -> String {
     let mut slug = String::new();
-    let mut previous_dash = false;
 
-    for ch in text.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            previous_dash = false;
-        } else if !previous_dash && !slug.is_empty() {
+    for ch in text.trim().chars().flat_map(char::to_lowercase) {
+        if ch == ' ' {
             slug.push('-');
-            previous_dash = true;
+        } else if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+            slug.push(ch);
         }
     }
 
-    slug.trim_end_matches('-').to_string()
+    slug
+}
+
+/// Document-order slug disambiguation: the first heading with a slug keeps it,
+/// and each later one taking the same slug is suffixed `-1`, `-2`, and so on.
+///
+/// A suffixed slug is itself taken, so a document whose third heading slugs to
+/// an already-issued `a-1` gets `a-1-1` rather than a duplicate. Two anchors
+/// that address the same heading are the defect this closes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SlugCounter {
+    issued: std::collections::HashMap<String, usize>,
+}
+
+impl SlugCounter {
+    /// The anchor for the next heading in document order.
+    pub(crate) fn issue(&mut self, text: &str) -> String {
+        let original = slugify(text);
+        let mut slug = original.clone();
+        while self.issued.contains_key(&slug) {
+            let taken = self.issued.entry(original.clone()).or_default();
+            *taken += 1;
+            slug = format!("{original}-{taken}");
+        }
+        self.issued.insert(slug.clone(), 0);
+        slug
+    }
 }
