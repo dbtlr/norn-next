@@ -1,0 +1,24 @@
+[package]
+name = "norn-wire"
+description = "The vocabulary — request params, reports, typed plans, findings and trust states as pure wire types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies, so nothing about vaults, stores, filesystems, protocols or
+# configuration can reach this crate. The two registry dependencies are the
+# wire itself rather than implementation behind a seam — `serde` is the
+# serialization every type here carries, and `schemars` is the schema every
+# surface derives its rendering from.
+[dependencies]
+schemars = { workspace = true }
+serde = { workspace = true }
+
+# `serde_json` is the round-trip and schema oracle the tests read through. It
+# appears in no signature here: nothing crossing this seam is an untyped JSON
+# value.
+[dev-dependencies]
+serde_json = { workspace = true }
