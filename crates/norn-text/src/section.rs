@@ -37,14 +37,6 @@ pub struct SectionAddress<'a> {
 }
 
 impl<'a> SectionAddress<'a> {
-    /// The heading must be unique in the body.
-    pub fn unique(heading: &'a str) -> Self {
-        SectionAddress {
-            heading,
-            occurrence: None,
-        }
-    }
-
     /// The 1-based nth heading whose text matches.
     pub fn occurrence(heading: &'a str, occurrence: usize) -> Self {
         SectionAddress {
@@ -56,7 +48,10 @@ impl<'a> SectionAddress<'a> {
 
 impl<'a> From<&'a str> for SectionAddress<'a> {
     fn from(heading: &'a str) -> Self {
-        SectionAddress::unique(heading)
+        SectionAddress {
+            heading,
+            occurrence: None,
+        }
     }
 }
 
@@ -118,17 +113,6 @@ impl fmt::Display for SectionError {
 }
 
 impl std::error::Error for SectionError {}
-
-/// Resolve a section against `body`, walking it once.
-///
-/// Fence-safe: a `#` inside a fenced code block is never a heading, so it
-/// never addresses a section.
-pub fn resolve_section<'a>(
-    body: &str,
-    address: impl Into<SectionAddress<'a>>,
-) -> Result<SectionSpan, SectionError> {
-    BodyScan::new(body).resolve_section(address.into())
-}
 
 /// The resolution core, over headings already parsed.
 pub(crate) fn resolve_section_in(

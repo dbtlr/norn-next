@@ -2,8 +2,17 @@
 //! stops, how it is addressed, and what a replace leaves alone.
 
 use norn_text::{
-    BodyScan, Document, EditError, SectionAddress, SectionError, Value, resolve_section, slugify,
+    BodyScan, Document, EditError, SectionAddress, SectionError, SectionSpan, Value, slugify,
 };
+
+/// A section resolved against a bare body, through the one public entry point
+/// a body-level question goes through.
+fn resolve_section<'a>(
+    body: &str,
+    address: impl Into<SectionAddress<'a>>,
+) -> Result<SectionSpan, SectionError> {
+    BodyScan::new(body).resolve_section(address.into())
+}
 
 const DOC: &str = "intro\n\n## Alpha\na1\na2\n\n## Beta\nb1\n";
 

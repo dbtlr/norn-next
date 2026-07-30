@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 use norn_fixtures::profile::Profile;
 
 /// One generated Markdown document.
+///
+/// The path it was generated at is kept only to order the batch: the tree is
+/// removed before it is handed over, so a path a caller could read would name
+/// nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedDocument {
-    /// Forward-slash path relative to the generated root.
-    pub path: String,
+    pub(crate) path: String,
     pub text: String,
 }
 

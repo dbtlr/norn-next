@@ -75,11 +75,6 @@ fn generated_documents() -> Vec<String> {
 fn reading_loses_nothing(source: &str, label: &str) -> usize {
     let document = Document::parse(source);
     assert_eq!(
-        document.source(),
-        source,
-        "{label}: the source is the source"
-    );
-    assert_eq!(
         format!("{}{}", &source[..document.body_start()], document.body()),
         source,
         "{label}: the body and its offset do not reassemble the document"

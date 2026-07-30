@@ -4,6 +4,9 @@
 //! vault value model cannot hold, a block whose spans cannot be trusted — each
 //! yields a [`Diagnostic`] and a usable rest-of-document rather than an error
 //! return. Writing is not forgiving; a write that cannot be proven refuses.
+//! That split is why a diagnostic carries no severity: everything on the
+//! reading side is something the reader worked around, and everything on the
+//! writing side is a refusal rather than a note.
 //!
 //! `code` is the stable identifier a caller branches on. The codes this crate
 //! emits:
@@ -17,36 +20,16 @@
 //! | `frontmatter-integer-out-of-range` | An integer outside `i64`. It is carried as a float. |
 //! | `frontmatter-not-editable` | The block parses, and its field spans cannot be trusted. Reads work; field edits refuse. |
 
-/// How much a diagnostic matters. A warning describes something the reader
-/// worked around; an error describes something it could not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Severity {
-    Warning,
-    Error,
-}
-
-impl Severity {
-    /// The stable kebab-case spelling.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Severity::Warning => "warning",
-            Severity::Error => "error",
-        }
-    }
-}
-
-impl std::fmt::Display for Severity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// A coded, human-readable note produced while reading text. `code` is a
 /// stable kebab identifier a caller can branch on; `message` is prose;
 /// `detail` carries an optional underlying cause.
+///
+/// Every diagnostic this crate emits is a warning — reading is forgiving by
+/// contract, and the one thing that is not forgiving returns an error rather
+/// than a note — so there is no severity to carry. A second severity would be
+/// a change to that contract, and it would arrive with the field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
-    pub severity: Severity,
     pub code: String,
     pub message: String,
     pub detail: Option<String>,
@@ -55,16 +38,6 @@ pub struct Diagnostic {
 impl Diagnostic {
     pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            severity: Severity::Warning,
-            code: code.into(),
-            message: message.into(),
-            detail: None,
-        }
-    }
-
-    pub fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            severity: Severity::Error,
             code: code.into(),
             message: message.into(),
             detail: None,
@@ -79,7 +52,7 @@ impl Diagnostic {
 
 impl std::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}: {}", self.severity, self.code, self.message)?;
+        write!(f, "{}: {}", self.code, self.message)?;
         if let Some(detail) = &self.detail {
             write!(f, " ({detail})")?;
         }

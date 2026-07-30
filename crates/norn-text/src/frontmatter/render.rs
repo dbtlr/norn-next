@@ -244,7 +244,7 @@ fn render_scalar(value: &Value, start: u8, context: ScalarContext) -> Result<Str
 
     for rank in start..=RANK_DOUBLE {
         let rendered = render_at_rank(text, rank);
-        if reparse_in_context(&rendered, context) == Some(value.clone()) {
+        if reparse_in_context(&rendered, context).as_ref() == Some(value) {
             return Ok(rendered);
         }
     }
@@ -365,7 +365,7 @@ pub fn render_document(
 ) -> Result<String, RenderError> {
     let terminator = line_ending.as_str();
     let mut out = format!("---{terminator}");
-    for (field, value) in fields {
+    for (field, value) in fields.iter() {
         match value {
             Value::Sequence(items) => {
                 out.push_str(&render_sequence_entry(field, items, line_ending)?);

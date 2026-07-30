@@ -74,7 +74,7 @@ pub enum ValueStyle {
 impl ValueStyle {
     /// Whether this style holds a sequence, and so is edited by replacing the
     /// whole entry rather than a value span.
-    pub fn is_sequence(self) -> bool {
+    pub(crate) fn is_sequence(self) -> bool {
         matches!(self, ValueStyle::FlowSequence | ValueStyle::BlockSequence)
     }
 }

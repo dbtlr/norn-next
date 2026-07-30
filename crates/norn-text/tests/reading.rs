@@ -282,12 +282,97 @@ fn a_core_schema_tag_is_resolved_by_the_parser_and_reported_by_nobody() {
     assert!(document.diagnostics().is_empty());
 }
 
+/// Scalar resolution is the YAML 1.2 core schema, stated rather than
+/// inherited. Every spelling here meant something else in YAML 1.1, and a
+/// vault holding `publish: no` means the word, not the boolean. A change of
+/// dialect is a change of contract and shows up as a diff in this table.
 #[test]
-fn an_integer_past_i64_is_carried_as_a_float_and_said_so() {
-    let document = Document::parse("---\na: 18446744073709551615\n---\n");
-    assert_eq!(codes(&document), ["frontmatter-integer-out-of-range"]);
-    let map = map_of("---\na: 18446744073709551615\n---\n");
-    assert_eq!(map.get("a"), Some(&Value::Float(18446744073709551615.0)));
+fn scalar_resolution_is_the_yaml_1_2_core_schema() {
+    for (written, expected) in [
+        // The 1.1 booleans that are words in 1.2.
+        ("no", Value::String("no".into())),
+        ("yes", Value::String("yes".into())),
+        ("on", Value::String("on".into())),
+        ("off", Value::String("off".into())),
+        ("y", Value::String("y".into())),
+        ("n", Value::String("n".into())),
+        ("Y", Value::String("Y".into())),
+        // The core schema names exactly three spellings per boolean, and a
+        // fourth casing is a word.
+        ("TrUe", Value::String("TrUe".into())),
+        // Sexagesimal, leading-zero octal, digit separators, dates.
+        ("12:34:56", Value::String("12:34:56".into())),
+        ("0777", Value::String("0777".into())),
+        ("1_000", Value::String("1_000".into())),
+        ("2026-07-29", Value::String("2026-07-29".into())),
+        // What the core schema does name.
+        ("true", Value::Bool(true)),
+        ("True", Value::Bool(true)),
+        ("TRUE", Value::Bool(true)),
+        ("false", Value::Bool(false)),
+        ("null", Value::Null),
+        ("~", Value::Null),
+        ("42", Value::Int(42)),
+        ("-42", Value::Int(-42)),
+        ("0x1f", Value::Int(31)),
+        ("0o17", Value::Int(15)),
+        ("1e3", Value::Float(1000.0)),
+        ("1.5", Value::Float(1.5)),
+        (".inf", Value::Float(f64::INFINITY)),
+    ] {
+        let map = map_of(&format!("---\na: {written}\n---\n"));
+        assert_eq!(map.get("a"), Some(&expected), "reading {written:?}");
+    }
+}
+
+/// The integer ladder is three rungs, and only the middle one is a diagnostic.
+/// Inside `i64` a whole number is an integer; past it but inside `u64` it is
+/// carried as a float and said so; outside `u64`, or below `i64`, the block
+/// does not parse at all and there is no value to carry.
+#[test]
+fn an_integer_climbs_a_three_rung_ladder_and_says_which_rung() {
+    for (written, expected) in [
+        ("9223372036854775807", Value::Int(i64::MAX)),
+        ("-9223372036854775808", Value::Int(i64::MIN)),
+    ] {
+        let source = format!("---\na: {written}\n---\n");
+        let document = Document::parse(&source);
+        assert_eq!(codes(&document), Vec::<&str>::new(), "reading {written:?}");
+        assert_eq!(
+            document
+                .frontmatter()
+                .and_then(Value::as_map)
+                .unwrap()
+                .get("a"),
+            Some(&expected)
+        );
+    }
+    for written in ["9223372036854775808", "18446744073709551615"] {
+        let source = format!("---\na: {written}\n---\n");
+        let document = Document::parse(&source);
+        assert_eq!(
+            codes(&document),
+            ["frontmatter-integer-out-of-range"],
+            "reading {written:?}"
+        );
+        assert!(matches!(
+            document
+                .frontmatter()
+                .and_then(Value::as_map)
+                .and_then(|map| map.get("a")),
+            Some(Value::Float(_))
+        ));
+    }
+    for written in ["18446744073709551616", "-9223372036854775809"] {
+        let source = format!("---\na: {written}\n---\n");
+        let document = Document::parse(&source);
+        assert_eq!(
+            codes(&document),
+            ["frontmatter-parse-failed"],
+            "reading {written:?}"
+        );
+        assert_eq!(document.frontmatter(), None);
+    }
 }
 
 #[test]

@@ -78,22 +78,9 @@ impl Value {
         }
     }
 
-    /// True for null, bool, int, float and string — the shapes that occupy a
-    /// single YAML scalar.
-    pub fn is_scalar(&self) -> bool {
-        !matches!(self, Value::Sequence(_) | Value::Map(_))
-    }
-
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    pub fn as_sequence(&self) -> Option<&[Value]> {
-        match self {
-            Value::Sequence(items) => Some(items),
             _ => None,
         }
     }
@@ -252,15 +239,6 @@ impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Mapping {
             map.insert(key, value);
         }
         map
-    }
-}
-
-impl<'a> IntoIterator for &'a Mapping {
-    type Item = (&'a str, &'a Value);
-    type IntoIter = Box<dyn Iterator<Item = (&'a str, &'a Value)> + 'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.iter())
     }
 }
 

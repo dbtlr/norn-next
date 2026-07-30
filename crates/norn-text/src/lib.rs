@@ -82,12 +82,12 @@ mod value;
 mod wikilink;
 
 pub use body::BodyScan;
-pub use diagnostic::{Diagnostic, Severity};
-pub use document::{Document, EditError, FieldText, frontmatter_reads_back, parse_value};
+pub use diagnostic::Diagnostic;
+pub use document::{Document, EditError, FieldText, frontmatter_reads_back};
 pub use frontmatter::{Field, RenderError, ScalarContext, ValueStyle, render_document};
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;
-pub use section::{SectionAddress, SectionError, SectionSpan, resolve_section};
+pub use section::{SectionAddress, SectionError, SectionSpan};
 pub use span::SourceSpan;
 pub use value::{Mapping, Value};
 pub use wikilink::{

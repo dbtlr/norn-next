@@ -188,11 +188,6 @@ impl<'a> Document<'a> {
         }
     }
 
-    /// The bytes this document was read from.
-    pub fn source(&self) -> &'a str {
-        self.source
-    }
-
     /// Everything after the closing delimiter, or the whole document when
     /// there is no block.
     pub fn body(&self) -> &'a str {
@@ -718,12 +713,16 @@ fn append_with_terminator(out: &mut String, content: &str, line_ending: LineEndi
 /// Whether `content` re-reads as the same value it was written from — the
 /// round-trip the emission layer proves for itself, exposed so a caller can
 /// assert it too.
+///
+/// A block holding no fields is written `---\n---\n` and reads as null, and
+/// the crate promotes that null to a mapping the moment a field is written
+/// into it. So null and the empty mapping are the same block written twice,
+/// and this predicate says so rather than reporting a round-trip failure for
+/// a document that round-tripped.
 pub fn frontmatter_reads_back(content: &str, expected: &Value) -> bool {
-    Document::parse(content).frontmatter() == Some(expected)
-}
-
-/// Read a value as this crate reads frontmatter, for a caller holding a
-/// fragment rather than a document.
-pub fn parse_value(text: &str) -> Option<Value> {
-    reparse(text)
+    match (frontmatter_of(content), expected) {
+        (Some(Value::Null), Value::Map(map)) => map.is_empty(),
+        (Some(actual), expected) => &actual == expected,
+        (None, _) => false,
+    }
 }

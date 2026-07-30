@@ -71,15 +71,27 @@ fn round_trip_key(key: &str) -> Mapping {
         .clone()
 }
 
-/// The bytes a value was written as, for a case that is about the style and
-/// not only the round trip.
-fn emitted_value(source: &str, field: &str, value: &str) -> String {
-    let edited = Document::parse(source)
-        .set_field(field, &Value::String(value.to_string()))
-        .unwrap_or_else(|error| panic!("emitting {value:?}: {error}"));
-    let document = Document::parse(&edited);
-    let located = document.field(field).expect("the edited field");
-    edited[located.value_range.clone().expect("a value span")].to_string()
+/// The whole document a block-context emission produces.
+fn block_document(source: &str, field: &str, value: &Value) -> String {
+    Document::parse(source)
+        .set_field(field, value)
+        .unwrap_or_else(|error| panic!("emitting {value:?} into {source:?}: {error}"))
+}
+
+/// The whole document a flow-item emission produces.
+fn flow_document(value: &Value) -> String {
+    Document::parse("---\nitems: [seed]\n---\nbody\n")
+        .set_field("items", &Value::Sequence(vec![value.clone()]))
+        .unwrap_or_else(|error| panic!("emitting {value:?} as a flow item: {error}"))
+}
+
+/// The whole document a key emission produces.
+fn key_document(key: &str) -> String {
+    let fields: Mapping = [(key.to_string(), Value::String("value".into()))]
+        .into_iter()
+        .collect();
+    render_document(&fields, "body\n", LineEnding::Lf)
+        .unwrap_or_else(|error| panic!("emitting {key:?} as a key: {error}"))
 }
 
 // ── Block context (NRN-118) ──────────────────────────────────────────────
@@ -280,55 +292,337 @@ fn a_key_no_parser_will_read_back_refuses_rather_than_emitting_unproven_bytes() 
 
 #[test]
 fn a_value_that_needs_no_quoting_gets_none() {
-    assert_eq!(
-        emitted_value("---\ntitle: seed\n---\n", "title", "hello world"),
-        "hello world"
-    );
+    let plain = |value: &str| block_document("---\ntitle: seed\n---\n", "title", &value.into());
+    assert_eq!(plain("hello world"), "---\ntitle: hello world\n---\n");
     // A single quote inside a value is not a hazard in block context, so the
     // value stays plain rather than escalating on the strength of a character.
-    assert_eq!(
-        emitted_value("---\ntitle: seed\n---\n", "title", "it's fine"),
-        "it's fine"
-    );
+    assert_eq!(plain("it's fine"), "---\ntitle: it's fine\n---\n");
 }
 
 #[test]
 fn an_explicit_quote_style_is_a_floor() {
     assert_eq!(
-        emitted_value("---\ntitle: 'seed'\n---\n", "title", "plain would do"),
-        "'plain would do'"
+        block_document(
+            "---\ntitle: 'seed'\n---\n",
+            "title",
+            &"plain would do".into()
+        ),
+        "---\ntitle: 'plain would do'\n---\n"
     );
     assert_eq!(
-        emitted_value("---\ntitle: \"seed\"\n---\n", "title", "plain would do"),
-        "\"plain would do\""
+        block_document(
+            "---\ntitle: \"seed\"\n---\n",
+            "title",
+            &"plain would do".into()
+        ),
+        "---\ntitle: \"plain would do\"\n---\n"
     );
     // Single-quoted stays single where it can, and climbs when it cannot: a
     // value carrying a newline cannot be single-quoted, because the newline
     // folds to a space.
     assert_eq!(
-        emitted_value("---\ntitle: 'seed'\n---\n", "title", "one\ntwo"),
-        "\"one\\ntwo\""
+        block_document("---\ntitle: 'seed'\n---\n", "title", &"one\ntwo".into()),
+        "---\ntitle: \"one\\ntwo\"\n---\n"
     );
 }
 
 #[test]
 fn escalation_climbs_no_further_than_it_must() {
+    let plain = |value: &str| block_document("---\ntitle: seed\n---\n", "title", &value.into());
     // Plain fails on the trailing colon; single quotes are enough.
-    assert_eq!(
-        emitted_value("---\ntitle: seed\n---\n", "title", "note:"),
-        "'note:'"
-    );
+    assert_eq!(plain("note:"), "---\ntitle: 'note:'\n---\n");
     // Single quotes cannot hold a newline, so this one reaches the terminal.
-    assert_eq!(
-        emitted_value("---\ntitle: seed\n---\n", "title", "one\ntwo"),
-        "\"one\\ntwo\""
-    );
+    assert_eq!(plain("one\ntwo"), "---\ntitle: \"one\\ntwo\"\n---\n");
     // A plain identifier key needs no quoting at all.
     let fields: Mapping = [("status", "draft")].into_iter().collect();
     assert_eq!(
         render_document(&fields, "", LineEnding::Lf),
         Ok("---\nstatus: draft\n---\n".to_string())
     );
+}
+
+// ── The golden emission table (NORN-25) ──────────────────────────────────
+
+/// Every row is a value, and the exact document emitting it produces in each
+/// of the three contexts.
+///
+/// The rest of this file asks whether a value reads back through this crate,
+/// which is a question this crate answers about itself: swap the parser behind
+/// the seam and every emitted byte could change while every assertion stayed
+/// green. These rows are the bytes, written down. They are also the YAML-1.1
+/// trap list — the spellings whose meaning moved between dialects — so a
+/// resolution change shows up here as a diff rather than as silence.
+#[test]
+fn the_dialect_traps_emit_exactly_these_bytes() {
+    // (value, block document, flow document, key document)
+    let rows: &[(&str, &str, &str, &str)] = &[
+        // YAML 1.1 read these as booleans. Under the 1.2 core schema they are
+        // strings, and a string that reads back as itself stays plain.
+        (
+            "yes",
+            "---\nfield: yes\n---\nbody\n",
+            "---\nitems: [yes]\n---\nbody\n",
+            "---\nyes: value\n---\nbody\n",
+        ),
+        (
+            "no",
+            "---\nfield: no\n---\nbody\n",
+            "---\nitems: [no]\n---\nbody\n",
+            "---\nno: value\n---\nbody\n",
+        ),
+        (
+            "on",
+            "---\nfield: on\n---\nbody\n",
+            "---\nitems: [on]\n---\nbody\n",
+            "---\non: value\n---\nbody\n",
+        ),
+        (
+            "off",
+            "---\nfield: off\n---\nbody\n",
+            "---\nitems: [off]\n---\nbody\n",
+            "---\noff: value\n---\nbody\n",
+        ),
+        (
+            "y",
+            "---\nfield: y\n---\nbody\n",
+            "---\nitems: [y]\n---\nbody\n",
+            "---\ny: value\n---\nbody\n",
+        ),
+        (
+            "n",
+            "---\nfield: n\n---\nbody\n",
+            "---\nitems: [n]\n---\nbody\n",
+            "---\nn: value\n---\nbody\n",
+        ),
+        (
+            "Y",
+            "---\nfield: Y\n---\nbody\n",
+            "---\nitems: [Y]\n---\nbody\n",
+            "---\nY: value\n---\nbody\n",
+        ),
+        // `true` in any casing the core schema does not name is still a
+        // string, and one it does name escalates.
+        (
+            "True",
+            "---\nfield: 'True'\n---\nbody\n",
+            "---\nitems: ['True']\n---\nbody\n",
+            "---\n'True': value\n---\nbody\n",
+        ),
+        // Sexagesimal, octal-by-leading-zero and digit separators: all three
+        // were numbers in 1.1 and are strings now.
+        (
+            "12:34:56",
+            "---\nfield: 12:34:56\n---\nbody\n",
+            "---\nitems: [12:34:56]\n---\nbody\n",
+            "---\n12:34:56: value\n---\nbody\n",
+        ),
+        (
+            "0777",
+            "---\nfield: 0777\n---\nbody\n",
+            "---\nitems: [0777]\n---\nbody\n",
+            "---\n0777: value\n---\nbody\n",
+        ),
+        (
+            "1_000",
+            "---\nfield: 1_000\n---\nbody\n",
+            "---\nitems: [1_000]\n---\nbody\n",
+            "---\n1_000: value\n---\nbody\n",
+        ),
+        (
+            "2026-07-29",
+            "---\nfield: 2026-07-29\n---\nbody\n",
+            "---\nitems: [2026-07-29]\n---\nbody\n",
+            "---\n2026-07-29: value\n---\nbody\n",
+        ),
+        // Exponent-shaped and number-shaped strings do read back as numbers,
+        // so they escalate to a quote.
+        (
+            "1e3",
+            "---\nfield: '1e3'\n---\nbody\n",
+            "---\nitems: ['1e3']\n---\nbody\n",
+            "---\n'1e3': value\n---\nbody\n",
+        ),
+        (
+            "-1.2e-3",
+            "---\nfield: '-1.2e-3'\n---\nbody\n",
+            "---\nitems: ['-1.2e-3']\n---\nbody\n",
+            "---\n'-1.2e-3': value\n---\nbody\n",
+        ),
+        (
+            "123",
+            "---\nfield: '123'\n---\nbody\n",
+            "---\nitems: ['123']\n---\nbody\n",
+            "---\n'123': value\n---\nbody\n",
+        ),
+        (
+            ".inf",
+            "---\nfield: '.inf'\n---\nbody\n",
+            "---\nitems: ['.inf']\n---\nbody\n",
+            "---\n'.inf': value\n---\nbody\n",
+        ),
+        (
+            "null",
+            "---\nfield: 'null'\n---\nbody\n",
+            "---\nitems: ['null']\n---\nbody\n",
+            "---\n'null': value\n---\nbody\n",
+        ),
+        // A trailing colon is a nested mapping in block and key position; in
+        // key position the emission spells the colon twice rather than quoting.
+        (
+            "note:",
+            "---\nfield: 'note:'\n---\nbody\n",
+            "---\nitems: ['note:']\n---\nbody\n",
+            "---\nnote:: value\n---\nbody\n",
+        ),
+        (
+            "a: b",
+            "---\nfield: 'a: b'\n---\nbody\n",
+            "---\nitems: ['a: b']\n---\nbody\n",
+            "---\n'a: b': value\n---\nbody\n",
+        ),
+        // A leading `#` turns the rest of the line into a comment.
+        (
+            "#lead",
+            "---\nfield: '#lead'\n---\nbody\n",
+            "---\nitems: ['#lead']\n---\nbody\n",
+            "---\n'#lead': value\n---\nbody\n",
+        ),
+        // Flow punctuation is inert in a block value and structural in a flow
+        // item, which is the whole reason context is carried.
+        (
+            "a,b",
+            "---\nfield: a,b\n---\nbody\n",
+            "---\nitems: ['a,b']\n---\nbody\n",
+            "---\na,b: value\n---\nbody\n",
+        ),
+        (
+            "a]b",
+            "---\nfield: a]b\n---\nbody\n",
+            "---\nitems: ['a]b']\n---\nbody\n",
+            "---\na]b: value\n---\nbody\n",
+        ),
+        (
+            "[a]",
+            "---\nfield: '[a]'\n---\nbody\n",
+            "---\nitems: ['[a]']\n---\nbody\n",
+            "---\n'[a]': value\n---\nbody\n",
+        ),
+        (
+            "{a}",
+            "---\nfield: '{a}'\n---\nbody\n",
+            "---\nitems: ['{a}']\n---\nbody\n",
+            "---\n'{a}': value\n---\nbody\n",
+        ),
+        // The Unicode separators. NEL folds to a space wherever it is left
+        // bare, so it reaches the double-quoted escape in every context; the
+        // line and paragraph separators survive inside single quotes and in a
+        // flow item, and only key position needs the escape.
+        (
+            "next\u{85}line",
+            "---\nfield: \"next\\Nline\"\n---\nbody\n",
+            "---\nitems: [\"next\\Nline\"]\n---\nbody\n",
+            "---\n\"next\\Nline\": value\n---\nbody\n",
+        ),
+        (
+            "line\u{2028}sep",
+            "---\nfield: 'line\u{2028}sep'\n---\nbody\n",
+            "---\nitems: [line\u{2028}sep]\n---\nbody\n",
+            "---\n\"line\\Lsep\": value\n---\nbody\n",
+        ),
+        (
+            "para\u{2029}sep",
+            "---\nfield: 'para\u{2029}sep'\n---\nbody\n",
+            "---\nitems: [para\u{2029}sep]\n---\nbody\n",
+            "---\n\"para\\Psep\": value\n---\nbody\n",
+        ),
+        // Nothing, and nothing but whitespace.
+        (
+            "",
+            "---\nfield: ''\n---\nbody\n",
+            "---\nitems: ['']\n---\nbody\n",
+            "---\n'': value\n---\nbody\n",
+        ),
+        (
+            "  ",
+            "---\nfield: '  '\n---\nbody\n",
+            "---\nitems: ['  ']\n---\nbody\n",
+            "---\n'  ': value\n---\nbody\n",
+        ),
+    ];
+
+    for (text, block, flow, key) in rows {
+        let value = Value::String((*text).to_string());
+        assert_eq!(
+            block_document("---\nfield: seed\n---\nbody\n", "field", &value),
+            *block,
+            "block value {text:?}"
+        );
+        assert_eq!(flow_document(&value), *flow, "flow item {text:?}");
+        assert_eq!(key_document(text), *key, "key {text:?}");
+    }
+}
+
+/// The same table for the non-string scalars, which have one spelling each and
+/// no quoting ladder to climb.
+#[test]
+fn the_non_string_scalars_emit_exactly_these_bytes() {
+    let rows: &[(Value, &str, &str)] = &[
+        (
+            Value::Null,
+            "---\nfield: ~\n---\nbody\n",
+            "---\nitems: [~]\n---\nbody\n",
+        ),
+        (
+            Value::Bool(true),
+            "---\nfield: true\n---\nbody\n",
+            "---\nitems: [true]\n---\nbody\n",
+        ),
+        (
+            Value::Int(-7),
+            "---\nfield: -7\n---\nbody\n",
+            "---\nitems: [-7]\n---\nbody\n",
+        ),
+        // An integral float keeps its point, or it would read back as an int.
+        (
+            Value::Float(1.0),
+            "---\nfield: 1.0\n---\nbody\n",
+            "---\nitems: [1.0]\n---\nbody\n",
+        ),
+        (
+            Value::Float(1e3),
+            "---\nfield: 1000.0\n---\nbody\n",
+            "---\nitems: [1000.0]\n---\nbody\n",
+        ),
+        (
+            Value::Float(-0.0),
+            "---\nfield: -0.0\n---\nbody\n",
+            "---\nitems: [-0.0]\n---\nbody\n",
+        ),
+        (
+            Value::Float(f64::NAN),
+            "---\nfield: .nan\n---\nbody\n",
+            "---\nitems: [.nan]\n---\nbody\n",
+        ),
+        (
+            Value::Float(f64::INFINITY),
+            "---\nfield: .inf\n---\nbody\n",
+            "---\nitems: [.inf]\n---\nbody\n",
+        ),
+        (
+            Value::Float(f64::NEG_INFINITY),
+            "---\nfield: -.inf\n---\nbody\n",
+            "---\nitems: [-.inf]\n---\nbody\n",
+        ),
+    ];
+
+    for (value, block, flow) in rows {
+        assert_eq!(
+            block_document("---\nfield: seed\n---\nbody\n", "field", value),
+            *block,
+            "block value {value:?}"
+        );
+        assert_eq!(flow_document(value), *flow, "flow item {value:?}");
+    }
 }
 
 // ── The non-string scalars ───────────────────────────────────────────────
@@ -456,6 +750,40 @@ fn a_rendered_body_gains_the_terminator_it_is_missing() {
         render_document(&Mapping::new(), "", LineEnding::Lf),
         Ok("---\n---\n".to_string())
     );
+}
+
+/// A block holding no fields is `---\n---\n`, which reads as null. That is not
+/// a lost round trip: the crate promotes that null to a mapping the moment a
+/// field is written into it, so null and the empty mapping are the same block
+/// written twice, and the reads-back predicate says so.
+#[test]
+fn a_block_written_from_no_fields_reads_back_as_the_empty_mapping() {
+    let rendered =
+        render_document(&Mapping::new(), "body\n", LineEnding::Lf).expect("an empty block");
+    assert_eq!(rendered, "---\n---\nbody\n");
+    assert!(frontmatter_reads_back(
+        &rendered,
+        &Value::Map(Mapping::new())
+    ));
+    // Read as a value it is null, and it takes a first field like any other
+    // empty block.
+    assert_eq!(Document::parse(&rendered).frontmatter(), Some(&Value::Null));
+    assert!(frontmatter_reads_back(&rendered, &Value::Null));
+    assert_eq!(
+        Document::parse(&rendered).set_field("title", &Value::String("t".into())),
+        Ok("---\ntitle: t\n---\nbody\n".to_string())
+    );
+    // The equivalence is only for an empty mapping; a block holding fields is
+    // not null and does not read back as one.
+    let held: Mapping = [("title", "t")].into_iter().collect();
+    assert!(!frontmatter_reads_back(
+        "---\ntitle: t\n---\n",
+        &Value::Map(Mapping::new())
+    ));
+    assert!(frontmatter_reads_back(
+        "---\ntitle: t\n---\n",
+        &Value::Map(held)
+    ));
 }
 
 #[test]
