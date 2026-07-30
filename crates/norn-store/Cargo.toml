@@ -1,0 +1,38 @@
+[package]
+name = "norn-store"
+description = "An SDK for talking to SQL — the store schema, the DDL fingerprint, the four pillars and the database-side heal rung"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The dependency allowlist (docs/architecture.md) carries `norn-store ->
+# norn-wire` and nothing else out of this crate: parsing happens in host
+# orchestration, so this crate's API takes typed facts and never a document.
+# `norn-wire` is declared because the architecture gate requires every
+# permitted edge whose two endpoints are both present; the read builders that
+# compile wire params to SQL are what will import it, and nothing here does
+# yet.
+#
+# `rusqlite` is the substrate this crate exists to own — the one crate in the
+# workspace that opens a SQLite connection. Features are pinned rather than
+# defaulted:
+#
+# - `bundled` compiles SQLite from vendored source, so the store schema is
+#   read by the library version this workspace pins rather than by whatever
+#   the host machine ships. It is also what turns FTS5 and JSON1 on, both of
+#   which the DDL requires as pillars rather than as optional extras.
+# - `fallible_uint` makes an unsigned value's conversion to SQLite's signed
+#   integer a checked one. Offsets, lengths and counts are unsigned facts, and
+#   the alternative to a checked bind is casting at every call site — which is
+#   where a wrapped number stops being visible.
+# - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
+#   rest is this crate's own projection, and a driver convenience that decided
+#   it would be a second spelling of one.
+[dependencies]
+norn-wire = { path = "../norn-wire" }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }

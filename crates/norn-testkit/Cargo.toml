@@ -12,12 +12,16 @@ publish.workspace = true
 # process harness reads its peak resident set from.
 #
 # The dependency allowlist (docs/architecture.md) carries `norn-testkit ->
-# norn-wire` and the architecture gate requires every permitted edge whose two
-# endpoints are both present, so the edge is declared here. Nothing in this
-# crate imports it yet.
+# norn-wire` and `norn-testkit -> norn-store`, and the architecture gate
+# requires every permitted edge whose two endpoints are both present, so both
+# edges are declared here. Nothing in this crate imports either yet: the
+# `EXPLAIN` and counter assertions read through `norn-store`'s own API, so the
+# edge is what makes that reachable and this crate still opens no connection
+# itself.
 [dependencies]
 libc = { workspace = true }
 norn-fixtures = { path = "../norn-fixtures" }
+norn-store = { path = "../norn-store" }
 norn-wire = { path = "../norn-wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }

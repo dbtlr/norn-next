@@ -19,6 +19,12 @@ publish = false
 libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
+# `bundled` vendors SQLite itself, which is also what enables FTS5 and JSON1 —
+# both of them store-schema requirements rather than optional extras.
+# `fallible_uint` binds unsigned values to SQLite's signed integers with a
+# checked conversion, so an offset or a length that does not fit is an error
+# rather than a wrapped number.
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
