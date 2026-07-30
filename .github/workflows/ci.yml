@@ -79,12 +79,14 @@ jobs:
   # machinery — counter snapshots, the SQL-and-plan pairing, the
   # size-independence pair — is in norn-testkit already.
   #
-  # The derivation counters and the read builders that emit the SQL arrive
-  # with norn-store, at Layer 1: that is what brings the zero-counter bar on
-  # warm paths and the size-independence pairs expressed as counts. The
-  # EXPLAIN bars arrive with the Layer 3 read builders, because a plan
-  # assertion is only worth anything against the statement a builder emitted.
-  # All of it is counts, never clocks, at the ~2k-document realistic profile.
+  # The derivation counters now exist: norn-store's requests carry their own
+  # reading, its own suite asserts a read-only request finishes at zero, and
+  # the readings feed norn-testkit's comparison primitives. What is still
+  # missing is what makes a *gate* out of them — a request path over the
+  # ~2k-document realistic profile, which arrives with the host. The EXPLAIN
+  # bars wait on the Layer 3 read builders, because a plan assertion is only
+  # worth anything against the statement a builder emitted. All of it is
+  # counts, never clocks.
   gates:
     name: counter and plan gates (placeholder — Layers 1 and 3)
     runs-on: ubuntu-latest
@@ -93,8 +95,8 @@ jobs:
       - name: Pending
         run: |
           echo "Counter and plan gates land with their subjects."
-          echo "Layer 1 (norn-store): zero derivation counters on warm paths;"
-          echo "                      size-independence pairs, as counts."
+          echo "norn-store carries the counters; the bars need a request path"
+          echo "over the ~2k-document profile, which the host brings."
           echo "Layer 3 (read builders): EXPLAIN plans against emitted SQL."
 
   # A real gate. It spawns the fixture generator under the testkit's process
