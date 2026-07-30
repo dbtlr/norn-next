@@ -43,13 +43,31 @@
 //! is no explicit index write here, and adding one would be a second maintainer
 //! of the same rows.
 //!
-//! **Findings are discarded by affected class.** Every changed path — upserted
-//! or dead — names the ambiguity class it belongs to, and the findings in the
-//! union of those classes are discarded before the changeset commits. The store
-//! discards and never records: minting a finding is a reading of the vault the
-//! caller performs, so **discard-then-record** is where idempotence lives, and
-//! the outcome reports the classes so the caller knows exactly which readings to
-//! take again.
+//! **Findings are discarded on two axes, both inside the one transaction.**
+//!
+//! - *By subject path.* Every changed path — upserted or dead — takes the
+//!   findings recorded about it. A re-derivation's findings were read off facts
+//!   the changeset has just replaced, and a death's describe a document that is
+//!   gone; the caller re-mints what holds now from the facts it just handed
+//!   over, which is the changeset itself, entry by entry.
+//! - *By affected ambiguity class.* Every changed path also names the class it
+//!   belongs to, and the findings in the union of those classes go with it —
+//!   the resolution axis, where a document joining or leaving a class
+//!   invalidates findings written in documents that did not change.
+//!
+//! The two axes are what make **discard-then-record** total. The store discards
+//! and never records: minting a finding is a reading of the vault the caller
+//! performs, so the outcome reports the classes, and the subject axis needs no
+//! report because its scope is the changeset the caller just built.
+//!
+//! A finding with no class — a vault-schema violation, say — is out of the
+//! resolution axis and reachable on the subject axis alone: it dies when the
+//! document it is about changes, and survives every change to any other.
+//!
+//! This is maintenance rather than a cascade. Nothing in the schema references
+//! `documents` from `findings`, so a finding about a path no document has is
+//! recordable and no row-existence ordering matters; what reaches a finding is
+//! a statement this crate runs and counts.
 //!
 //! # Memory is the changeset's, never the vault's
 //!
@@ -131,11 +149,18 @@ pub struct IncrementOutcome {
     pub documents_deleted: u64,
     /// Deaths recorded, which is one per [`Change::Death`] entry.
     pub tombstones_recorded: u64,
-    /// Every ambiguity class the changed paths are in — the scope of findings
-    /// maintenance this changeset implies, and what a caller re-records against.
+    /// Every ambiguity class the changed paths are in — the resolution axis of
+    /// the findings maintenance this changeset implies, and what a caller
+    /// re-records against.
+    ///
+    /// The subject axis carries no field beside it: the paths whose findings
+    /// went are the changeset's own entries, which the caller processed one by
+    /// one to build it.
     pub affected_classes: BTreeSet<ClassKey>,
-    /// The findings the changeset discarded, which are exactly the ones in
-    /// [`IncrementOutcome::affected_classes`].
+    /// The findings the changeset discarded on both axes — those recorded about
+    /// a changed path, and those in [`IncrementOutcome::affected_classes`]. A
+    /// finding in both is counted once, because the first discard is what
+    /// removed it.
     pub invalidated: Invalidation,
 }
 
@@ -179,9 +204,9 @@ pub(crate) fn apply(
     {
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
-            match change {
+            match &change {
                 Change::Upsert(facts) => {
-                    upsert(&mut statements, generation, recorded_at, &facts, &mut tally)?;
+                    upsert(&mut statements, generation, recorded_at, facts, &mut tally)?;
                 }
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
@@ -190,17 +215,19 @@ pub(crate) fn apply(
                         &mut statements,
                         generation,
                         recorded_at,
-                        &path,
-                        provenance,
+                        path,
+                        *provenance,
                         &mut tally,
                     )?;
                 }
             }
+            tally.findings_discarded +=
+                discard_the_subject(&mut statements.discard_subject, subject(&change))?;
             torn_here(index + 1);
         }
         let discarded =
             discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
-        tally.findings_discarded = discarded;
+        tally.findings_discarded += discarded;
     }
 
     transaction
@@ -281,6 +308,8 @@ struct Statements<'t> {
     insert_tag: Statement<'t>,
     delete_document: Statement<'t>,
     record_tombstone: Statement<'t>,
+    /// The subject-scoped findings discard, over one changed path at a time.
+    discard_subject: Statement<'t>,
     /// The class-scoped findings discard, over one class at a time.
     discard_class: Statement<'t>,
 }
@@ -374,6 +403,10 @@ impl<'t> Statements<'t> {
                      generation        = excluded.generation,
                      recorded_at       = excluded.recorded_at",
                 "preparing a tombstone write",
+            )?,
+            discard_subject: prepared(
+                request::SUBJECT_DISCARD_SQL,
+                "preparing a path's findings discard",
             )?,
             discard_class: prepared(
                 &request::class_discard_sql(1),
@@ -550,14 +583,43 @@ fn record_death(
     Ok(())
 }
 
+/// The path one entry is about, which is the subject its findings are recorded
+/// under.
+fn subject(change: &Change) -> &DocumentPath {
+    match change {
+        Change::Upsert(facts) => &facts.path,
+        Change::Death { path, .. } => path,
+    }
+}
+
+/// Discard the findings recorded about one changed path, and report how many
+/// went.
+///
+/// A seek over `findings_path` rather than a predicate over the table: the
+/// discard costs the path's own findings, and it runs once per entry, so a
+/// changeset of fifty thousand entries is fifty thousand seeks rather than fifty
+/// thousand scans.
+///
+/// A path named twice discards twice, and the second run finds nothing: the
+/// entry ahead of it took the rows, and the caller records what holds now once
+/// the whole changeset has committed.
+fn discard_the_subject(
+    statement: &mut Statement<'_>,
+    path: &DocumentPath,
+) -> Result<u64, StoreError> {
+    Ok(statement
+        .execute(params![path.as_str()])
+        .map_err(|error| error::sql("discarding a path's findings", error))? as u64)
+}
+
 /// Discard the findings in every class the changeset's paths affect, and report
 /// how many went.
 ///
 /// One seek per class rather than one predicate over all of them: each class is
 /// a range over `finding_classes(class_key)`, and the statement that opens one
 /// is prepared once and run per class. The count is findings rather than rows,
-/// because a finding in two of the affected classes is one finding and the
-/// second range finds it already gone.
+/// because a finding a previous range — or the subject axis — already took is
+/// found gone rather than counted twice.
 fn discard_affected_classes(
     statement: &mut Statement<'_>,
     classes: &BTreeSet<ClassKey>,

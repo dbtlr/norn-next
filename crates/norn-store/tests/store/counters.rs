@@ -157,10 +157,9 @@ fn a_request_that_only_reads_finishes_at_zero() {
         .expect("reading candidates");
     let _ = warm.full_text_matches("body").expect("reading matches");
     let _ = warm
-        .probe_reader_plan(
-            norn_store::ProbeReader::SuffixCandidates,
+        .emitted_plan(norn_store::ExplainedStatement::SuffixCandidates(
             &norn_store::class_probe("glossary").expect("a class stem"),
-        )
+        ))
         .expect("a query plan");
     let _ = warm.vault_schema_pin().expect("reading the pin");
     let _ = warm.pillars().expect("a pillar report");

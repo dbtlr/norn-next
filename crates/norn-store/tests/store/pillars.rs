@@ -11,12 +11,12 @@ use crate::common::{
     path, record_death, vector, violation, write_document, write_documents,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, ProbeReader, Provenance, StoreError, class_probe,
+    CANDIDATE_HEAD, CandidateFact, ExplainedStatement, Provenance, StoreError, class_probe,
     induced_failure, suffix_probe,
 };
 use norn_testkit::explain::{PlanRow, QueryPlan};
 
-/// The plan the store reported for one of its probe readers, in the shape the
+/// The plan the store reported for one of its named statements, in the shape the
 /// harness asserts over. The pairing is the store's: a plan bar over SQL nobody
 /// ran judges a string, and no crate outside the store may take a plan itself.
 fn plan(emitted: norn_store::EmittedPlan) -> QueryPlan {
@@ -564,12 +564,12 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     );
 }
 
-/// **Both probe readers reach their rows through the index the probe is bounds
-/// for.** The bar is asserted against the statement the reader actually emitted,
-/// which is why the store hands the pair out rather than the caller re-spelling
-/// the SQL.
+/// **Every statement findings maintenance runs reaches its rows through an
+/// index.** The bar is asserted against the statement the store actually
+/// emitted, which is why the store hands the pair out rather than the caller
+/// re-spelling the SQL.
 #[test]
-fn both_probe_readers_search_the_index_the_probe_opens() {
+fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
     let scratch = Scratch::new("plans");
     let mut store = scratch.open();
     let mut request = store.begin_request();
@@ -591,10 +591,9 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let candidates = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::SuffixCandidates,
+            .emitted_plan(ExplainedStatement::SuffixCandidates(
                 &class_probe("glossary").expect("a class stem"),
-            )
+            ))
             .expect("a query plan"),
     );
     candidates.assert_no_full_scan_of("documents");
@@ -603,10 +602,9 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
 
     let findings = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::FindingsInClass,
+            .emitted_plan(ExplainedStatement::FindingsInClass(
                 &class_probe("glossary").expect("a class stem"),
-            )
+            ))
             .expect("a query plan"),
     );
     findings.assert_no_full_scan_of("findings");
@@ -616,13 +614,38 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
     // row id, which is the order the reader states — so nothing sorts.
     findings.assert_no_temp_btree();
 
+    // The class-scoped discard reads the same membership range as the read
+    // beside it: an increment runs it once per affected class, so a class it
+    // does not name costs nothing.
+    let class_discard = plan(
+        request
+            .emitted_plan(ExplainedStatement::ClassDiscard(
+                &class_probe("glossary").expect("a class stem"),
+            ))
+            .expect("a query plan"),
+    );
+    class_discard.assert_no_full_scan_of("findings");
+    class_discard.assert_no_full_scan_of("finding_classes");
+    class_discard.assert_uses_index("finding_classes_class_key");
+
+    // The subject-scoped discard an increment runs once per changed path seeks
+    // `findings_path`, so a changeset of fifty thousand entries is that many
+    // seeks rather than that many reads of the table.
+    let subject_discard = plan(
+        request
+            .emitted_plan(ExplainedStatement::SubjectDiscard(&path("one/glossary.md")))
+            .expect("a query plan"),
+    );
+    subject_discard.assert_no_full_scan_of("findings");
+    subject_discard.assert_searches("findings");
+    subject_discard.assert_uses_index("findings_path");
+
     // A two-reduction probe is two seeks rather than one wider read.
     let two = plan(
         request
-            .probe_reader_plan(
-                ProbeReader::SuffixCandidates,
+            .emitted_plan(ExplainedStatement::SuffixCandidates(
                 &suffix_probe("glossary.md").expect("a suffix target"),
-            )
+            ))
             .expect("a query plan"),
     );
     two.assert_no_full_scan_of("documents");
@@ -921,20 +944,24 @@ fn a_deleted_paths_class_is_still_computable_from_its_tombstone() {
     );
 }
 
-/// **Findings outlive their subject uniformly.** A finding is keyed by path and
-/// class, so deleting the document it happens to be about takes nothing with it —
-/// which is the only reading under which a finding about a path no document has
-/// and a finding about one that was just deleted are the same kind of row.
+/// **A finding is not coupled to a document row; maintenance is what takes it.**
+/// Nothing in the schema references `documents` from `findings`, so a finding is
+/// recordable about a path nothing has ever derived, no row-existence ordering
+/// applies to writing one, and no delete cascades into the table. What removes a
+/// finding is a statement the store runs and counts.
 ///
-/// The death is of `docs/index.md` and neither finding is in the class that path
-/// is in, so the only thing that could take one is a cascade. That is the point:
-/// what reaches a finding is the class a change affects, never the document a
-/// finding happens to be written in.
+/// The two findings here are in classes the death names none of, so the class
+/// axis reaches neither and the axes are told apart. The finding about
+/// `docs/index.md` goes on the **subject** axis, because it describes a document
+/// that is now gone. The finding about `never/derived.md` stays: it was recorded
+/// against a path with no row at all, and it is untouched by a change to a
+/// different path.
 #[test]
-fn a_finding_outlives_the_document_it_is_about() {
-    let scratch = Scratch::new("findings-outlive");
+fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
+    let scratch = Scratch::new("findings-maintenance");
     let mut store = scratch.open();
     let subject = path("docs/index.md");
+    let never_derived = path("never/derived.md");
 
     let mut request = store.begin_request();
     write_document(
@@ -951,7 +978,13 @@ fn a_finding_outlives_the_document_it_is_about() {
         ))
         .expect("a finding about a stored document");
     request
-        .record_finding(&ambiguity("never/derived.md", "notes", "notes/", &[], 2))
+        .record_finding(&ambiguity(
+            never_derived.as_str(),
+            "notes",
+            "notes/",
+            &[],
+            2,
+        ))
         .expect("a finding about a path nothing derived");
     assert_eq!(request.pillars().expect("a pillar report").findings, 2);
 
@@ -959,27 +992,34 @@ fn a_finding_outlives_the_document_it_is_about() {
     assert_eq!(
         death.affected_classes,
         classes(&["index/"]),
-        "the death names a class neither finding is in"
+        "the death names a class one of the findings is in, so the axes are not told apart"
     );
     assert_eq!(
-        request.pillars().expect("a pillar report").findings,
-        2,
-        "a delete cascaded into findings"
+        death.invalidated.findings_discarded, 1,
+        "the death took a finding that is not about the path that died"
     );
-    assert_eq!(
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
+    assert!(
         request
             .stored_findings(&subject)
             .expect("reading findings")
+            .is_empty(),
+        "a finding about the dead path survived the death"
+    );
+    assert_eq!(
+        request
+            .stored_findings(&never_derived)
+            .expect("reading findings")
             .len(),
         1,
-        "the finding is no longer reachable by the path it is about"
+        "a finding about a path nothing derived was reached by another path's death"
     );
-    assert_eq!(request.counters().get("findings_discarded"), Some(0));
+    assert_eq!(request.pillars().expect("a pillar report").findings, 1);
 
     request.finish();
     store
         .verify_integrity()
-        .expect("a store whose findings outlived a document");
+        .expect("a store whose findings left through maintenance");
 }
 
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is

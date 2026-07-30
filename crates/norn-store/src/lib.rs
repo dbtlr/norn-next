@@ -51,8 +51,8 @@
 //!   `EXPLAIN` bars that judge the SQL a builder actually emitted, is Layer 3.
 //!   The probe readers here are the range primitives those builders compose;
 //!   they take index bounds, never parameters. What is here already is the seam
-//!   those bars are asserted through — [`Request::probe_reader_plan`] — because
-//!   a plan cannot be taken by a crate that may not open a connection.
+//!   those bars are asserted through — [`Request::emitted_plan`] — because a
+//!   plan cannot be taken by a crate that may not open a connection.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -76,7 +76,7 @@ pub use facts::{
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use path::{ClassKey, DocumentPath, SuffixProbe, class_probe, suffix_probe};
-pub use request::{EmittedPlan, PlanStep, ProbeReader, Request};
+pub use request::{EmittedPlan, ExplainedStatement, PlanStep, Request};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
 pub use store::{OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode};

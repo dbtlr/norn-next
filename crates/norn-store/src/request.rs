@@ -42,9 +42,10 @@
 //! [`Request::findings_in_class`] — are the range reads the resolution ladder
 //! and the findings pillar are defined in terms of. They take a
 //! [`SuffixProbe`], which is a set of index bounds, and read exactly the class it
-//! opens. [`Request::probe_reader_plan`] hands their emitted SQL and its query
-//! plan out, because a plan bar over hand-copied SQL judges a string nobody runs
-//! — and no crate outside this one may open a connection to take a plan itself.
+//! opens. [`Request::emitted_plan`] hands a named statement's own SQL and its
+//! query plan out, because a plan bar over hand-copied SQL judges a string
+//! nobody runs — and no crate outside this one may open a connection to take a
+//! plan itself.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
@@ -643,36 +644,55 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The statement one probe reader emits for one probe, with the query plan
-    /// SQLite reported for **that** statement.
+    /// One named statement as this crate emits it, with the query plan SQLite
+    /// reported for **that** statement.
     ///
     /// A plan bar is worth something only against the SQL that actually ran, and
     /// no crate outside this one may open a connection to take a plan of its own.
-    /// So the store hands the pair out: the reader chooses the statement, the
+    /// So the store hands the pair out: the crate chooses the statement, the
     /// caller judges the plan. It is deliberately not a way to explain arbitrary
-    /// SQL — the readers are named, and their statements stay this crate's.
-    pub fn probe_reader_plan(
+    /// SQL — the statements are named, and each of them carries the parameters
+    /// its own execution site binds.
+    pub fn emitted_plan(
         &self,
-        reader: ProbeReader,
-        probe: &SuffixProbe,
+        statement: ExplainedStatement<'_>,
     ) -> Result<EmittedPlan, StoreError> {
-        let sql = match reader {
-            ProbeReader::SuffixCandidates => suffix_candidates_sql(probe.range_count()),
-            ProbeReader::FindingsInClass => findings_in_class_sql(probe.range_count()),
+        let sql = match statement {
+            ExplainedStatement::SuffixCandidates(probe) => {
+                suffix_candidates_sql(probe.range_count())
+            }
+            ExplainedStatement::FindingsInClass(probe) => {
+                findings_in_class_sql(probe.range_count())
+            }
+            ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
+            ExplainedStatement::SubjectDiscard(_) => SUBJECT_DISCARD_SQL.to_string(),
         };
-        let steps = Self::read_all(
-            &self.store.connection,
-            &format!("EXPLAIN QUERY PLAN {sql}"),
-            probe_parameters(probe),
-            |row| {
-                Ok(Ok(PlanStep {
-                    id: row.get(0)?,
-                    parent: row.get(1)?,
-                    detail: row.get(3)?,
-                }))
-            },
-            "explaining a probe reader",
-        )?;
+        let read = |row: &Row<'_>| {
+            Ok(Ok(PlanStep {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                detail: row.get(3)?,
+            }))
+        };
+        let explained = format!("EXPLAIN QUERY PLAN {sql}");
+        let steps = match statement {
+            ExplainedStatement::SuffixCandidates(probe)
+            | ExplainedStatement::FindingsInClass(probe)
+            | ExplainedStatement::ClassDiscard(probe) => Self::read_all(
+                &self.store.connection,
+                &explained,
+                probe_parameters(probe),
+                read,
+                "explaining an emitted statement",
+            )?,
+            ExplainedStatement::SubjectDiscard(path) => Self::read_all(
+                &self.store.connection,
+                &explained,
+                params![path.as_str()],
+                read,
+                "explaining an emitted statement",
+            )?,
+        };
         Ok(EmittedPlan { sql, steps })
     }
 
@@ -784,13 +804,25 @@ impl<'a> Request<'a> {
     }
 }
 
-/// Which probe reader [`Request::probe_reader_plan`] is asked about.
+/// Which statement [`Request::emitted_plan`] is asked about, with what that
+/// statement is bound to.
+///
+/// The parameters ride the variant because a plan is taken of a statement as it
+/// is executed: the probe readers range over a [`SuffixProbe`], and the
+/// increment's subject-axis discard is keyed by one path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProbeReader {
+pub enum ExplainedStatement<'a> {
     /// [`Request::suffix_candidates`].
-    SuffixCandidates,
+    SuffixCandidates(&'a SuffixProbe),
     /// [`Request::findings_in_class`].
-    FindingsInClass,
+    FindingsInClass(&'a SuffixProbe),
+    /// The class-scoped discard: [`Request::discard_findings_in_class`] runs it
+    /// over a probe a caller named, and [`Request::apply_increment`] runs it
+    /// over each class its changed paths are in.
+    ClassDiscard(&'a SuffixProbe),
+    /// The subject-scoped discard [`Request::apply_increment`] runs once per
+    /// changed path.
+    SubjectDiscard(&'a DocumentPath),
 }
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
@@ -847,6 +879,13 @@ pub(crate) fn class_discard_sql(ranges: usize) -> String {
         range_predicate("class_key", ranges)
     )
 }
+
+/// The statement that discards every finding recorded **about** one path.
+///
+/// The subject axis of findings maintenance, run once per changed path by
+/// [`Request::apply_increment`]. It seeks `findings_path`, which is the index
+/// that keeps the discard costing the path's own findings rather than the table.
+pub(crate) const SUBJECT_DISCARD_SQL: &str = "DELETE FROM findings WHERE path = ?1";
 
 /// The predicate one probe's ranges open over `column`: a half-open range per
 /// range, `OR`ed, each bound its own parameter.

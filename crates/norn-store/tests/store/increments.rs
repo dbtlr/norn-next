@@ -258,11 +258,16 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 }
 
-/// **Findings maintenance is scoped by affected ambiguity class, and the scope is
+/// **The resolution axis is scoped by affected ambiguity class, and the scope is
 /// exact.** A finding in a class the changeset's paths are in dies; a finding in
-/// a class none of them is in survives; a finding in no class at all is out of
-/// reach of any changeset. The outcome names the classes, because re-recording
-/// what holds now is the caller's half of discard-then-record.
+/// a class none of them is in survives; a finding in no class at all is outside
+/// this axis, and the subject axis is what reaches it. The outcome names the
+/// classes, because re-recording what holds now is the caller's half of
+/// discard-then-record.
+///
+/// Every finding here is recorded about `docs/index.md`, and no changeset names
+/// that path until the last one — so what the discards reach is the class axis
+/// alone, until the case says otherwise.
 #[test]
 fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
     let scratch = Scratch::new("class-scope");
@@ -336,18 +341,162 @@ fn a_changeset_discards_the_findings_in_the_classes_its_paths_are_in() {
     assert_eq!(died.invalidated.findings_discarded, 1);
     assert_eq!(request.counters().get("findings_discarded"), Some(3));
 
-    // What is left is the finding no class reaches, which is the one no
-    // changeset can invalidate.
+    // What is left is the finding no class reaches: two changesets have run and
+    // neither named the path it is about.
     let left = request
         .stored_findings(&path("docs/index.md"))
         .expect("reading findings");
     assert_eq!(left.len(), 1);
     assert!(left[0].class_keys.is_empty());
 
+    // It is reachable on the other axis, and only there. Re-deriving the
+    // document it is about discards it, from a changeset naming a class it is
+    // not in.
+    let subject = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("docs/index.md", "hash-2", "another body\n")],
+        )
+        .expect("applying a changeset");
+    assert_eq!(subject.affected_classes, classes(&["index/"]));
+    assert_eq!(
+        subject.invalidated.findings_discarded, 1,
+        "a re-derivation kept the findings read off the facts it replaced"
+    );
+    assert!(
+        request
+            .stored_findings(&path("docs/index.md"))
+            .expect("reading findings")
+            .is_empty()
+    );
+
     request.finish();
     store
         .verify_integrity()
         .expect("a store whose findings left through a changeset");
+}
+
+/// **A changeset discards the findings recorded about every path it names,
+/// whatever class they are in.** A re-derivation's findings were read off facts
+/// the changeset has just replaced and a death's describe a document that is
+/// gone, so the subject axis is what makes discard-then-record total: the caller
+/// re-mints from the facts it handed over, entry by entry.
+///
+/// The findings here are in classes no path of the changeset is in, so the class
+/// axis reaches none of them and what the changeset takes is exactly the two
+/// subjects it names.
+#[test]
+fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
+    let scratch = Scratch::new("subject-scope");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    write_documents(
+        &mut request,
+        &[
+            document("re/derived.md", "hash-1", "a body\n"),
+            document("about/to/die.md", "hash-1", "a body\n"),
+            document("untouched.md", "hash-1", "a body\n"),
+        ],
+    );
+    // One finding per subject, all in the same class — a class none of the
+    // changeset's own paths is in, so only the subject axis can reach them.
+    for at in ["re/derived.md", "about/to/die.md", "untouched.md"] {
+        request
+            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 3))
+            .expect("recording a finding");
+    }
+    // And one that is in no class at all, about a path the changeset names.
+    request
+        .record_finding(&violation("re/derived.md"))
+        .expect("recording a finding");
+    assert_eq!(request.pillars().expect("a pillar report").findings, 4);
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [
+                upsert("re/derived.md", "hash-2", "another body\n"),
+                death("about/to/die.md", Provenance::PlanDelete),
+            ],
+        )
+        .expect("applying a changeset");
+
+    assert_eq!(
+        outcome.affected_classes,
+        classes(&["derived/", "die/"]),
+        "the changeset names the class the findings are in, so the axes are not told apart"
+    );
+    assert_eq!(
+        outcome.invalidated.findings_discarded, 3,
+        "the changeset did not take exactly the findings about the paths it named"
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(3));
+
+    for at in ["re/derived.md", "about/to/die.md"] {
+        assert!(
+            request
+                .stored_findings(&path(at))
+                .expect("reading findings")
+                .is_empty(),
+            "a finding about `{at}`, which the changeset named, survived it"
+        );
+    }
+    let surviving = request
+        .stored_findings(&path("untouched.md"))
+        .expect("reading findings");
+    assert_eq!(
+        surviving.len(),
+        1,
+        "the discard reached a path the changeset never named"
+    );
+
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose findings left through a changeset");
+}
+
+/// **A finding both axes reach leaves once.** The subject discard runs first and
+/// the class range then finds it gone, so a changeset that re-derives the
+/// document a finding is written in *and* names the class that finding is about
+/// reports one departure rather than two.
+#[test]
+fn a_finding_both_axes_reach_is_counted_once() {
+    let scratch = Scratch::new("both-axes");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    // The finding is written in `glossary.md` and about the class `glossary/`,
+    // which is the class `glossary.md` itself is in — so re-deriving that one
+    // document reaches it on both axes.
+    write_document(
+        &mut request,
+        &document("docs/glossary.md", "hash-1", "a body\n"),
+    );
+    request
+        .record_finding(&ambiguity(
+            "docs/glossary.md",
+            "glossary",
+            "glossary/",
+            &[],
+            3,
+        ))
+        .expect("recording a finding");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("docs/glossary.md", "hash-2", "another body\n")],
+        )
+        .expect("applying a changeset");
+    assert_eq!(outcome.affected_classes, classes(&["glossary/"]));
+    assert_eq!(
+        outcome.invalidated.findings_discarded, 1,
+        "one finding on two axes was counted twice"
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
+    assert_eq!(request.pillars().expect("a pillar report").findings, 0);
 }
 
 /// **A changeset names one class per distinct stem among its paths, and the
