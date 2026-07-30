@@ -130,7 +130,17 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
         .begin_request()
         .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)])
         .expect_err("a document whose frontmatter nests past the bound");
-    assert!(matches!(error, StoreError::Bound { .. }), "{error:?}");
+    let StoreError::Entry {
+        index,
+        path,
+        problem,
+    } = &error
+    else {
+        panic!("the refusal does not say which entry it came from: {error:?}");
+    };
+    assert_eq!(*index, 0);
+    assert_eq!(path, subject.as_str());
+    assert!(matches!(**problem, StoreError::Bound { .. }), "{problem:?}");
     // Nothing was written, and the changeset freed what it was refusing rather
     // than leaking it past the error.
     assert_eq!(
@@ -616,6 +626,51 @@ fn byte_length_is_the_document_and_not_the_body() {
         .expect("a document");
     assert_eq!(stored.byte_length, facts.byte_length);
     assert_eq!(stored.body_offset, facts.body_offset);
+}
+
+/// **A document whose frame and body do not account for its size is refused.**
+/// The body runs to the end of the document, so the three numbers are checkable
+/// against one another — and a body offset past the end of the document would
+/// turn every span stored beside it into an offset outside the file. This is the
+/// one write path for a document row, so it is where the check lives.
+#[test]
+fn a_document_whose_numbers_do_not_add_up_is_refused() {
+    let scratch = Scratch::new("document-size");
+    let mut store = scratch.open();
+    let subject = path("docs/norn/glossary.md");
+
+    for (body_offset, byte_length) in [
+        // A frame past the end of the document it claims to be inside.
+        (1_000, 3),
+        // A document larger than the frame and body that account for it.
+        (0, 4_096),
+        // And smaller.
+        (4, 5),
+    ] {
+        let mut facts = document(subject.as_str(), "hash-1", "a body\n");
+        facts.body_offset = body_offset;
+        facts.byte_length = byte_length;
+        let error = store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, [Change::Upsert(facts)])
+            .expect_err("a document whose numbers do not add up");
+        let StoreError::Entry { problem, .. } = &error else {
+            panic!("the refusal does not say which entry it came from: {error:?}");
+        };
+        assert!(
+            matches!(**problem, StoreError::Bound { .. }),
+            "body_offset {body_offset} and byte_length {byte_length}: {problem:?}"
+        );
+    }
+
+    assert_eq!(
+        store
+            .begin_request()
+            .stored_document(&subject)
+            .expect("reading a document"),
+        None,
+        "a refused document reached the table"
+    );
 }
 
 /// Generations order every write in the store, across documents and across

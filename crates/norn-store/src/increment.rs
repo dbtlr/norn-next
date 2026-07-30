@@ -80,7 +80,7 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{OptionalExtension, Statement, Transaction, TransactionBehavior, params};
+use rusqlite::{CachedStatement, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
@@ -204,25 +204,29 @@ pub(crate) fn apply(
     {
         let mut statements = Statements::prepare(&transaction)?;
         for (index, change) in std::iter::once(first).chain(entries).enumerate() {
-            match &change {
+            let subject = subject(&change);
+            // Every refusal from here is wrapped in the entry that caused it.
+            // A heal streaming fifty thousand entries fails on whichever one is
+            // pathological, and the operation alone reads the same for all of
+            // them.
+            let applied = match &change {
                 Change::Upsert(facts) => {
-                    upsert(&mut statements, generation, recorded_at, facts, &mut tally)?;
+                    upsert(&mut statements, generation, recorded_at, facts, &mut tally)
                 }
                 // The death's own provenance, which is a different thing from
                 // the changeset's mark this function was called with.
-                Change::Death { path, provenance } => {
-                    record_death(
-                        &mut statements,
-                        generation,
-                        recorded_at,
-                        path,
-                        *provenance,
-                        &mut tally,
-                    )?;
-                }
+                Change::Death { path, provenance } => record_death(
+                    &mut statements,
+                    generation,
+                    recorded_at,
+                    path,
+                    *provenance,
+                    &mut tally,
+                ),
             }
+            .and_then(|()| discard_the_subject(&mut statements.discard_subject, subject));
             tally.findings_discarded +=
-                discard_the_subject(&mut statements.discard_subject, subject(&change))?;
+                applied.map_err(|problem| error::in_entry(index, subject, problem))?;
             torn_here(index + 1);
         }
         let discarded =
@@ -299,19 +303,19 @@ struct Tally {
 /// make a changeset cost its own size in facts on top of the rows it writes —
 /// the iterator hands one over at a time and nothing here keeps it.
 struct Statements<'t> {
-    upsert_document: Statement<'t>,
+    upsert_document: CachedStatement<'t>,
     /// One per fact table, in the order [`FACT_DISCARDS`] names them.
-    discard_facts: Vec<Statement<'t>>,
-    insert_link: Statement<'t>,
-    insert_heading: Statement<'t>,
-    insert_block: Statement<'t>,
-    insert_tag: Statement<'t>,
-    delete_document: Statement<'t>,
-    record_tombstone: Statement<'t>,
+    discard_facts: Vec<CachedStatement<'t>>,
+    insert_link: CachedStatement<'t>,
+    insert_heading: CachedStatement<'t>,
+    insert_block: CachedStatement<'t>,
+    insert_tag: CachedStatement<'t>,
+    delete_document: CachedStatement<'t>,
+    record_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
-    discard_subject: Statement<'t>,
+    discard_subject: CachedStatement<'t>,
     /// The class-scoped findings discard, over one class at a time.
-    discard_class: Statement<'t>,
+    discard_class: CachedStatement<'t>,
 }
 
 /// The fact rows a re-derivation replaces, one statement per table.
@@ -330,7 +334,7 @@ impl<'t> Statements<'t> {
     fn prepare(transaction: &'t Transaction<'_>) -> Result<Self, StoreError> {
         let prepared = |sql: &str, what: &'static str| {
             transaction
-                .prepare(sql)
+                .prepare_cached(sql)
                 .map_err(move |error| error::sql(what, error))
         };
         Ok(Statements {
@@ -358,7 +362,7 @@ impl<'t> Statements<'t> {
             discard_facts: FACT_DISCARDS
                 .iter()
                 .map(|sql| prepared(sql, "preparing a fact-row discard"))
-                .collect::<Result<Vec<Statement<'t>>, StoreError>>()?,
+                .collect::<Result<Vec<CachedStatement<'t>>, StoreError>>()?,
             insert_link: prepared(
                 "INSERT INTO links (
                      document, ordinal, family, embed, protocol, target, title, anchor,
@@ -424,6 +428,7 @@ fn upsert(
     facts: &DocumentFacts,
     tally: &mut Tally,
 ) -> Result<(), StoreError> {
+    refuse_a_document_that_does_not_add_up(facts)?;
     let projection = facts
         .frontmatter
         .as_ref()
@@ -583,6 +588,33 @@ fn record_death(
     Ok(())
 }
 
+/// Refuse a document whose frame and body do not account for its size.
+///
+/// A document is its frontmatter block and then its body: `body_offset` is where
+/// the body begins and the body runs to the end of the document, so
+/// `body_offset` plus the body's length **is** the document's byte length. That
+/// holds for every shape the text layer produces — no block, an unclosed block,
+/// a byte-order mark, `CRLF` line endings — because the body it reports is a
+/// slice of the document that ends where the document does.
+///
+/// So the three numbers are checkable against each other, and a set of them that
+/// does not add up describes no file: a body offset past the end of the document
+/// turns every stored span into an offset outside it, and a byte length that
+/// disagrees with the body is a size a heal would compare against. This is the
+/// one write path for a document row, so it is where the check belongs.
+fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), StoreError> {
+    let accounted = facts.body_offset.saturating_add(facts.body.len() as u64);
+    if accounted == facts.byte_length {
+        return Ok(());
+    }
+    let widest = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+    Err(StoreError::Bound {
+        what: "a document's byte length, against the body offset and body accounting for it",
+        limit: widest(facts.byte_length),
+        given: widest(accounted),
+    })
+}
+
 /// The path one entry is about, which is the subject its findings are recorded
 /// under.
 fn subject(change: &Change) -> &DocumentPath {
@@ -604,7 +636,7 @@ fn subject(change: &Change) -> &DocumentPath {
 /// entry ahead of it took the rows, and the caller records what holds now once
 /// the whole changeset has committed.
 fn discard_the_subject(
-    statement: &mut Statement<'_>,
+    statement: &mut CachedStatement<'_>,
     path: &DocumentPath,
 ) -> Result<u64, StoreError> {
     Ok(statement
@@ -621,13 +653,23 @@ fn discard_the_subject(
 /// because a finding a previous range — or the subject axis — already took is
 /// found gone rather than counted twice.
 fn discard_affected_classes(
-    statement: &mut Statement<'_>,
+    statement: &mut CachedStatement<'_>,
     classes: &BTreeSet<ClassKey>,
 ) -> Result<u64, StoreError> {
     let mut discarded = 0_u64;
     for class in classes {
+        let probe = class.probe();
+        // The statement was compiled for one range and binds two parameters. A
+        // class key is its own probe's single lower bound, so this holds by
+        // construction — and a probe that ever opened two would bind half its
+        // bounds and discard the wrong rows.
+        debug_assert_eq!(
+            probe.range_count(),
+            1,
+            "the class discard is prepared for one range"
+        );
         discarded += statement
-            .execute(request::probe_parameters(&class.probe()))
+            .execute(request::probe_parameters(&probe))
             .map_err(|error| error::sql("discarding a class's findings", error))?
             as u64;
     }

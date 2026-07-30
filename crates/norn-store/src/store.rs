@@ -93,6 +93,18 @@ const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
 /// flag says: the in-memory database, and the anonymous temporary one.
 const NOT_A_FILE: &[&str] = &[":memory:", ""];
 
+/// How many compiled statements a connection keeps.
+///
+/// Compiling SQL is a material share of what a small changeset costs, and the
+/// increment prepares thirteen statements — the document write, one discard per
+/// fact table, one insert per fact table, the document delete, the tombstone
+/// write and the two findings discards — every time it runs. The cache is what
+/// makes that a per-connection cost rather than a per-changeset one, so the
+/// capacity is set above the widest write path's count rather than left at the
+/// driver's default of sixteen, which the next statement to join that path would
+/// take the store over.
+const PREPARED_STATEMENT_CACHE: usize = 32;
+
 /// Whether the store's file outlives the store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreMode {
@@ -507,7 +519,10 @@ pub mod induced_failure {
     /// revoked permission or a read-only mount looks like from inside a statement.
     /// That is not damage and the store must not answer it as damage — a verdict
     /// of `Damaged` authorizes discarding the database — so arranging it is how
-    /// the distinction gets tested at all.
+    /// the distinction gets tested at all. `PRAGMA cache_size` is the other one:
+    /// a page cache smaller than an open transaction's dirty pages is what makes
+    /// that transaction spill into the write-ahead log, so an atomicity case can
+    /// be about the file rather than about one process's memory.
     pub fn execute_out_of_band(store: &mut Store, sql: &str) -> Result<(), StoreError> {
         store
             .connection
@@ -592,6 +607,7 @@ fn connect(path: &Path) -> Result<Attempt, StoreError> {
     connection
         .busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| error::sql("setting the busy timeout", error))?;
+    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
 
     let journal: String =
         match connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0)) {

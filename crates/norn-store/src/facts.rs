@@ -176,8 +176,12 @@ pub struct DocumentFacts {
     /// content hash concludes "unchanged".
     pub content_hash: String,
     /// The size of the whole document those bytes came from — frontmatter block
-    /// included, so it is `body_offset` plus the body's length for a document
-    /// whose body runs to the end.
+    /// included.
+    ///
+    /// A document is its frontmatter block and then its body, and the body runs
+    /// to the end of it, so this **is** `body_offset` plus the body's length.
+    /// The three are checked against each other where a document is written, and
+    /// a set of them that does not add up is refused: it describes no file.
     pub byte_length: u64,
     /// The document's body, frontmatter block excluded.
     pub body: String,

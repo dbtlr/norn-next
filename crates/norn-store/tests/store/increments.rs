@@ -796,6 +796,15 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
         );
     }
 
+    // The write-ahead log the child left is the evidence that the tear happened
+    // to the file. Read before reopening, because an open recovers the log.
+    let spilled = write_ahead_log_size(&database);
+    assert!(
+        spilled >= SPILLED_WAL_FLOOR,
+        "the torn changeset left a {spilled}-byte write-ahead log, so it never reached the file \
+         and what survived the tear was one process's memory"
+    );
+
     let mut reopened = Store::open(&database).expect("reopening a store");
     assert_eq!(
         *reopened.open_outcome(),
@@ -859,10 +868,26 @@ fn a_torn_changeset_leaves_the_previous_generation_whole() {
         .expect("a store a changeset was torn in");
 }
 
+/// How many bytes stand in the write-ahead log beside a database, or zero where
+/// there is none.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: sizing the sidecar a torn changeset left.
+fn write_ahead_log_size(database: &Path) -> u64 {
+    let mut wal = database.to_path_buf().into_os_string();
+    wal.push("-wal");
+    std::fs::metadata(&wal).map_or(0, |wal| wal.len())
+}
+
 /// The child half of the case above: apply a changeset this process does not
 /// survive, and never return.
 fn tear_a_changeset(database: &Path) -> ! {
     let mut store = Store::open(database).expect("opening the store the parent wrote");
+    // A page cache far smaller than the changeset's own pages. SQLite then
+    // writes the uncommitted pages into the write-ahead log rather than holding
+    // them, which is what makes the file — and not one process's memory — the
+    // thing the invariant is asserted about.
+    norn_store::induced_failure::execute_out_of_band(&mut store, "PRAGMA cache_size = 16")
+        .expect("shrinking the page cache");
+
     // Two entries either side of the tear: a re-derivation and a new document
     // are applied and never committed, and a third entry is never reached at
     // all. Both are absent afterwards, and neither for the same reason.
@@ -870,10 +895,30 @@ fn tear_a_changeset(database: &Path) -> ! {
     let _ = store.begin_request().apply_increment(
         IncrementProvenance::Derived,
         [
-            upsert("notes/one.md", "hash-2", "a torn body\n"),
-            upsert("notes/three.md", "hash-1", "a torn body\n"),
-            upsert("notes/four.md", "hash-1", "a torn body\n"),
+            upsert("notes/one.md", "hash-2", &torn_body()),
+            upsert("notes/three.md", "hash-1", &torn_body()),
+            upsert("notes/four.md", "hash-1", &torn_body()),
         ],
     );
     panic!("the changeset committed, so the arrangement that arms the abort did not fire");
 }
+
+/// A body large enough that writing it dirties far more pages than the child's
+/// page cache holds, so the transaction has to spill before it is torn.
+fn torn_body() -> String {
+    "a torn body\n".repeat(TORN_BODY_LINES)
+}
+
+/// How many lines each torn body carries. Twenty thousand of them is a little
+/// over 200 KiB per document, against a 16-page cache.
+const TORN_BODY_LINES: usize = 20_000;
+
+/// The smallest write-ahead log the torn changeset can plausibly have left.
+///
+/// One document's body is over 200 KiB and two of them were written before the
+/// tear, so a log this size cannot have been produced by anything but the
+/// changeset's own uncommitted pages. The bar is a floor rather than a
+/// measurement: what it fails on is a log that is absent or trivial, which is
+/// what "the increment stopped writing through an open transaction" looks like
+/// from outside.
+const SPILLED_WAL_FLOOR: u64 = 128 * 1024;
