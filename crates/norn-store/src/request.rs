@@ -135,7 +135,12 @@ impl<'a> Request<'a> {
     ///
     /// What that buys is the rung-2 story: a process that dies partway through
     /// leaves the previous generation whole, so nothing is ever at rest saying a
-    /// document was re-derived while the fact rows derived from it were not.
+    /// document was re-derived while the fact rows derived from it were not. A
+    /// transaction that never committed rolls back with the process that died in
+    /// it, so nothing partial is ever at rest — there is nothing to detect and
+    /// nothing to repair. The work the tear lost comes back the way any
+    /// unapplied work does, through the attach heal comparing content hashes and
+    /// finding the store's copy stale.
     ///
     /// # One generation stamps everything the changeset wrote
     ///
@@ -223,10 +228,10 @@ impl<'a> Request<'a> {
     /// read — see [`crate::DerivationCounters`].
     pub fn apply_increment(
         &mut self,
-        provenance: IncrementProvenance,
+        _provenance: IncrementProvenance,
         changes: impl IntoIterator<Item = Change>,
     ) -> Result<IncrementOutcome, StoreError> {
-        increment::apply(self.store, &mut self.counters, provenance, changes)
+        increment::apply(self.store, &mut self.counters, changes)
     }
 
     /// Record one finding, with the head of its candidates.

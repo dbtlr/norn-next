@@ -140,7 +140,10 @@ fn a_frontmatter_value_past_the_bound_is_refused_and_its_facts_freed() {
     };
     assert_eq!(*index, 0);
     assert_eq!(path, subject.as_str());
-    assert!(matches!(**problem, StoreError::Bound { .. }), "{problem:?}");
+    let StoreError::Bound { what, .. } = &**problem else {
+        panic!("the nesting depth was not refused as a bound: {problem:?}");
+    };
+    assert!(what.contains("nesting"), "{what}");
     // Nothing was written, and the changeset freed what it was refusing rather
     // than leaking it past the error.
     assert_eq!(
@@ -657,10 +660,10 @@ fn a_document_whose_numbers_do_not_add_up_is_refused() {
         let StoreError::Entry { problem, .. } = &error else {
             panic!("the refusal does not say which entry it came from: {error:?}");
         };
-        assert!(
-            matches!(**problem, StoreError::Bound { .. }),
-            "body_offset {body_offset} and byte_length {byte_length}: {problem:?}"
-        );
+        let StoreError::Bound { what, .. } = &**problem else {
+            panic!("body_offset {body_offset} and byte_length {byte_length}: {problem:?}");
+        };
+        assert!(what.contains("byte length"), "{what}");
     }
 
     assert_eq!(

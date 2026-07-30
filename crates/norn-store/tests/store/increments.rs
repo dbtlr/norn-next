@@ -473,10 +473,23 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
         ],
     );
     // One finding per subject, all in the same class — a class none of the
-    // changeset's own paths is in, so only the subject axis can reach them.
+    // changeset's own paths is in, so only the subject axis can reach them. The
+    // one about `about/to/die.md` carries candidate rows, so its subject discard
+    // also pins the finding_candidates FK cascade.
     for at in ["re/derived.md", "about/to/die.md", "untouched.md"] {
+        let finding = if at == "about/to/die.md" {
+            ambiguity(
+                at,
+                "glossary",
+                "glossary/",
+                &["a/glossary.md", "b/glossary.md"],
+                2,
+            )
+        } else {
+            ambiguity(at, "glossary", "glossary/", &[], 3)
+        };
         request
-            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 3))
+            .record_finding(&finding)
             .expect("recording a finding");
     }
     // And one that is in no class at all, about a path the changeset names.

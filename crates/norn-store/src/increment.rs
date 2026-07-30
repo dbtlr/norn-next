@@ -2,15 +2,9 @@
 //! and the tally it reports.
 //!
 //! The contract — atomicity, the one generation, the ordering rule, the findings
-//! maintenance folded in and what a streamed changeset costs — is stated at
-//! [`crate::Request::apply_increment`], which is where a caller meets it. This
-//! module is how it is carried out, and the recovery half of the rung-2 story
-//! belongs here: what a torn changeset leaves behind is the previous generation,
-//! whole, because a transaction that never committed rolls back with the process
-//! that died in it. Nothing partial is ever at rest, so there is nothing to
-//! detect and nothing to repair — the work the tear lost comes back the way any
-//! unapplied work does, through the attach heal comparing content hashes and
-//! finding the store's copy stale.
+//! maintenance folded in, the rung-2 recovery story and what a streamed
+//! changeset costs — is stated at [`crate::Request::apply_increment`], which is
+//! where a caller meets it. This module is how it is carried out.
 
 use std::collections::BTreeSet;
 
@@ -133,11 +127,6 @@ pub struct IncrementOutcome {
 pub(crate) fn apply(
     store: &mut Store,
     counters: &mut DerivationCounters,
-    // The changeset's mark, which nothing below reads. It selects no statement
-    // and no branch — the store composes supplied facts and re-derives nothing
-    // under either mark — and what it binds is how the counter reading this
-    // function moves is judged. See [`IncrementProvenance`].
-    _provenance: IncrementProvenance,
     changes: impl IntoIterator<Item = Change>,
 ) -> Result<IncrementOutcome, StoreError> {
     // The first entry is what decides whether there is an act at all, so it is
@@ -555,9 +544,9 @@ fn refuse_a_document_that_does_not_add_up(facts: &DocumentFacts) -> Result<(), S
     }
     let widest = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
     Err(StoreError::Bound {
-        what: "a document's byte length, against the body offset and body accounting for it",
-        limit: widest(facts.byte_length),
-        given: widest(accounted),
+        what: "the byte length a document's body offset and body account for",
+        limit: widest(accounted),
+        given: widest(facts.byte_length),
     })
 }
 
