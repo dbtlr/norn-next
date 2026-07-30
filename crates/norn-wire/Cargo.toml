@@ -1,6 +1,6 @@
 [package]
 name = "norn-wire"
-description = "The vocabulary — request params, reports, typed plans, findings and trust states as pure wire types"
+description = "The vocabulary — trust states and the structured error envelope as pure wire types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

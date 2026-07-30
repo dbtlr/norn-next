@@ -1,17 +1,20 @@
 #![forbid(unsafe_code)]
 //! The vocabulary. Pure types: no I/O, no logic.
 //!
-//! Request params, reports, typed plans, findings and trust states are defined
-//! here exactly once, and every surface is a derived rendering of them: CLI
-//! flags, MCP tool schemas and HTTP payloads render these types and never
-//! define vocabulary of their own. The crate links nothing else in the
-//! workspace and reaches no filesystem, no database and no socket — a type in
-//! here can be constructed, serialized and compared, and that is the whole of
-//! what it does.
+//! What crosses the client/host seam is defined here exactly once, and every
+//! surface is a derived rendering of it: CLI flags, MCP tool schemas and HTTP
+//! payloads render these types and never define vocabulary of their own. The
+//! crate links nothing else in the workspace and reaches no filesystem, no
+//! database and no socket — a type in here can be constructed, serialized and
+//! compared, and that is the whole of what it does.
 //!
-//! Nothing crosses the client/host seam that is not a type from here. There is
-//! no untyped JSON value in any signature and no JSON-in-a-string; a payload
-//! that cannot be spelled as a type here does not cross.
+//! What is defined here today is where a vault entry stands — [`TrustState`]
+//! and the [`UntrustedReason`] it carries — and the one shape a refusal takes:
+//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`].
+//!
+//! Nothing crosses the seam that is not a type from here. There is no untyped
+//! JSON value in any signature and no JSON-in-a-string; a payload that cannot
+//! be spelled as a type here does not cross.
 //!
 //! # Derive discipline
 //!
@@ -30,28 +33,54 @@
 //! reader has to enumerate keys to learn what it is holding and a new variant
 //! changes the object's shape rather than one field's value. The tag names are
 //! part of the wire: [`TrustState`] is tagged `state`, [`UntrustedReason`] is
-//! tagged `kind`, and [`ErrorDetail`] is tagged `code`. A code list such as
-//! [`ReasonCode`] carries no data and is a flat string.
+//! tagged `kind`, and [`ErrorDetail`] is tagged `code`.
+//!
+//! **A tagged enum's variants are struct-shaped.** Internal tagging merges the
+//! tag into the variant's own map, so a newtype variant fails at serialize
+//! time while schemars advertises a schema saying it works: the break arrives
+//! at runtime, against a shape a consumer was told to expect. A variant that
+//! carries data names its fields.
+//!
+//! **A tagged object or a flat string** is decided by whether the variants
+//! carry data. A closed vocabulary whose members carry nothing is a flat
+//! string, as [`ReasonCode`] is; an enum whose variants may carry a payload is
+//! a tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
+//! are. The flat string keeps a code matchable as a value; the tagged object
+//! keeps a payload's arrival from changing what the value is.
+//!
+//! **Doc comments on a type, a variant or a field are published.** schemars
+//! lifts them verbatim into the schema `description`s an MCP consumer reads,
+//! so they carry wire documentation and nothing else: no Rust intralinks, no
+//! maintainer rationale, no narration of shapes the type does not have.
+//! Rationale belongs in module documentation such as this, which schemars does
+//! not lift.
+//!
+//! # Extension, and what a version skew does
 //!
 //! Public enums are `#[non_exhaustive]`, and so is [`ErrorEnvelope`], which
-//! extends by gaining fields. `#[non_exhaustive]` binds across crates, so a
-//! type consumers cannot write as a literal carries a constructor —
-//! [`ErrorEnvelope::new`] is the one such type today.
+//! extends by gaining a field. A variant that carries a payload is
+//! `#[non_exhaustive]` in its own right, so the payload extends by gaining a
+//! field too rather than by breaking every caller that destructured it.
+//! `#[non_exhaustive]` binds across crates, so a shape consumers cannot write
+//! as a literal carries a constructor: [`ErrorEnvelope::new`],
+//! [`TrustState::warming`], [`TrustState::untrusted`],
+//! [`UntrustedReason::environmental_refusal`] and
+//! [`ErrorDetail::entry_untrusted`].
+//!
+//! **A struct tolerates a field it does not know; an enum refuses a variant it
+//! does not know.** A reader drops an unknown field, so a writer that gained
+//! one is still read by a reader that has not. A reader handed a tag or a code
+//! string it does not know fails the read instead: there is no
+//! `#[serde(other)]` catch-all anywhere in the vocabulary, because a variant
+//! nobody can interpret is a refusal to parse rather than a value to pass on
+//! degraded.
 //!
 //! # Minting a reason code
 //!
-//! [`ReasonCode`] is a Rust enum rather than a set of string constants, and it
-//! holds exactly one code: `host/entry-untrusted`. **A code is minted by the
-//! task that brings the mechanism producing it** — the content-addressed
-//! store, the filesystem seam, the derived store and the embedding runtime
-//! each mint theirs when they land, together with the typed detail that code
-//! carries. A code minted ahead of its producer describes a refusal nothing
-//! can emit, and a code list nobody can exercise drifts from what the system
-//! actually refuses with.
-//!
-//! Each code pairs with one [`ErrorDetail`] variant, and the pairing is the
-//! shape rather than a convention: the detail's wire tag *is* the code string,
-//! and [`ErrorDetail::code`] hands back the code the detail belongs to.
+//! [`ReasonCode`] holds one code today, `host/entry-untrusted`, and each code
+//! pairs with exactly one [`ErrorDetail`] variant: the detail's wire tag *is*
+//! the code string, and [`ErrorDetail::code`] hands back the code the detail
+//! belongs to.
 
 mod error;
 mod trust;

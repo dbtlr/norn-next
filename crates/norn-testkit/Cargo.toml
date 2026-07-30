@@ -11,13 +11,10 @@ publish.workspace = true
 # size-independence pair is run at. `libc` is the child-process accounting the
 # process harness reads its peak resident set from.
 #
-# `norn-wire` is the workspace vocabulary, and the dependency allowlist
-# (docs/architecture.md) carries `norn-testkit -> norn-wire`. The architecture
-# gate requires every permitted edge whose two endpoints are both present, so
-# the edge is declared here rather than discovered later by an import. No
-# helper in this crate reads a wire type today: the assertions that state their
-# subjects in the vocabulary are the counter, EXPLAIN and induced-failure ones,
-# and each lands with the crate whose behavior it measures.
+# The dependency allowlist (docs/architecture.md) carries `norn-testkit ->
+# norn-wire` and the architecture gate requires every permitted edge whose two
+# endpoints are both present, so the edge is declared here. Nothing in this
+# crate imports it yet.
 [dependencies]
 libc = { workspace = true }
 norn-fixtures = { path = "../norn-fixtures" }
