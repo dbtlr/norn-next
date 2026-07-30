@@ -44,9 +44,9 @@
 //! # Full candidate enumeration is a query, and it is indexed
 //!
 //! The head is a head *because* the full list stays reachable. It is not a
-//! table: it is a range scan over `documents(suffix_key)` keyed by the
-//! finding's `class_key`, which costs the class rather than the vault and
-//! returns the class as it stands rather than as it stood.
+//! table: it is a range scan over `documents(suffix_key)` keyed by a class the
+//! finding is in, which costs the class rather than the vault and returns the
+//! class as it stands rather than as it stood.
 //!
 //! # Ambiguity classes, and why maintenance is scoped by class
 //!
@@ -67,21 +67,43 @@
 //! - A document's class key is its `stem` followed by a separator —
 //!   `docs/norn/glossary.md` gives `glossary/` — and every suffix target that
 //!   can address it is a prefix of its `suffix_key`, `glossary/norn/docs/`.
-//! - A finding's `class_key` is the same form built from the target it is
-//!   about: `[[glossary]]` gives `glossary/`, `[[norn/glossary]]` gives
-//!   `glossary/norn/`.
-//! - So the findings a changed path affects are the ones whose `class_key`
-//!   starts with that path's class key — one prefix range over
-//!   `findings(class_key)` — and the candidates of each are one prefix range
-//!   over `documents(suffix_key)`. Both bounds come from
-//!   [`crate::path::class_probe`].
+//! - A finding's classes are the same form built from the target it is about,
+//!   one per reduction of that target: `[[glossary]]` gives `glossary/`,
+//!   `[[norn/glossary]]` gives `glossary/norn/`, `[[v1.2]]` gives `v1.2/` *and*
+//!   `v1/`. They are rows in `finding_classes`, one per pair.
+//! - So the findings a changed path affects are the ones holding a class key
+//!   that path's class key prefixes — one prefix range over
+//!   `finding_classes(class_key)`, joined back by finding id — and the
+//!   candidates of each are one prefix range over `documents(suffix_key)`. Both
+//!   bounds come from [`crate::path::class_probe`].
 //!
 //! The class range is **correct in the no-miss direction, and a superset**: a
-//! probe of one class key opens every finding whose class key it prefixes, so
+//! probe of one class key opens every finding holding a class key it prefixes, so
 //! nothing a change can invalidate is missed, and a longer-suffix finding in the
 //! same class — `[[norn/glossary]]` under `glossary/` — is read even where that
 //! particular change cannot have reached it. Re-deciding a finding that was
 //! already right is cheap; missing one is a stale finding nothing revisits.
+//!
+//! # Membership is a set, because the two reductions are disjoint
+//!
+//! A written target whose leaf carries a dot reduces both ways and reads both
+//! ranges, and those ranges do not nest: `.` is `0x2e` and `/` is `0x2f`, so
+//! under `BINARY` collation `notes.tar/` sorts *before* `notes/` rather than
+//! inside it. A single-valued class column could therefore hold only one of the
+//! two, and the no-miss direction would be false for every finding about such a
+//! target — a finding about `notes.tar` filed under `notes/` alone is invisible
+//! to the class `archive/notes.tar.gz` is in, and a finding about `v1.2` filed
+//! under `v1/` alone is invisible to the class `notes/v1.2.md` is in. Both are
+//! findings that no maintenance ever revisits, which is exactly what class
+//! scoping exists to prevent.
+//!
+//! So `finding_classes` holds one row per `(finding, class)` pair, and a finding
+//! is reached through **any** class it is in. The rows cascade from the finding,
+//! so a class discard takes the whole finding — its other memberships included —
+//! and the read side asks for each finding once however many of its classes a
+//! probe opens. `finding_classes_class_key` is the index the class direction
+//! seeks through; the primary key is the finding direction, and being `WITHOUT
+//! ROWID` is what makes the pair the row rather than a payload beside one.
 //!
 //! A tombstone keeps the same class computable for the same reason: a deletion
 //! changes a class, and the class has to stay derivable after the document row
@@ -89,13 +111,13 @@
 //! recomputed from the path, which is how the tombstone is read in the first
 //! place.
 //!
-//! `class_key` is nullable, because not every finding is about resolution. A
-//! finding about a frontmatter field violating the vault schema has no
-//! ambiguity class, and giving it a synthetic one would put it in the blast
-//! radius of every rename that shared a stem with it. Where it is present it is
-//! a validated [`crate::ClassKey`]: a class key that is not
-//! separator-terminated names a range no probe opens, so the finding would be
-//! at rest and permanently invisible to the maintenance that owns it.
+//! A finding's class set may be **empty**, because not every finding is about
+//! resolution. A finding about a frontmatter field violating the vault schema has
+//! no ambiguity class, so it has no row here at all, and giving it a synthetic one
+//! would put it in the blast radius of every rename that shared a stem with it.
+//! Every key that is present is a validated [`crate::ClassKey`]: a class key that
+//! is not separator-terminated names a range no probe opens, so the finding would
+//! be at rest and permanently invisible to the maintenance that owns it.
 //!
 //! # Findings outlive their subject, and the class owns their lifecycle
 //!
@@ -103,9 +125,10 @@
 //! be: the finding a resolution failure produces is about a path no document
 //! has, and a class is invalidated by documents joining or leaving it rather
 //! than by the document that cited it changing. So nothing here references
-//! `documents`, and no delete cascades into this table — a finding whose subject
-//! was deleted is exactly as live as one whose subject was never there, and both
-//! are resolved the same way.
+//! `documents` and no document delete reaches a finding — one whose subject was
+//! deleted is exactly as live as one whose subject was never there, and both are
+//! resolved the same way. The cascades that do exist run the other way, from a
+//! finding to the candidate and class rows that are parts of it.
 //!
 //! The way is class-scoped maintenance, in both directions:
 //! [`crate::Request::findings_in_class`] reads the class and
@@ -140,7 +163,6 @@ const STATEMENTS: &[&str] = &[
     kind                     TEXT    NOT NULL,
     severity                 TEXT    NOT NULL,
     path                     TEXT    NOT NULL,
-    class_key                TEXT,
     target                   TEXT,
     span_line                INTEGER,
     span_column              INTEGER,
@@ -151,9 +173,14 @@ const STATEMENTS: &[&str] = &[
     CHECK ((span_line IS NULL) = (span_column IS NULL)
        AND (span_line IS NULL) = (span_offset IS NULL))
 )",
-    "CREATE INDEX findings_class_key ON findings(class_key)",
     "CREATE INDEX findings_path ON findings(path)",
     "CREATE INDEX findings_vault_schema_fingerprint ON findings(vault_schema_fingerprint)",
+    "CREATE TABLE finding_classes (
+    finding   INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    class_key TEXT    NOT NULL,
+    PRIMARY KEY (finding, class_key)
+) WITHOUT ROWID",
+    "CREATE INDEX finding_classes_class_key ON finding_classes(class_key)",
 ];
 
 /// The bounded head, with its rank bound taken from the constant the API states

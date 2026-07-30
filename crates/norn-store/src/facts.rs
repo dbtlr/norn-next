@@ -31,6 +31,8 @@
 //! tree and comes back as the canonical JSON text it projected to, because that
 //! projection does not run backwards. See [`crate::json`].
 
+use std::collections::BTreeSet;
+
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath};
 
@@ -355,10 +357,16 @@ pub struct FindingFacts {
     pub severity: String,
     /// The path the finding is about, whether or not a document is stored there.
     pub path: DocumentPath,
-    /// The ambiguity class this finding is maintained by, or `None` for a
-    /// finding that is not about resolution. A validated key, because a class key
-    /// no probe's range opens is a finding no maintenance ever revisits.
-    pub class_key: Option<ClassKey>,
+    /// Every ambiguity class this finding is maintained by, which is
+    /// [`crate::SuffixProbe::class_keys`] for the probe it was read from — one
+    /// class per reduction of the target, and empty for a finding that is not
+    /// about resolution at all.
+    ///
+    /// A set rather than one key, because a target's two reductions are two
+    /// disjoint classes and a finding filed under only one of them is invisible to
+    /// maintenance that names the other. Validated keys, because a key no probe's
+    /// range opens is the same invisibility by another route.
+    pub class_keys: BTreeSet<ClassKey>,
     /// The resolution target, as written.
     pub target: Option<String>,
     pub span: Option<Span>,
@@ -388,7 +396,9 @@ pub struct StoredFinding {
     pub kind: String,
     pub severity: String,
     pub path: DocumentPath,
-    pub class_key: Option<ClassKey>,
+    /// Every ambiguity class the finding is in, and empty for a finding that is
+    /// not about resolution. Any one of them reaches it.
+    pub class_keys: BTreeSet<ClassKey>,
     pub target: Option<String>,
     pub span: Option<Span>,
     pub candidates: Vec<CandidateFact>,

@@ -5,13 +5,14 @@
 //! Reading and writing files beside a store belongs to the lifecycle suite, which
 //! is the only one that judges the file, so those helpers live there.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_store::{
     BlockFact, CandidateFact, ClassKey, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, LinkFact, LinkFamily, Span, Store, TagFact, TagSource,
-    VectorFacts,
+    VectorFacts, suffix_probe,
 };
 
 /// Distinguishes two scratch directories taken in the same process.
@@ -62,6 +63,11 @@ pub fn path(text: &str) -> DocumentPath {
 /// A class key, or a panic naming what was wrong with it.
 pub fn class(text: &str) -> ClassKey {
     ClassKey::new(text).unwrap_or_else(|problem| panic!("`{text}` is a class key: {problem}"))
+}
+
+/// A set of class keys, which is what a finding's membership is.
+pub fn classes(texts: &[&str]) -> BTreeSet<ClassKey> {
+    texts.iter().copied().map(class).collect()
 }
 
 pub fn span(line: u64, column: u64, byte_offset: u64) -> Span {
@@ -163,8 +169,8 @@ pub fn document_with_every_fact(text: &str, hash: &str) -> DocumentFacts {
     facts
 }
 
-/// An ambiguity finding over `target`, with `candidates` as its bounded head out
-/// of `total`.
+/// An ambiguity finding over `target`, in the one class `class_key` names, with
+/// `candidates` as its bounded head out of `total`.
 pub fn ambiguity(
     at: &str,
     target: &str,
@@ -172,11 +178,26 @@ pub fn ambiguity(
     candidates: &[&str],
     total: u64,
 ) -> FindingFacts {
+    let mut finding = ambiguity_for_target(at, target, candidates, total);
+    finding.class_keys = classes(&[class_key]);
+    finding
+}
+
+/// The same finding with its classes taken from the probe `target` opens, which
+/// is how a resolution reading mints them: one class per reduction.
+pub fn ambiguity_for_target(
+    at: &str,
+    target: &str,
+    candidates: &[&str],
+    total: u64,
+) -> FindingFacts {
     FindingFacts {
         kind: "resolution/ambiguous-target".to_string(),
         severity: "warning".to_string(),
         path: path(at),
-        class_key: Some(class(class_key)),
+        class_keys: suffix_probe(target)
+            .unwrap_or_else(|problem| panic!("`{target}` is a suffix target: {problem}"))
+            .class_keys(),
         target: Some(target.to_string()),
         span: Some(span(2, 1, 10)),
         candidates: candidates
@@ -198,7 +219,7 @@ pub fn violation(at: &str) -> FindingFacts {
         kind: "schema/field-missing".to_string(),
         severity: "error".to_string(),
         path: path(at),
-        class_key: None,
+        class_keys: BTreeSet::new(),
         target: None,
         span: None,
         candidates: Vec::new(),

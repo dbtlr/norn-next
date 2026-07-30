@@ -51,6 +51,8 @@
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
 //! compose these primitives rather than re-spelling the ranges.
 
+use std::collections::BTreeSet;
+
 use rusqlite::{OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter};
 
 use crate::counters::{Counter, DerivationCounters};
@@ -71,7 +73,7 @@ type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 
 /// The columns every finding reader selects, in the order [`stored_finding`]
 /// reads them.
-const FINDING_COLUMNS: &str = "id, kind, severity, path, class_key, target, span_line, span_column,
+const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span_column,
             span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation";
 
 /// One request's worth of work against a store.
@@ -375,6 +377,11 @@ impl<'a> Request<'a> {
     /// [`CANDIDATE_HEAD`], and one longer than the total it claims to be the head
     /// of. The total is what makes the head a head, so a total below the head's
     /// own length describes no vault.
+    ///
+    /// **Every class the finding is in is written**, one `finding_classes` row
+    /// each, because a target's reductions are disjoint classes and a finding
+    /// filed under one of them is invisible to the other's maintenance. A finding
+    /// that is not about resolution carries no class and writes no such row.
     pub fn record_finding(&mut self, finding: &FindingFacts) -> Result<(), StoreError> {
         if finding.candidates.len() > CANDIDATE_HEAD {
             return Err(StoreError::Bound {
@@ -402,10 +409,9 @@ impl<'a> Request<'a> {
         let id: i64 = transaction
             .query_row(
                 "INSERT INTO findings (
-                     vault_schema_fingerprint, generation, kind, severity, path, class_key,
-                     target, span_line, span_column, span_offset, candidates_total, message,
-                     detail
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     vault_schema_fingerprint, generation, kind, severity, path, target,
+                     span_line, span_column, span_offset, candidates_total, message, detail
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  RETURNING id",
                 params![
                     fingerprint,
@@ -413,7 +419,6 @@ impl<'a> Request<'a> {
                     finding.kind,
                     finding.severity,
                     finding.path.as_str(),
-                    finding.class_key.as_ref().map(ClassKey::as_str),
                     finding.target,
                     finding.span.map(|span| span.line),
                     finding.span.map(|span| span.column),
@@ -445,6 +450,17 @@ impl<'a> Request<'a> {
             }
         }
 
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO finding_classes (finding, class_key) VALUES (?1, ?2)")
+                .map_err(|error| error::sql("preparing a finding class write", error))?;
+            for class_key in &finding.class_keys {
+                insert
+                    .execute(params![id, class_key.as_str()])
+                    .map_err(|error| error::sql("writing a finding's class", error))?;
+            }
+        }
+
         transaction
             .commit()
             .map_err(|error| error::sql("committing a finding", error))?;
@@ -463,12 +479,19 @@ impl<'a> Request<'a> {
     /// this call followed by a [`Request::record_finding`] for each finding that
     /// holds now, so two derivations of one class cannot leave two copies and
     /// there is no dedupe rule for a caller to keep.
+    ///
+    /// A finding in more than one class goes **whole**: the membership row this
+    /// range matched identifies the finding, and deleting the finding takes its
+    /// other memberships with it. The count is findings rather than rows, because
+    /// a cascade is not what `changes()` reports.
     pub fn discard_findings_in_class(
         &mut self,
         probe: &SuffixProbe,
     ) -> Result<Invalidation, StoreError> {
         let sql = format!(
-            "DELETE FROM findings WHERE {}",
+            "DELETE FROM findings WHERE id IN (
+                 SELECT finding FROM finding_classes WHERE {}
+             )",
             range_predicate("class_key", probe.range_count())
         );
         let discarded = self
@@ -770,14 +793,20 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// Every finding whose ambiguity class the probe opens.
+    /// Every finding belonging to an ambiguity class the probe opens.
     ///
     /// This is what scopes findings maintenance: a changed path names a class,
-    /// and the findings a change to it can invalidate are exactly the ones in
-    /// this range. The read is **correct in the no-miss direction and a
-    /// superset**: a longer-suffix finding in the same class is read even where
-    /// the particular change cannot have reached it, which costs a re-decision
-    /// rather than a stale finding nothing revisits.
+    /// and the findings a change to it can invalidate are exactly the ones with a
+    /// membership row in this range. A finding belongs to one class per reduction
+    /// of the target it is about, and **any** of them reaches it — which is what
+    /// makes the no-miss direction true for a target whose two reductions are
+    /// disjoint classes. A finding in two of the probe's own classes still comes
+    /// back once.
+    ///
+    /// The read is **correct in the no-miss direction and a superset**: a
+    /// longer-suffix finding in the same class is read even where the particular
+    /// change cannot have reached it, which costs a re-decision rather than a
+    /// stale finding nothing revisits.
     pub fn findings_in_class(&self, probe: &SuffixProbe) -> Result<Vec<StoredFinding>, StoreError> {
         self.findings(
             &findings_in_class_sql(probe.range_count()),
@@ -841,11 +870,12 @@ impl<'a> Request<'a> {
 
     // ---- readers ----
 
-    /// The findings one statement selects, each with the head of its candidates.
+    /// The findings one statement selects, each with the head of its candidates
+    /// and the set of classes it is in.
     ///
-    /// The candidates come back in **one** further statement for the whole set
-    /// rather than one per finding, so reading a class costs two round trips
-    /// whatever the class holds.
+    /// The candidates and the classes come back in **one** further statement each
+    /// for the whole set rather than one per finding, so reading a class costs
+    /// three round trips whatever the class holds.
     fn findings(
         &self,
         sql: &str,
@@ -869,6 +899,15 @@ impl<'a> Request<'a> {
             stored_candidate,
             "reading a finding's candidates",
         )?;
+        let classes = self.read_all(
+            &format!(
+                "SELECT finding, class_key FROM finding_classes
+                 WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
+            ),
+            params_from_iter(ids.iter()),
+            stored_class,
+            "reading a finding's classes",
+        )?;
 
         let mut findings: Vec<StoredFinding> = Vec::with_capacity(found.len());
         let mut positions = std::collections::HashMap::with_capacity(found.len());
@@ -879,6 +918,11 @@ impl<'a> Request<'a> {
         for (finding, candidate) in candidates {
             if let Some(position) = positions.get(&finding) {
                 findings[*position].candidates.push(candidate);
+            }
+        }
+        for (finding, class_key) in classes {
+            if let Some(position) = positions.get(&finding) {
+                findings[*position].class_keys.insert(class_key);
             }
         }
         Ok(findings)
@@ -957,9 +1001,15 @@ fn suffix_candidates_sql(ranges: usize) -> String {
 
 /// The statement [`Request::findings_in_class`] emits for a probe of `ranges`
 /// ranges.
+///
+/// The membership rows are read through their own index and the findings are
+/// reached by row id, which is why a finding in two of the probe's classes comes
+/// back once rather than twice and why the `id` order needs no sorter.
 fn findings_in_class_sql(ranges: usize) -> String {
     format!(
-        "SELECT {FINDING_COLUMNS} FROM findings WHERE {} ORDER BY class_key, id",
+        "SELECT {FINDING_COLUMNS} FROM findings
+         WHERE id IN (SELECT finding FROM finding_classes WHERE {})
+         ORDER BY id",
         range_predicate("class_key", ranges)
     )
 }
@@ -1030,27 +1080,20 @@ fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {
     }))
 }
 
-/// A finding and its row id, which is what its candidates are read by.
+/// A finding and its row id, which is what its candidates and its classes are
+/// read by.
 fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
     let id: i64 = row.get(0)?;
     let kind: String = row.get(1)?;
     let severity: String = row.get(2)?;
     let path: String = row.get(3)?;
-    let written_class: Option<String> = row.get(4)?;
-    let target: Option<String> = row.get(5)?;
-    let span = optional_span(row, 6)?;
-    let candidates_total: u64 = row.get(9)?;
-    let message: String = row.get(10)?;
-    let detail: Option<String> = row.get(11)?;
-    let vault_schema_fingerprint: String = row.get(12)?;
-    let generation: i64 = row.get(13)?;
-    let class_key = match written_class {
-        None => None,
-        Some(written) => match ClassKey::new(&written) {
-            Ok(class_key) => Some(class_key),
-            Err(_) => return Ok(Err(unreadable("findings.class_key", &written))),
-        },
-    };
+    let target: Option<String> = row.get(4)?;
+    let span = optional_span(row, 5)?;
+    let candidates_total: u64 = row.get(8)?;
+    let message: String = row.get(9)?;
+    let detail: Option<String> = row.get(10)?;
+    let vault_schema_fingerprint: String = row.get(11)?;
+    let generation: i64 = row.get(12)?;
     Ok(DocumentPath::new(&path).map(|path| {
         (
             id,
@@ -1058,7 +1101,7 @@ fn stored_finding(row: &Row<'_>) -> Reading<(i64, StoredFinding)> {
                 kind,
                 severity,
                 path,
-                class_key,
+                class_keys: BTreeSet::new(),
                 target,
                 span,
                 candidates: Vec::new(),
@@ -1078,6 +1121,20 @@ fn stored_candidate(row: &Row<'_>) -> Reading<(i64, CandidateFact)> {
     let path: String = row.get(1)?;
     let suffix: String = row.get(2)?;
     Ok(DocumentPath::new(&path).map(|path| (finding, CandidateFact { path, suffix })))
+}
+
+/// A class and the finding that belongs to it.
+///
+/// The key is read back through [`ClassKey::new`] rather than trusted: a stored
+/// key that no probe opens is a finding at rest, so it is damage rather than a
+/// value to hand on.
+fn stored_class(row: &Row<'_>) -> Reading<(i64, ClassKey)> {
+    let finding: i64 = row.get(0)?;
+    let written: String = row.get(1)?;
+    Ok(match ClassKey::new(&written) {
+        Ok(class_key) => Ok((finding, class_key)),
+        Err(_) => Err(unreadable("finding_classes.class_key", &written)),
+    })
 }
 
 fn stored_link(row: &Row<'_>) -> Reading<LinkFact> {

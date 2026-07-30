@@ -7,7 +7,8 @@
 //! fingerprint that a schema edit invalidates by.
 
 use crate::common::{
-    Scratch, ambiguity, class, document, document_with_every_fact, path, vector, violation,
+    Scratch, ambiguity, ambiguity_for_target, class, classes, document, document_with_every_fact,
+    path, vector, violation,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, ProbeReader, Provenance, StoreError, class_probe,
@@ -307,7 +308,7 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
     assert_eq!(stored.kind, finding.kind);
     assert_eq!(stored.severity, finding.severity);
     assert_eq!(stored.target.as_deref(), Some("glossary"));
-    assert_eq!(stored.class_key, Some(class("glossary/")));
+    assert_eq!(stored.class_keys, classes(&["glossary/"]));
     assert_eq!(stored.span, finding.span);
     assert_eq!(stored.candidates, finding.candidates);
     assert_eq!(stored.candidates.len(), CANDIDATE_HEAD);
@@ -602,9 +603,9 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
     );
     findings.assert_no_full_scan_of("findings");
     findings.assert_searches("findings");
-    findings.assert_uses_index("findings_class_key");
-    // The findings direction sorts by the key it searched and the rowid behind
-    // it, so the index answers the order too.
+    findings.assert_uses_index("finding_classes_class_key");
+    // The class direction seeks the membership index and reaches each finding by
+    // row id, which is the order the reader states — so nothing sorts.
     findings.assert_no_temp_btree();
 
     // A two-reduction probe is two seeks rather than one wider read.
@@ -625,6 +626,30 @@ fn both_probe_readers_search_the_index_the_probe_opens() {
         2,
         "a two-reduction probe did not open two ranges: {:?}",
         two.rows()
+    );
+
+    // **The candidates direction sorts through a temporary B-tree, and that is
+    // the stated baseline.** Its order is total — `suffix_key` then `path` — and
+    // `documents_suffix_key` leads with `suffix_key` alone, so the index answers
+    // the range and not the tie-break. Widening the index is the only way to
+    // retire the sorter, and the reader that would justify the wider index is the
+    // read builders' rather than this crate's.
+    let sorters: Vec<&PlanRow> = candidates
+        .rows()
+        .iter()
+        .filter(|row| row.detail.contains("TEMP B-TREE"))
+        .collect();
+    assert_eq!(
+        sorters.len(),
+        1,
+        "the candidates direction no longer sorts through exactly one temporary B-tree, so \
+         the baseline this bar states has moved: {:?}",
+        candidates.rows()
+    );
+    assert!(
+        sorters[0].detail.contains("ORDER BY"),
+        "the sorter is not the ladder's own order: {:?}",
+        sorters[0]
     );
 }
 
@@ -697,9 +722,160 @@ fn findings_are_reachable_by_the_ambiguity_class_a_change_affects() {
     assert!(
         by_path
             .iter()
-            .any(|finding| finding.class_key.is_none() && finding.candidates.is_empty())
+            .any(|finding| finding.class_keys.is_empty() && finding.candidates.is_empty())
     );
     assert_eq!(request.counters().get("findings_written"), Some(5));
+}
+
+/// **A finding belongs to every class its target's reductions read, and any one of
+/// them reaches it.** The two reductions are disjoint rather than nested — `.` is
+/// `0x2e` and `/` is `0x2f`, so `notes.tar/` sorts before `notes/` — so a finding
+/// filed under one class alone would be invisible to maintenance that named the
+/// other: a finding nothing ever revisits, which is the hazard class scoping
+/// exists to close.
+#[test]
+fn a_finding_is_reachable_and_discardable_through_every_class_it_is_in() {
+    // The byte order the hazard is made of, stated where it is relied on.
+    assert!("notes.tar/" < "notes/", "`.` does not sort before `/`");
+    assert!(
+        !"notes.tar/".starts_with("notes/"),
+        "the reductions nest after all"
+    );
+
+    for (target, at) in [
+        // The flagship pair: the written target reduces one way, the document it
+        // resolves to is in the class the *other* reduction names.
+        ("v1.2", "notes/v1.2.md"),
+        ("notes.tar", "archive/notes.tar.gz"),
+        ("notes.tar.gz", "archive/notes.tar.gz"),
+        // And a target with one reduction, which is one class and unchanged.
+        ("glossary", "docs/glossary.md"),
+    ] {
+        let scratch = Scratch::new("two-reduction");
+        let mut store = scratch.open();
+        let mut request = store.begin_request();
+        let subject = path(at);
+        let probe = suffix_probe(target).expect("a suffix target");
+        request
+            .upsert_document(&document(subject.as_str(), "hash-1", "a body\n"))
+            .expect("writing a document");
+        assert!(
+            request
+                .suffix_candidates(&probe)
+                .expect("reading candidates")
+                .contains(&subject),
+            "`{target}` does not resolve to `{at}`"
+        );
+
+        // The finding is recorded from the probe, as a resolution reading mints
+        // it, and a schema violation with no class sits beside it.
+        request
+            .record_finding(&ambiguity_for_target("docs/index.md", target, &[at], 1))
+            .expect("recording a finding");
+        request
+            .record_finding(&violation("docs/index.md"))
+            .expect("recording a finding");
+
+        // The class the document is in is one of the finding's, which is what
+        // makes a change to that document reach it.
+        assert!(
+            probe.class_keys().contains(&subject.class_key()),
+            "a finding about `{target}` is not in the class `{at}` is in"
+        );
+        let stored = request
+            .findings_in_class(&class_probe(subject.stem()))
+            .expect("reading findings");
+        assert_eq!(
+            stored.len(),
+            1,
+            "a change to `{at}` does not reach the finding about `{target}`"
+        );
+        assert_eq!(stored[0].class_keys, probe.class_keys());
+
+        // So is every other class the target read, whichever reduction produced
+        // it, and each of them reads the finding once.
+        for key in probe.class_keys() {
+            let stem = key
+                .as_str()
+                .strip_suffix('/')
+                .expect("a class key is separator-terminated");
+            assert_eq!(
+                request
+                    .findings_in_class(&class_probe(stem))
+                    .expect("reading findings")
+                    .len(),
+                1,
+                "the class `{}` does not reach the finding about `{target}`",
+                key.as_str()
+            );
+        }
+
+        // And the discard verb reaches it through the document's class, taking the
+        // whole finding — every membership row it had included, so no other class
+        // still holds it and nothing is left referencing a finding that is gone.
+        let invalidation = request
+            .discard_findings_in_class(&class_probe(subject.stem()))
+            .expect("discarding a class");
+        assert_eq!(
+            invalidation.findings_discarded, 1,
+            "re-deriving the class of `{at}` discarded nothing"
+        );
+        for key in probe.class_keys() {
+            let stem = key.as_str().strip_suffix('/').expect("a class key");
+            assert!(
+                request
+                    .findings_in_class(&class_probe(stem))
+                    .expect("reading findings")
+                    .is_empty(),
+                "the finding survives in `{}` after its class was discarded",
+                key.as_str()
+            );
+        }
+
+        // The schema violation is in no class, so no class discard touches it.
+        let surviving = request
+            .stored_findings(&path("docs/index.md"))
+            .expect("reading findings");
+        assert_eq!(surviving.len(), 1, "the class-free finding went with it");
+        assert!(surviving[0].class_keys.is_empty());
+
+        request.finish();
+        store
+            .verify_integrity()
+            .expect("a store whose findings left through the class verb");
+    }
+}
+
+/// A finding in two of one probe's own classes is still one finding on both sides
+/// of maintenance: read once and discarded once. The unit is the finding, so a
+/// range that matched two membership rows has not found two findings.
+#[test]
+fn a_finding_in_two_of_a_probes_classes_is_read_and_counted_once() {
+    let scratch = Scratch::new("both-classes");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let probe = suffix_probe("v1.2").expect("a suffix target");
+    assert_eq!(probe.range_count(), 2);
+
+    request
+        .record_finding(&ambiguity_for_target("docs/index.md", "v1.2", &[], 2))
+        .expect("recording a finding");
+    assert_eq!(
+        request
+            .findings_in_class(&probe)
+            .expect("reading findings")
+            .len(),
+        1,
+        "a finding in both of the probe's classes came back twice"
+    );
+    assert_eq!(
+        request
+            .discard_findings_in_class(&probe)
+            .expect("discarding a class")
+            .findings_discarded,
+        1
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
 }
 
 /// The tombstone keeps a dead path's class reachable, which is what a deletion's

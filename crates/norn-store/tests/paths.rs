@@ -29,6 +29,16 @@ fn prefixes(target: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every ambiguity class a probe names, in the set's own order.
+fn class_keys(target: &str) -> Vec<String> {
+    suffix_probe(target)
+        .expect("a suffix target")
+        .class_keys()
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect()
+}
+
 /// The table from the encoding's own documentation, as cases.
 #[test]
 fn a_path_reverses_its_segments_and_drops_the_leaf_extension() {
@@ -221,15 +231,34 @@ fn a_class_key_is_the_stem_with_the_separator() {
         }
     }
 
-    // A probe names the class of its widest range, so a two-reduction target is
-    // maintained under the class both readings live in.
-    assert_eq!(
-        suffix_probe("glossary.md")
-            .expect("a suffix target")
-            .class_key()
-            .as_str(),
-        "glossary/"
-    );
+    // A probe names one class per reduction, and a two-reduction target names
+    // both: the reductions are disjoint rather than nested, because `.` (0x2e)
+    // sorts before `/` (0x2f), so neither range holds the other's keys and one key
+    // could not stand for both.
+    assert_eq!(class_keys("glossary"), vec!["glossary/"]);
+    assert_eq!(class_keys("glossary.md"), vec!["glossary.md/", "glossary/"]);
+    assert_eq!(class_keys("v1.2"), vec!["v1.2/", "v1/"]);
+    assert_eq!(class_keys("notes.tar"), vec!["notes.tar/", "notes/"]);
+    assert!("notes.tar/" < "notes/");
+    assert!(!"notes.tar/".starts_with("notes/"));
+
+    // The document each of those targets can resolve to is in one of the classes
+    // the target named, which is what makes a change to it reach a finding about
+    // the target.
+    for (target, at) in [
+        ("glossary.md", "docs/glossary.md"),
+        ("v1.2", "notes/v1.2.md"),
+        ("notes.tar", "archive/notes.tar.gz"),
+    ] {
+        let document = DocumentPath::new(at).expect("a document path");
+        assert!(
+            suffix_probe(target)
+                .expect("a suffix target")
+                .class_keys()
+                .contains(&document.class_key()),
+            "`{target}` does not name the class `{at}` is in"
+        );
+    }
 }
 
 /// **A class key is validated, because an unterminated one names a range no probe

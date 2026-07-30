@@ -241,6 +241,46 @@ fn the_candidate_rank_check_is_built_from_the_bound_the_api_states() {
     );
 }
 
+/// **A finding's ambiguity classes are rows, not a column.** A target whose leaf
+/// carries a dot reduces two ways, and the two prefixes are disjoint under
+/// `BINARY` — `notes.tar/` sorts before `notes/` — so a single-valued column could
+/// hold only one of them and the finding would be invisible to the class the other
+/// opens.
+#[test]
+fn a_findings_class_membership_is_a_set_of_rows() {
+    let declared = ddl::statements();
+    let findings = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE findings "))
+        .expect("the findings table");
+    assert!(
+        !findings.contains("class_key"),
+        "`findings` carries a single-valued class column: {findings}"
+    );
+
+    let membership = declared
+        .iter()
+        .find(|statement| statement.contains("CREATE TABLE finding_classes "))
+        .expect("the class membership table");
+    // One row per pair, and the pair is the row rather than a payload beside one.
+    assert!(
+        membership.contains("PRIMARY KEY (finding, class_key)")
+            && membership.contains("WITHOUT ROWID"),
+        "{membership}"
+    );
+    // A finding's memberships are parts of it, so they go when it goes.
+    assert!(
+        membership.contains("REFERENCES findings(id) ON DELETE CASCADE"),
+        "{membership}"
+    );
+    assert!(
+        declared
+            .iter()
+            .any(|statement| statement.contains("INDEX finding_classes_class_key ")),
+        "the class direction of findings maintenance has no index to seek through"
+    );
+}
+
 /// A nullable span triple is all three columns or none. The reader turns a
 /// partial triple into no span at all, so a row carrying one would be a position
 /// silently thrown away — the `CHECK` is what means the writer cannot make one.
@@ -306,9 +346,14 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The two that stay, because a statement in this build reads each: the
-    // resolution ladder's range, and the schema-key discard's two ranges.
-    for present in ["documents_suffix_key", "findings_vault_schema_fingerprint"] {
+    // The three that stay, because a statement in this build reads each: the
+    // resolution ladder's range, the class direction of findings maintenance, and
+    // the schema-key discard's two ranges.
+    for present in [
+        "documents_suffix_key",
+        "finding_classes_class_key",
+        "findings_vault_schema_fingerprint",
+    ] {
         assert!(
             declared
                 .iter()

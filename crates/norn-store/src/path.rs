@@ -67,6 +67,14 @@
 //! [`class_probe`] over that stem. Both directions of findings maintenance are
 //! the same range read: which documents are in a class, and which findings are
 //! about a class. See [`crate::ddl::findings`].
+//!
+//! **The two reductions are two classes, not one.** They are not nested: `.` is
+//! `0x2e` and `/` is `0x2f`, so `notes.tar/` sorts *before* `notes/` rather than
+//! inside it, and neither reduction's range holds the other's keys. A probe
+//! therefore names a **set** of class keys — [`SuffixProbe::class_keys`] — and a
+//! finding recorded from one belongs to every class in that set.
+
+use std::collections::BTreeSet;
 
 use crate::error::StoreError;
 
@@ -191,8 +199,13 @@ impl DocumentPath {
 
     /// The key of the ambiguity class this document belongs to: its stem, with
     /// the separator that makes the match segment-aligned.
+    ///
+    /// One class, not a set: the store holds the whole path, so which segment is
+    /// the leaf and which bytes are its extension are settled facts here. The
+    /// ambiguity is the written target's, and it is [`SuffixProbe::class_keys`]
+    /// that carries it.
     pub fn class_key(&self) -> ClassKey {
-        ClassKey(class_probe(&self.stem).ranges[0].lower.clone())
+        ClassKey::of_prefix(&class_probe(&self.stem).ranges[0].lower)
     }
 }
 
@@ -205,7 +218,7 @@ impl DocumentPath {
 /// range covers, so a finding stored under one is at rest and permanently
 /// invisible to the maintenance that owns its lifecycle.
 ///
-/// It is produced by [`DocumentPath::class_key`] and [`SuffixProbe::class_key`],
+/// It is produced by [`DocumentPath::class_key`] and [`SuffixProbe::class_keys`],
 /// which is where the two sides of resolution mint the same form.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ClassKey(String);
@@ -243,6 +256,21 @@ impl ClassKey {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// A probe prefix as the class key it is.
+    ///
+    /// The prefix comes from [`bounded`], which holds the terminator, and its
+    /// segments are the target's or the stem's — so what [`ClassKey::new`] refuses
+    /// is what the probe's own construction already refused. The check is kept as
+    /// a debug assertion rather than dropped, because this is the one place a key
+    /// enters the type without being read as text.
+    fn of_prefix(prefix: &str) -> Self {
+        debug_assert!(
+            ClassKey::new(prefix).is_ok(),
+            "a probe prefix is a class key: {prefix}"
+        );
+        ClassKey(prefix.to_string())
     }
 }
 
@@ -283,19 +311,21 @@ impl SuffixProbe {
         self.ranges.len()
     }
 
-    /// The class key this probe names, which is the prefix of its widest range.
+    /// Every ambiguity class this probe reads: one per reduction, so one key or
+    /// two.
     ///
-    /// The widest range is the one whose prefix the others open under: `notes`
-    /// and `notes.tar` both live under `notes`. A finding recorded from a probe
-    /// carries this, so the class that maintains it is the class the probe read.
-    pub fn class_key(&self) -> ClassKey {
-        let widest = self
-            .ranges
+    /// A finding recorded from a probe belongs to **all** of them, because the
+    /// reductions are disjoint rather than nested. `notes.tar` opens `notes.tar/`
+    /// and `notes/`, and under `BINARY` collation `notes.tar/` sorts before
+    /// `notes/` — so neither range holds the other's keys, and a finding filed
+    /// under one alone is invisible to maintenance that named the other. Which is
+    /// a finding nothing ever revisits: the hazard class-scoped maintenance
+    /// exists to close.
+    pub fn class_keys(&self) -> BTreeSet<ClassKey> {
+        self.ranges
             .iter()
-            .map(|range| range.lower.as_str())
-            .min_by_key(|lower| lower.len())
-            .expect("a probe carries at least one range");
-        ClassKey(widest.to_string())
+            .map(|range| ClassKey::of_prefix(&range.lower))
+            .collect()
     }
 }
 
