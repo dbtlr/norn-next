@@ -606,6 +606,17 @@ pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
     Some(out)
 }
 
+/// One trailing block-id definition (`… ^block-id`) — the target side of a
+/// `#^` reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockId {
+    /// The id as written, without the `^`.
+    pub id: String,
+    /// Where the definition begins — its `^` marker, the same convention every
+    /// construct in this crate follows for its span.
+    pub span: SourceSpan,
+}
+
 /// Trailing block-id definitions (`… ^block-id`), one per line that carries
 /// one.
 ///
@@ -616,14 +627,20 @@ pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
 /// Widening the definition's alphabet is a behaviour change rather than a
 /// correction, and it belongs wherever references and definitions are matched
 /// to each other.
-pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<String> {
+pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<BlockId> {
     let mut block_ids = Vec::new();
+    let mut cursor = LineCursor::new(body);
     let mut line_start = 0;
     for line in body.split_inclusive('\n') {
         if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
             let id_range = (line_start + block_id.start())..(line_start + block_id.end());
             if !overlaps_any(ignored, &id_range) {
-                block_ids.push(block_id.as_str().to_string());
+                block_ids.push(BlockId {
+                    id: block_id.as_str().to_string(),
+                    // Group 1 sits directly after the `\^` in the pattern, so
+                    // the marker is always the byte before it.
+                    span: cursor.span_at(id_range.start - 1),
+                });
             }
         }
         line_start += line.len();

@@ -57,7 +57,7 @@ use pulldown_cmark::{Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
 use crate::heading::{Heading, SlugCounter};
 use crate::link::{
-    Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
+    BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
 use crate::span::LineCursor;
@@ -294,8 +294,9 @@ impl<'a> BodyScan<'a> {
 
     /// Trailing block-id definitions (`… ^block-id`), one per line that
     /// carries one, in document order. These are the anchors a
-    /// `[[Note#^block-id]]` reference points at.
-    pub fn block_ids(&self) -> Vec<String> {
+    /// `[[Note#^block-id]]` reference points at; each carries the span of its
+    /// `^` marker, body-relative like every other span this scan reports.
+    pub fn block_ids(&self) -> Vec<BlockId> {
         parse_block_ids_in(self.body, &self.code_ranges)
     }
 

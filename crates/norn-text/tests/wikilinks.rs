@@ -8,8 +8,8 @@
 //! meaning — is somebody else's layer.
 
 use norn_text::{
-    BodyScan, Link, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks_in_text,
-    wikilink_target_is_representable,
+    BlockId, BodyScan, Link, SourceSpan, parse_wikilinks_in_text, reconstruct_wikilink,
+    splice_wikilinks_in_text, wikilink_target_is_representable,
 };
 
 fn only(text: &str) -> Link {
@@ -24,6 +24,10 @@ fn only(text: &str) -> Link {
 
 fn targets(links: &[Link]) -> Vec<&str> {
     links.iter().map(|link| link.target.as_str()).collect()
+}
+
+fn ids(block_ids: &[BlockId]) -> Vec<&str> {
+    block_ids.iter().map(|block| block.id.as_str()).collect()
 }
 
 // ── Decomposition ────────────────────────────────────────────────────────
@@ -340,15 +344,76 @@ fn a_splice_that_selects_nothing_returns_the_text_unchanged() {
 #[test]
 fn a_trailing_block_id_is_an_anchor() {
     assert_eq!(
-        BodyScan::new("Some paragraph. ^block-1\n").block_ids(),
+        ids(&BodyScan::new("Some paragraph. ^block-1\n").block_ids()),
         ["block-1"]
     );
-    assert_eq!(BodyScan::new("^block-2\n").block_ids(), ["block-2"]);
+    assert_eq!(ids(&BodyScan::new("^block-2\n").block_ids()), ["block-2"]);
     assert_eq!(
-        BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids(),
+        ids(&BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids()),
         ["a", "b"]
     );
-    assert_eq!(BodyScan::new("hello ^ok  \n").block_ids(), ["ok"]);
+    assert_eq!(ids(&BodyScan::new("hello ^ok  \n").block_ids()), ["ok"]);
+}
+
+/// Each definition's span points at its `^` marker — the crate-wide span
+/// convention — with 1-based line/column and a 0-based byte offset.
+#[test]
+fn a_block_id_span_points_at_its_marker() {
+    assert_eq!(
+        BodyScan::new("Some paragraph. ^block-1\n").block_ids(),
+        [BlockId {
+            id: "block-1".to_string(),
+            span: SourceSpan {
+                line: 1,
+                column: 17,
+                byte_offset: 16,
+            },
+        }]
+    );
+    // A later line's span counts every byte before it, and a CRLF break is
+    // two of them.
+    assert_eq!(
+        BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids(),
+        [
+            BlockId {
+                id: "a".to_string(),
+                span: SourceSpan {
+                    line: 1,
+                    column: 7,
+                    byte_offset: 6,
+                },
+            },
+            BlockId {
+                id: "b".to_string(),
+                span: SourceSpan {
+                    line: 2,
+                    column: 8,
+                    byte_offset: 16,
+                },
+            },
+        ]
+    );
+    assert_eq!(
+        BodyScan::new("first ^a\r\nsecond ^b\r\n").block_ids(),
+        [
+            BlockId {
+                id: "a".to_string(),
+                span: SourceSpan {
+                    line: 1,
+                    column: 7,
+                    byte_offset: 6,
+                },
+            },
+            BlockId {
+                id: "b".to_string(),
+                span: SourceSpan {
+                    line: 2,
+                    column: 8,
+                    byte_offset: 17,
+                },
+            },
+        ]
+    );
 }
 
 #[test]
@@ -361,7 +426,7 @@ fn a_block_id_holding_an_unsupported_character_is_not_an_anchor() {
 #[test]
 fn a_block_id_inside_code_is_not_an_anchor() {
     assert_eq!(
-        BodyScan::new("real ^outside\n\n```\n^incode\n```\n").block_ids(),
+        ids(&BodyScan::new("real ^outside\n\n```\n^incode\n```\n").block_ids()),
         ["outside"]
     );
     assert!(BodyScan::new("prose\n`^incode`\n").block_ids().is_empty());
@@ -371,9 +436,17 @@ fn a_block_id_inside_code_is_not_an_anchor() {
 /// lies outside the fence and references the code block itself.
 #[test]
 fn a_block_id_on_the_line_after_a_fence_is_still_an_anchor() {
+    let block_ids = BodyScan::new("```\n^incode\n```\n^after-fence\n").block_ids();
+    assert_eq!(ids(&block_ids), ["after-fence"]);
+    // The skipped in-code match before it must not desync the line count for
+    // the definitions that do land.
     assert_eq!(
-        BodyScan::new("```\ncode line\n```\n^after-fence\n").block_ids(),
-        ["after-fence"]
+        block_ids[0].span,
+        SourceSpan {
+            line: 4,
+            column: 1,
+            byte_offset: 16,
+        }
     );
 }
 
