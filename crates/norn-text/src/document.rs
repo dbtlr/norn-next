@@ -13,7 +13,7 @@ use crate::frontmatter::render::{
 };
 use crate::heading::Heading;
 use crate::line_ending::LineEnding;
-use crate::link::Link;
+use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
 use crate::span::LineCursor;
 use crate::tag::{Tag, frontmatter_tag_name};
@@ -141,6 +141,15 @@ impl From<SectionError> for EditError {
 /// Reading is forgiving and reports what it worked around in
 /// [`Document::diagnostics`]. Editing is not: each edit either returns a whole
 /// new document that provably reads back as intended, or refuses.
+///
+/// # Ask the body once
+///
+/// The body accessors here — [`Document::headings`], [`Document::links`],
+/// [`Document::wikilinks`], [`Document::tags`] — each build their own
+/// [`BodyScan`], so asking four questions parses the body four times. They are
+/// the convenience for a caller with one question and source coordinates. A
+/// caller with several should take [`Document::scan_body`] once and rebase by
+/// [`Document::body_start`], which is what the one-pass guarantee is worth.
 #[derive(Debug, Clone)]
 pub struct Document<'a> {
     source: &'a str,
@@ -396,6 +405,51 @@ impl<'a> Document<'a> {
                 })
             })
             .collect()
+    }
+
+    /// Every `[[…]]` token written in a frontmatter string value, in source
+    /// coordinates.
+    ///
+    /// The counterpart to [`Document::frontmatter_tags`], and the other half
+    /// of what a frontmatter value is scanned for: every string the block
+    /// holds is read — scalar values and the string items of sequences, not
+    /// just one field — because writing the wikilink form is what opts a
+    /// property into the link graph, whichever property it is. A
+    /// `[title](target)` string is inert text here; the Markdown form is body
+    /// syntax.
+    ///
+    /// **A link is reported when the entry's source bytes carry its token
+    /// literally**, which is what makes the span exact and
+    /// [`Link::range`] index the source. A value whose bytes and whose parsed
+    /// string are different text — a flow sequence's items, which have no
+    /// nameable bytes at all, or an escaped scalar — yields nothing here
+    /// rather than a span that is not certainly right. Reading one without a
+    /// span is what [`Document::field_texts`] and
+    /// [`crate::parse_wikilinks_in_text`] are for.
+    pub fn frontmatter_wikilinks(&self) -> Vec<Link> {
+        let mut cursor = LineCursor::new(self.source);
+        let mut links = Vec::new();
+        for text in self.field_texts() {
+            let Some(range) = text.range else {
+                continue;
+            };
+            let written = &self.source[range.clone()];
+            // The tokens are found in ascending order, so the search for each
+            // one resumes where the last was found: two identical links in one
+            // value are two entries at two offsets.
+            let mut at = 0;
+            for link in parse_wikilinks_in_text(text.text) {
+                let Some(found) = written[at..].find(&link.raw) else {
+                    continue;
+                };
+                at = at + found + link.raw.len();
+                links.push(Link {
+                    span: cursor.span_at(range.start + at - link.raw.len()),
+                    ..link
+                });
+            }
+        }
+        links
     }
 
     /// Rebase body-relative link spans onto the source.

@@ -23,11 +23,19 @@
 //! the hashes, so `#tag` is a paragraph and `# tag` is a heading, and the two
 //! grammars partition rather than compete.
 //!
-//! In frontmatter, the `tags` field's strings follow the identical grammar
-//! with the marker optional: `#foo` and `foo` are both the tag `foo`, so a
+//! In frontmatter, the `tags` field's strings are read by the same character
+//! set with the marker optional: `#foo` and `foo` are both the tag `foo`, so a
 //! hand-written marker is read as the syntax it is instead of becoming part of
 //! the name. Nothing else in frontmatter is scanned for tags — a `#tag` inside
 //! some other string value is text in a string, not a tag.
+//!
+//! What differs between the homes is how much of the string has to fit. A body
+//! marker opens a run that *ends* at the first character outside the set,
+//! because it was written in free text with prose either side of it. A
+//! frontmatter entry is a discrete value written to be one tag, so the **whole
+//! string** must be one: `#a.b` in a body is the tag `a`, and `a.b` in the
+//! field is not a tag at all. Reading a prefix out of a property would name a
+//! tag nobody wrote.
 //!
 //! Whether a string that is *not* a tag under this grammar is an error is a
 //! validation question with its own venue. Here it is simply not a tag, and no

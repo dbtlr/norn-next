@@ -597,6 +597,16 @@ pub fn reconstruct_wikilink(link: &Link, new_target: &str) -> Option<String> {
     Some(out)
 }
 
+/// Trailing block-id definitions (`… ^block-id`), one per line that carries
+/// one.
+///
+/// The alphabets of the two halves are asymmetric, and the asymmetry is
+/// recorded rather than resolved: a `#^id` *reference* is stored raw and
+/// carries whatever the author wrote, while a definition is matched against
+/// ASCII, so `^ünicode` defines nothing for `[[N#^ünicode]]` to point at.
+/// Widening the definition's alphabet is a behaviour change rather than a
+/// correction, and it belongs wherever references and definitions are matched
+/// to each other.
 pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<String> {
     let mut block_ids = Vec::new();
     let mut line_start = 0;

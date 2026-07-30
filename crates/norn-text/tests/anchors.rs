@@ -64,6 +64,18 @@ fn a_slug_keeps_the_combining_marks_the_text_carries() {
     assert_eq!(slugify("cafe\u{301}"), "cafe\u{301}");
 }
 
+/// Characterized: a space is the one whitespace character a slug turns into a
+/// hyphen. A tab or a non-breaking space is neither a space nor a letter, so
+/// it is dropped like any other unsluggable character and the words either
+/// side of it run together.
+#[test]
+fn only_a_space_becomes_a_hyphen() {
+    assert_eq!(slugify("A B"), "a-b");
+    assert_eq!(slugify("A\tB"), "ab");
+    assert_eq!(slugify("A\u{A0}B"), "ab");
+    assert_eq!(slugs("## A\u{A0}B\n"), ["ab"]);
+}
+
 #[test]
 fn a_heading_carries_the_slug_of_its_flattened_text() {
     assert_eq!(slugs("## What? Really!\n"), ["what-really"]);

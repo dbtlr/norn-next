@@ -247,6 +247,49 @@ fn a_markdown_link_in_a_frontmatter_value_is_not_a_link() {
     assert_eq!(targets(&document.links()), ["./b.md"]);
 }
 
+/// The frontmatter side of that contract has its own accessor, mirroring
+/// `frontmatter_tags`: every string the block holds is read, not just one
+/// field, because writing the wikilink form is what opts a property into the
+/// link graph. Spans are the source's, so a caller takes a reader to the
+/// property the link was written in.
+#[test]
+fn a_document_reports_the_wikilinks_its_frontmatter_values_carry() {
+    let source = "---\ntitle: Note\nrelated: \"[[Other]]\"\nsee:\n  - \"[[A]]\"\n  \
+                  - \"[Md](./x.md) and [[B]]\"\n---\n\n[[Body]]\n";
+    let document = Document::parse(source);
+
+    let links = document.frontmatter_wikilinks();
+    assert_eq!(targets(&links), ["Other", "A", "B"]);
+    for link in &links {
+        assert_eq!(&source[link.range()], link.raw);
+        assert_eq!(link.family, LinkFamily::Wikilink);
+    }
+    assert_eq!(links[0].span.line, 3);
+    assert_eq!(links[1].span.line, 5);
+    assert_eq!(links[2].span.line, 6);
+
+    // The body's own links are a separate answer about a separate home.
+    assert_eq!(targets(&document.links()), ["Body"]);
+}
+
+/// The stated limitation. A flow sequence's items have no separately nameable
+/// bytes — the same reason a flow value has no value span — so a link written
+/// in one is reported by nothing here rather than by a span that is not
+/// certainly right. `field_texts` plus `parse_wikilinks_in_text` reads it
+/// without one.
+#[test]
+fn a_frontmatter_link_with_no_nameable_bytes_is_absent_rather_than_guessed() {
+    let document = Document::parse("---\nsee: [\"[[A]]\", \"[[B]]\"]\n---\n");
+    assert!(document.frontmatter_wikilinks().is_empty());
+
+    let unnamed: Vec<Link> = document
+        .field_texts()
+        .iter()
+        .flat_map(|text| norn_text::parse_wikilinks_in_text(text.text))
+        .collect();
+    assert_eq!(targets(&unnamed), ["A", "B"]);
+}
+
 // ── The scope fence, characterized ───────────────────────────────────────
 
 /// An image is a different element to the parser, and a transclusion in this

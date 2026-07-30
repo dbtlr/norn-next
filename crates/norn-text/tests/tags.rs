@@ -292,8 +292,9 @@ fn a_frontmatter_marker_is_stripped_and_the_name_is_the_same_grammar() {
     assert_eq!(names(&document.frontmatter_tags()), ["alpha", "beta"]);
 }
 
+/// The two homes share one character set, and one entry is one whole tag.
 #[test]
-fn a_frontmatter_tag_follows_the_body_grammar_exactly() {
+fn a_frontmatter_entry_is_a_whole_tag_in_the_body_character_set() {
     let document = Document::parse(
         "---\ntags:\n  - area/project\n  - snake_case-kebab\n  - 日本語\n  - 2026-07\n---\n",
     );
@@ -301,6 +302,47 @@ fn a_frontmatter_tag_follows_the_body_grammar_exactly() {
         names(&document.frontmatter_tags()),
         ["area/project", "snake_case-kebab", "日本語", "2026-07"]
     );
+}
+
+/// Where the two homes part company, and why. A body `#` opens a run that
+/// *ends* at the first character outside the set, because it was written in
+/// free text with prose either side of it. A frontmatter entry is a discrete
+/// value that was written to be one tag, so the whole string has to be one:
+/// `a.b` in a property is not the tag `a` with a stray `.b` nobody meant.
+///
+/// So `#a.b` in the body is the tag `a`, and `a.b` in the field is nothing at
+/// all.
+#[test]
+fn a_frontmatter_entry_is_judged_whole_where_a_body_run_terminates() {
+    for entry in ["a.b", "tag,", "tag ", " tag", "a b"] {
+        let source = format!("---\ntags:\n  - \"{entry}\"\n---\n");
+        let document = Document::parse(&source);
+        assert!(
+            document.frontmatter_tags().is_empty(),
+            "frontmatter entry {entry:?}"
+        );
+    }
+
+    assert_eq!(names(&body_tags("#a.b\n")), ["a"]);
+    assert_eq!(names(&body_tags("#tag, next\n")), ["tag"]);
+}
+
+/// The scalar forms an older hand-written vault carries, pinned at what this
+/// grammar makes of them: one string is one tag, so a string holding several
+/// is not a tag. Whether a comma- or space-separated scalar should be split
+/// into several tags is a schema question with its own venue; until it is
+/// answered, splitting here would invent facts the field does not state.
+#[test]
+fn a_scalar_holding_several_names_is_not_several_tags() {
+    for scalar in ["a, b", "a b", "\"#a #b\""] {
+        let source = format!("---\ntags: {scalar}\n---\n");
+        let document = Document::parse(&source);
+        assert!(
+            document.frontmatter_tags().is_empty(),
+            "scalar tags field {scalar:?}"
+        );
+        assert!(document.diagnostics().is_empty(), "for {scalar:?}");
+    }
 }
 
 /// A string the grammar does not describe is not a tag, and saying so is not
