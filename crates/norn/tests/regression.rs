@@ -21,11 +21,10 @@
 //! fails: a bound case with no tests is a problem, and every test it does name
 //! is held to a function cargo compiled into the target the reference gives.
 //!
-//! Layer 0 is the layer that exists, so a case whose venue is 0 is bindable
-//! against the harness as it stands. Leaving one dormant is therefore a
-//! statement rather than a wait, and [`the_registry_is_structurally_sound`]
-//! requires it to be written down: a dormant layer-0 case with no reason
-//! fails.
+//! A case at or below [`LAYER_LANDING`] is bindable against a subject that
+//! exists. Leaving one dormant is therefore a statement rather than a wait,
+//! and [`the_registry_is_structurally_sound`] requires it to be written down:
+//! a dormant case at or below that layer with no reason fails.
 //!
 //! # What this suite is not
 //!
@@ -48,7 +47,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_testkit::regression::{BindingStatus, Kind, Registry, TestIndex};
+use norn_testkit::regression::{BindingStatus, Kind, LAYER_LANDING, Registry, TestIndex};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
@@ -61,7 +60,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "0fdc02fe02d70062a1af186209d8fcf24f7f670c519c67f30e13e21dc5f57fee";
+const CONTRACT_DIGEST: &str = "9acb7e93a4e894ce195085f427546aab3017f61ed68d22b9af714fda6d650cc8";
 
 /// The cases carried by tests today, by name.
 ///
@@ -174,14 +173,6 @@ fn the_bound_cases_are_the_ones_the_harness_already_carries() {
     let pinned: BTreeSet<&str> = BOUND_CASES.iter().copied().collect();
     assert_eq!(bound, pinned, "the set of bound cases moved");
 }
-
-/// The layer a bound case may sit at, inclusive.
-///
-/// Layer 0 is complete and layer 1 is landing task by task, so a venue-1 case
-/// binds the moment its subject exists — the structural audit holds every
-/// binding to tests cargo really compiled, which is what "exists" means here.
-/// Raising this is a reviewed edit made when the next layer starts landing.
-const LAYER_LANDING: u8 = 1;
 
 /// Every venue on the scale is accounted for, and nothing is bound above the
 /// layer currently landing.

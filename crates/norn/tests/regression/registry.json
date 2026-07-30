@@ -475,7 +475,7 @@
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "no link parser exists."
+        "reason": "a second link-text consumer does not exist; the parser half is carried by norn-text's suite."
       }
     },
     {
@@ -508,7 +508,7 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "no parser produces a diagnostic and no consumer reads one."
+        "reason": "diagnostics are produced; no consumer exists to hold to not-dropping them."
       }
     },
     {
