@@ -238,7 +238,15 @@ fn matching_indices(headings: &[Heading], text: &str) -> Vec<usize> {
 /// that produced the document's headings, so a trailing closer (`## X ##`) and
 /// inline markup are handled identically to a real heading and a `#` that is
 /// part of the text (`## C#`) is preserved.
+///
+/// An anchor carrying a line break is not one heading and is refused. Reading
+/// the first heading out of it would answer a question about `## a` when the
+/// caller asked about `## a\n## b`, and address the wrong section by a margin
+/// nothing in the result reports.
 fn atx_anchor_text(anchor: &str) -> Option<String> {
+    if anchor.contains(['\n', '\r']) {
+        return None;
+    }
     let hashes = anchor.bytes().take_while(|byte| *byte == b'#').count();
     if !(1..=6).contains(&hashes) {
         return None;

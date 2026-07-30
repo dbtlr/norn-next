@@ -2,7 +2,7 @@
 //! stops, how it is addressed, and what a replace leaves alone.
 
 use norn_text::{
-    BodyScan, Document, SectionAddress, SectionError, Value, resolve_section, slugify,
+    BodyScan, Document, EditError, SectionAddress, SectionError, Value, resolve_section, slugify,
 };
 
 const DOC: &str = "intro\n\n## Alpha\na1\na2\n\n## Beta\nb1\n";
@@ -168,6 +168,24 @@ fn a_setext_headings_underline_belongs_to_the_heading() {
     );
 }
 
+/// A setext title may run across several lines. The break between them
+/// separates two words, so the text — and the slug, and the address — reads as
+/// the heading a human sees rather than as the two words run together.
+#[test]
+fn a_setext_title_spanning_lines_reads_as_one_spaced_heading() {
+    let body = "foo\nbar\n===\n\nunder it\n";
+    let scan = BodyScan::new(body);
+    assert_eq!(scan.headings()[0].text, "foo bar");
+    assert_eq!(scan.headings()[0].slug, "foo-bar");
+    let span = resolve_section(body, "foo bar").expect("the heading resolves by its text");
+    assert_eq!(&body[span.content_start..span.content_end], "under it\n");
+    // A hard break — two trailing spaces — separates words the same way.
+    assert_eq!(
+        BodyScan::new("foo  \nbar\n===\n").headings()[0].text,
+        "foo bar"
+    );
+}
+
 #[test]
 fn two_setext_headings_in_a_row_leave_the_first_with_no_body() {
     let body = "Alpha\n=====\nBeta\n=====\nb\n";
@@ -263,6 +281,23 @@ fn a_degenerate_atx_anchor_refuses_rather_than_matching_anything() {
     assert!(resolve_section(body, "##").is_err());
 }
 
+/// An anchor carrying a line break is not one heading. Reading the first
+/// heading out of it answers a question about `## Alpha` when the caller asked
+/// about two lines, and lands on a section nothing in the result names.
+#[test]
+fn an_anchor_carrying_a_line_break_matches_nothing() {
+    let body = "## Alpha\na\n\n## Beta\nb\n";
+    for anchor in ["## Alpha\n## Beta", "## Alpha\ntrailing", "## Alpha\r\n"] {
+        assert_eq!(
+            resolve_section(body, anchor),
+            Err(SectionError::HeadingNotFound {
+                heading: anchor.to_string()
+            }),
+            "for {anchor:?}"
+        );
+    }
+}
+
 /// The ambiguity guard: a document holding both a heading whose text is
 /// literally `## Verbatim` and a different heading `Verbatim`. Exact-first is
 /// what stops the anchor landing on the wrong section.
@@ -353,12 +388,48 @@ fn an_empty_replacement_empties_the_section_and_keeps_its_heading() {
     );
 }
 
+/// An empty section's content range collapses onto the next heading, so the
+/// separator the section had sits entirely above the splice. Writing into it
+/// restores one below, or the written content jams against the heading beneath
+/// it — and where that heading is setext, is absorbed into it.
 #[test]
-fn writing_into_an_empty_section_lands_below_its_separators() {
+fn writing_into_an_empty_section_lands_between_its_separators() {
     let source = "## Alpha\n\n\n## Beta\nb\n";
     assert_eq!(
         Document::parse(source).replace_section("Alpha", "new"),
-        Ok("## Alpha\n\n\nnew\n## Beta\nb\n".to_string())
+        Ok("## Alpha\n\n\nnew\n\n## Beta\nb\n".to_string())
+    );
+    // A section with no separators to mirror gains none, and an empty section
+    // at the end of the body has no heading below to separate from.
+    assert_eq!(
+        Document::parse("## Alpha\n## Beta\nb\n").replace_section("Alpha", "new"),
+        Ok("## Alpha\nnew\n## Beta\nb\n".to_string())
+    );
+    assert_eq!(
+        Document::parse("## Alpha\n\n").replace_section("Alpha", "new"),
+        Ok("## Alpha\n\nnew\n".to_string())
+    );
+}
+
+/// The heading below an empty section is setext here, so content written
+/// without a separator would become the first line of its title and delete the
+/// heading. The separator is what keeps the write honest; the post-image check
+/// is what would refuse it otherwise.
+#[test]
+fn writing_into_an_empty_section_above_a_setext_heading_keeps_that_heading() {
+    let source = "## Alpha\n\n\nBeta\n====\nb\n";
+    let edited = Document::parse(source)
+        .replace_section("Alpha", "new")
+        .expect("a replacement");
+    assert_eq!(edited, "## Alpha\n\n\nnew\n\nBeta\n====\nb\n");
+    let headings = BodyScan::new(&edited);
+    assert_eq!(
+        headings
+            .headings()
+            .iter()
+            .map(|heading| heading.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Alpha", "Beta"]
     );
 }
 
@@ -378,6 +449,121 @@ fn replacing_an_ambiguous_section_refuses() {
         Document::parse(source)
             .replace_section("Dup", "changed")
             .is_err()
+    );
+}
+
+// ── A replace is proven or refused (NORN-25) ─────────────────────────────
+
+/// Section content is arbitrary Markdown, and Markdown is not inert. An
+/// unclosed fence swallows every heading below it, an indented block makes
+/// them literal text, and a line of `=` turns the heading beneath it into its
+/// own title. None of these move a byte the splice did not address, so only
+/// re-reading the result catches them.
+#[test]
+fn content_that_swallows_the_document_below_it_refuses() {
+    let source = "---\ntitle: t\n---\n## Alpha\n\nbody\n\n## Beta\nb\n\n## Gamma\ng\n";
+    for content in ["```", "```rust\nfn main() {}", "~~~"] {
+        assert_eq!(
+            Document::parse(source).replace_section("Alpha", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "Alpha".to_string()
+            }),
+            "for content {content:?}"
+        );
+    }
+    // A closed fence is ordinary content and is written.
+    assert_eq!(
+        Document::parse(source).replace_section("Alpha", "```\nsample\n```"),
+        Ok(
+            "---\ntitle: t\n---\n## Alpha\n\n```\nsample\n```\n\n## Beta\nb\n\n## Gamma\ng\n"
+                .to_string()
+        )
+    );
+}
+
+/// Content that restates the addressed heading makes the address ambiguous, so
+/// there is no longer one section to have written — and the replace refuses
+/// rather than reporting a success nothing can re-address. Occurrence
+/// addressing is the way through.
+#[test]
+fn content_restating_the_heading_refuses_and_an_occurrence_gets_through() {
+    let source = "## Alpha\n\nbody\n\n## Beta\nb\n";
+    for content in ["## Alpha\n\nnested", "### Alpha\n\nnested"] {
+        assert_eq!(
+            Document::parse(source).replace_section("Alpha", content),
+            Err(EditError::SectionPostImageMismatch {
+                heading: "Alpha".to_string()
+            }),
+            "for content {content:?}"
+        );
+    }
+    // A deeper restatement nests inside the section rather than splitting it,
+    // so naming the occurrence resolves the ambiguity and the write goes
+    // through.
+    assert_eq!(
+        Document::parse(source).replace_section(
+            SectionAddress::occurrence("Alpha", 1),
+            "### Alpha\n\nnested"
+        ),
+        Ok("## Alpha\n\n### Alpha\n\nnested\n\n## Beta\nb\n".to_string())
+    );
+    // A restatement at the same level splits the section in two, so the
+    // content the address was given is not what any one section came to hold,
+    // and even the occurrence refuses.
+    assert_eq!(
+        Document::parse(source)
+            .replace_section(SectionAddress::occurrence("Alpha", 1), "## Alpha\n\nnested"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Alpha".to_string()
+        })
+    );
+}
+
+/// A heading inside a blockquote or a list item owns no byte range of its own:
+/// the bytes below it are the container's, and splicing over them lifts them
+/// out of it. The refusal is early and typed — container-aware splicing is not
+/// something this crate does.
+#[test]
+fn a_heading_inside_a_container_refuses_a_replace() {
+    for (source, heading) in [
+        ("> ## Quoted\n> body\n\nafter\n", "Quoted"),
+        ("- ## Listed\n  body\n\nafter\n", "Listed"),
+    ] {
+        assert_eq!(
+            Document::parse(source).replace_section(heading, "new"),
+            Err(EditError::SectionInContainer {
+                heading: heading.to_string()
+            }),
+            "for {source:?}"
+        );
+        // Reading one is fine; only replacing it is refused.
+        assert!(
+            BodyScan::new(source)
+                .resolve_section(heading.into())
+                .is_ok()
+        );
+    }
+}
+
+/// Every line a replace writes uses the document's terminator, `content`'s own
+/// lines included. Splicing content verbatim is how a CRLF document ends up
+/// with LF lines through the middle of it.
+#[test]
+fn a_multi_line_replacement_into_a_crlf_document_is_all_crlf() {
+    let source = "---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\nold\r\n\r\n## Beta\r\nb\r\n";
+    let edited = Document::parse(source)
+        .replace_section("Alpha", "one\ntwo\n\nthree")
+        .expect("a replacement");
+    assert_eq!(
+        edited,
+        "---\r\ntitle: t\r\n---\r\n## Alpha\r\n\r\none\r\ntwo\r\n\r\nthree\r\n\r\n## Beta\r\nb\r\n"
+    );
+    assert_eq!(edited.matches('\n').count(), edited.matches("\r\n").count());
+    // And an LF document given CRLF content comes back all LF.
+    let lf = "## Alpha\n\nold\n\n## Beta\n";
+    assert_eq!(
+        Document::parse(lf).replace_section("Alpha", "one\r\ntwo"),
+        Ok("## Alpha\n\none\ntwo\n\n## Beta\n".to_string())
     );
 }
 

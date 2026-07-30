@@ -241,6 +241,39 @@ fn a_target_carrying_a_delimiter_is_refused_rather_than_emitted() {
     }
 }
 
+/// A target has to carry something, and carry it on one line. An empty or
+/// blank target writes `[[]]`, which is not a token this grammar recognizes,
+/// so the link vanishes; a target holding a line break splices one into
+/// whatever the link sat in.
+#[test]
+fn an_empty_or_line_breaking_target_is_refused_rather_than_emitted() {
+    let link = only("[[old]]");
+    for bad in ["", "   ", "\t", "a\nb", "a\r\nb", "\n"] {
+        assert!(!wikilink_target_is_representable(bad), "{bad:?}");
+        assert!(
+            reconstruct_wikilink(&link, bad).is_none(),
+            "reconstructing with {bad:?}"
+        );
+    }
+}
+
+/// The reason the refusal is not pedantry: a line break inside a table cell
+/// ends the row, and one inside a blockquote ends the quote. A splice that
+/// emitted these would rewrite the block the link sat in, so it emits nothing
+/// and leaves the token alone.
+#[test]
+fn a_splice_to_a_line_breaking_target_leaves_the_document_alone() {
+    for body in [
+        "| a | b |\n| --- | --- |\n| [[old]] | x |\n",
+        "> quoted [[old]] here\n> still quoted\n",
+    ] {
+        let out = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, "a\nb"));
+        assert_eq!(out, body, "for {body:?}");
+        let blanked = BodyScan::new(body).splice_wikilinks(|link| reconstruct_wikilink(link, ""));
+        assert_eq!(blanked, body, "for {body:?}");
+    }
+}
+
 // ── Splicing (NRN-424, NRN-432, NRN-484) ─────────────────────────────────
 
 #[test]

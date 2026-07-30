@@ -95,18 +95,25 @@ pub struct Field {
 }
 
 /// One field per top-level key in `content[frontmatter_range]`, in document
-/// order. Empty when the block's spans cannot be trusted.
+/// order, or `None` when the block's spans cannot be trusted.
+///
+/// `None` and an empty split are different answers and the distinction is
+/// load-bearing: a block holding no fields is fully understood and takes an
+/// appended one, while a block whose split was refused has lines nothing can
+/// attribute and refuses every edit. A block whose only key the value model
+/// dropped reaches both descriptions by counting, and only one of them is
+/// true.
 pub(crate) fn field_spans(
     content: &str,
     frontmatter_range: Range<usize>,
     value: &Value,
     strip: StripReport,
-) -> Vec<Field> {
+) -> Option<Vec<Field>> {
     let Some(map) = value.as_map() else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     if !strip.is_clean() {
-        return Vec::new();
+        return None;
     }
 
     let candidates = scan_key_lines(content, &frontmatter_range);
@@ -119,7 +126,7 @@ pub(crate) fn field_spans(
         .keys()
         .all(|key| name_counts.get(key).copied() == Some(1));
     if !every_key_uniquely_located {
-        return Vec::new();
+        return None;
     }
 
     // An entry ends where the next one begins. A merge-key line begins no
@@ -162,7 +169,7 @@ pub(crate) fn field_spans(
         });
     }
 
-    fields
+    Some(fields)
 }
 
 /// The key a merge directive is written under.

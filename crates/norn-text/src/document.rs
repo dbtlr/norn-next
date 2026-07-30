@@ -11,9 +11,12 @@ use crate::frontmatter::render::{
     RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
     render_scalar_in_span, render_sequence_entry,
 };
+use crate::heading::Heading;
 use crate::line_ending::LineEnding;
 use crate::section::{SectionAddress, SectionError, SectionSpan};
+use crate::span::LineCursor;
 use crate::value::{Mapping, Value};
+use crate::wikilink::Wikilink;
 
 /// A frontmatter string value and where its bytes are.
 ///
@@ -41,8 +44,12 @@ pub enum EditError {
     FrontmatterNotAMapping {
         kind: &'static str,
     },
-    /// The block's field spans cannot be trusted, or this field's value cannot
-    /// be named as one span. Reads are unaffected; the edit is not attempted.
+    /// The block parses, and its field spans cannot be trusted: the scanner
+    /// and the parser disagree somewhere in it, so no field in it is
+    /// addressable. Reads are unaffected; no edit is attempted.
+    FrontmatterNotEditable,
+    /// This field's value cannot be named as one span. Reads are unaffected;
+    /// the edit is not attempted.
     FieldNotEditable {
         field: String,
     },
@@ -51,10 +58,23 @@ pub enum EditError {
     },
     Render(RenderError),
     Section(SectionError),
+    /// The addressed heading sits inside a blockquote or a list item, whose
+    /// bytes are the container's before they are the section's. Replacing them
+    /// by byte range lifts them out of the container.
+    SectionInContainer {
+        heading: String,
+    },
     /// The edited document does not read back as intended. Nothing is
     /// returned: an unproven write is a refusal.
     PostImageMismatch {
         field: String,
+    },
+    /// The document a section replace produced does not read back as
+    /// intended — the frontmatter moved, the addressed heading no longer
+    /// resolves to the content it was given, or a heading the body already had
+    /// is gone. Nothing is returned.
+    SectionPostImageMismatch {
+        heading: String,
     },
 }
 
@@ -68,16 +88,30 @@ impl fmt::Display for EditError {
                 f,
                 "the frontmatter block holds a {kind}, and only a mapping has fields"
             ),
+            EditError::FrontmatterNotEditable => f.write_str(
+                "the frontmatter block's field spans cannot be trusted, so no field in it can be \
+                 edited",
+            ),
             EditError::FieldNotEditable { field } => {
                 write!(f, "the field {field:?} cannot be edited in place")
             }
             EditError::FieldAbsent { field } => write!(f, "the field {field:?} is not present"),
             EditError::Render(error) => write!(f, "{error}"),
             EditError::Section(error) => write!(f, "{error}"),
+            EditError::SectionInContainer { heading } => write!(
+                f,
+                "the heading {heading:?} sits inside a blockquote or list item, whose content is \
+                 not separately replaceable"
+            ),
             EditError::PostImageMismatch { field } => write!(
                 f,
                 "the edited document does not read back with {field:?} as intended, so the edit \
                  was refused"
+            ),
+            EditError::SectionPostImageMismatch { heading } => write!(
+                f,
+                "the edited document does not read back with the section {heading:?} as intended, \
+                 so the edit was refused"
             ),
         }
     }
@@ -113,6 +147,9 @@ pub struct Document<'a> {
     body: &'a str,
     body_start: usize,
     fields: Vec<Field>,
+    /// The block parsed and the field layer refused to split it, so no line in
+    /// it is safely attributable to a field and every edit into it refuses.
+    spans_untrusted: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -122,15 +159,15 @@ impl<'a> Document<'a> {
     pub fn parse(source: &'a str) -> Self {
         let mut diagnostics = Vec::new();
         let extraction = extract(source, &mut diagnostics);
-        let fields = match (&extraction.value, &extraction.range) {
+        let located = match (&extraction.value, &extraction.range) {
             (Some(value), Some(range)) => {
                 field_spans(source, range.clone(), value, extraction.strip)
             }
-            _ => Vec::new(),
+            _ => Some(Vec::new()),
         };
-        if let Some(Value::Map(map)) = &extraction.value
-            && fields.len() != map.len()
-        {
+        let spans_untrusted = located.is_none();
+        let fields = located.unwrap_or_default();
+        if spans_untrusted {
             diagnostics.push(Diagnostic::warning(
                 "frontmatter-not-editable",
                 "the frontmatter block's field spans cannot be trusted, so field edits refuse; \
@@ -138,6 +175,7 @@ impl<'a> Document<'a> {
             ));
         }
         Document {
+            spans_untrusted,
             source,
             byte_order_mark: extraction.byte_order_mark,
             line_ending: LineEnding::of(source),
@@ -282,9 +320,43 @@ impl<'a> Document<'a> {
     }
 
     /// One CommonMark reading of the body. Offsets it reports are relative to
-    /// [`Document::body`]; add [`Document::body_start`] for source offsets.
+    /// [`Document::body`]; the accessors on this type report the same
+    /// constructs in source coordinates.
     pub fn scan_body(&self) -> BodyScan<'a> {
         BodyScan::new(self.body)
+    }
+
+    /// Every heading in the body, in source coordinates.
+    ///
+    /// There are two origins in this crate and they are one `body_start`
+    /// apart: a [`BodyScan`] answers about the body it was built from, and a
+    /// `Document` answers about the bytes it was read from. Rebasing by hand
+    /// is how an offset from one origin gets used against the other, so the
+    /// rebase is here and a caller never adds anything.
+    pub fn headings(&self) -> Vec<Heading> {
+        let scan = self.scan_body();
+        let mut cursor = LineCursor::new(self.source);
+        scan.headings()
+            .iter()
+            .map(|heading| Heading {
+                span: cursor.span_at(heading.span.byte_offset + self.body_start),
+                body_offset: heading.body_offset + self.body_start,
+                ..heading.clone()
+            })
+            .collect()
+    }
+
+    /// Every `[[…]]` token in the body, code excluded, in source coordinates.
+    pub fn wikilinks(&self) -> Vec<Wikilink> {
+        let scan = self.scan_body();
+        let mut cursor = LineCursor::new(self.source);
+        scan.wikilinks()
+            .into_iter()
+            .map(|link| Wikilink {
+                span: cursor.span_at(link.span.byte_offset + self.body_start),
+                ..link
+            })
+            .collect()
     }
 
     /// Write `value` at `field`, returning the whole edited document.
@@ -310,10 +382,13 @@ impl<'a> Document<'a> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
         }
+        if self.spans_untrusted {
+            return Err(EditError::FrontmatterNotEditable);
+        }
         let Some(located) = self.field(field) else {
             return Err(self.absent_or_not_editable(field));
         };
-        let mut edited = String::with_capacity(self.source.len());
+        let mut edited = String::with_capacity(self.source.len() - located.line_range.len());
         edited.push_str(&self.source[..located.line_range.start]);
         edited.push_str(&self.source[located.line_range.end..]);
         let mut expected = self.mapping()?.unwrap_or_default();
@@ -326,14 +401,31 @@ impl<'a> Document<'a> {
     ///
     /// The heading and the blank lines separating it from its neighbours are
     /// not the section's content and are left where they are. An empty
-    /// `content` empties the section without touching its heading.
+    /// `content` empties the section without touching its heading. Every line
+    /// the splice writes uses the document's own terminator, `content`'s own
+    /// lines included.
+    ///
+    /// The result is re-read before it is returned. A replace that moved the
+    /// frontmatter, lost a heading the body already had, or produced a section
+    /// that does not read back as the content it was given refuses and returns
+    /// nothing — the same bargain a field edit makes, for the same reason:
+    /// content is arbitrary Markdown, and an unclosed fence in it swallows
+    /// everything below.
     pub fn replace_section(
         &self,
         address: impl Into<SectionAddress<'a>>,
         content: &str,
     ) -> Result<String, EditError> {
+        let address = address.into();
         let scan = self.scan_body();
-        let span = scan.resolve_section(address.into())?;
+        let span = scan.resolve_section(address)?;
+        if scan.headings().iter().any(|heading| {
+            heading.span.byte_offset == span.heading_start && heading.inside_container
+        }) {
+            return Err(EditError::SectionInContainer {
+                heading: address.heading.to_string(),
+            });
+        }
         let start = self.body_start + span.content_start;
         let end = self.body_start + span.content_end;
 
@@ -346,16 +438,27 @@ impl<'a> Document<'a> {
             if start > 0 && !self.source[..start].ends_with('\n') {
                 replacement.push_str(terminator);
             }
-            replacement.push_str(content);
-            if !content.ends_with('\n') {
+            append_with_terminator(&mut replacement, content, self.line_ending);
+            // An empty section's content range collapses onto the next
+            // heading, so the separator the section had sits above the splice
+            // and none is left below it. Restoring one is what keeps the
+            // heading below from being jammed against written content — and,
+            // where that heading is setext, from being absorbed into it.
+            if span.content_start == span.content_end
+                && span.content_start == span.end
+                && span.body_start < span.end
+                && end < self.source.len()
+            {
                 replacement.push_str(terminator);
             }
         }
 
-        let mut edited = String::with_capacity(self.source.len());
+        let mut edited =
+            String::with_capacity(self.source.len() - (end - start) + replacement.len());
         edited.push_str(&self.source[..start]);
         edited.push_str(&replacement);
         edited.push_str(&self.source[end..]);
+        self.verify_section(&edited, address, content, scan.headings())?;
         Ok(edited)
     }
 
@@ -414,13 +517,8 @@ impl<'a> Document<'a> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
         }
-        if let Some(Value::Map(map)) = &self.frontmatter
-            && map.contains_key(field)
-            && self.field(field).is_none()
-        {
-            return Err(EditError::FieldNotEditable {
-                field: field.to_string(),
-            });
+        if self.spans_untrusted {
+            return Err(EditError::FrontmatterNotEditable);
         }
         match &self.frontmatter {
             Some(Value::Map(_)) | Some(Value::Null) | None => {}
@@ -437,20 +535,13 @@ impl<'a> Document<'a> {
             // Append before the closing delimiter. A null block — `---\n---\n`
             // — has an empty range there, so writing a field into it promotes
             // it to a mapping.
-            Some(range) => Ok(format!(
-                "{}{entry}{}",
-                &self.source[..range.end],
-                &self.source[range.end..]
-            )),
+            Some(range) => Ok(splice(self.source, range.end..range.end, &entry)),
             // No block at all. It lands after any byte-order mark, never above
             // it, so the mark stays the document's first bytes.
             None => {
                 let at = if self.byte_order_mark { BOM.len() } else { 0 };
-                Ok(format!(
-                    "{}---{terminator}{entry}---{terminator}{}",
-                    &self.source[..at],
-                    &self.source[at..]
-                ))
+                let block = format!("---{terminator}{entry}---{terminator}");
+                Ok(splice(self.source, at..at, &block))
             }
         }
     }
@@ -484,11 +575,7 @@ impl<'a> Document<'a> {
             } else {
                 render_sequence_entry(&located.name, items, self.line_ending)?
             };
-            return Ok(format!(
-                "{}{entry}{}",
-                &self.source[..located.line_range.start],
-                &self.source[located.line_range.end..]
-            ));
+            return Ok(splice(self.source, located.line_range.clone(), &entry));
         }
 
         let (Some(range), Some(style)) = (&located.value_range, ScalarStyle::of(located.style))
@@ -503,20 +590,27 @@ impl<'a> Document<'a> {
             // space is part of what the splice writes.
             rendered.insert(0, ' ');
         }
-        Ok(format!(
-            "{}{rendered}{}",
-            &self.source[..range.start],
-            &self.source[range.end..]
-        ))
+        Ok(splice(self.source, range.clone(), &rendered))
     }
 
     /// Re-read the edited bytes and refuse unless the frontmatter is exactly
     /// the intended mapping — the edited field as asked for, and every other
     /// field, its order included, untouched.
+    ///
+    /// This is where the fidelity invariant is actually enforced. Every layer
+    /// below reasons about where a construct's bytes are; this one asks the
+    /// reader what the bytes now say and compares it against what was asked
+    /// for. A span computed one line off, a quoting escalation that changed a
+    /// neighbour, a splice that closed a quote somewhere else — none of them
+    /// can reach a caller through here, because none of them read back as the
+    /// mapping that was intended.
     fn verify(&self, edited: &str, field: &str, expected: &Mapping) -> Result<(), EditError> {
-        let reread = Document::parse(edited);
-        let matches = match reread.frontmatter() {
-            Some(Value::Map(map)) => map == expected,
+        // The check is about the block, so only the block is re-read: locating
+        // the edited document's fields would compute spans nothing here asks
+        // for, at the cost of the scan that produced this edit in the first
+        // place.
+        let matches = match frontmatter_of(edited) {
+            Some(Value::Map(map)) => &map == expected,
             Some(Value::Null) => expected.is_empty(),
             _ => false,
         };
@@ -527,6 +621,97 @@ impl<'a> Document<'a> {
                 field: field.to_string(),
             })
         }
+    }
+
+    /// Re-read the bytes a section replace produced and refuse unless all four
+    /// of these hold: the frontmatter mapping is the one that was there, the
+    /// addressed heading still resolves, it now owns the content it was given,
+    /// and every heading the body already had is still a heading.
+    ///
+    /// The fourth is the one that catches the class: `content` is arbitrary
+    /// Markdown, and an unclosed fence, an indented block or a line that turns
+    /// the heading below it into a setext underline all swallow document
+    /// structure without touching a byte the splice addressed.
+    fn verify_section(
+        &self,
+        edited: &str,
+        address: SectionAddress<'_>,
+        content: &str,
+        before: &[Heading],
+    ) -> Result<(), EditError> {
+        let refuse = || EditError::SectionPostImageMismatch {
+            heading: address.heading.to_string(),
+        };
+        let reread = Document::parse(edited);
+        if reread.frontmatter() != self.frontmatter() {
+            return Err(refuse());
+        }
+        let scan = reread.scan_body();
+        let span = scan.resolve_section(address).map_err(|_| refuse())?;
+        let written = &reread.body()[span.content_start..span.content_end];
+        if !same_lines(written, content) {
+            return Err(refuse());
+        }
+        let after = scan.headings();
+        for heading in before {
+            let wanted = after
+                .iter()
+                .filter(|other| other.level == heading.level && other.text == heading.text)
+                .count();
+            let had = before
+                .iter()
+                .filter(|other| other.level == heading.level && other.text == heading.text)
+                .count();
+            if wanted < had {
+                return Err(refuse());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The frontmatter value `source` holds, without locating its fields.
+fn frontmatter_of(source: &str) -> Option<Value> {
+    extract(source, &mut Vec::new()).value
+}
+
+/// `source` with `range` replaced by `replacement`, allocated once at the size
+/// the result actually is.
+fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
+    let mut out = String::with_capacity(source.len() - range.len() + replacement.len());
+    out.push_str(&source[..range.start]);
+    out.push_str(replacement);
+    out.push_str(&source[range.end..]);
+    out
+}
+
+/// Whether two runs of text are the same lines.
+///
+/// Section content is compared the way a splice writes it: terminators are the
+/// document's whatever the content arrived with, and the last line is
+/// terminated whether or not it asked to be. Neither is a difference in what
+/// the section says, so neither is a mismatch.
+fn same_lines(left: &str, right: &str) -> bool {
+    fn lines(text: &str) -> impl Iterator<Item = &str> {
+        text.trim_end_matches(['\n', '\r'])
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r'))
+    }
+    lines(left).eq(lines(right))
+}
+
+/// Append `content` with every line terminated by `line_ending`, and terminate
+/// the last line too.
+///
+/// Content arrives written however its author wrote it. Splicing it verbatim
+/// is how a CRLF document ends up with LF lines in the middle of it, which is
+/// the same defect as a synthesized line with the wrong terminator and is
+/// caught by nothing downstream.
+fn append_with_terminator(out: &mut String, content: &str, line_ending: LineEnding) {
+    let terminator = line_ending.as_str();
+    for line in content.split_inclusive('\n') {
+        out.push_str(line.trim_end_matches(['\r', '\n']));
+        out.push_str(terminator);
     }
 }
 

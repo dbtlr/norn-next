@@ -18,8 +18,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::body::overlap;
-use crate::span::SourceSpan;
+use crate::body::overlaps_any;
+use crate::span::{LineCursor, SourceSpan};
 
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));
@@ -76,12 +76,15 @@ pub fn splice_wikilinks_in_text(
 }
 
 pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Wikilink> {
+    // Matches arrive in ascending order, so their positions are counted once
+    // across the text rather than once per token.
+    let mut cursor = LineCursor::new(text);
     WIKILINK_RE
         .captures_iter(text)
         .filter_map(|captures| {
             let full_match = captures.get(0)?;
             let match_range = full_match.start()..full_match.end();
-            if ignored.iter().any(|r| overlap(r, &match_range)) {
+            if overlaps_any(ignored, &match_range) {
                 return None;
             }
 
@@ -102,7 +105,7 @@ pub(crate) fn parse_tokens(text: &str, ignored: &[Range<usize>]) -> Vec<Wikilink
                 title,
                 anchor,
                 block_ref,
-                span: SourceSpan::at(text, full_match.start()),
+                span: cursor.span_at(full_match.start()),
             })
         })
         .collect()
@@ -153,10 +156,15 @@ pub fn split_wikilink_target(raw: &str) -> (String, Option<String>, Option<Strin
 /// The delimiter bytes a target must not contain are `|` (begins the title),
 /// `#` (begins the anchor or block reference) and `[` / `]` (the fences). A
 /// target carrying one would re-parse as a different link shape — `a|b` reads
-/// as target `a` with title `b` — so a rewrite to such a name is refused
-/// rather than emitted. Every other byte, a bare `^` included, round-trips.
+/// as target `a` with title `b`.
+///
+/// A target must also carry something, and carry it on one line. `[[]]` and
+/// `[[   ]]` are not tokens this grammar recognizes at all, so a link written
+/// with one vanishes; a target holding `\n` or `\r` splices a line break into
+/// whatever the link sat in, which ends a table row and leaves a blockquote
+/// mid-paragraph. Every other byte, a bare `^` included, round-trips.
 pub fn wikilink_target_is_representable(target: &str) -> bool {
-    !target.contains(['|', '#', '[', ']'])
+    !target.trim().is_empty() && !target.contains(['|', '#', '[', ']', '\n', '\r'])
 }
 
 /// Reconstruct a wikilink's text with `new_target` in place of its target,
@@ -200,7 +208,7 @@ pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<St
     for line in body.split_inclusive('\n') {
         if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
             let id_range = (line_start + block_id.start())..(line_start + block_id.end());
-            if !ignored.iter().any(|r| overlap(r, &id_range)) {
+            if !overlaps_any(ignored, &id_range) {
                 block_ids.push(block_id.as_str().to_string());
             }
         }

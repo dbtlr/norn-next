@@ -30,6 +30,13 @@ pub struct Heading {
     /// there is no way to build a `Heading` without one. A section whose body
     /// silently ran to end of file is the shape that absence produced.
     pub body_offset: usize,
+    /// Whether the heading sits inside a blockquote or a list item.
+    ///
+    /// The bytes below such a heading are the container's before they are the
+    /// section's, so replacing the section by byte range lifts them out of the
+    /// container and rewrites the document around it. A replace addressed at
+    /// one refuses.
+    pub inside_container: bool,
 }
 
 /// Slugify heading text into an anchor: lowercase, ASCII alphanumerics kept,

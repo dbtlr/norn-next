@@ -303,15 +303,34 @@ fn a_synthesized_block_lands_after_the_byte_order_mark() {
     assert_eq!(edited.matches("---").count(), 2);
 }
 
+/// The mark is the document's first bytes and stays them, through every path
+/// that writes. A prefix untouched by a set but relocated by a remove or a
+/// section replace is the same defect found one path later.
 #[test]
 fn editing_a_marked_document_leaves_the_mark_alone() {
-    let edited = set(
-        "\u{feff}---\ntitle: old\n---\nbody\n",
-        "title",
-        Value::String("new".into()),
-    )
-    .expect("an edit");
-    assert_eq!(edited, "\u{feff}---\ntitle: new\n---\nbody\n");
+    let source = "\u{feff}---\ntitle: old\nother: x\n---\n## Alpha\n\nbody\n";
+    let document = Document::parse(source);
+    let edits = [
+        document.set_field("title", &Value::String("new".into())),
+        document.remove_field("title"),
+        document.replace_section("Alpha", "rewritten"),
+    ];
+    for edited in edits {
+        let edited = edited.expect("an edit");
+        assert!(edited.starts_with('\u{feff}'), "the mark moved: {edited:?}");
+        assert_eq!(edited.matches('\u{feff}').count(), 1, "{edited:?}");
+        let reread = Document::parse(&edited);
+        assert!(reread.has_byte_order_mark());
+        assert!(reread.frontmatter().is_some(), "{edited:?}");
+    }
+    assert_eq!(
+        set(
+            "\u{feff}---\ntitle: old\n---\nbody\n",
+            "title",
+            Value::String("new".into())
+        ),
+        Ok("\u{feff}---\ntitle: new\n---\nbody\n".to_string())
+    );
 }
 
 // ── The whole-document span guard (NRN-128, NRN-133, NRN-141) ────────────
@@ -337,20 +356,56 @@ fn a_key_the_scanner_decodes_differently_refuses_the_whole_block() {
             .iter()
             .any(|diagnostic| diagnostic.code == "frontmatter-not-editable")
     );
+    // The refusal is the block's, not any one field's: the disagreement is
+    // about the block's split, and a field-level answer would suggest another
+    // field might be fine.
     for field in ["a", "x61"] {
         assert_eq!(
             document.set_field(field, &Value::Int(9)),
-            Err(EditError::FieldNotEditable {
-                field: field.to_string()
-            })
+            Err(EditError::FrontmatterNotEditable)
         );
         assert_eq!(
             document.remove_field(field),
-            Err(EditError::FieldNotEditable {
-                field: field.to_string()
-            })
+            Err(EditError::FrontmatterNotEditable)
         );
     }
+    // Appending a field the block does not have is an edit into the block too,
+    // and lands between lines nothing can attribute. It refuses on the same
+    // terms rather than slipping past a per-field guard.
+    assert_eq!(
+        document.set_field("brand new", &Value::Int(1)),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    assert_eq!(
+        document.remove_field("brand new"),
+        Err(EditError::FrontmatterNotEditable)
+    );
+}
+
+/// A block with no fields is not the same thing as a block whose fields cannot
+/// be located, and the two refuse differently. An empty mapping is fully
+/// understood — nothing about it is untrusted — so the write is attempted, and
+/// what refuses it is the post-image check discovering that a flow mapping
+/// cannot be appended to. A block holding a key the value model dropped never
+/// gets that far.
+#[test]
+fn a_block_with_no_fields_and_a_block_with_no_trustworthy_fields_refuse_differently() {
+    assert_eq!(
+        set("---\n{}\n---\nbody\n", "title", Value::String("t".into())),
+        Err(EditError::PostImageMismatch {
+            field: "title".to_string()
+        })
+    );
+    assert_eq!(
+        set("---\n1: x\n---\nbody\n", "title", Value::String("t".into())),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    // And the empty block, which is null rather than a mapping, still takes
+    // its first field.
+    assert_eq!(
+        set("---\n---\nbody\n", "title", Value::String("t".into())),
+        Ok("---\ntitle: t\n---\nbody\n".to_string())
+    );
 }
 
 /// The guard is whole-document: a well-formed field beside an unlocatable one
@@ -363,9 +418,7 @@ fn a_well_formed_field_beside_an_ambiguous_one_refuses_as_well() {
     assert!(document.field("title").is_none());
     assert_eq!(
         document.set_field("title", &Value::String("changed".into())),
-        Err(EditError::FieldNotEditable {
-            field: "title".to_string()
-        })
+        Err(EditError::FrontmatterNotEditable)
     );
 }
 

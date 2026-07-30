@@ -68,6 +68,60 @@ fn an_empty_string_has_one_position() {
     assert_eq!(SourceSpan::at("", 7), span);
 }
 
+// ── The two origins (NORN-25) ────────────────────────────────────────────
+
+/// There are two coordinate origins in this crate, one `body_start` apart, and
+/// a caller adding the difference by hand is how a body offset gets used
+/// against a source. A `Document` reports both headings and wikilinks in its
+/// own coordinates, with the line and column recomputed against the whole
+/// document rather than shifted.
+#[test]
+fn a_document_reports_its_constructs_in_source_coordinates() {
+    let source =
+        "---\ntitle: t\ntags:\n  - a\n---\n# One\n\nsee [[Target]] and [[Other]]\n\n## Two\n";
+    let document = Document::parse(source);
+    let scan = document.scan_body();
+
+    let headings = document.headings();
+    assert_eq!(headings.len(), 2);
+    for (source_side, body_side) in headings.iter().zip(scan.headings()) {
+        assert_eq!(
+            source_side.span.byte_offset,
+            body_side.span.byte_offset + document.body_start()
+        );
+        assert_eq!(
+            source_side.body_offset,
+            body_side.body_offset + document.body_start()
+        );
+        assert!(source[source_side.span.byte_offset..].starts_with('#'));
+    }
+    // The heading's line is its line in the document, not in the body.
+    assert_eq!(headings[0].text, "One");
+    assert_eq!(headings[0].span.line, 6);
+    assert_eq!(headings[0].span.column, 1);
+    assert_eq!(headings[1].span.line, 10);
+
+    let links = document.wikilinks();
+    assert_eq!(links.len(), 2);
+    assert_eq!(&source[links[0].range()], "[[Target]]");
+    assert_eq!(&source[links[1].range()], "[[Other]]");
+    assert_eq!(links[0].span.line, 8);
+    assert_eq!(links[0].span.column, 5);
+}
+
+/// A lone `\r` ends a line. Counting only `\n` reported line 1 for every
+/// construct in a CR-only document, which is a position that points at nothing.
+#[test]
+fn a_carriage_return_alone_ends_a_line() {
+    let content = "one\rtwo\rthree";
+    assert_eq!(SourceSpan::at(content, 4).line, 2);
+    assert_eq!(SourceSpan::at(content, 4).column, 1);
+    assert_eq!(SourceSpan::at(content, 8).line, 3);
+    // And a CRLF pair is one break, not two.
+    assert_eq!(SourceSpan::at("one\r\ntwo", 5).line, 2);
+    assert_eq!(SourceSpan::at("one\r\ntwo", 5).column, 1);
+}
+
 // ── Frontmatter strings and their bytes (NRN-499) ────────────────────────
 
 fn texts(source: &str) -> Vec<(String, String, Option<String>)> {

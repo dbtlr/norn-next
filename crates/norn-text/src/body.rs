@@ -24,7 +24,7 @@ use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
 use crate::heading::{Heading, slugify};
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
-use crate::span::SourceSpan;
+use crate::span::LineCursor;
 use crate::wikilink::{Wikilink, parse_tokens, splice_tokens};
 
 /// One CommonMark reading of a document body: its headings and the byte
@@ -43,45 +43,70 @@ impl<'a> BodyScan<'a> {
     /// Walk `body` once.
     pub fn new(body: &'a str) -> Self {
         let mut headings = Vec::new();
-        let mut code_ranges = Vec::new();
-        let mut active_heading: Option<(u8, String, usize)> = None;
+        let mut code_ranges: Vec<Range<usize>> = Vec::new();
+        let mut active_heading: Option<ActiveHeading> = None;
         let mut active_code_block: Option<usize> = None;
+        // Headings arrive in ascending order, so their positions are counted
+        // once across the whole walk rather than once per heading.
+        let mut cursor = LineCursor::new(body);
+        let mut container_depth: usize = 0;
 
         for (event, range) in Parser::new(body).into_offset_iter() {
             match event {
+                Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::Item) => {
+                    container_depth += 1;
+                }
+                Event::End(TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item) => {
+                    container_depth = container_depth.saturating_sub(1);
+                }
                 Event::Start(Tag::Heading { level, .. }) => {
-                    active_heading = Some((heading_level(level), String::new(), range.start));
+                    active_heading = Some(ActiveHeading {
+                        level: heading_level(level),
+                        text: String::new(),
+                        start: range.start,
+                        inside_container: container_depth > 0,
+                    });
                 }
                 Event::End(TagEnd::Heading(_)) => {
-                    if let Some((level, text, start)) = active_heading.take() {
-                        let text = text.trim().to_string();
+                    if let Some(active) = active_heading.take() {
+                        let text = active.text.trim().to_string();
                         headings.push(Heading {
-                            level,
+                            level: active.level,
                             slug: slugify(&text),
                             text,
-                            span: SourceSpan::at(body, start),
+                            span: cursor.span_at(active.start),
                             // `range.end` covers the whole heading construct:
                             // the ATX line through its newline, or the setext
                             // underline line.
                             body_offset: range.end.min(body.len()),
+                            inside_container: active.inside_container,
                         });
                     }
                 }
                 Event::Text(text) => {
-                    if let Some((_, heading_text, _)) = active_heading.as_mut() {
-                        heading_text.push_str(&text);
+                    if let Some(active) = active_heading.as_mut() {
+                        active.text.push_str(&text);
+                    }
+                }
+                // A setext heading's title may run across several lines. The
+                // break between them separates two words, so it contributes
+                // one, and the text — and the slug and the address derived
+                // from it — reads as the heading a human sees.
+                Event::SoftBreak | Event::HardBreak => {
+                    if let Some(active) = active_heading.as_mut() {
+                        active.text.push(' ');
                     }
                 }
                 Event::Code(text) => {
-                    if let Some((_, heading_text, _)) = active_heading.as_mut() {
-                        heading_text.push_str(&text);
+                    if let Some(active) = active_heading.as_mut() {
+                        active.text.push_str(&text);
                     }
-                    code_ranges.push(range);
+                    push_code_range(&mut code_ranges, range);
                 }
                 Event::Start(Tag::CodeBlock(_)) => active_code_block = Some(range.start),
                 Event::End(TagEnd::CodeBlock) => {
                     if let Some(start) = active_code_block.take() {
-                        code_ranges.push(start..range.end);
+                        push_code_range(&mut code_ranges, start..range.end);
                     }
                 }
                 _ => {}
@@ -103,17 +128,6 @@ impl<'a> BodyScan<'a> {
     /// Every heading, in document order.
     pub fn headings(&self) -> &[Heading] {
         &self.headings
-    }
-
-    /// The byte ranges where code makes text opaque: inline code spans and
-    /// whole fenced or indented code blocks.
-    pub fn code_ranges(&self) -> &[Range<usize>] {
-        &self.code_ranges
-    }
-
-    /// Whether `range` overlaps any opaque code range.
-    pub fn is_in_code(&self, range: &Range<usize>) -> bool {
-        self.code_ranges.iter().any(|code| overlap(code, range))
     }
 
     /// Every `[[…]]` token in the body, code excluded.
@@ -150,8 +164,36 @@ impl<'a> BodyScan<'a> {
     }
 }
 
-pub(crate) fn overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
-    left.start < right.end && right.start < left.end
+/// A heading being accumulated across the events that make it up.
+struct ActiveHeading {
+    level: u8,
+    text: String,
+    start: usize,
+    inside_container: bool,
+}
+
+/// Record an opaque range, dropping an empty one.
+///
+/// An empty range masks nothing, and [`overlaps_any`] resolves a query against
+/// one candidate — the last range that could reach it — so an empty range
+/// standing in that position would hide a real one behind it.
+fn push_code_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
+    if range.start < range.end {
+        ranges.push(range);
+    }
+}
+
+/// Whether `query` overlaps any of `ranges`, which are ascending,
+/// non-overlapping and non-empty.
+///
+/// A linear scan makes every masked-construct question cost the document's
+/// code, so a document that is mostly code pays that once per wikilink, per
+/// block id and per heading. Binary search over the ordering the one pass
+/// already produced answers it in a step: at most one range can start before
+/// the query ends and still reach past where it begins.
+pub(crate) fn overlaps_any(ranges: &[Range<usize>], query: &Range<usize>) -> bool {
+    let index = ranges.partition_point(|range| range.start < query.end);
+    index > 0 && ranges[index - 1].end > query.start
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
