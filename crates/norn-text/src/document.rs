@@ -453,7 +453,13 @@ impl<'a> Document<'a> {
         edited.push_str(&self.source[..start]);
         edited.push_str(&replacement);
         edited.push_str(&self.source[end..]);
-        self.verify_section(&edited, address, content, scan.headings())?;
+        self.verify_section(
+            &edited,
+            address,
+            content,
+            scan.headings(),
+            span.content_start..span.content_end,
+        )?;
         Ok(edited)
     }
 
@@ -621,18 +627,27 @@ impl<'a> Document<'a> {
     /// Re-read the bytes a section replace produced and refuse unless all four
     /// of these hold: the frontmatter mapping is the one that was there, the
     /// addressed heading still resolves, it now owns the content it was given,
-    /// and every heading the body already had is still a heading.
+    /// and every heading the body already had *outside the replaced range* is
+    /// still a heading.
     ///
     /// The fourth is the one that catches the class: `content` is arbitrary
     /// Markdown, and an unclosed fence, an indented block or a line that turns
     /// the heading below it into a setext underline all swallow document
     /// structure without touching a byte the splice addressed.
+    ///
+    /// `replaced` — the addressed section's content range, in body
+    /// coordinates — is what bounds it. A section owns its subsections, so
+    /// replacing its content is allowed to remove them, and a heading the
+    /// splice overwrote is not one this check may demand back. Everything
+    /// above the range and below it is the document's, and all of it survives
+    /// or the replace refuses.
     fn verify_section(
         &self,
         edited: &str,
         address: SectionAddress<'_>,
         content: &str,
         before: &[Heading],
+        replaced: Range<usize>,
     ) -> Result<(), EditError> {
         let refuse = || EditError::SectionPostImageMismatch {
             heading: address.heading.to_string(),
@@ -648,14 +663,15 @@ impl<'a> Document<'a> {
             return Err(refuse());
         }
         let after = scan.headings();
-        for heading in before {
-            let wanted = after
-                .iter()
-                .filter(|other| other.level == heading.level && other.text == heading.text)
-                .count();
+        let survives = |heading: &Heading| !replaced.contains(&heading.span.byte_offset);
+        for heading in before.iter().filter(|heading| survives(heading)) {
             let had = before
                 .iter()
-                .filter(|other| other.level == heading.level && other.text == heading.text)
+                .filter(|other| survives(other) && same_heading(other, heading))
+                .count();
+            let wanted = after
+                .iter()
+                .filter(|other| same_heading(other, heading))
                 .count();
             if wanted < had {
                 return Err(refuse());
@@ -678,6 +694,13 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> String {
     out.push_str(replacement);
     out.push_str(&source[range.end..]);
     out
+}
+
+/// Whether two headings are the same heading for survival purposes: same level
+/// and same text. Position is deliberately not part of it — a splice moves the
+/// bytes below it, and a heading that only moved is a heading that survived.
+fn same_heading(left: &Heading, right: &Heading) -> bool {
+    left.level == right.level && left.text == right.text
 }
 
 /// Whether two runs of text are the same lines.

@@ -521,6 +521,33 @@ fn content_that_swallows_the_document_below_it_refuses() {
     );
 }
 
+/// A section owns its subsections, so replacing its content removes them. That
+/// is what the address means, not structure lost to the content — so the
+/// survival check asks only about headings outside the range the splice
+/// overwrote.
+#[test]
+fn replacing_a_section_that_owns_subsections_removes_them() {
+    assert_eq!(
+        Document::parse("# Top\n\nold\n\n## Sub\n\nx\n").replace_section("Top", "new"),
+        Ok("# Top\n\nnew\n".to_string())
+    );
+
+    // A sibling below the section is outside that range, so it still has to
+    // survive — and the same replace behind an unclosed fence, which swallows
+    // it, refuses.
+    let with_sibling = "# Top\n\nold\n\n## Sub\n\nx\n\n# Next\n\ny\n";
+    assert_eq!(
+        Document::parse(with_sibling).replace_section("Top", "new"),
+        Ok("# Top\n\nnew\n\n# Next\n\ny\n".to_string())
+    );
+    assert_eq!(
+        Document::parse(with_sibling).replace_section("Top", "```"),
+        Err(EditError::SectionPostImageMismatch {
+            heading: "Top".to_string()
+        })
+    );
+}
+
 /// Content that restates the addressed heading makes the address ambiguous, so
 /// there is no longer one section to have written — and the replace refuses
 /// rather than reporting a success nothing can re-address. Occurrence

@@ -18,9 +18,10 @@ impl SourceSpan {
     /// The span of `byte_offset` within `content`.
     ///
     /// `byte_offset` is clamped into `content`: an offset past the end lands
-    /// on the end, and an offset inside a multi-byte character lands on that
-    /// character's first byte. The clamped value is what the returned
-    /// `byte_offset` carries, so slicing `content` at it is always sound.
+    /// on the end, an offset inside a multi-byte character lands on that
+    /// character's first byte, and an offset on the `\n` of a `\r\n` lands on
+    /// the `\r`. The clamped value is what the returned `byte_offset` carries,
+    /// so slicing `content` at it is always sound.
     ///
     /// Counting is from the start of `content`, so this costs the offset. A
     /// caller asking for many spans in ascending order uses [`LineCursor`],
@@ -66,17 +67,29 @@ impl<'a> LineCursor<'a> {
         while target > 0 && !self.content.is_char_boundary(target) {
             target -= 1;
         }
+        // `\r\n` is one break, so an offset landing on its `\n` lands on the
+        // `\r` — the same clamp a multi-byte character gets, for the same
+        // reason. Without it the interior of a break is a position the two
+        // paths answer differently: stopping there ends the line, and resuming
+        // there reads the `\n` as a second break the one-shot walk never
+        // counted.
+        let bytes = self.content.as_bytes();
+        if target > 0 && bytes.get(target) == Some(&b'\n') && bytes[target - 1] == b'\r' {
+            target -= 1;
+        }
         debug_assert!(
             target >= self.offset,
             "a line cursor only advances: {target} is behind {}",
             self.offset
         );
 
-        let bytes = self.content.as_bytes();
         while self.offset < target {
             let byte = bytes[self.offset];
             self.offset += 1;
-            if byte == b'\r' && bytes.get(self.offset) == Some(&b'\n') && self.offset < target {
+            // The `\n` of a pair is consumed with its `\r` unconditionally: the
+            // clamp above puts no target between them, so there is no offset
+            // the cursor can be asked to stop at mid-break.
+            if byte == b'\r' && bytes.get(self.offset) == Some(&b'\n') {
                 self.offset += 1;
             } else if byte != b'\r' && byte != b'\n' {
                 continue;

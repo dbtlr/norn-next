@@ -122,6 +122,24 @@ fn a_carriage_return_alone_ends_a_line() {
     assert_eq!(SourceSpan::at("one\r\ntwo", 5).column, 1);
 }
 
+/// One break is one position. An offset landing on the `\n` of a `\r\n` is
+/// inside a break rather than at a place in the text, so it is clamped to the
+/// break's first byte — the same clamp a multi-byte character gets. Without it
+/// the interior of a break is a position a walk that stops there and a walk
+/// that resumes there answer differently.
+#[test]
+fn an_offset_inside_a_crlf_pair_is_clamped_to_the_carriage_return() {
+    let content = "one\r\ntwo\r\n";
+    let span = SourceSpan::at(content, 4);
+    assert_eq!(span.byte_offset, 3);
+    assert_eq!(span.line, 1);
+    assert_eq!(span.column, 4);
+    // Every construct after it still reports the line it is on.
+    assert_eq!(SourceSpan::at(content, 5).line, 2);
+    assert_eq!(SourceSpan::at(content, 9).line, 2);
+    assert_eq!(SourceSpan::at(content, content.len()).line, 3);
+}
+
 // ── Frontmatter strings and their bytes (NRN-499) ────────────────────────
 
 fn texts(source: &str) -> Vec<(String, String, Option<String>)> {
