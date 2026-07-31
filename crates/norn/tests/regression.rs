@@ -60,7 +60,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c9860e8220f9e6abb7dbb8d51ca3e72a631e12db75b0ad71caadb020e72d5cf2";
+const CONTRACT_DIGEST: &str = "f4335c22bd081bf7f31e0940f45aedf9e74c4cd3365688bd839a5f8bca834f1c";
 
 /// The cases carried by tests today, by name.
 ///
@@ -74,6 +74,7 @@ const BOUND_CASES: &[&str] = &[
     "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
+    "harness-condition-waits-have-deadlines",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
