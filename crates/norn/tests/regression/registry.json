@@ -383,7 +383,9 @@
           "crates/norn-testkit/src/wait.rs::a_condition_that_never_holds_fails_naming_its_bound_and_the_last_state",
           "crates/norn-testkit/src/wait.rs::each_wait_obeys_the_bound_its_own_call_site_declared",
           "crates/norn-testkit/src/wait.rs::a_slow_probe_is_named_as_a_slow_probe_rather_than_as_a_stuck_subject",
-          "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored"
+          "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored",
+          "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored",
+          "crates/norn-testkit/src/wait.rs::a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound"
         ]
       }
     },
