@@ -15,15 +15,24 @@
 //!
 //! # Condition-precise, deadline-generous
 //!
-//! Precision belongs to the condition; slack belongs to the budget. **A
-//! harness deadline is a hang detector, never a performance bar.** It answers
-//! whether the state ever converged, and nothing about how quickly. A suite
-//! that wants the settle time asserts it itself, as its own measurement,
-//! under the lane rules its evidence kind belongs to. A budget set near the
-//! time convergence usually takes makes machine speed a test result.
+//! Precision belongs to the condition; slack belongs to both bounds. **A
+//! bound here answers whether the state ever converged, and nothing about how
+//! quickly.** A suite that wants the settle time asserts it itself, as its own
+//! measurement, under the lane rules its evidence kind belongs to. A work
+//! bound set near the time convergence usually takes makes machine speed a
+//! test result.
+//!
+//! The probe bound is sized the same way, and it is the easier of the two to
+//! write too tight, because it is a bar on a single sample: one evaluation
+//! that meets a cold cache or a collection pause fails the whole wait as
+//! [`FailureKind::ProbeOverran`], however much work bound was left. So size it
+//! for the slowest evaluation the probe could plausibly make, not the typical
+//! one. What it is there to catch is a probe whose cost is structurally wrong
+//! — a scan where a lookup was meant — and that reads as overrun at any
+//! generous bound.
 //!
 //! So the condition is written exactly — the precise set of paths, the exact
-//! row — and the budget is written loose.
+//! row — and both bounds are written loose.
 //!
 //! # The work bound is not the probe bound
 //!
@@ -35,9 +44,24 @@
 //! diagnosis of a real defect: [`FailureKind::ProbeOverran`] names the slow
 //! probe instead.
 //!
-//! **The bound observes; it does not preempt.** A probe that begins inside
+//! **The bounds observe; they do not preempt.** A probe that begins inside
 //! the work bound runs to completion, and a condition it observes to hold is
-//! a success however late that lands.
+//! a success however late that lands — including an evaluation that passed the
+//! probe bound while it ran, because a subject that converged failing its wait
+//! is a false negative no budget can settle. Both bounds are read between
+//! evaluations, on an evaluation that has already returned.
+//!
+//! # A probe returns, and that part is the call site's
+//!
+//! Observing rather than preempting is what leaves this constraint with the
+//! caller. [`wait_until`] runs the probe on the calling thread, so a probe
+//! that never returns — a lock it never gets, a read on a pipe nothing writes
+//! — hangs the wait past both of its bounds, which are only ever read after an
+//! evaluation returns. That is the outcome the rest of this module rules out,
+//! and here it is an accepted limitation rather than a case handled: the run
+//! ends on the runner's own timeout, naming neither a bound nor a state. So a
+//! probe takes a reading and returns. It does not wait inside itself, and
+//! anything it calls that could block carries a bound of its own.
 //!
 //! # A failure says what it saw
 //!
@@ -53,19 +77,21 @@
 //! A progress heartbeat trades a wrong deadline for a starvation nobody
 //! diagnoses: the run ends when the runner's own timeout kills it, and that
 //! failure names neither a bound nor a state. A hard bound carrying a rich
-//! failure payload is what this module offers in its place.
+//! failure payload is what this module offers in its place, for every probe
+//! that returns.
 
 use std::fmt;
 use std::time::{Duration, Instant};
 
-/// The first gap between probes, and the longest one.
+use crate::poll;
+
+/// What a failure reports for a pending observation that named no state.
 ///
-/// Cadence is granularity, not a bound: it decides how soon after the
-/// condition becomes true the wait notices, and it never extends a wait past
-/// the work bound, because the last gap is clamped to what is left of it. The
-/// bounds a wait obeys are the two in its [`Budget`] and nothing else.
-const FIRST_POLL_WAIT: Duration = Duration::from_millis(1);
-const LONGEST_POLL_WAIT: Duration = Duration::from_millis(50);
+/// [`Observed::Pending`] carries a state so that no failure is a bare
+/// timeout. An empty string is that shape smuggled back in — a diagnostic
+/// ending in a colon and nothing — so it is replaced by a phrase that at least
+/// says which side failed to report.
+const UNREPORTED_STATE: &str = "(no state reported)";
 
 /// The two bounds a wait obeys.
 ///
@@ -204,6 +230,11 @@ pub enum Observed<T> {
 
 impl<T> Observed<T> {
     /// The condition does not hold yet, described as what was seen.
+    ///
+    /// A state worth reading is the caller's part. An empty description is the
+    /// one thing the wait fixes up: a failure reports it as
+    /// `(no state reported)`, so the diagnostic says a state was missing
+    /// instead of trailing off after its colon.
     pub fn pending(state: impl Into<String>) -> Self {
         Observed::Pending(state.into())
     }
@@ -217,6 +248,13 @@ pub enum FailureKind {
     /// One evaluation of the condition passed the probe bound, and the wait
     /// stopped there rather than spending the rest of the work bound on more
     /// evaluations that cost the same.
+    ///
+    /// One evaluation is the whole sample: a single slow one ends the wait,
+    /// whatever the ones around it cost and whatever work bound is left. That
+    /// is why the probe bound is sized for the slowest plausible evaluation
+    /// rather than the typical one — this failure reads as "the probe is
+    /// structurally too expensive", and a bound tight enough to be tripped by
+    /// one unlucky evaluation makes it say that about a probe that is fine.
     ProbeOverran {
         /// How long that evaluation took.
         took: Duration,
@@ -320,7 +358,7 @@ pub fn wait_until<T>(
     mut probe: impl FnMut() -> Observed<T>,
 ) -> Result<T, WaitFailure> {
     let started = Instant::now();
-    let mut poll_wait = FIRST_POLL_WAIT;
+    let mut poll_wait = poll::FIRST_GAP;
     let mut probes = 0usize;
     // Written by the first pending observation, and read only after one has
     // happened: every failure path here is downstream of a probe that
@@ -334,10 +372,14 @@ pub fn wait_until<T>(
         probes += 1;
 
         match observed {
-            // The bound observes and does not preempt: a condition seen to
-            // hold is the answer, however long the evaluation that saw it
-            // took and however far past the work bound it lands.
+            // The bounds observe and do not preempt: a condition seen to hold
+            // is the answer, however long the evaluation that saw it took and
+            // however far past either bound it lands. Both bounds are read
+            // below, on an evaluation that reported pending.
             Observed::Met(value) => return Ok(value),
+            Observed::Pending(state) if state.is_empty() => {
+                last_state = UNREPORTED_STATE.to_string();
+            }
             Observed::Pending(state) => last_state = state,
         }
 
@@ -357,8 +399,7 @@ pub fn wait_until<T>(
         if left.is_zero() {
             return Err(failure(FailureKind::Elapsed));
         }
-        std::thread::sleep(poll_wait.min(left));
-        poll_wait = (poll_wait * 2).min(LONGEST_POLL_WAIT);
+        poll_wait = poll::sleep_gap(poll_wait, left);
     }
 }
 
@@ -463,7 +504,15 @@ mod tests {
     #[test]
     fn each_wait_obeys_the_bound_its_own_call_site_declared() {
         let short = Duration::from_millis(10);
-        let long = Duration::from_millis(250);
+        let long = Duration::from_millis(400);
+        // A ceiling between the two declared bounds. Each wait is judged
+        // against its own bound rather than against the other's measurement:
+        // comparing two elapsed times makes a descheduled short wait look like
+        // a governing default, and the discrimination survives without it,
+        // because a single bound governing both waits either holds the short
+        // one past this ceiling or lets the long one return under its own
+        // bound.
+        let between = Duration::from_millis(200);
 
         let mut failures = Vec::new();
         for bound in [short, long] {
@@ -486,11 +535,10 @@ mod tests {
             failures[1].elapsed
         );
         assert!(
-            failures[0].elapsed < failures[1].elapsed,
-            "both waits ran the same length ({:?}, {:?}) whatever they declared, so one bound is \
-             governing both",
-            failures[0].elapsed,
-            failures[1].elapsed
+            failures[0].elapsed < between,
+            "the wait declaring {short:?} ran {:?}, past the {between:?} ceiling between the two \
+             declared bounds, so a bound it did not declare is governing it",
+            failures[0].elapsed
         );
     }
 
@@ -551,6 +599,87 @@ mod tests {
         )
         .expect("a condition observed by a probe that started inside the bound");
         assert_eq!(value, "settled");
+    }
+
+    /// **The bar on preemption, at the other bound.** An evaluation that
+    /// passes the probe bound and observes the condition anyway is honored.
+    ///
+    /// This is where "the bounds observe, they do not preempt" is decided,
+    /// because it is the only case in which the probe bound has an answer to
+    /// discard: the sibling case above passes the work bound instead, and a
+    /// wait that weighed the probe bound against a met condition would still
+    /// pass it. The forbidden shape is exactly that weighing — under it a
+    /// probe a millisecond over its bound turns an observed convergence into a
+    /// [`FailureKind::ProbeOverran`], and the suite fails a subject that is
+    /// where it should be. The bound is read on the next pending observation
+    /// instead, which the slow-probe case above pins.
+    #[test]
+    fn a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored() {
+        let probe_bound = Duration::from_millis(5);
+        let slow = Duration::from_millis(60);
+        let value = wait_until(
+            "a state read through a probe slower than its own bound",
+            // Work enough that only the probe bound is passed, so a failure
+            // here could only be the probe bound discarding the answer.
+            Budget::new(Duration::from_secs(30), probe_bound),
+            || {
+                std::thread::sleep(slow);
+                Observed::Met("settled")
+            },
+        )
+        .expect("a condition observed by an evaluation that passed the probe bound");
+        assert_eq!(value, "settled");
+    }
+
+    /// The look taken at the work bound is a real look: a condition that
+    /// becomes true in the last gap between probes is observed there.
+    ///
+    /// A wait that reports elapsed the moment it wakes from that gap is the
+    /// forbidden shape, and it fails a subject that converged inside the
+    /// budget it was given — with a diagnostic naming a state that was already
+    /// stale when it was recorded.
+    #[test]
+    fn a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound() {
+        let work = Duration::from_millis(60);
+        // Read from before the wait starts, so the condition turns true a hair
+        // ahead of the wait's own bound: the look that sees it is the one
+        // taken after the last gap, which is clamped to the bound itself.
+        let started = Instant::now();
+        let value = wait_until(
+            "a state that settles as its bound expires",
+            Budget::new(work, PROBE),
+            || {
+                let waited = started.elapsed();
+                if waited >= work {
+                    Observed::Met("settled")
+                } else {
+                    Observed::pending(format!("{waited:?} into a {work:?} bound"))
+                }
+            },
+        )
+        .expect("a condition true at the work bound is seen by the look taken there");
+        assert_eq!(value, "settled");
+    }
+
+    /// A pending observation that describes nothing still fails with something
+    /// to read. An empty description renders as a bound, a colon, and nothing
+    /// — the bare timeout [`Observed::Pending`] exists to forbid, reached from
+    /// the caller's side rather than the type's.
+    #[test]
+    fn a_pending_observation_that_describes_nothing_still_names_a_state() {
+        let failure = wait_until(
+            "a state nothing described",
+            Budget::new(Duration::ZERO, PROBE),
+            || Observed::<()>::pending(""),
+        )
+        .expect_err("a condition that is never true");
+
+        assert_eq!(failure.last_state, UNREPORTED_STATE);
+        let rendered = failure.to_string();
+        assert!(
+            rendered.ends_with(UNREPORTED_STATE),
+            "the failure trails off after its colon: {rendered:?}"
+        );
     }
 
     /// A zero work bound is still a bound, and the condition is still asked.
@@ -617,6 +746,20 @@ mod tests {
             settling.floor()
         );
         assert!(absurd > settling.budget_for(1_000).work());
+
+        // The count that separates the guard from a truncating cast. usize::MAX
+        // cannot: its low 32 bits are u32::MAX, which is what the guard yields
+        // anyway. This one truncates to zero, and a truncating conversion
+        // returns the bare floor.
+        #[cfg(target_pointer_width = "64")]
+        {
+            let past_u32 = settling.budget_for(1usize << 32).work();
+            assert!(
+                past_u32 > settling.floor(),
+                "a changed set of 2^32 produced {past_u32:?}, at or under the {:?} floor",
+                settling.floor()
+            );
+        }
     }
 
     /// Unwrapping a failed wait prints the diagnostic rather than a field
