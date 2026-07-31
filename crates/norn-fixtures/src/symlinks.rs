@@ -17,13 +17,20 @@
 //! where the generator writes is inside its own root, and what a link *names*
 //! is a string.
 //!
-//! # Following a link is never required, and a cycle is never emitted
+//! # Following a link is never required, and no walk of the tree can loop
 //!
-//! A directory link never sits inside the directory it names, so following one
-//! reaches a subtree rather than an ancestor of itself. Nothing here needs a
-//! reader to follow anything — the probe classifies by one stat of the target
-//! — but a tree carrying a traversal cycle would be a trap for every consumer
-//! that does.
+//! A walk that descends every directory and follows every directory link
+//! reaches each link at most once. [`plan`] places a directory link only where
+//! the links planned before it cannot lead back to the directory holding it,
+//! and puts it at the vault root otherwise — the root is reachable through no
+//! link, because every target is a subdirectory. Two links naming each other's
+//! subtrees are the case a per-link check misses: each one sits outside the
+//! directory it names and the pair still makes a path of unbounded length.
+//!
+//! Nothing here needs a reader to follow anything — the probe classifies by
+//! one stat of the target — but a tree carrying a traversal cycle is a trap
+//! for every consumer that does: the kernel answers `ELOOP` after about thirty
+//! hops, and the walk fails on a tree it was handed as well-formed.
 
 use std::io;
 use std::path::Path;
@@ -79,6 +86,47 @@ pub fn platform_refusal(profile: &str, requested: usize, supported: bool) -> Opt
     })
 }
 
+/// The refusal a generation earns when the filesystem under `dir` cannot carry
+/// the symbolic links its profile asks for.
+pub fn filesystem_refusal(profile: &str, requested: usize, dir: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "profile `{profile}` asks for {requested} symbolic links and the filesystem at {} \
+             cannot create one; refusing rather than emitting a tree without them",
+            dir.display()
+        ),
+    )
+}
+
+/// Name of the link [`creatable_in`] makes and removes. Dot-prefixed, so a
+/// walk that skips hidden entries would not see it even if a removal failed.
+const PROBE_LINK: &str = ".norn-fixtures-symlink-probe";
+
+/// Whether a symbolic link can be created inside `dir`.
+///
+/// [`SUPPORTED`] is a property of the build; this is a property of the
+/// filesystem the directory sits on, and the two disagree. A build that can
+/// call `symlink(2)` still meets filesystems that answer it with an error —
+/// exFAT, FAT32, and some network and overlay mounts — and trying is the only
+/// way to find out.
+///
+/// A removal that fails is returned as an error rather than as `false`: a
+/// stray entry left in the target directory is a different problem from a
+/// filesystem that carries no links, and reporting it as the second would
+/// leave the first behind unmentioned.
+#[allow(clippy::disallowed_methods)] // Makes and removes the one link the answer is read from.
+pub fn creatable_in(dir: &Path) -> io::Result<bool> {
+    let probe = dir.join(PROBE_LINK);
+    match create("probe-target", &probe) {
+        Ok(()) => {
+            std::fs::remove_file(&probe)?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
+}
+
 /// Create the symbolic link `at`, naming `target`.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)] // The generator's own writer: it creates the links it emits.
@@ -130,19 +178,28 @@ pub fn plan(
         });
     }
 
+    // Where each directory link sits and what it names, for the cycle check
+    // the next one is put through. Each link is placed against an acyclic set,
+    // so the set stays acyclic.
+    let mut dir_links: Vec<(&str, &str)> = Vec::with_capacity(symlinks.in_vault_dir);
     for index in 0..symlinks.in_vault_dir {
         let drawn = rng.pick(dirs).as_str();
         let target = rng.pick(dirs).as_str();
-        // A link inside the directory it names is a traversal cycle. The vault
-        // root is inside no subdirectory, so placing the link there is the
-        // spelling that always exists.
-        let dir = if is_inside(drawn, target) { "" } else { drawn };
+        // The vault root is reachable through no link, because every target is
+        // a subdirectory, so placing the link there is the spelling that
+        // always breaks the loop.
+        let dir = if reentered(drawn, target, &dir_links) {
+            ""
+        } else {
+            drawn
+        };
         let name = format!("{}-shortcut-{index:03}", rng.pick(SUB_DIRS));
         out.push(PlannedLink {
             path: join(dir, &name),
             target: relative(dir, target),
             species: Species::InVaultDir,
         });
+        dir_links.push((dir, target));
     }
 
     for index in 0..symlinks.dangling {
@@ -250,6 +307,33 @@ fn is_inside(path: &str, ancestor: &str) -> bool {
     ancestor.is_empty() || path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
+/// Whether a directory link held in `dir` and naming `target` is one a walk
+/// re-enters, given the directory links in `planned` — each a pair of the
+/// directory holding it and the directory it names.
+///
+/// A walk descending `target` reaches every directory beneath it, follows any
+/// planned link held in one of those, and repeats. Re-entry is that closure
+/// reaching `dir`: the walk arrives back at the directory holding this link,
+/// descends it again, and the path it is building has no end. `dir` inside
+/// `target` is the one-link case and falls out of the first step.
+fn reentered<'a>(dir: &str, target: &'a str, planned: &[(&'a str, &'a str)]) -> bool {
+    let mut reached = vec![target];
+    let mut next = 0;
+    while next < reached.len() {
+        let here = reached[next];
+        next += 1;
+        if is_inside(dir, here) {
+            return true;
+        }
+        for &(held_in, names) in planned {
+            if is_inside(held_in, here) && !reached.contains(&names) {
+                reached.push(names);
+            }
+        }
+    }
+    false
+}
+
 /// The spelling of `to` relative to the directory `from_dir`, both
 /// vault-relative.
 fn relative(from_dir: &str, to: &str) -> String {
@@ -326,23 +410,72 @@ mod tests {
         }
     }
 
-    /// A directory link inside the directory it names is a traversal cycle:
-    /// following it lands on an ancestor of itself.
-    #[test]
-    fn a_directory_link_never_sits_inside_the_directory_it_names() {
-        for seed in [1, 2, 3, 7, 11] {
-            for link in sample(FOUR, seed) {
-                if link.species != Species::InVaultDir {
-                    continue;
-                }
+    /// More directory links than any shipped profile carries. A traversal
+    /// cycle needs two links naming each other's subtrees, which is rare in
+    /// the one to six a profile asks for and common at eight.
+    const DENSE_DIR_LINKS: Symlinks = Symlinks {
+        in_vault_file: 1,
+        in_vault_dir: 8,
+        dangling: 1,
+        outbound: 1,
+    };
+
+    /// Every directory link as the pair (the directory holding it, the
+    /// directory it names), both vault-relative.
+    fn directory_edges(links: &[PlannedLink]) -> Vec<(String, String)> {
+        links
+            .iter()
+            .filter(|link| link.species == Species::InVaultDir)
+            .map(|link| {
                 let target = resolved_in_vault(&link.path, &link.target)
                     .expect("an in-vault directory link stays inside the vault");
-                assert!(
-                    !is_inside(parent_of(&link.path), &target),
-                    "`{}` sits inside `{target}`, which it names",
-                    link.path
-                );
+                (parent_of(&link.path).to_string(), target)
+            })
+            .collect()
+    }
+
+    /// The first directory link a walk re-enters, if any.
+    ///
+    /// Computed over the whole planned set as a fixed point, where [`plan`]
+    /// places each link against the ones before it — so a placement that
+    /// reasons wrongly about the set it has already built cannot pass by
+    /// reasoning the same way twice.
+    fn re_entered(edges: &[(String, String)]) -> Option<&(String, String)> {
+        edges.iter().find(|(dir, target)| {
+            let mut reached = vec![target.as_str()];
+            let mut next = 0;
+            while next < reached.len() {
+                let here = reached[next];
+                next += 1;
+                if is_inside(dir, here) {
+                    return true;
+                }
+                for (held_in, names) in edges {
+                    if is_inside(held_in, here) && !reached.contains(&names.as_str()) {
+                        reached.push(names);
+                    }
+                }
             }
+            false
+        })
+    }
+
+    /// No seed plans a set of directory links a walk can re-enter.
+    ///
+    /// The one-link case — a link inside the directory it names — is the
+    /// obvious half. The half this is wide for is the mutual pair: one link in
+    /// `a` naming `b` and another in `b` naming `a` are each outside the
+    /// directory they name, and together they make a path of unbounded length.
+    #[test]
+    fn no_seed_plans_a_walk_that_loops() {
+        for seed in 0..400 {
+            let links = sample(DENSE_DIR_LINKS, seed);
+            let edges = directory_edges(&links);
+            assert!(
+                re_entered(&edges).is_none(),
+                "seed {seed} planned a directory link a walk re-enters: {:?} among {edges:?}",
+                re_entered(&edges)
+            );
         }
     }
 
@@ -425,5 +558,53 @@ mod tests {
     fn a_platform_that_can_create_links_and_a_profile_asking_for_none_both_proceed() {
         assert!(platform_refusal("tiny", 4, true).is_none());
         assert!(platform_refusal("tiny", 0, false).is_none());
+    }
+
+    #[test]
+    fn a_filesystem_refusal_names_the_profile_the_count_and_the_directory() {
+        let refusal = filesystem_refusal("tiny", 4, Path::new("/mnt/exfat/vault"));
+        assert_eq!(refusal.kind(), io::ErrorKind::Unsupported);
+        let message = refusal.to_string();
+        assert!(message.contains("tiny"), "{message}");
+        assert!(message.contains('4'), "{message}");
+        assert!(message.contains("/mnt/exfat/vault"), "{message}");
+    }
+
+    /// The probe answers for the filesystem it is pointed at, and the
+    /// directory it answered about is exactly as it found it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Makes and removes the directory it probes.
+    fn the_probe_answers_and_leaves_the_directory_as_it_found_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "norn-fixtures-probe-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creating a scratch directory");
+
+        assert_eq!(
+            creatable_in(&dir).expect("probing a scratch directory"),
+            SUPPORTED,
+            "the probe disagreed with the build about this platform"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .expect("listing a scratch directory")
+                .count(),
+            0,
+            "the probe left an entry behind"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("removing a scratch directory");
+    }
+
+    /// A directory that is not there carries no link. The probe answers `no`
+    /// rather than failing, because the answer it is asked for is whether a
+    /// link can be created and the answer is the same either way.
+    #[test]
+    fn a_probe_of_a_directory_that_is_not_there_answers_no() {
+        let absent = Path::new("/norn-fixtures-no-such-directory/inner");
+        assert!(!creatable_in(absent).expect("probing an absent directory"));
     }
 }

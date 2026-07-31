@@ -103,11 +103,17 @@
 //!
 //! ## Symbolic links, and the platform that cannot make one
 //!
-//! A generation whose profile asks for symbolic links **fails on a platform
-//! that cannot create one**, before it writes anything. The alternative — a
-//! tree emitted without them, reported as a success — would make the platform
-//! a third input to a pair that names one tree, and every consumer measuring
+//! A generation whose profile asks for symbolic links **fails where one cannot
+//! be created**, before it writes any of the tree. The alternative — a tree
+//! emitted without them, reported as a success — would make the platform a
+//! third input to a pair that names one tree, and every consumer measuring
 //! link handling would measure nothing while passing.
+//!
+//! Two questions, because the build and the filesystem answer differently. A
+//! build without `symlink(2)` is refused before the target directory is
+//! touched at all. A build that has it still meets filesystems that refuse the
+//! call — exFAT, FAT32, and some network and overlay mounts — so the output
+//! directory is asked directly, once, while it is still empty.
 //!
 //! ## Body length is the one that was most wrong
 //!
@@ -167,7 +173,7 @@ pub mod probe;
 pub mod profile;
 mod rng;
 mod symlinks;
-mod tree;
+pub mod tree;
 mod words;
 mod yaml;
 
@@ -399,15 +405,38 @@ fn prepare_out_dir(out_dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Everything a generation refuses on before it touches its target: a profile
+/// that does not satisfy [`Profile::validate`], and a profile asking for
+/// symbolic links on a build that cannot create one.
+///
+/// [`generate`] asks this itself. It is public for the caller that clears its
+/// target before generating into it: a clear-then-refuse leaves an empty
+/// directory where a tree was, and asking first is what makes the refusal cost
+/// nothing.
+pub fn preflight(profile: &Profile) -> io::Result<()> {
+    preflight_where(profile, symlinks::SUPPORTED)
+}
+
+fn preflight_where(profile: &Profile, symlinks_supported: bool) -> io::Result<()> {
+    profile
+        .validate()
+        .map_err(|problem| io::Error::new(io::ErrorKind::InvalidInput, problem))?;
+    match symlinks::platform_refusal(profile.name, profile.symlinks.total(), symlinks_supported) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
 /// Generate the tree `(profile, seed)` names, at `out_dir`.
 ///
 /// `out_dir` must be absent or an empty directory; anything else is refused,
 /// because generating into a populated directory produces a tree that is not a
 /// function of the pair. The sentinel [`SENTINEL_FILE`] is written last.
 ///
-/// A profile that does not satisfy [`Profile::validate`] is refused before
-/// anything is written, and so is a profile asking for symbolic links on a
-/// platform that cannot create one.
+/// Everything [`preflight`] refuses is refused here before the target is
+/// touched at all, and a filesystem under `out_dir` that carries no symbolic
+/// link is refused after the empty directory exists and before any of the tree
+/// is written.
 pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Manifest> {
     generate_where(profile, seed, out_dir, symlinks::SUPPORTED)
 }
@@ -424,18 +453,22 @@ fn generate_where(
     out_dir: &Path,
     symlinks_supported: bool,
 ) -> io::Result<Manifest> {
-    profile
-        .validate()
-        .map_err(|problem| io::Error::new(io::ErrorKind::InvalidInput, problem))?;
-    // Asked before the target is touched: a platform that cannot carry the
+    // Asked before the target is touched: a build that cannot carry the
     // profile's sixth knob fails the whole generation rather than leaving a
     // part of one behind.
-    if let Some(refusal) =
-        symlinks::platform_refusal(profile.name, profile.symlinks.total(), symlinks_supported)
-    {
-        return Err(refusal);
-    }
+    preflight_where(profile, symlinks_supported)?;
     prepare_out_dir(out_dir)?;
+    // And asked again of the filesystem the target actually sits on, which the
+    // build cannot answer for. The directory is empty at this point, so a
+    // refusal here still precedes every byte of the tree.
+    let requested = profile.symlinks.total();
+    if requested > 0 && symlinks_supported && !symlinks::creatable_in(out_dir)? {
+        return Err(symlinks::filesystem_refusal(
+            profile.name,
+            requested,
+            out_dir,
+        ));
+    }
 
     let mut rng = rng::Rng::new(seed ^ salt(profile.name));
     let mut writer = Writer::new(out_dir);
@@ -489,6 +522,16 @@ fn generate_where(
         }
     }
 
+    // The manifest states that a generation emits every link its profile asks
+    // for or fails, and this is where that becomes true rather than a claim
+    // about what the planner is believed to do.
+    if emitted != profile.symlinks {
+        return Err(io::Error::other(format!(
+            "profile `{}` asks for {:?} and the generation emitted {emitted:?}",
+            profile.name, profile.symlinks
+        )));
+    }
+
     writer.write(SENTINEL_FILE, SENTINEL_CONTENT.as_bytes())?;
 
     Ok(Manifest {
@@ -518,6 +561,55 @@ mod tests {
         let total = salts.len();
         salts.dedup();
         assert_eq!(total, salts.len(), "two profiles share a salt");
+    }
+
+    /// The target a link names is inside the contract digest.
+    ///
+    /// Two trees alike but for how one link's target is spelled are two trees.
+    /// A digest carrying the link's path and not its target would report a
+    /// generation that moved every target as the tree it stopped being — and
+    /// the knob-on against knob-off case cannot see it, because both spellings
+    /// are equally present.
+    #[test]
+    fn the_target_a_link_names_is_inside_the_contract_digest() {
+        let spelled = |target: &str| {
+            let mut writer = Writer::new(Path::new("nothing is written here"));
+            writer
+                .links
+                .insert("notes/alias.md".to_string(), target.to_string());
+            digest::hex(&writer.tree_digest())
+        };
+        assert_ne!(
+            spelled("alpha.md"),
+            spelled("../alpha.md"),
+            "one link path with two targets shares a contract digest, so the \
+             digest cannot see what a link names"
+        );
+    }
+
+    /// [`preflight`] refuses what a generation refuses before its target is
+    /// touched, which is what lets a caller clearing its target ask first.
+    #[test]
+    fn preflight_refuses_an_invalid_profile_and_a_build_without_symlinks() {
+        let tiny = Profile::by_name("tiny").expect("the tiny profile");
+        assert!(preflight(&tiny).is_ok());
+
+        let mut invalid = tiny;
+        invalid.dirs.top_level = 0;
+        assert_eq!(
+            preflight(&invalid)
+                .expect_err("an invalid profile must be refused")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        assert_eq!(
+            preflight_where(&tiny, false)
+                .expect_err("a build that cannot create a link must be refused")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(preflight_where(&tiny, true).is_ok());
     }
 
     #[test]

@@ -142,6 +142,9 @@ fn run_generate(argv: &[String]) -> Result<String, (String, u8)> {
         )
     })?;
 
+    // Before the target is cleared, not after: clearing and then refusing
+    // leaves an empty directory where a generated tree was.
+    norn_fixtures::preflight(&profile).map_err(|e| (format!("generation failed: {e}"), 1))?;
     prepare_target(&args.out_dir).map_err(|e| (e, 1))?;
     let manifest = generate(&profile, args.seed, &args.out_dir)
         .map_err(|e| (format!("generation failed: {e}"), 1))?;
