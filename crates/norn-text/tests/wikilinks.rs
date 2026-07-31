@@ -415,21 +415,43 @@ fn a_block_id_span_points_at_its_marker() {
         ]
     );
     // A lone-CR body is the case that separates the cursor's three-way break
-    // rule from counting `\n` alone: the definition sits on line 2, not at
-    // column 17 of line 1. Detection here finds only the chunk's last
-    // candidate — `a` is dropped — which is NORN-41's characterized gap, not
-    // this span's.
+    // rule from counting `\n` alone: detection honors the same rule, so both
+    // definitions are found, `b` on line 2 exactly as the CRLF case above.
     assert_eq!(
         BodyScan::new("first ^a\rsecond ^b\r").block_ids(),
-        [BlockId {
-            id: "b".to_string(),
-            span: SourceSpan {
-                line: 2,
-                column: 8,
-                byte_offset: 16,
+        [
+            BlockId {
+                id: "a".to_string(),
+                span: SourceSpan {
+                    line: 1,
+                    column: 7,
+                    byte_offset: 6,
+                },
             },
-        }]
+            BlockId {
+                id: "b".to_string(),
+                span: SourceSpan {
+                    line: 2,
+                    column: 8,
+                    byte_offset: 16,
+                },
+            },
+        ]
     );
+}
+
+/// Detection honors the same three-way break rule as the span cursor: an `\n`
+/// document, a `\r\n` document and a lone-`\r` document carrying the same
+/// text find the same block ids.
+#[test]
+fn block_id_detection_agrees_across_line_break_styles() {
+    let lf_ids = BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids();
+    let crlf_ids = BodyScan::new("first ^a\r\nsecond ^b\r\nthird\r\n").block_ids();
+    let cr_ids = BodyScan::new("first ^a\rsecond ^b\rthird\r").block_ids();
+    let lf = ids(&lf_ids);
+    assert_eq!(lf, ["a", "b"]);
+    assert_eq!(ids(&crlf_ids), lf);
+    assert_eq!(ids(&cr_ids), lf);
 }
 
 #[test]
