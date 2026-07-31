@@ -375,7 +375,7 @@
       "name": "harness-condition-waits-have-deadlines",
       "kind": "defect-class",
       "venue": 0,
-      "property": "A harness wait on a condition carries a deadline: it either observes the condition or fails naming the bound it passed, rather than polling for as long as the run lasts.",
+      "property": "A harness wait on a condition carries a deadline the call site declared, over two bounds: the work bound the condition has to become true, and the probe bound one evaluation of it may take. The wait either observes the condition or fails naming the bound it passed and the last state it saw, rather than polling for as long as the run lasts. A slow evaluation is reported as a slow probe rather than as a condition that never held, and neither bound preempts an evaluation already in flight.",
       "sources": ["NRN-324"],
       "binding": {
         "status": "bound",
