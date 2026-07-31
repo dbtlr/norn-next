@@ -163,20 +163,30 @@ pub fn hex(digest: &[u8; 32]) -> String {
 /// node's relative path, kind and contents, in sorted path order.
 ///
 /// Two trees share a digest exactly when the filesystem reports the same
-/// relative paths, the same directories, and the same file bytes. Mode,
+/// relative paths, the same directories, the same file bytes, and the same
+/// link targets. Mode,
 /// ownership and timestamps are outside it — they are properties of the run,
 /// not of the tree. Filename *spelling* is inside it, which is what makes this
 /// a diagnostic rather than the determinism contract: see the module docs.
-#[allow(clippy::disallowed_methods)] // Reads the tree it digests.
+///
+/// A symbolic link contributes the target it names, read without following it.
+/// Reading through one would digest a document twice under two names, and
+/// would fail outright on a link whose target is not there.
+#[allow(clippy::disallowed_methods)] // Reads the tree it digests, and the targets of the links in it.
 pub fn tree(root: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     for node in tree::walk(root)? {
         hasher.update_framed(node.rel.as_bytes());
-        if node.is_dir {
-            hasher.update(b"d");
-        } else {
-            hasher.update(b"f");
-            hasher.update_framed(&fs::read(&node.path)?);
+        match node.kind {
+            tree::Kind::Dir => hasher.update(b"d"),
+            tree::Kind::File => {
+                hasher.update(b"f");
+                hasher.update_framed(&fs::read(&node.path)?);
+            }
+            tree::Kind::Symlink => {
+                hasher.update(b"l");
+                hasher.update_framed(fs::read_link(&node.path)?.to_string_lossy().as_bytes());
+            }
         }
     }
     Ok(hasher.finish())

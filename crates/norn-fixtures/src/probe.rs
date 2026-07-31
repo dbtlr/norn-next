@@ -18,6 +18,11 @@
 //! its manifest, because the generator knows which links it made dangle and
 //! no byte-level reading can tell.
 //!
+//! A symbolic link's species is measured rather than taken from intent: the
+//! target is read, resolved lexically against the walk root, and stat'd once.
+//! That is the same kind of question as "do these bytes decode" — where a link
+//! points is a fact about the tree, not an interpretation of a document.
+//!
 //! # Where the checked-in parameters come from
 //!
 //! [`CALIBRATION`] is an **authored envelope**, not a measurement. Each entry
@@ -41,6 +46,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::symlinks;
 use crate::tree;
 
 /// Shape statistics for one directory tree.
@@ -75,6 +81,14 @@ pub struct VaultStats {
     pub binary_files: u64,
     pub ambiguous_stem_classes: u64,
     pub largest_stem_class: u64,
+    /// Symbolic links naming a file inside the tree.
+    pub in_vault_file_symlinks: u64,
+    /// Symbolic links naming a directory inside the tree.
+    pub in_vault_dir_symlinks: u64,
+    /// Symbolic links whose target is inside the tree and not there.
+    pub dangling_symlinks: u64,
+    /// Symbolic links naming a location above the tree root.
+    pub outbound_symlinks: u64,
 }
 
 impl VaultStats {
@@ -141,6 +155,31 @@ impl VaultStats {
     pub fn documents_per_thousand_directories(&self) -> u64 {
         ratio(self.documents * 1000, self.directories)
     }
+
+    /// Symbolic links of every species.
+    pub fn symlinks(&self) -> u64 {
+        self.in_vault_file_symlinks
+            + self.in_vault_dir_symlinks
+            + self.dangling_symlinks
+            + self.outbound_symlinks
+    }
+
+    /// How many of the four symbolic-link species the tree carries.
+    ///
+    /// A count of species rather than of links, because presence is the claim:
+    /// each species is a different question for whatever walks the tree, and a
+    /// tree missing one answers three.
+    pub fn symlink_species_present(&self) -> u64 {
+        [
+            self.in_vault_file_symlinks,
+            self.in_vault_dir_symlinks,
+            self.dangling_symlinks,
+            self.outbound_symlinks,
+        ]
+        .iter()
+        .filter(|count| **count > 0)
+        .count() as u64
+    }
 }
 
 /// A ratio over an empty tree is zero rather than a panic: the probe reports
@@ -172,6 +211,7 @@ pub enum Stat {
     MaxDirectoryDepth,
     AmbiguousStemClasses,
     LargestStemClass,
+    SymlinkSpeciesPresent,
 }
 
 impl Stat {
@@ -197,6 +237,7 @@ impl Stat {
             Stat::MaxDirectoryDepth => "max_directory_depth",
             Stat::AmbiguousStemClasses => "ambiguous_stem_classes",
             Stat::LargestStemClass => "largest_stem_class",
+            Stat::SymlinkSpeciesPresent => "symlink_species_present",
         }
     }
 
@@ -222,6 +263,7 @@ impl Stat {
             Stat::MaxDirectoryDepth => stats.max_directory_depth,
             Stat::AmbiguousStemClasses => stats.ambiguous_stem_classes,
             Stat::LargestStemClass => stats.largest_stem_class,
+            Stat::SymlinkSpeciesPresent => stats.symlink_species_present(),
         }
     }
 
@@ -249,6 +291,7 @@ impl Stat {
             Stat::MaxDirectoryDepth,
             Stat::AmbiguousStemClasses,
             Stat::LargestStemClass,
+            Stat::SymlinkSpeciesPresent,
         ]
     }
 }
@@ -404,6 +447,17 @@ pub const CALIBRATION: &[Target] = &[
         why: "repeated file names are ordinary; resolution has to face them",
     },
     Target {
+        stat: Stat::SymlinkSpeciesPresent,
+        min: 4,
+        max: 4,
+        why: "the four species — a second name for a document, a second name \
+               for a directory, a target that is not there, a target above the \
+               root — are four different questions for whatever walks the \
+               tree, and a tree carrying three of them answers three. The \
+               range is a point because the floor is the whole claim and \
+               nothing above it adds a question",
+    },
+    Target {
         stat: Stat::LargestStemClass,
         min: 6,
         max: 64,
@@ -523,11 +577,27 @@ pub fn measure(root: &Path) -> io::Result<VaultStats> {
     let mut stems: BTreeMap<String, u64> = BTreeMap::new();
 
     for node in tree::walk(root)? {
-        if node.is_dir {
-            stats.directories += 1;
-            let depth = node.rel.split('/').count() as u64;
-            stats.max_directory_depth = stats.max_directory_depth.max(depth);
-            continue;
+        match node.kind {
+            tree::Kind::Dir => {
+                stats.directories += 1;
+                let depth = node.rel.split('/').count() as u64;
+                stats.max_directory_depth = stats.max_directory_depth.max(depth);
+                continue;
+            }
+            tree::Kind::Symlink => {
+                // A link counts as a link whatever it names: a `.md` link read
+                // as a document would count one document twice, and reading
+                // through a link with no target would fail.
+                let target = fs::read_link(&node.path)?;
+                match symlinks::classify(root, &node.rel, &target.to_string_lossy()) {
+                    symlinks::Species::InVaultFile => stats.in_vault_file_symlinks += 1,
+                    symlinks::Species::InVaultDir => stats.in_vault_dir_symlinks += 1,
+                    symlinks::Species::Dangling => stats.dangling_symlinks += 1,
+                    symlinks::Species::Outbound => stats.outbound_symlinks += 1,
+                }
+                continue;
+            }
+            tree::Kind::File => {}
         }
         let Some(stem) = node.rel.strip_suffix(".md") else {
             stats.non_markdown_files += 1;
