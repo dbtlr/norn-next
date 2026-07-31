@@ -20,7 +20,7 @@
 //! `from_environment` reads the three variables it claims to and builds the
 //! same value the injected constructor does.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -49,7 +49,7 @@ impl Saved {
         }
     }
 
-    fn set(variable: &str, value: Option<&str>) {
+    fn set(variable: &str, value: Option<&OsStr>) {
         // SAFETY: the environment is process-wide, and this binary holds the
         // lock every case takes before it reaches here. No other test target
         // shares this process.
@@ -65,7 +65,7 @@ impl Saved {
 impl Drop for Saved {
     fn drop(&mut self) {
         for (variable, value) in &self.values {
-            Saved::set(variable, value.as_ref().and_then(|value| value.to_str()));
+            Saved::set(variable, value.as_deref());
         }
     }
 }
@@ -74,9 +74,9 @@ impl Drop for Saved {
 fn the_xdg_bases_are_read_when_they_are_set() {
     let _lock = environment();
     let _saved = Saved::take();
-    Saved::set("XDG_CONFIG_HOME", Some("/scratch/config"));
-    Saved::set("XDG_DATA_HOME", Some("/scratch/data"));
-    Saved::set("HOME", Some("/scratch/home"));
+    Saved::set("XDG_CONFIG_HOME", Some(OsStr::new("/scratch/config")));
+    Saved::set("XDG_DATA_HOME", Some(OsStr::new("/scratch/data")));
+    Saved::set("HOME", Some(OsStr::new("/scratch/home")));
 
     let dirs = ConfigDirs::from_environment().expect("the machine's directories");
     assert_eq!(
@@ -95,7 +95,7 @@ fn the_home_defaults_apply_when_the_xdg_bases_are_not_set() {
     let _saved = Saved::take();
     Saved::set("XDG_CONFIG_HOME", None);
     Saved::set("XDG_DATA_HOME", None);
-    Saved::set("HOME", Some("/scratch/home"));
+    Saved::set("HOME", Some(OsStr::new("/scratch/home")));
 
     let dirs = ConfigDirs::from_environment().expect("the machine's directories");
     assert_eq!(
