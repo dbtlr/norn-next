@@ -1,0 +1,39 @@
+[package]
+name = "norn-config"
+description = "Machine-local state, one owner — the config-directory layout, the registry file, the bearer tokens, the loopback endpoint conventions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies. Nothing about vaults, stores, protocols or orchestration can
+# reach this crate, and nothing here can reach them — the registry file's
+# *shape* lives here and the registry's *semantics* live in `norn-host`, which
+# an edge in this direction would blur.
+#
+# `toml` is the format every machine-local file is written in, and this crate
+# is the only reader and writer of them. The registry's tolerant reader is
+# built on the untyped `toml::Table` rather than on a derived deserializer:
+# preserving a field this binary does not know about requires holding the
+# document as it was read, which a struct with named fields cannot do. The
+# feature set is the default one spelled out — `parse` and `display` are the
+# two halves of the round trip, and `serde` is what `toml`'s own serializer is
+# written against.
+#
+# `libc` is here for one thing: `O_NOFOLLOW`, which the standard library has
+# no name for. The lock file is opened with it so that a symlink planted at
+# the lock name is refused rather than followed, and spelling the flag's value
+# per platform by hand is a portability bug waiting for its target.
+[dependencies]
+libc = { workspace = true }
+toml = { workspace = true }
+
+# The channel a build is pinned to. Absent is the dev channel, which is what a
+# development build and every test run is; a release build of the shipped
+# artifact turns this on. It gates no code path — it selects the app-directory
+# name and the default port, and through them every machine-local path — so
+# that a dev binary cannot reach live state by any route, mistake included.
+[features]
+channel-live = []
