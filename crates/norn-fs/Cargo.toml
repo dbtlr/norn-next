@@ -1,0 +1,29 @@
+[package]
+name = "norn-fs"
+description = "The vault filesystem seam — the compare-and-swap write kernel, the shadow protocol, and the per-vault maintainer lock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies. Vault bytes are reached through this crate and nothing about
+# stores, schemas, plans or orchestration reaches into it — a write takes a
+# path, bytes and a hash, and hands back an identity.
+#
+# `sha2` is the content hash. Only a content hash concludes "unchanged"
+# anywhere in the system, so the algorithm behind that conclusion is a
+# workspace dependency rather than a per-crate choice.
+#
+# `libc` is here for the flags and error numbers the standard library has no
+# name for: `O_NOFOLLOW`, so a symlink planted at a path this crate opens is
+# refused rather than followed, and `ENOSPC`/`EXDEV`, so a caller can tell a
+# full disk from a shadow directory on the wrong filesystem. Spelling either by
+# hand per platform is a portability bug waiting for its target.
+[dependencies]
+libc = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }
