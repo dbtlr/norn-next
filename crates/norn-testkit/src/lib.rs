@@ -24,6 +24,24 @@
 //! expresses the size-independence pair, and [`process`] spawns a child under
 //! isolation and measures what it cost. Each is helpers only — the bars that
 //! use them land with the subjects they measure.
+//!
+//! Two modules bound how long a suite may wait, and they divide by subject:
+//! [`process`] bounds a child process's run, and [`wait`] bounds an
+//! in-process wait for state to converge. They agree on what a bound is worth
+//! — every wait carries one, passing it reports what was seen rather than that
+//! time ran out, and neither offers a wait without one — and they poll to one
+//! cadence,
+//! which is why that cadence lives in one private module rather than in each.
+//!
+//! They differ on where the number comes from, because what they bound is not
+//! equally preemptible. A run's bound has a default:
+//! [`process::DEFAULT_WAIT_DEADLINE`] is what a [`process::Run`] gets when its
+//! call site says nothing, and the harness enforces it by killing the child it
+//! spawned. A condition wait has no default and cannot have one:
+//! [`wait::Budget`] has no `Default`, every call site declares its own, and the
+//! bound observes rather than preempts, since the probe runs on this thread and
+//! there is nothing to kill. A bound nobody wrote, over an evaluation nothing
+//! can stop, is a wait no call site can tune.
 
 pub mod architecture;
 pub mod base64;
@@ -33,7 +51,9 @@ pub mod explain;
 pub mod generated;
 pub mod invariants;
 mod json;
+mod poll;
 #[cfg(unix)]
 pub mod process;
 pub mod regression;
 pub mod scale;
+pub mod wait;

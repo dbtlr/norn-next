@@ -374,12 +374,19 @@
     {
       "name": "harness-condition-waits-have-deadlines",
       "kind": "defect-class",
-      "venue": 1,
-      "property": "A harness wait on a condition carries a deadline: it either observes the condition or fails naming the bound it passed, rather than polling for as long as the run lasts.",
+      "venue": 0,
+      "property": "A harness wait on a condition carries a deadline the call site declared, over two bounds: the work bound the condition has to become true, and the probe bound one evaluation of it may take. The wait either observes the condition or fails naming the bound it passed and the last state it saw, rather than polling for as long as the run lasts. A slow evaluation is reported as a slow probe rather than as a condition that never held, and neither bound preempts an evaluation already in flight.",
       "sources": ["NRN-324"],
       "binding": {
-        "status": "dormant",
-        "reason": "nothing in the harness waits on a condition. The first substrate-layer wait is the subject, and the primitive that bounds it arrives with that consumer."
+        "status": "bound",
+        "tests": [
+          "crates/norn-testkit/src/wait.rs::a_condition_that_never_holds_fails_naming_its_bound_and_the_last_state",
+          "crates/norn-testkit/src/wait.rs::each_wait_obeys_the_bound_its_own_call_site_declared",
+          "crates/norn-testkit/src/wait.rs::a_slow_probe_is_named_as_a_slow_probe_rather_than_as_a_stuck_subject",
+          "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored",
+          "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored",
+          "crates/norn-testkit/src/wait.rs::a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound"
+        ]
       }
     },
     {

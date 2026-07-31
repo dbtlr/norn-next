@@ -51,6 +51,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::poll;
+
 /// The environment variables a run is given, beyond `PATH`. Each points into
 /// the sandbox, so a run's machine-local state is its own.
 pub const ISOLATED_VARIABLES: &[&str] = &[
@@ -175,17 +177,6 @@ pub const DEFAULT_CAPTURE_LIMIT: u64 = 8 * 1024 * 1024;
 /// bound with [`Run::deadline`]. Every run has one: this is what a run that
 /// says nothing gets, and there is no constructor that leaves it unset.
 pub const DEFAULT_WAIT_DEADLINE: Duration = Duration::from_secs(60);
-
-/// How long the harness waits before asking about the child again: the first
-/// wait, and the longest one.
-///
-/// The first question is asked before any wait, so a child that is already
-/// gone is answered immediately; the wait doubles from the first bound to the
-/// longest, so a run that lasts is asked about a bounded number of times
-/// rather than once per millisecond, and the answer for one that ends is late
-/// by at most the longest wait.
-const FIRST_POLL_WAIT: Duration = Duration::from_millis(1);
-const LONGEST_POLL_WAIT: Duration = Duration::from_millis(50);
 
 /// One process to run under a sandbox.
 pub struct Run<'a> {
@@ -368,7 +359,7 @@ struct Ended {
 fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunStatus, u64)> {
     let pid = child.id() as libc::pid_t;
     let started = Instant::now();
-    let mut poll_wait = FIRST_POLL_WAIT;
+    let mut poll_wait = poll::FIRST_GAP;
     let ended = loop {
         match waited(pid, libc::WNOHANG) {
             Ok(Some(ended)) => break Some(ended),
@@ -382,8 +373,7 @@ fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunSt
         if left.is_zero() {
             break None;
         }
-        std::thread::sleep(poll_wait.min(left));
-        poll_wait = (poll_wait * 2).min(LONGEST_POLL_WAIT);
+        poll_wait = poll::sleep_gap(poll_wait, left);
     };
 
     let (ended, timed_out) = match ended {
