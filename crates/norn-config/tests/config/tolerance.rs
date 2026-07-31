@@ -1,0 +1,153 @@
+//! The tolerant reader.
+//!
+//! Three behaviours, and every one of them exists because two binaries of
+//! different ages read the same machine: a version ahead is refused, a version
+//! behind is handled in memory without touching the file, and a field this
+//! build does not model survives a rewrite by it.
+//!
+//! The dangling-symlink refusal is here too, because it is the same class of
+//! question — what a reader does with a file it cannot make sense of — and the
+//! answer is the same shape: a typed refusal, never a guess.
+
+use norn_config::ConfigError;
+use norn_config::registry;
+
+use crate::common::{Scratch, entry, name};
+
+/// Reading a file written by a newer build and keeping only the parts this one
+/// understands would make the next write a silent deletion of the newer
+/// build's state.
+#[test]
+fn a_version_ahead_of_this_build_is_refused() {
+    let scratch = Scratch::new("ahead");
+    let dirs = scratch.dirs();
+    scratch.place(&dirs.registry_file(), "version = 2\n");
+    let error = registry::read(dirs).expect_err("a file from a newer build");
+    let ConfigError::VersionAhead {
+        found, supported, ..
+    } = error
+    else {
+        panic!("the registry was refused as something other than a version ahead");
+    };
+    assert_eq!((found, supported), (2, 1));
+}
+
+/// A mutation refuses the same way. A writer that opened a newer file and
+/// wrote it back at this build's version would destroy exactly what the read
+/// refusal exists to protect.
+#[test]
+fn a_version_ahead_refuses_a_mutation_too() {
+    let scratch = Scratch::new("ahead-mutate");
+    let dirs = scratch.dirs();
+    scratch.place(&dirs.registry_file(), "version = 2\n");
+    let error = registry::mutate(dirs, |registry| {
+        registry.insert(entry("notes", "/home/person/notes"));
+        Ok(())
+    })
+    .expect_err("a mutation of a newer file");
+    assert!(matches!(error, ConfigError::VersionAhead { .. }), "{error}");
+    assert_eq!(scratch.text_at(&dirs.registry_file()), "version = 2\n");
+}
+
+/// A version below the first one names a format no release ever wrote, so
+/// there is nothing to migrate it from. What matters here is that the
+/// version-behind branch is a branch: it is reached, and it refuses with the
+/// version it was given rather than falling through to a parse error.
+#[test]
+fn a_version_below_the_first_one_is_refused_with_the_version() {
+    let scratch = Scratch::new("behind");
+    let dirs = scratch.dirs();
+    scratch.place(&dirs.registry_file(), "version = 0\n");
+    let error = registry::read(dirs).expect_err("a version nobody wrote");
+    let ConfigError::Corrupt { reason, .. } = error else {
+        panic!("a version below the first one was refused as something other than corrupt");
+    };
+    assert!(reason.contains("version 0"), "{reason}");
+}
+
+/// A field this build does not model survives a rewrite by it — at the top
+/// level and inside an entry alike. A reader that projected the file onto its
+/// own struct and serialized the struct back would drop both.
+#[test]
+fn a_field_this_build_does_not_model_survives_a_rewrite() {
+    let scratch = Scratch::new("unknown-fields");
+    let dirs = scratch.dirs();
+    scratch.place(
+        &dirs.registry_file(),
+        "version = 1\nfuture_top_level = \"kept\"\n\n\
+         [vaults.notes]\nroot = \"/home/person/notes\"\nfuture_entry_field = 7\n\n\
+         [future_section]\nsomething = true\n",
+    );
+
+    registry::mutate(dirs, |registry| {
+        registry.insert(entry("work", "/home/person/work"));
+        Ok(())
+    })
+    .expect("a registration beside fields this build does not model");
+
+    let text = scratch.text_at(&dirs.registry_file());
+    assert!(text.contains("future_top_level"), "{text}");
+    assert!(text.contains("future_entry_field"), "{text}");
+    assert!(text.contains("[future_section]"), "{text}");
+
+    // And the entry the fields hang off is still readable, with its own known
+    // fields intact.
+    let read = registry::read(dirs).expect("the registry");
+    assert_eq!(read.len(), 2);
+    assert_eq!(
+        read.get(&name("notes")).expect("the entry").root.as_path(),
+        std::path::Path::new("/home/person/notes")
+    );
+}
+
+/// A read is a read. A file written by another build is not rewritten by
+/// looking at it: a plain listing on a machine that also runs an older service
+/// must leave the bytes under it exactly as they were.
+#[test]
+fn a_read_never_rewrites_the_file() {
+    let scratch = Scratch::new("read-only");
+    let dirs = scratch.dirs();
+    let original =
+        "version = 1\nfuture = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\nfuture = 2\n";
+    scratch.place(&dirs.registry_file(), original);
+
+    registry::read(dirs).expect("the registry");
+    registry::read(dirs).expect("the registry again");
+
+    assert_eq!(scratch.text_at(&dirs.registry_file()), original);
+    assert_eq!(
+        scratch.names_in(dirs.config_dir()),
+        vec!["registry.toml".to_string()],
+        "a read left something beside the file"
+    );
+}
+
+/// A symlink pointing at nothing and a file that is not there fail an open
+/// identically, and they mean opposite things: nothing there is a first run,
+/// and a link to nothing is state that moved or was half removed. Reading the
+/// second as the first would answer "no vaults are registered" to a machine
+/// whose registry is one restored symlink away.
+#[test]
+fn a_dangling_symlink_refuses_rather_than_reading_as_absent() {
+    let scratch = Scratch::new("dangling");
+    let dirs = scratch.dirs();
+    let path = dirs.registry_file();
+    scratch.place(&dirs.config_dir().join("placeholder"), "");
+    link(&dirs.config_dir().join("gone"), &path);
+    let error = registry::read(dirs).expect_err("a link to nothing");
+    let ConfigError::DanglingSymlink { path: refused } = error else {
+        panic!("the registry was refused as something other than a dangling symlink");
+    };
+    assert_eq!(refused, path);
+    unlink(&path);
+}
+
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a link the API never writes.
+fn link(target: &std::path::Path, at: &std::path::Path) {
+    std::os::unix::fs::symlink(target, at).expect("a symlink");
+}
+
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: clearing what the case arranged.
+fn unlink(path: &std::path::Path) {
+    std::fs::remove_file(path).expect("removing a link");
+}
