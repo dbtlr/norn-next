@@ -1,9 +1,12 @@
 //! Reading a directory tree back off disk, in one fixed order.
 //!
-//! Both consumers — the tree digest and the calibration probe — need the same
-//! thing: every node under a root, named by a forward-slash relative path, in
-//! an order that does not depend on the filesystem's readdir order. The sort
-//! is what makes the digest a property of the tree rather than of the machine.
+//! Every consumer needs the same thing: each node under a root, named by a
+//! forward-slash relative path, in an order that does not depend on the
+//! filesystem's readdir order. The sort is what makes the digest a property of
+//! the tree rather than of the machine. The tree digest and the calibration
+//! probe read it here, and so does anything outside the crate that reads a
+//! generated tree back, so that "a symbolic link is not the thing it names" is
+//! decided once.
 
 use std::fs;
 use std::io;

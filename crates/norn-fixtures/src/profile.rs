@@ -147,7 +147,7 @@ pub struct Clutter {
 /// This type is both the request and the account: a profile states the counts
 /// it wants, and [`crate::Manifest`] reports the counts that were emitted, in
 /// the same shape so the two compare directly.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Symlinks {
     pub in_vault_file: usize,
     pub in_vault_dir: usize,

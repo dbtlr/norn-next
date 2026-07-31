@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use norn_fixtures::profile::Profile;
+use norn_fixtures::tree;
 
 /// One generated Markdown document.
 ///
@@ -40,6 +41,9 @@ pub fn documents(profile: &str, seed: u64) -> Result<Vec<GeneratedDocument>, Str
     outcome
 }
 
+/// The batch arrives in `tree::walk` order, which is sorted by relative path,
+/// so nothing here sorts.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the temporary tree this module just generated.
 fn generate_and_read(
     profile: &Profile,
     seed: u64,
@@ -47,56 +51,21 @@ fn generate_and_read(
 ) -> Result<Vec<GeneratedDocument>, String> {
     norn_fixtures::generate(profile, seed, root)
         .map_err(|error| format!("could not generate `{}`: {error}", profile.name))?;
+    let nodes =
+        tree::walk(root).map_err(|error| format!("could not read {}: {error}", root.display()))?;
     let mut documents = Vec::new();
-    read_markdown(root, "", &mut documents)?;
-    documents.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(documents)
-}
-
-#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the temporary tree this module just generated.
-fn read_markdown(
-    directory: &Path,
-    prefix: &str,
-    documents: &mut Vec<GeneratedDocument>,
-) -> Result<(), String> {
-    let entries = std::fs::read_dir(directory)
-        .map_err(|error| format!("could not read {}: {error}", directory.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("could not read a directory entry: {error}"))?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| format!("{} holds a non-UTF-8 name", directory.display()))?;
-        let path = entry.path();
-        let relative = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        // `DirEntry::file_type` describes the entry itself, so a symbolic link
-        // is a symbolic link whatever it names. A generated tree carries them,
-        // and none of them is a document: one naming a file would hand the
-        // same document back twice under two paths, one naming a directory
-        // would repeat a whole subtree, and one whose target is absent has no
-        // bytes to read at all.
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("could not type {}: {error}", path.display()))?;
-        if file_type.is_symlink() {
+    for node in nodes {
+        if node.kind != tree::Kind::File || !node.rel.ends_with(".md") {
             continue;
         }
-        if file_type.is_dir() {
-            read_markdown(&path, &relative, documents)?;
-        } else if name.ends_with(".md") {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-            documents.push(GeneratedDocument {
-                path: relative,
-                text,
-            });
-        }
+        let text = std::fs::read_to_string(&node.path)
+            .map_err(|error| format!("could not read {}: {error}", node.path.display()))?;
+        documents.push(GeneratedDocument {
+            path: node.rel,
+            text,
+        });
     }
-    Ok(())
+    Ok(documents)
 }
 
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the scratch tree is this module's to place.
