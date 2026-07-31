@@ -191,6 +191,42 @@ impl fmt::Display for Incumbent {
 /// be created is an [environmental refusal](Refusal::Environment) carrying the
 /// kind, so a missing path is distinguishable from a denied one and both are
 /// distinguishable from contention.
+///
+/// ```
+/// use norn_fs::{Acquisition, try_acquire};
+///
+/// let directory = std::env::temp_dir().join(format!("norn-fs-doc-{}", std::process::id()));
+/// let lock = directory.join("maintainer.lock");
+///
+/// let held = match try_acquire(&lock).expect("an acquisition") {
+///     Acquisition::Acquired(held) => held,
+///     Acquisition::Contended { incumbent } => panic!("held by {incumbent}"),
+/// };
+///
+/// // A second attempt answers rather than waits.
+/// assert!(matches!(
+///     try_acquire(&lock).expect("an attempt"),
+///     Acquisition::Contended { .. }
+/// ));
+///
+/// // Release is dropping the guard. The lock file is never unlinked.
+/// drop(held);
+/// assert!(matches!(
+///     try_acquire(&lock).expect("an attempt"),
+///     Acquisition::Acquired(_)
+/// ));
+/// ```
+///
+/// **There is no bound to pass, because there is nothing here that waits.** The
+/// deadline this does not take, spelled out so that gaining one fails:
+///
+/// ```compile_fail
+/// use std::time::Duration;
+///
+/// use norn_fs::try_acquire;
+///
+/// let waited = try_acquire(&std::path::PathBuf::from("/tmp/x.lock"), Duration::from_secs(5));
+/// ```
 pub fn try_acquire(path: &Path) -> Result<Acquisition, Refusal> {
     try_acquire_where(path, |_| {})
 }

@@ -116,6 +116,50 @@ use crate::shadow::ShadowHome;
 /// contract: an agent must never find overwriting cheaper than merging, and a
 /// range that drifted invalidates an edit intent only the caller can derive
 /// again.
+///
+/// The two that exist:
+///
+/// ```
+/// use norn_fs::{ContentHash, Precondition};
+///
+/// let replace = Precondition::Replace(ContentHash::of(b"what the caller read"));
+/// let create = Precondition::Create;
+/// assert_ne!(replace, create);
+/// ```
+///
+/// The one that does not, spelled out so that gaining it fails. Every name an
+/// unconditional overwrite could plausibly wear is pinned here at once: an arm
+/// of this enum is where one would have to appear, and any of these compiling is
+/// that having happened.
+///
+/// ```compile_fail
+/// use norn_fs::Precondition;
+///
+/// let force = Precondition::Force;
+/// ```
+///
+/// ```compile_fail
+/// use norn_fs::Precondition;
+///
+/// let anything = Precondition::Any;
+/// ```
+///
+/// ```compile_fail
+/// use norn_fs::Precondition;
+///
+/// let clobber = Precondition::Overwrite;
+/// ```
+///
+/// And a write with no precondition at all has no spelling either — the argument
+/// is not optional and there is no second entry point that omits it.
+///
+/// ```compile_fail
+/// use norn_fs::{ShadowHome, write};
+///
+/// fn overwrite(destination: &std::path::Path, content: &[u8], shadows: &ShadowHome) {
+///     write(destination, content, shadows).expect("an unconditional write");
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Precondition {
     /// Replace what was observed. The destination must hash to this now.
@@ -247,11 +291,38 @@ fn write_where(
     shadows: &ShadowHome,
     faults: Faults,
 ) -> Result<Landed, Refusal> {
+    write_disturbed(
+        destination,
+        content,
+        precondition,
+        shadows,
+        faults,
+        &mut || {},
+    )
+}
+
+/// [`write`], with something allowed to happen inside the window between the
+/// precondition's reading and the verification.
+///
+/// `disturb` is called once, after the precondition has been satisfied and
+/// before anything is staged, which is the window a foreign writer would land
+/// in. It is the only way to reach the verify stage's two refusals
+/// deterministically: waiting for a real writer to arrive inside a window one
+/// call wide is a race nobody can arrange, and the defense would then be
+/// asserted rather than checked.
+fn write_disturbed(
+    destination: &Path,
+    content: &[u8],
+    precondition: Precondition,
+    shadows: &ShadowHome,
+    faults: Faults,
+    disturb: &mut dyn FnMut(),
+) -> Result<Landed, Refusal> {
     refuse_symlink(destination)?;
     match precondition {
         Precondition::Create => create_exclusively(destination, content, faults),
         Precondition::Replace(expected) => {
-            replace_observed(destination, content, expected, shadows, faults)
+            replace_observed(destination, content, expected, shadows, faults, disturb)
         }
     }
 }
@@ -367,7 +438,7 @@ fn create_exclusively(
         Err(refusal) => {
             // A file this call created and could not finish is a file this call
             // takes back.
-            remove_quietly(destination);
+            remove_quietly(destination, faults);
             return Err(refusal);
         }
     };
@@ -384,6 +455,7 @@ fn replace_observed(
     expected: ContentHash,
     shadows: &ShadowHome,
     faults: Faults,
+    disturb: &mut dyn FnMut(),
 ) -> Result<Landed, Refusal> {
     // Stage 2. One handle, opened here and held until the swap.
     let (mut held, replaced) = match opened_for_reading(destination)? {
@@ -400,13 +472,14 @@ fn replace_observed(
         // and a filesystem event for a document that did not change.
         return Ok(Landed::Unchanged(observed));
     }
+    disturb();
 
     // Stage 3.
     let shadow = shadows.next_shadow();
     let staged = match stage(&shadow, content, &replaced, faults) {
         Ok(staged) => staged,
         Err(refusal) => {
-            remove_quietly(&shadow);
+            remove_quietly(&shadow, faults);
             return Err(refusal);
         }
     };
@@ -415,20 +488,20 @@ fn replace_observed(
     let published = match observed_metadata(&staged, &shadow) {
         Ok(metadata) => post_state(composed, content.len() as u64, &metadata),
         Err(refusal) => {
-            remove_quietly(&shadow);
+            remove_quietly(&shadow, faults);
             return Err(refusal);
         }
     };
 
     // Stage 4.
     if let Err(refusal) = verify(&mut held, destination, expected, observed.identity()) {
-        remove_quietly(&shadow);
+        remove_quietly(&shadow, faults);
         return Err(refusal);
     }
 
     // Stage 5.
     if let Err(refusal) = swap(&shadow, destination, faults) {
-        remove_quietly(&shadow);
+        remove_quietly(&shadow, faults);
         return Err(refusal);
     }
 
@@ -702,7 +775,10 @@ fn remove(path: &Path) -> Result<(), Refusal> {
 /// failure instead would turn a clean refusal into two problems, and on the
 /// create path it would report a landed write as failed.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault paths.
-fn remove_quietly(path: &Path) {
+fn remove_quietly(path: &Path, faults: Faults) {
+    if faults.check(Stage::Cleanup).is_err() {
+        return;
+    }
     let _ = std::fs::remove_file(path);
 }
 
@@ -798,6 +874,22 @@ mod tests {
                 .expect("the shadow home")
                 .count()
         }
+
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging what the protocol left behind.
+        fn shadow_names(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(self.shadows.directory())
+                .expect("the shadow home")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        }
     }
 
     impl Drop for Scratch {
@@ -823,7 +915,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             &scratch.shadows,
-            Faults::at(Stage::Sync, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::Sync, std::io::ErrorKind::Other)]),
         )
         .expect_err("a shadow that cannot be synced");
 
@@ -850,7 +942,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             &scratch.shadows,
-            Faults::at(Stage::Write, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
         )
         .expect_err("a shadow that cannot be written");
 
@@ -873,7 +965,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             &scratch.shadows,
-            Faults::at(Stage::Swap, std::io::ErrorKind::PermissionDenied),
+            Faults::at(&[(Stage::Swap, std::io::ErrorKind::PermissionDenied)]),
         )
         .expect_err("a rename that fails");
 
@@ -905,7 +997,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             &scratch.shadows,
-            Faults::at(Stage::ParentSync, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
         )
         .expect("a landed write whose durability was not confirmed");
 
@@ -921,7 +1013,7 @@ mod tests {
             b"fresh",
             Precondition::Create,
             &scratch.shadows,
-            Faults::at(Stage::ParentSync, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
         )
         .expect("a landed create whose durability was not confirmed");
         assert!(landed.wrote());
@@ -940,7 +1032,7 @@ mod tests {
             b"fresh",
             Precondition::Create,
             &scratch.shadows,
-            Faults::at(Stage::Write, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
         )
         .expect_err("a create that cannot be written");
 
@@ -965,7 +1057,7 @@ mod tests {
             b"ours",
             Precondition::Create,
             &scratch.shadows,
-            Faults::at(Stage::Create, std::io::ErrorKind::Other),
+            Faults::at(&[(Stage::Create, std::io::ErrorKind::Other)]),
         )
         .expect_err("a create that cannot open");
         assert!(
@@ -977,5 +1069,229 @@ mod tests {
             b"somebody else's bytes",
             "the failure path removed a file it did not create"
         );
+    }
+    /// **The bar on the verification.** A foreign write that lands inside the
+    /// window is caught before the swap, and the foreign bytes are what remain.
+    ///
+    /// The window is one call wide, so the foreign writer is injected into it
+    /// rather than raced for. The forbidden shape is a protocol that checks the
+    /// precondition and then renames: the foreign write is silently overwritten,
+    /// and the caller is told its own content landed over the bytes it was
+    /// composed against.
+    #[test]
+    fn a_foreign_write_inside_the_window_is_caught_before_the_swap() {
+        let scratch = Scratch::new("verify-drift");
+        let path = scratch.place("note.md", b"old");
+        let mut landed_first = false;
+        let refusal = write_disturbed(
+            &path,
+            b"ours",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::NONE,
+            &mut || {
+                // A foreign writer editing the same file: the inode is the same
+                // and only the bytes moved, which is what the re-hash sees.
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                std::fs::write(&path, b"theirs").expect("a foreign write");
+                landed_first = true;
+            },
+        )
+        .expect_err("a foreign write inside the window");
+
+        assert!(landed_first, "the window was never entered");
+        let Refusal::Drifted {
+            expected, observed, ..
+        } = &refusal
+        else {
+            panic!("a foreign write was not reported as drift: {refusal}");
+        };
+        assert_eq!(*expected, ContentHash::of(b"old"));
+        assert_eq!(
+            observed.as_ref().expect("the observed state").content_hash,
+            ContentHash::of(b"theirs")
+        );
+        assert_eq!(
+            scratch.read(&path),
+            b"theirs",
+            "the swap ran over the foreign writer"
+        );
+        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+    }
+
+    /// **The bar the hash cannot carry.** A foreign writer that *replaced* the
+    /// document leaves bytes that still hash to what the caller observed, and the
+    /// identity comparison is what refuses.
+    ///
+    /// This is the whole reason one handle binds the protocol. Under two opens by
+    /// name, the second read would see the newcomer and agree with the
+    /// precondition; under one handle, the held description still refers to the
+    /// orphaned inode, so the hash agrees for the wrong reason and only the
+    /// identity says so. The forbidden shape is a verify that compares content
+    /// alone: it publishes over a document somebody else just published.
+    #[test]
+    fn a_foreign_replacement_that_keeps_the_bytes_is_still_refused() {
+        let scratch = Scratch::new("verify-republished");
+        let path = scratch.place("note.md", b"old");
+        let original = crate::identity::identity_of(
+            #[allow(clippy::disallowed_methods)]
+            &std::fs::metadata(&path).expect("the original"),
+        );
+
+        let refusal = write_disturbed(
+            &path,
+            b"ours",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::NONE,
+            &mut || {
+                // A foreign writer with its own atomic-replace protocol: same
+                // bytes, different file.
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                {
+                    let theirs = scratch.at("theirs");
+                    std::fs::write(&theirs, b"old").expect("a foreign staging");
+                    std::fs::rename(&theirs, &path).expect("a foreign publish");
+                }
+            },
+        )
+        .expect_err("a foreign replacement inside the window");
+
+        let Refusal::Republished {
+            read,
+            current: Some(current),
+            ..
+        } = &refusal
+        else {
+            panic!("a foreign replacement was not reported as one: {refusal}");
+        };
+        assert_eq!(*read, original);
+        assert_ne!(*current, original);
+        assert_eq!(
+            scratch.read(&path),
+            b"old",
+            "the swap ran over the foreign writer"
+        );
+        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+    }
+
+    /// A document removed inside the window is reported as a name that no longer
+    /// resolves, and the swap does not resurrect it.
+    #[test]
+    fn a_document_removed_inside_the_window_is_not_resurrected() {
+        let scratch = Scratch::new("verify-removed");
+        let path = scratch.place("note.md", b"old");
+        let refusal = write_disturbed(
+            &path,
+            b"ours",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::NONE,
+            &mut || {
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                std::fs::remove_file(&path).expect("a foreign removal");
+            },
+        )
+        .expect_err("a removal inside the window");
+
+        assert!(
+            matches!(&refusal, Refusal::Republished { current: None, .. }),
+            "{refusal}"
+        );
+        #[allow(clippy::disallowed_methods)] // Asserting on what the refusal left behind.
+        let resurrected = std::fs::metadata(&path).is_ok();
+        assert!(!resurrected, "the swap ran after the document was removed");
+        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+    }
+
+    /// **The bar on a cleanup that cannot happen.** A shadow the filesystem
+    /// refuses to remove does not change the refusal the caller is given, and
+    /// what it leaks is inert.
+    ///
+    /// Two failures are injected: the swap, which is why the write refuses, and
+    /// the removal after it, which is why the shadow is still there. The
+    /// forbidden shape is reporting the cleanup's failure — a clean refusal
+    /// becomes two problems, the caller is told something other than why its
+    /// write did not happen, and on the create path the same code would report a
+    /// landed write as failed. What the leak costs is bounded instead: its name
+    /// is one nothing recomputes, so nothing reopens it, and the host's sweep
+    /// clears it.
+    #[test]
+    fn a_cleanup_that_cannot_happen_still_returns_the_original_outcome() {
+        let scratch = Scratch::new("cleanup-blocked");
+        let path = scratch.place("note.md", b"old");
+        let refusal = write_where(
+            &path,
+            b"new",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::at(&[
+                (Stage::Swap, std::io::ErrorKind::PermissionDenied),
+                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+            ]),
+        )
+        .expect_err("a rename that fails with a removal that cannot happen");
+
+        assert!(
+            matches!(
+                &refusal,
+                Refusal::Environment { operation, kind, .. }
+                    if *operation == "renaming onto"
+                        && *kind == std::io::ErrorKind::PermissionDenied
+            ),
+            "the caller was told about the cleanup instead of the write: {refusal}"
+        );
+        assert_eq!(scratch.read(&path), b"old", "the destination was touched");
+
+        let leaked = scratch.shadow_names();
+        assert_eq!(
+            leaked.len(),
+            1,
+            "expected one leaked shadow, got {leaked:?}"
+        );
+        assert!(
+            crate::shadow::is_shadow_name(std::ffi::OsStr::new(&leaked[0])),
+            "the leaked shadow {:?} is not recognizable as ours, so no sweep would clear it",
+            leaked[0]
+        );
+
+        // And the leak is inert: the next write to the same document neither
+        // trips over it nor touches it.
+        write_where(
+            &path,
+            b"new",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::NONE,
+        )
+        .expect("a replacement over a leaked shadow");
+        assert_eq!(scratch.read(&path), b"new");
+        assert_eq!(
+            scratch.shadow_names(),
+            leaked,
+            "the leaked shadow was reopened or removed by a later write"
+        );
+    }
+
+    /// An injected cleanup failure on a path that publishes changes nothing: a
+    /// landed write has no shadow to remove. The clause only ever bites where a
+    /// write refuses.
+    #[test]
+    fn an_injected_cleanup_failure_never_fails_a_landed_write() {
+        let scratch = Scratch::new("cleanup-landed");
+        let path = scratch.place("note.md", b"old");
+        let landed = write_where(
+            &path,
+            b"new",
+            Precondition::Replace(ContentHash::of(b"old")),
+            &scratch.shadows,
+            Faults::at(&[(Stage::Cleanup, std::io::ErrorKind::PermissionDenied)]),
+        )
+        .expect("a landed write whose cleanup was refused");
+        assert!(landed.wrote());
+        assert_eq!(scratch.read(&path), b"new");
     }
 }
