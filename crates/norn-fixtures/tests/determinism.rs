@@ -30,12 +30,16 @@ const PER_PR_PROFILES: &[&str] = &["tiny", "small", "ambiguous", "realistic"];
 
 /// The contract digest each named `(profile, seed)` produces, pinned.
 ///
-/// Two generations agreeing is a claim about one run of one build; this table
-/// is the claim that the pair alone names the tree. It is **read from a
-/// reviewed diff, never derived**: a generator revision may move a tree on
-/// purpose, and editing a value here is where that intention gets written
-/// down and looked at. A value that moved without such an edit is a tree that
-/// changed by accident, which is the whole failure this catches.
+/// Two generations agreeing catches a generator that is unstable inside one
+/// run. It cannot catch one that moved every tree consistently, and this table
+/// is what does: a value here is **read from a reviewed diff, never derived**,
+/// so a revision that changes what a pair produces arrives as an edit somebody
+/// made and a reviewer read rather than as a silent change of subject. The
+/// identity it holds is scoped to a build, per [ADR 0002][identity] — the
+/// table says what this generator produces today, not what any build of it
+/// must produce.
+///
+/// [identity]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0002-fixture-determinism-and-calibration.md
 const PINNED_TREE_DIGESTS: &[(&str, u64, &str)] = &[
     (
         "tiny",
@@ -69,7 +73,8 @@ fn profile(name: &str) -> Profile {
 }
 
 /// The pinned digest for one pair. A pair with no entry is an error rather
-/// than a skip: the table names every pair the suite generates.
+/// than a skip: a case that asks for a pin and quietly compares nothing is the
+/// failure the table exists to prevent.
 fn pinned(name: &str, seed: u64) -> &'static str {
     PINNED_TREE_DIGESTS
         .iter()
@@ -376,44 +381,22 @@ fn decompose(name: &str) -> String {
 }
 
 /// Every name the directory tree reports, sorted.
-#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
 fn reported_names(dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            }
-            out.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    out.sort();
-    out
+    let mut names: Vec<String> = scratch::walk(dir)
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Generated documents whose file name is not pure ASCII.
-#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
-fn non_ascii_documents(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if !entry.file_name().to_string_lossy().is_ascii()
-                && path.extension().is_some_and(|e| e == "md")
-            {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
+fn non_ascii_documents(dir: &Path) -> Vec<PathBuf> {
+    scratch::documents(dir)
+        .into_iter()
+        .filter(|entry| !entry.name().is_ascii())
+        .map(|entry| entry.path)
+        .collect()
 }
 
 /// "cafe" followed by U+0301 COMBINING ACUTE ACCENT — the decomposed spelling
