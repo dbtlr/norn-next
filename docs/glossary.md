@@ -84,7 +84,7 @@ The single process maintaining a registered vault’s derived state and serving 
 _Avoid_: Owner, single-owner
 
 **Shadow**:
-A staged, unpublished copy of one document write, invisible to every reader. Publication is atomic, and a shadow that outlives its write attempt is inert.
+A staged, unpublished copy of one document write. A shadow is never a vault document and is never surfaced by any Norn reading surface; publication is atomic, and a shadow that outlives its write attempt is inert.
 _Avoid_: Temp file (when the distinction matters)
 
 **Post-state identity**:
