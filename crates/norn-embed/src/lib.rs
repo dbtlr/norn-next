@@ -45,6 +45,8 @@
 //!   reproducible.
 //! - [`Model`] — the identity that travels with every vector.
 
+use std::num::NonZeroUsize;
+
 mod embedding;
 mod error;
 mod model;
@@ -83,8 +85,12 @@ pub trait Embedder: Send + Sync {
     /// carries this identity.
     fn model(&self) -> &Model;
 
-    /// How many values its vectors hold. Always positive.
-    fn dimensions(&self) -> usize;
+    /// How many values its vectors hold.
+    ///
+    /// The type carries the guarantee rather than the prose: a width of zero
+    /// is a vector with no values, which no consumer of one has a meaning
+    /// for, and an implementation outside this crate cannot report one.
+    fn dimensions(&self) -> NonZeroUsize;
 
     /// The vector for `text`.
     ///

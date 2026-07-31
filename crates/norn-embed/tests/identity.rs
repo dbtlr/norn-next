@@ -15,6 +15,7 @@ fn stub(id: &str, version: &str) -> StubEmbedder {
         Model::new(id, version),
         NonZeroUsize::new(32).expect("32 is not zero"),
     )
+    .expect("an id of its own is free at every width")
 }
 
 fn embed(embedder: &StubEmbedder, text: &str) -> Embedding {
@@ -72,12 +73,33 @@ fn an_embedding_is_as_wide_as_the_embedder_that_made_it() {
         let embedder = StubEmbedder::with_model(
             Model::new("width", "1"),
             NonZeroUsize::new(width).expect("the widths tested are not zero"),
-        );
+        )
+        .expect("an id of its own is free at every width");
         let embedding = embed(&embedder, TEXT);
-        assert_eq!(embedder.dimensions(), width);
+        assert_eq!(embedder.dimensions().get(), width);
         assert_eq!(embedding.dimensions(), width);
         assert_eq!(embedding.values().len(), width);
     }
+}
+
+/// Width is an input to the vector function that a [`Model`] does not carry,
+/// so the one id this crate pins is held to the one width it was pinned at.
+/// Every other id stays free, which is what keeps a second stub available to
+/// stand in for a second model.
+#[test]
+fn the_pinned_id_names_one_width_and_every_other_id_names_any() {
+    let width = |n: usize| NonZeroUsize::new(n).expect("the widths tested are not zero");
+    assert!(
+        StubEmbedder::with_model(
+            Model::new(StubEmbedder::ID, StubEmbedder::VERSION),
+            width(8)
+        )
+        .is_none(),
+        "two widths under one `(model id, version)` key compute two functions \
+         and compare equal, and derived state keyed on the pair could not tell \
+         them apart"
+    );
+    assert!(StubEmbedder::with_model(Model::new("a-model", "1"), width(8)).is_some());
 }
 
 #[test]

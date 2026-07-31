@@ -4,12 +4,19 @@
 //! developer's machine, in CI, and on a user's laptop is the same vector, so
 //! anything built on top of derived vector state can be asserted. The pinned
 //! digests below are what makes that a gate rather than a hope — they were
-//! computed once and are compared against on every platform the suite runs on.
+//! computed once and are compared against wherever the suite is run.
+//!
+//! **What the pins gate is the function, not the platform.** Every machine
+//! this suite has run on so far is one the pins were computed on, so a
+//! platform-sensitive operation reintroduced into the stub would pass here
+//! until a second architecture ran it. The defence against that is the
+//! construction rather than this test: integer counting, and float work
+//! limited to operations IEEE-754 requires to be correctly rounded.
 //!
 //! **A digest that no longer matches is not a test to update.** It says the
 //! stub computes something different from what it computed before, and vectors
-//! already stored under `stub/1` describe the old function. The fix is a new
-//! model version, and the new digests belong to it.
+//! already stored under the model version above describe the old function. The
+//! fix is a new model version, and the new digests belong to it.
 
 use std::sync::Arc;
 use std::thread;
@@ -39,16 +46,16 @@ fn embed(text: &str) -> Vec<f32> {
 }
 
 /// The texts the digests below are pinned over, each with the digest of the
-/// vector `stub/1` produces for it.
+/// vector the pinned stub produces for it.
 const PINNED: &[(&str, &str)] = &[
-    ("", "21d2b700faab7628"),
-    ("the quick brown fox", "69bc398d7ae8c3f6"),
-    ("The Quick Brown Fox", "69bc398d7ae8c3f6"),
+    ("", "f92825ee9aa66d88"),
+    ("the quick brown fox", "07879a769f1a30b6"),
+    ("The Quick Brown Fox", "07879a769f1a30b6"),
     (
         "# A heading\n\nA paragraph with [[a wikilink]] and a #tag.\n",
-        "810f525183f771b2",
+        "49c0a983f1ab85bd",
     ),
-    ("naïve — с кириллицей 🌍", "c9e914a53cde78f1"),
+    ("naïve — с кириллицей 🌍", "b16dbad303cce1e1"),
 ];
 
 #[test]
@@ -70,9 +77,24 @@ fn the_stub_pins_the_vector_it_produces() {
 #[test]
 fn the_pinned_stub_keeps_its_identity_and_width() {
     let stub = StubEmbedder::new();
-    assert_eq!(stub.model(), &Model::new("stub", "1"));
-    assert_eq!(stub.dimensions(), 64);
+    assert_eq!(stub.model(), &Model::new("stub", "2"));
+    assert_eq!(stub.dimensions().get(), 64);
     assert_eq!(embed("anything").len(), 64);
+}
+
+/// Reducing a hash by the width keeps only its low bits, and FNV-1a computes
+/// those from the low bits of the input alone — so without a finalizer, texts
+/// agreeing byte-for-byte modulo the width embed identically however
+/// differently they read. These two are that pair: every digit here is an
+/// exact alias of the letter `0x40` above it.
+#[test]
+fn texts_agreeing_only_in_their_low_bits_embed_differently() {
+    assert_ne!(
+        embed("release 1 note 2 build 3"),
+        embed("release q note r build s"),
+        "digits and the letters 0x40 above them landed in one bucket, so the \
+         stub read two unrelated texts as the same bag of words"
+    );
 }
 
 #[test]

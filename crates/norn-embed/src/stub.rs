@@ -18,6 +18,17 @@
 //!   token is a maximal run of bytes that are ASCII alphanumeric or non-ASCII,
 //!   lowercased over ASCII only. Where the split falls therefore does not move
 //!   when a toolchain's Unicode tables do.
+//!
+//!   The price is paid outside ASCII, and it is worth stating plainly. **Only
+//!   ASCII punctuation, whitespace and control bytes separate tokens**: a
+//!   non-ASCII byte is a token byte, so an ideographic comma, a non-breaking
+//!   space and an em dash all join rather than split, and a CJK run between
+//!   two ASCII separators is one token however many words it holds. There is
+//!   no Unicode normalization either, so `café` written as one code point and
+//!   the same word written as `e` plus a combining accent are two tokens and
+//!   two vectors. A retrieval quality that depends on any of that is asking
+//!   the stub for something it does not have; a real model runtime is what
+//!   answers it.
 //! - **Counting is integer arithmetic.** Bucket counts are `u64` and the sum
 //!   of their squares is `u128`; neither rounds, so no accumulation order can
 //!   change a result.
@@ -62,7 +73,7 @@ impl StubEmbedder {
 
     /// The pinned stub's model version. It moves when what the stub computes
     /// moves, and never otherwise.
-    pub const VERSION: &'static str = "1";
+    pub const VERSION: &'static str = "2";
 
     /// The pinned stub's width. Its own number, chosen to be cheap — it
     /// imitates no real model's width, and nothing should read it as a
@@ -74,17 +85,32 @@ impl StubEmbedder {
     pub fn new() -> Self {
         let dimensions = NonZeroUsize::new(Self::DIMENSIONS).expect("the pinned width is not zero");
         Self::with_model(Model::new(Self::ID, Self::VERSION), dimensions)
+            .expect("the pinned id at the pinned width")
     }
 
-    /// A stub under a named identity and width.
+    /// A stub under a named identity and width, or `None` when `model` names
+    /// [`ID`](Self::ID) at a width other than [`DIMENSIONS`](Self::DIMENSIONS).
     ///
-    /// The identity is the caller's to choose, which is what lets a second
-    /// stub stand in for a second model — the shape a migration over
+    /// The identity is otherwise the caller's to choose, which is what lets a
+    /// second stub stand in for a second model — the shape a migration over
     /// `(model id, version)` needs to be exercised against. Naming a real
     /// model's id here would put that name on vectors the real model did not
     /// produce, so callers name stubs.
-    pub fn with_model(model: Model, dimensions: NonZeroUsize) -> Self {
-        StubEmbedder { model, dimensions }
+    ///
+    /// # Why the pinned id is reserved
+    ///
+    /// Width is a fourth input to the vector function and the only one that
+    /// does not appear in a [`Model`]. Two stubs under the same id at two
+    /// widths compute different functions while comparing equal, so derived
+    /// state keyed on `(model id, version)` would hold both under one key and
+    /// have nothing to tell them apart by. The id this crate pins is held to
+    /// one width so that key stays honest; every other id is free at every
+    /// width, because nothing has pinned what it means.
+    pub fn with_model(model: Model, dimensions: NonZeroUsize) -> Option<Self> {
+        if model.id() == Self::ID && dimensions.get() != Self::DIMENSIONS {
+            return None;
+        }
+        Some(StubEmbedder { model, dimensions })
     }
 }
 
@@ -99,8 +125,8 @@ impl Embedder for StubEmbedder {
         &self.model
     }
 
-    fn dimensions(&self) -> usize {
-        self.dimensions.get()
+    fn dimensions(&self) -> NonZeroUsize {
+        self.dimensions
     }
 
     fn embed(&self, text: &str) -> Result<Embedding, EmbedError> {
@@ -121,8 +147,36 @@ impl Embedder for StubEmbedder {
 }
 
 /// Where a hash lands. `width` is non-zero: it comes from a [`NonZeroUsize`].
+///
+/// The hash is run through [`mix`] before the reduction, and that step is
+/// load-bearing rather than decorative: `%` by a small width keeps the low
+/// bits of its input and discards the rest, and FNV-1a's low bits are worth
+/// very little on their own.
 fn bucket(hash: u64, width: usize) -> usize {
-    (hash % width as u64) as usize
+    (mix(hash) % width as u64) as usize
+}
+
+/// A hash spread across all 64 of its bits.
+///
+/// FNV-1a's rounds are `xor` then multiply, and both carry information
+/// upward only: bit *n* of the state is a function of bits 0..=*n* of the
+/// input bytes, so the low bits of the hash are a closed function of the low
+/// bits of the token. Reducing by a width of 64 keeps exactly six of them,
+/// and the result is that tokens agreeing in the low six bits of every byte
+/// share a bucket with probability 1 — every ASCII digit is an exact alias of
+/// the letter `0x40` above it, `1` for `q` and `2` for `r` on down.
+///
+/// This is the finalizer that fixes it: two xor-shift-multiply rounds and a
+/// last shift, each step a bijection, together carrying every input bit into
+/// every output bit. Only wrapping integer arithmetic appears, so it computes
+/// the same value everywhere the stub runs.
+fn mix(hash: u64) -> u64 {
+    let mut state = hash;
+    state ^= state >> 30;
+    state = state.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state ^= state >> 27;
+    state = state.wrapping_mul(0x94d0_49bb_1331_11eb);
+    state ^ (state >> 31)
 }
 
 /// The state every token hash starts from.
@@ -206,9 +260,11 @@ impl Iterator for Tokens<'_> {
     }
 }
 
-/// A byte a token is made of: an ASCII letter or digit, or any byte of a
-/// multi-byte UTF-8 sequence. Everything else — punctuation, whitespace,
-/// control bytes — separates.
+/// A byte a token is made of: an ASCII letter or digit, or any byte outside
+/// ASCII. **Only ASCII separates** — ASCII punctuation, whitespace and control
+/// bytes, and nothing else. A non-ASCII separator is a token byte like any
+/// other, so an ideographic comma or a non-breaking space joins the runs
+/// around it rather than splitting them.
 const fn is_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || !byte.is_ascii()
 }
@@ -222,6 +278,7 @@ mod tests {
             Model::new(id, version),
             NonZeroUsize::new(16).expect("16 is not zero"),
         )
+        .expect("an id of its own is free at every width")
     }
 
     fn values(embedder: &StubEmbedder, text: &str) -> Vec<f32> {
@@ -263,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn tokens_split_on_everything_that_is_not_a_letter_or_a_digit() {
+    fn only_ascii_that_is_not_a_letter_or_a_digit_splits_tokens() {
         let read = |text: &str| Tokens::over(text).collect::<Vec<_>>();
         assert_eq!(
             read("Alpha, beta!"),
@@ -272,6 +329,75 @@ mod tests {
         assert_eq!(read("  \t\n "), Vec::<Vec<u8>>::new());
         assert_eq!(read("a1-b2"), vec![b"a1".to_vec(), b"b2".to_vec()]);
         assert_eq!(read("naïve"), vec!["naïve".as_bytes().to_vec()]);
+    }
+
+    /// The other half of the same rule, stated as its cost: a separator
+    /// outside ASCII does not separate, so a run of CJK is one token however
+    /// many words it holds, and a non-breaking space joins what an ASCII
+    /// space would split.
+    #[test]
+    fn a_separator_outside_ascii_joins_rather_than_splits() {
+        let read = |text: &str| Tokens::over(text).collect::<Vec<_>>();
+        assert_eq!(
+            read("日本語、テスト").len(),
+            1,
+            "an ideographic comma is a token byte, so the run around it is one token"
+        );
+        assert_eq!(
+            read("a\u{a0}b").len(),
+            1,
+            "a non-breaking space is a token byte too"
+        );
+        assert_eq!(read("a b").len(), 2, "an ASCII space is a separator");
+    }
+
+    /// FNV-1a's low bits are a closed function of the input's low bits, so a
+    /// reduction that keeps only the low bits puts every ASCII digit in the
+    /// bucket of the letter `0x40` above it — ten pairs, all ten colliding,
+    /// every time. [`mix`] is what breaks that: after it the ten pairs
+    /// collide at chance, and `1` and `q` in particular do not.
+    #[test]
+    fn a_tokens_low_bits_do_not_decide_its_bucket() {
+        let width = StubEmbedder::DIMENSIONS;
+        let seed = seed(&Model::new(StubEmbedder::ID, StubEmbedder::VERSION));
+        let bucket_of = |byte: u8| bucket(fnv1a(seed, &[byte]), width);
+
+        assert_ne!(
+            bucket_of(b'1'),
+            bucket_of(b'q'),
+            "`1` and `q` differ in one bit above the reduction's width"
+        );
+
+        let collisions = (b'0'..=b'9')
+            .filter(|digit| bucket_of(*digit) == bucket_of(digit ^ 0x40))
+            .count();
+        assert_eq!(
+            collisions, 0,
+            "{collisions} of the ten digit/letter pairs share a bucket; ten of \
+             ten is the aliasing this guards against"
+        );
+    }
+
+    /// The pinned id names one function of one width. A width it does not
+    /// have would put vectors that are not comparable under one
+    /// `(model id, version)` key, with nothing in the key to tell them apart.
+    #[test]
+    fn the_pinned_id_is_refused_at_a_width_it_does_not_have() {
+        let width = |n: usize| NonZeroUsize::new(n).expect("the widths tested are not zero");
+        let pinned = Model::new(StubEmbedder::ID, StubEmbedder::VERSION);
+        assert!(StubEmbedder::with_model(pinned.clone(), width(8)).is_none());
+        assert!(
+            StubEmbedder::with_model(pinned, width(StubEmbedder::DIMENSIONS)).is_some(),
+            "the pinned width is the one width the pinned id has"
+        );
+        assert!(
+            StubEmbedder::with_model(Model::new(StubEmbedder::ID, "99"), width(8)).is_none(),
+            "the id is what is reserved, at every version of it"
+        );
+        assert!(
+            StubEmbedder::with_model(Model::new("not-the-stub", "1"), width(8)).is_some(),
+            "an id this crate has pinned nothing about is free at every width"
+        );
     }
 
     #[test]

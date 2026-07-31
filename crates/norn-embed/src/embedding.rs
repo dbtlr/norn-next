@@ -35,8 +35,9 @@ impl Embedding {
         &self.values
     }
 
-    /// How many values there are. Equal to the producing embedder's
-    /// [`dimensions`](crate::Embedder::dimensions).
+    /// How many values there are — the length of the vector, which is what
+    /// the producing embedder's
+    /// [`dimensions`](crate::Embedder::dimensions) promised.
     pub fn dimensions(&self) -> usize {
         self.values.len()
     }

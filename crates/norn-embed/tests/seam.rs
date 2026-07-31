@@ -24,7 +24,7 @@ fn an_embedder_is_a_shareable_trait_object() {
                     .embed("a document")
                     .expect("the stub refuses nothing");
                 assert_eq!(embedding.model(), embedder.model());
-                assert_eq!(embedding.dimensions(), embedder.dimensions());
+                assert_eq!(embedding.dimensions(), embedder.dimensions().get());
                 embedding
             })
         })
