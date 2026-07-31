@@ -79,6 +79,20 @@ How a boundary invariant is currently carried: by a withheld dependency edge, an
 **Review-held invariant**:
 An invariant carried by an explicit human judgment because no executable rule currently expresses it.
 
+**Maintainer**:
+The single process maintaining a registered vault’s derived state and serving requests against it. Maintainership is exclusive; it never restricts any process’s access to the vault’s files.
+_Avoid_: Owner, single-owner
+
+**Shadow**:
+A staged, unpublished copy of one document write. A shadow is never a vault document and is never surfaced by any Norn reading surface; publication is atomic, and a shadow that outlives its write attempt is inert.
+_Avoid_: Temp file (when the distinction matters)
+
+**Post-state identity**:
+The identity a landed write reports for what it published, by which Norn later recognizes its own writes.
+
+**Own-write ledger**:
+The record of post-state identities Norn’s writes produced, consulted to distinguish its own filesystem events from foreign ones.
+
 **Size-independence pair**:
 The same operation run at two fixture scales with structural counters compared by name, demonstrating that cost does not grow with vault size.
 
