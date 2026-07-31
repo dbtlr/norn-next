@@ -382,6 +382,12 @@ exact equality is restricted to crates currently present.
 - Development-dependency edges (every crate's tests reaching testkit) are documented but
   ungated: they inherently cycle. They are omitted from the graph above, whose dotted edges
   are testkit's own normal dependencies.
+- **A crate declared isolated links nothing under the default selection**, registry crates
+  included. Heavy-dependency isolation — the `norn-embed` guard, keeping a model runtime out
+  of every development build — is not a property of one manifest: a feature belongs to the
+  dependent, so a consumer naming `features = [..]` or forwarding one of its own defaults
+  pulls in whatever it reaches. The crate's own manifest test states what it asks for; this
+  gate reads what the workspace resolves.
 
 Symbol-level rules the dependency graph cannot express **escalate to lint tooling**. Which
 tooling expresses them is an implementation detail, not a fixed part of this contract —

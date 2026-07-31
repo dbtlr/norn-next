@@ -53,8 +53,10 @@ jobs:
   # machinery. Two arrive with the Layer 1 host: fd growth, which needs a
   # long-running process to grow them, and the nightly ~1h mixed load the
   # flat-memory-slope requirement is judged over. The third is the real pinned
-  # embedding model, which compiles only behind norn-embed's release/soak
-  # feature and so has no build to run in until that crate exists.
+  # embedding model: norn-embed ships the deterministic stub, and the runtime
+  # this lane would measure compiles only behind the release/soak feature,
+  # which arrives with the runtime it gates. There is nothing to run until
+  # then — the stub has no model to load and no weights to fetch.
   #
   # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
   # mixed load, showing zero counter violations, a flat memory slope, and no
