@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+use norn_config::machine::tokens;
 use norn_config::registry;
 
 use crate::common::{Scratch, entry, name};
@@ -41,9 +42,47 @@ use crate::common::{Scratch, entry, name};
 const WRITERS: usize = 8;
 const PER_WRITER: usize = 25;
 
-/// Every writer's registration survives. A read-modify-write that dropped its
-/// lock between the read and the write would lose most of these: each writer
-/// reads a file, adds one entry, and writes the whole file back.
+/// Every writer's addition survives. A read-modify-write that dropped its lock
+/// between the read and the write would lose most of these: each writer reads a
+/// file, adds one label, and writes the whole file back.
+#[test]
+fn concurrent_token_additions_all_land() {
+    let scratch = Scratch::new("token-race");
+    let dirs = scratch.dirs().clone();
+
+    thread::scope(|scope| {
+        for writer in 0..WRITERS {
+            let dirs = dirs.clone();
+            scope.spawn(move || {
+                for round in 0..PER_WRITER {
+                    tokens::mutate(&dirs, |tokens| {
+                        tokens.add(&format!("w{writer}-{round}"), &[writer as u8, round as u8])
+                    })
+                    .expect("a token");
+                }
+            });
+        }
+    });
+
+    let read = tokens::read(&dirs).expect("the tokens");
+    assert_eq!(
+        read.len(),
+        WRITERS * PER_WRITER,
+        "labels were lost between a read and the write that followed it"
+    );
+    for writer in 0..WRITERS {
+        for round in 0..PER_WRITER {
+            let label = format!("w{writer}-{round}");
+            let token = read
+                .get(&label)
+                .unwrap_or_else(|| panic!("`{label}` was lost"));
+            assert_eq!(token.secret(), &[writer as u8, round as u8]);
+        }
+    }
+}
+
+/// The same over the registry, whose entries are a different table in a
+/// different file under a different mode — and the same lock.
 #[test]
 fn concurrent_registrations_all_land() {
     let scratch = Scratch::new("registry-race");
@@ -189,6 +228,20 @@ fn every_write_replaces_the_file_rather_than_editing_it_in_place() {
         );
     }
 }
+
+/// The same for the token file, whose in-place rewrite would expose a
+/// truncated credential rather than a truncated list of vaults.
+#[test]
+fn every_token_write_replaces_the_file_too() {
+    let scratch = Scratch::new("token-replacement");
+    let dirs = scratch.dirs();
+
+    tokens::mutate(dirs, |tokens| tokens.add("first", b"a")).expect("a token");
+    let first = inode_of(&dirs.tokens_file());
+    tokens::mutate(dirs, |tokens| tokens.add("second", b"b")).expect("a second token");
+    assert_ne!(first, inode_of(&dirs.tokens_file()));
+}
+
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging what the write protocol did to the name.
 fn inode_of(path: &std::path::Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
@@ -213,13 +266,17 @@ fn the_write_protocol_leaves_no_temporary_behind() {
         })
         .expect("a registration");
     }
+    tokens::mutate(dirs, |tokens| tokens.add("laptop", b"secret")).expect("a token");
+
     let mut names = scratch.names_in(dirs.config_dir());
     names.sort();
     assert_eq!(
         names,
         vec![
             ".registry.toml.lock".to_string(),
-            "registry.toml".to_string()
+            ".tokens.toml.lock".to_string(),
+            "registry.toml".to_string(),
+            "tokens.toml".to_string(),
         ],
         "the write protocol left something behind"
     );

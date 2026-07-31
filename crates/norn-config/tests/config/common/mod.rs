@@ -57,6 +57,17 @@ impl Scratch {
         std::fs::write(path, text).expect("placing a file");
     }
 
+    /// The same, at the mode a file holding secrets is read at. The token
+    /// file's permission check runs ahead of everything else it could refuse,
+    /// so a case about anything else has to arrange a mode that gets past it.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the mode a token file is read at.
+    pub fn place_private(&self, path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        self.place(path, text);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("tightening a mode");
+    }
+
     /// The bytes at `path`.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: reading what the API wrote.
     pub fn text_at(&self, path: &Path) -> String {

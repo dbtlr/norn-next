@@ -217,6 +217,26 @@ pub(crate) fn boolean(
     }
 }
 
+/// The integer under `key`, or a refusal naming the entry that omitted it.
+pub(crate) fn required_integer(
+    path: &Path,
+    context: &str,
+    entry: &Table,
+    key: &str,
+) -> Result<i64, ConfigError> {
+    match entry.get(key) {
+        Some(Value::Integer(value)) => Ok(*value),
+        Some(other) => Err(corrupt(
+            path,
+            format!(
+                "{context}: `{key}` is {}, and it holds an integer",
+                other.type_str()
+            ),
+        )),
+        None => Err(corrupt(path, format!("{context}: `{key}` is required"))),
+    }
+}
+
 /// The sub-table under `key` of a section, or a refusal saying what is there
 /// instead.
 pub(crate) fn entry_table(path: &Path, context: &str, value: &Value) -> Result<Table, ConfigError> {

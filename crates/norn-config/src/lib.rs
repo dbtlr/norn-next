@@ -21,6 +21,8 @@
 //!   read.
 //! - [`registry`] — the registry file: the vaults a host serves, and the
 //!   locked read-modify-write that changes them.
+//! - [`machine`] — the surface both sides of the client/host seam share: the
+//!   bearer tokens, and the loopback endpoint.
 //!
 //! # The two surfaces
 //!
@@ -30,8 +32,9 @@
 //! - [`registry`] is **host-only**. Registry semantics — which vaults are
 //!   served, what attaching one means — are the orchestrator's, and this
 //!   module is the storage under them. No client-side path reads it.
-//! - The machine surface — shared, and what a client reads to reach a host at
-//!   all — is the module beside it.
+//! - [`machine`] is **shared**. A client needs the endpoint to reach the host
+//!   and a token to authenticate; the serving side needs the same token to
+//!   verify. That is the whole of what both sides read.
 //!
 //! Nothing from either module is re-exported here. A caller naming a registry
 //! type names it through [`registry`], which is what makes "no registry
@@ -61,6 +64,7 @@ mod error;
 mod file;
 mod name;
 
+pub mod machine;
 pub mod registry;
 
 use std::ffi::OsString;

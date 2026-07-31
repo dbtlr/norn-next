@@ -1,4 +1,4 @@
-//! The tolerant reader.
+//! The tolerant reader, on both files.
 //!
 //! Three behaviours, and every one of them exists because two binaries of
 //! different ages read the same machine: a version ahead is refused, a version
@@ -9,27 +9,38 @@
 //! question — what a reader does with a file it cannot make sense of — and the
 //! answer is the same shape: a typed refusal, never a guess.
 
-use norn_config::ConfigError;
+use norn_config::machine::tokens;
 use norn_config::registry;
+use norn_config::{ConfigDirs, ConfigError};
 
 use crate::common::{Scratch, entry, name};
+
+/// Both files, so a case is never written for one and forgotten for the other.
+fn both_files(scratch: &Scratch) -> [(&'static str, std::path::PathBuf); 2] {
+    [
+        ("registry", scratch.dirs().registry_file()),
+        ("tokens", scratch.dirs().tokens_file()),
+    ]
+}
 
 /// Reading a file written by a newer build and keeping only the parts this one
 /// understands would make the next write a silent deletion of the newer
 /// build's state.
 #[test]
-fn a_version_ahead_of_this_build_is_refused() {
+fn a_version_ahead_of_this_build_is_refused_on_both_files() {
     let scratch = Scratch::new("ahead");
     let dirs = scratch.dirs();
-    scratch.place(&dirs.registry_file(), "version = 2\n");
-    let error = registry::read(dirs).expect_err("a file from a newer build");
-    let ConfigError::VersionAhead {
-        found, supported, ..
-    } = error
-    else {
-        panic!("the registry was refused as something other than a version ahead");
-    };
-    assert_eq!((found, supported), (2, 1));
+    for (which, path) in both_files(&scratch) {
+        place_either(&scratch, which, &path, "version = 2\n");
+        let error = read_either(which, dirs).expect_err("a file from a newer build");
+        let ConfigError::VersionAhead {
+            found, supported, ..
+        } = error
+        else {
+            panic!("the {which} file was refused as something other than a version ahead");
+        };
+        assert_eq!((found, supported), (2, 1));
+    }
 }
 
 /// A mutation refuses the same way. A writer that opened a newer file and
@@ -100,6 +111,25 @@ fn a_field_this_build_does_not_model_survives_a_rewrite() {
     );
 }
 
+/// The same on the token file, where the stakes are a credential a newer build
+/// scoped or dated in a way this one cannot read.
+#[test]
+fn a_token_field_this_build_does_not_model_survives_a_rewrite() {
+    let scratch = Scratch::new("unknown-token-fields");
+    let dirs = scratch.dirs();
+    scratch.place_private(
+        &dirs.tokens_file(),
+        "version = 1\n\n[tokens.laptop]\nsecret = \"0a0b\"\ncreated = 10\nscope = \"read\"\n",
+    );
+
+    tokens::mutate(dirs, |tokens| tokens.add("desktop", b"\x01\x02")).expect("a second token");
+
+    let text = scratch.text_at(&dirs.tokens_file());
+    assert!(text.contains("scope = \"read\""), "{text}");
+    assert!(text.contains("0a0b"), "{text}");
+    assert!(text.contains("0102"), "{text}");
+}
+
 /// A read is a read. A file written by another build is not rewritten by
 /// looking at it: a plain listing on a machine that also runs an older service
 /// must leave the bytes under it exactly as they were.
@@ -131,15 +161,33 @@ fn a_read_never_rewrites_the_file() {
 fn a_dangling_symlink_refuses_rather_than_reading_as_absent() {
     let scratch = Scratch::new("dangling");
     let dirs = scratch.dirs();
-    let path = dirs.registry_file();
-    scratch.place(&dirs.config_dir().join("placeholder"), "");
-    link(&dirs.config_dir().join("gone"), &path);
-    let error = registry::read(dirs).expect_err("a link to nothing");
-    let ConfigError::DanglingSymlink { path: refused } = error else {
-        panic!("the registry was refused as something other than a dangling symlink");
-    };
-    assert_eq!(refused, path);
-    unlink(&path);
+    for (which, path) in both_files(&scratch) {
+        scratch.place(&dirs.config_dir().join("placeholder"), "");
+        link(&dirs.config_dir().join("gone"), &path);
+        let error = read_either(which, dirs).expect_err("a link to nothing");
+        let ConfigError::DanglingSymlink { path: refused } = error else {
+            panic!("the {which} file was refused as something other than a dangling symlink");
+        };
+        assert_eq!(refused, path);
+        unlink(&path);
+    }
+}
+
+fn read_either(which: &str, dirs: &ConfigDirs) -> Result<(), ConfigError> {
+    match which {
+        "registry" => registry::read(dirs).map(|_| ()),
+        _ => tokens::read(dirs).map(|_| ()),
+    }
+}
+
+/// The token file's permission check runs ahead of everything else it could
+/// refuse, so a case about the version has to place it at the mode a token
+/// file is read at.
+fn place_either(scratch: &Scratch, which: &str, path: &std::path::Path, text: &str) {
+    match which {
+        "registry" => scratch.place(path, text),
+        _ => scratch.place_private(path, text),
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a link the API never writes.
