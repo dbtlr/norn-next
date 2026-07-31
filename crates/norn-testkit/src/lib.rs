@@ -24,6 +24,12 @@
 //! expresses the size-independence pair, and [`process`] spawns a child under
 //! isolation and measures what it cost. Each is helpers only — the bars that
 //! use them land with the subjects they measure.
+//!
+//! Two modules bound how long a suite may wait, and they divide by subject:
+//! [`process`] bounds a child process's run, and [`wait`] bounds an
+//! in-process wait for state to converge. Both hold the same doctrine — the
+//! bound is declared, it observes rather than preempts, and passing it
+//! reports what was seen.
 
 pub mod architecture;
 pub mod base64;
@@ -37,3 +43,4 @@ mod json;
 pub mod process;
 pub mod regression;
 pub mod scale;
+pub mod wait;
