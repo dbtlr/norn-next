@@ -35,7 +35,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::body::overlaps_any;
-use crate::span::{LineCursor, SourceSpan};
+use crate::span::{LineCursor, SourceSpan, split_lines_inclusive};
 
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));
@@ -631,6 +631,10 @@ pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<Bl
     let mut block_ids = Vec::new();
     let mut cursor = LineCursor::new(body);
     let mut line_start = 0;
+    // `BLOCK_ID_RE` anchors on `$`, so it reports one candidate per chunk: the
+    // last. Lines therefore have to arrive one per break the cursor counts —
+    // a chunk spanning a break yields the definition after it and hides every
+    // definition before.
     for line in split_lines_inclusive(body) {
         if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
             let id_range = (line_start + block_id.start())..(line_start + block_id.end());
@@ -648,44 +652,6 @@ pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<Bl
         line_start += line.len();
     }
     block_ids
-}
-
-/// Split `body` into lines, terminator included, on the same three-way break
-/// rule as [`LineCursor`]: `\n`, `\r\n`, or a lone `\r`. A splitter keyed on
-/// `\n` alone folds a lone-CR line into whatever follows it, so a definition
-/// on that line is checked against the wrong candidate — the last one in the
-/// merged chunk, per `BLOCK_ID_RE`'s `$` anchor — and every earlier one goes
-/// unseen.
-fn split_lines_inclusive(body: &str) -> impl Iterator<Item = &str> {
-    let bytes = body.as_bytes();
-    let mut start = 0;
-    std::iter::from_fn(move || {
-        if start >= body.len() {
-            return None;
-        }
-        let mut end = bytes.len();
-        let mut i = start;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\n' => {
-                    end = i + 1;
-                    break;
-                }
-                b'\r' => {
-                    end = if bytes.get(i + 1) == Some(&b'\n') {
-                        i + 2
-                    } else {
-                        i + 1
-                    };
-                    break;
-                }
-                _ => i += 1,
-            }
-        }
-        let line = &body[start..end];
-        start = end;
-        Some(line)
-    })
 }
 
 /// Every `[[…]]` token's byte range, code exclusion applied.

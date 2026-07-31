@@ -60,7 +60,7 @@ use crate::link::{
     BlockId, Link, markdown_link, parse_block_ids_in, parse_tokens, splice_tokens, wikilink_ranges,
 };
 use crate::section::{SectionAddress, SectionError, SectionSpan, resolve_section_in};
-use crate::span::LineCursor;
+use crate::span::{LineCursor, split_lines_inclusive};
 use crate::tag::{Tag as TagFact, scan_tags};
 
 /// One CommonMark reading of a document body: its headings, the inline
@@ -348,10 +348,16 @@ impl<'a> BodyScan<'a> {
 /// in the safe direction — the alternative is minting a tag out of the
 /// fragment of every URL a document defines. A footnote definition
 /// (`[^fn]: prose`) has that shape too and is masked with them.
+///
+/// The shape test reads a whole line and the mask covers a whole line, so lines
+/// arrive on the break rule the rest of the crate counts — a chunk spanning a
+/// break both over-masks (the prose sharing it loses its tags) and under-masks
+/// (a definition behind prose is never tested, and its URL fragment is minted
+/// as a tag).
 fn definition_lines(body: &str, code_ranges: &[Range<usize>]) -> Vec<Range<usize>> {
     let mut lines = Vec::new();
     let mut line_start = 0;
-    for line in body.split_inclusive('\n') {
+    for line in split_lines_inclusive(body) {
         if is_definition_line(line) {
             let range = line_start..line_start + line.len();
             if !overlaps_any(code_ranges, &range) {
