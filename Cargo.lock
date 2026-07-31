@@ -167,6 +167,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "norn-embed"
+version = "0.0.0"
+dependencies = [
+ "toml",
+]
+
+[[package]]
 name = "norn-fixtures"
 version = "0.0.0"
 dependencies = [

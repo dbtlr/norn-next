@@ -1,0 +1,26 @@
+[package]
+name = "norn-embed"
+description = "Text in, vector out, model identity explicit — the embedding trait and the deterministic stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies. Nothing about vaults, stores, filesystems or orchestration can
+# reach this crate, and — boundary invariant 12 — nothing here can reach them,
+# so inference structurally cannot touch findings or plans.
+#
+# **No third-party dependency either, and that is the crate's other reason for
+# existing.** Heavy-dependency isolation means a model runtime never enters a
+# development build: when one arrives it is `optional = true` behind the
+# release/soak feature, and `tests/isolation.rs` reads this manifest and fails
+# on a dependency a default build would link. There is no feature declared yet
+# because there is no runtime for one to gate.
+[dependencies]
+
+# `toml` is how the isolation test reads this manifest. It is a dev-dependency,
+# so it is absent from every build that is not a test run.
+[dev-dependencies]
+toml = { workspace = true }
