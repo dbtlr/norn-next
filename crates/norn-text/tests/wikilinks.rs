@@ -415,21 +415,48 @@ fn a_block_id_span_points_at_its_marker() {
         ]
     );
     // A lone-CR body is the case that separates the cursor's three-way break
-    // rule from counting `\n` alone: the definition sits on line 2, not at
-    // column 17 of line 1. Detection here finds only the chunk's last
-    // candidate — `a` is dropped — which is NORN-41's characterized gap, not
-    // this span's.
+    // rule from counting `\n` alone: detection honors the same rule, so both
+    // definitions are found, `b` on line 2 exactly as the CRLF case above.
     assert_eq!(
         BodyScan::new("first ^a\rsecond ^b\r").block_ids(),
-        [BlockId {
-            id: "b".to_string(),
-            span: SourceSpan {
-                line: 2,
-                column: 8,
-                byte_offset: 16,
+        [
+            BlockId {
+                id: "a".to_string(),
+                span: SourceSpan {
+                    line: 1,
+                    column: 7,
+                    byte_offset: 6,
+                },
             },
-        }]
+            BlockId {
+                id: "b".to_string(),
+                span: SourceSpan {
+                    line: 2,
+                    column: 8,
+                    byte_offset: 16,
+                },
+            },
+        ]
     );
+}
+
+/// Detection honors the same three-way break rule as the span cursor: an `\n`
+/// document, a `\r\n` document and a lone-`\r` document carrying the same
+/// text find the same block ids.
+///
+/// The agreement covers the line rule this crate owns. It does not extend
+/// inside a backtick fence, where the CommonMark parse decides what is opaque
+/// and reads a lone-`\r` document differently — see
+/// `a_lone_cr_backtick_fence_is_not_opaque`.
+#[test]
+fn block_id_detection_agrees_across_line_break_styles() {
+    let lf_ids = BodyScan::new("first ^a\nsecond ^b\nthird\n").block_ids();
+    let crlf_ids = BodyScan::new("first ^a\r\nsecond ^b\r\nthird\r\n").block_ids();
+    let cr_ids = BodyScan::new("first ^a\rsecond ^b\rthird\r").block_ids();
+    let lf = ids(&lf_ids);
+    assert_eq!(lf, ["a", "b"]);
+    assert_eq!(ids(&crlf_ids), lf);
+    assert_eq!(ids(&cr_ids), lf);
 }
 
 #[test]
@@ -446,6 +473,34 @@ fn a_block_id_inside_code_is_not_an_anchor() {
         ["outside"]
     );
     assert!(BodyScan::new("prose\n`^incode`\n").block_ids().is_empty());
+}
+
+/// A known gap, characterized rather than asserted as correct: the CommonMark
+/// parse opens a backtick fence on `\n` and on `\r\n`, and does not open one
+/// terminated by a lone `\r`. No code range comes out of such a fence, so
+/// nothing inside it is opaque and every construct the crate scans for leaks
+/// out of it — a block id, a wikilink and a tag alike. A `[[N#^a]]` reference
+/// therefore resolves into a code sample in a lone-`\r` document.
+///
+/// A tilde fence is not affected, which locates the gap in fence opening
+/// rather than in the exclusion this crate applies.
+#[test]
+fn a_lone_cr_backtick_fence_is_not_opaque() {
+    // What the fence should do, and does on the two terminators the parse
+    // opens it with.
+    assert!(BodyScan::new("```\nfoo ^a\n```\n").block_ids().is_empty());
+    assert!(
+        BodyScan::new("```\r\nfoo ^a\r\n```\r\n")
+            .block_ids()
+            .is_empty()
+    );
+    // A tilde fence opens on a lone `\r`, so its contents stay opaque.
+    assert!(BodyScan::new("~~~\rfoo ^a\r~~~\r").block_ids().is_empty());
+
+    // The gap. Every family leaks out of the same unopened fence.
+    assert_eq!(ids(&BodyScan::new("```\rfoo ^a\r```\r").block_ids()), ["a"]);
+    assert_eq!(BodyScan::new("```\r[[X]]\r```\r").wikilinks().len(), 1);
+    assert_eq!(BodyScan::new("```\r#tagme\r```\r").tags().len(), 1);
 }
 
 /// The nuance that goes with it: a `^id` on the line *after* a closing fence

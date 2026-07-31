@@ -258,6 +258,25 @@ fn a_definition_line_inside_a_container_is_still_a_definition() {
     assert_eq!(names(&body_tags("> a note about #real\n")), ["real"]);
 }
 
+/// The definition line's mask is a whole line, so it reads lines on the same
+/// three-way break rule as the rest of the crate: `\n`, `\r\n` or a lone `\r`.
+/// A lone-`\r` document is what separates that rule from counting `\n` alone,
+/// and it misses in both directions — a chunk holding a definition *and* the
+/// prose after it masks that prose's tags, while a chunk holding prose first
+/// never matches the definition behind it and mints a tag out of its fragment.
+#[test]
+fn a_definition_line_is_masked_across_line_break_styles() {
+    for break_style in ["\n", "\r\n", "\r"] {
+        // A definition ahead of prose masks itself and nothing else.
+        let leading = format!("[label]: http://x/y{break_style}plain #realtag{break_style}");
+        assert_eq!(names(&body_tags(&leading)), ["realtag"], "in {leading:?}");
+
+        // A definition behind prose is still a definition, fragment included.
+        let trailing = format!("plain text{break_style}[label]: http://x/#frag{break_style}");
+        assert!(body_tags(&trailing).is_empty(), "in {trailing:?}");
+    }
+}
+
 /// Raw HTML is a construct the parse recognizes and hands over whole, so what
 /// is written inside it is that markup's business: an `href` fragment is a URL
 /// fragment, and **a `#tag` inside an HTML comment stays commented out**. A

@@ -35,7 +35,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::body::overlaps_any;
-use crate::span::{LineCursor, SourceSpan};
+use crate::span::{LineCursor, SourceSpan, split_lines_inclusive};
 
 static WIKILINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]]+)\]\]").expect("valid wikilink regex"));
@@ -631,7 +631,11 @@ pub(crate) fn parse_block_ids_in(body: &str, ignored: &[Range<usize>]) -> Vec<Bl
     let mut block_ids = Vec::new();
     let mut cursor = LineCursor::new(body);
     let mut line_start = 0;
-    for line in body.split_inclusive('\n') {
+    // `BLOCK_ID_RE` anchors on `$`, so it reports one candidate per chunk: the
+    // last. Lines therefore have to arrive one per break the cursor counts —
+    // a chunk spanning a break yields the definition after it and hides every
+    // definition before.
+    for line in split_lines_inclusive(body) {
         if let Some(block_id) = BLOCK_ID_RE.captures(line).and_then(|c| c.get(1)) {
             let id_range = (line_start + block_id.start())..(line_start + block_id.end());
             if !overlaps_any(ignored, &id_range) {

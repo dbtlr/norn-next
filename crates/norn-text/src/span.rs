@@ -105,3 +105,40 @@ impl<'a> LineCursor<'a> {
         }
     }
 }
+
+/// Split `content` into lines, terminator included, on [`LineCursor`]'s break
+/// rule: `\n`, `\r\n`, or a lone `\r`.
+///
+/// The cursor and this splitter read the same rule, so a scan that walks lines
+/// and asks the cursor where they are cannot disagree with it about what a line
+/// is. `str::split_inclusive('\n')` is the shape this exists in place of: it
+/// folds a lone-`\r` line into the one after it, handing its caller a chunk
+/// that spans a break. A per-line test then answers for two lines at once —
+/// masking or matching the pair on whichever one the test happens to read.
+pub(crate) fn split_lines_inclusive(content: &str) -> impl Iterator<Item = &str> {
+    let bytes = content.as_bytes();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start >= bytes.len() {
+            return None;
+        }
+        let end = match bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n' || b == b'\r')
+        {
+            // `\r\n` is one break, so it terminates one line rather than
+            // opening an empty second one.
+            Some(offset) => {
+                let brk = start + offset;
+                match bytes[brk] {
+                    b'\r' if bytes.get(brk + 1) == Some(&b'\n') => brk + 2,
+                    _ => brk + 1,
+                }
+            }
+            None => bytes.len(),
+        };
+        let line = &content[start..end];
+        start = end;
+        Some(line)
+    })
+}
