@@ -27,10 +27,18 @@ use crate::error::ConfigError;
 /// unspellable for free — a name cannot be empty, cannot be `.` or `..`, and
 /// cannot contain a separator, because it must open with a lowercase letter
 /// and holds no `/`.
+///
+/// The length bound is the other half of "this is a directory component":
+/// [`VaultName::MAXIMUM_BYTES`] is `NAME_MAX`, and a name past it is a
+/// registry entry whose derived-state directory cannot be created at all.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct VaultName(String);
 
 impl VaultName {
+    /// The longest a name may be: `NAME_MAX`, the bound every filesystem norn
+    /// runs on puts on one directory component.
+    pub const MAXIMUM_BYTES: usize = 255;
+
     /// The name `text` spells, or the reason it spells none.
     pub fn new(text: impl AsRef<str>) -> Result<Self, ConfigError> {
         let text = text.as_ref();
@@ -41,6 +49,9 @@ impl VaultName {
             })
         };
 
+        if text.len() > VaultName::MAXIMUM_BYTES {
+            return refuse("a name is at most 255 bytes, which is what a directory component is");
+        }
         let mut characters = text.chars();
         let Some(first) = characters.next() else {
             return refuse("a name is at least one character");

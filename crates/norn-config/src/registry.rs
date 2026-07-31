@@ -12,10 +12,20 @@
 //!
 //! - **No duplicate-root detection.** Deciding that two roots are the same
 //!   directory means resolving symlinks and comparing device and inode, which
-//!   is a filesystem read. [`VaultRoot`] refuses a relative path — pure syntax,
-//!   decidable from the string — and stops there.
+//!   is a filesystem read. [`VaultRoot`] refuses a path that is not absolute
+//!   UTF-8 — pure syntax, decidable from the string — and stops there.
 //! - **No vault is opened.** An entry names a root and possibly a schema
 //!   source. Neither path is checked for existence, and neither file is read.
+//!
+//! # What a rewrite preserves
+//!
+//! A key this build does not model survives a rewrite, at the top level and
+//! inside an entry alike, because the document is held as it was parsed and a
+//! write edits the keys the typed view owns. **Comments and key order do
+//! not**: the file is re-rendered from the parsed document, so a hand-written
+//! comment is gone after the next write and keys come back in the order the
+//! renderer emits them. What is preserved is the *state* a newer build wrote,
+//! which is what a lost field would cost; the layout of the text is not.
 //!
 //! # The file
 //!
@@ -43,8 +53,8 @@ use toml::{Table, Value};
 
 use crate::document::{self, Document};
 use crate::error::{ConfigError, corrupt};
-use crate::file;
-use crate::{ConfigDirs, VaultName};
+use crate::file::{Sensitivity, Stored};
+use crate::{ConfigDirs, VaultName, absolute_path};
 
 /// The key of the table holding the entries.
 const VAULTS_KEY: &str = "vaults";
@@ -56,28 +66,59 @@ const POLL_BACKEND_KEY: &str = "poll_backend";
 
 /// A vault's root directory, as recorded.
 ///
-/// Absolute, and nothing more is claimed. Whether it exists, whether it is a
-/// directory, whether it is the same directory as another entry's root — all
-/// three are filesystem questions, and this crate does not ask them.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
+/// Absolute and UTF-8, and nothing more is claimed. Whether it exists, whether
+/// it is a directory, whether it is the same directory as another entry's root
+/// — all three are filesystem questions, and this crate does not ask them.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultRoot(PathBuf);
 
 impl VaultRoot {
-    /// The root `path` names, or a refusal if it is relative.
+    /// The root `path` names, or a refusal if it is not one.
     ///
     /// A relative root resolves against whatever directory the reading process
     /// happens to be in, and machine-local state is read by a service, a CLI
-    /// and a shim that are in three different ones.
+    /// and a shim that are in three different ones. A root that is not UTF-8
+    /// cannot be written into the file at all: rendering it would substitute
+    /// replacement characters and report a success that recorded a different
+    /// directory.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
-        let path = path.into();
-        if !path.is_absolute() {
-            return Err(ConfigError::RelativeRoot { path });
-        }
-        Ok(VaultRoot(path))
+        Ok(VaultRoot(absolute_path(path.into(), "vault root")?))
     }
 
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+
+    /// The root as it is written down. Infallible: the constructor refused
+    /// anything that is not text.
+    fn as_str(&self) -> &str {
+        self.0.to_str().expect("a vault root is UTF-8")
+    }
+}
+
+/// Where a vault's schema is read from, when it is not the in-vault default.
+///
+/// The same two demands as [`VaultRoot`], for the same two reasons: the path
+/// is recorded in a text file and resolved by processes in different working
+/// directories. Whether the file exists, and what is in it, belong to whoever
+/// resolves the entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchemaSource(PathBuf);
+
+impl SchemaSource {
+    /// The schema source `path` names, or a refusal if it is not one.
+    pub fn new(path: impl Into<PathBuf>) -> Result<Self, ConfigError> {
+        Ok(SchemaSource(absolute_path(path.into(), "schema source")?))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The source as it is written down. Infallible: the constructor refused
+    /// anything that is not text.
+    fn as_str(&self) -> &str {
+        self.0.to_str().expect("a schema source is UTF-8")
     }
 }
 
@@ -126,7 +167,7 @@ pub struct Entry {
     pub root: VaultRoot,
     /// Where the vault's schema is read from. Absent means the in-vault
     /// default, [`crate::IN_VAULT_SCHEMA_PATH`], relative to the root.
-    pub schema_source: Option<PathBuf>,
+    pub schema_source: Option<SchemaSource>,
     /// Whether semantic search is enabled for this vault. Off unless somebody
     /// turned it on: it is the one feature that fetches a model.
     pub semantic_search: bool,
@@ -159,7 +200,7 @@ pub struct Registry {
     /// The sub-table each entry was read from, keyed the same way as
     /// [`Registry::entries`]. A rewrite edits these rather than building fresh
     /// ones, which is what preserves a key this build does not model.
-    raw: BTreeMap<String, Table>,
+    raw: BTreeMap<VaultName, Table>,
     entries: BTreeMap<VaultName, Entry>,
 }
 
@@ -174,19 +215,6 @@ impl Registry {
         self.entries.values()
     }
 
-    /// Every registered name, in order.
-    pub fn names(&self) -> impl Iterator<Item = &VaultName> {
-        self.entries.keys()
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Register `entry`, replacing whatever was registered under its name.
     ///
     /// Keyed by the entry's own name, so the key and the field cannot disagree.
@@ -195,11 +223,18 @@ impl Registry {
     }
 
     /// Remove the entry registered under `name`.
+    ///
+    /// The keys this build does not model go with it. **Unknown-key retention
+    /// is scoped to an entry's lifetime, not to its name**: a name registered
+    /// again later is a new entry, and grafting the removed one's fields onto
+    /// it — a `revoked` flag, a scope a newer build wrote — would resurrect
+    /// state nobody asked to keep.
     pub fn remove(&mut self, name: &VaultName) -> Option<Entry> {
+        self.raw.remove(name);
         self.entries.remove(name)
     }
 
-    fn load(path: &Path, bytes: Option<Vec<u8>>) -> Result<Self, ConfigError> {
+    fn load(path: &Path, bytes: Option<&[u8]>) -> Result<Self, ConfigError> {
         let document = Document::read(path, bytes)?;
         let section = document.section(path, VAULTS_KEY)?;
 
@@ -212,8 +247,10 @@ impl Registry {
             let root =
                 VaultRoot::new(document::required_string(path, &context, &table, ROOT_KEY)?)?;
             let schema_source =
-                document::optional_string(path, &context, &table, SCHEMA_SOURCE_KEY)?
-                    .map(PathBuf::from);
+                match document::optional_string(path, &context, &table, SCHEMA_SOURCE_KEY)? {
+                    Some(source) => Some(SchemaSource::new(source)?),
+                    None => None,
+                };
             let semantic_search =
                 document::boolean(path, &context, &table, SEMANTIC_SEARCH_KEY, false)?;
             let poll_backend =
@@ -227,7 +264,7 @@ impl Registry {
                     None => None,
                 };
 
-            raw.insert(key.clone(), table);
+            raw.insert(name.clone(), table);
             entries.insert(
                 name.clone(),
                 Entry {
@@ -248,16 +285,20 @@ impl Registry {
 
     /// The registry as TOML, with every key this build does not model still in
     /// the place it was read from.
-    fn render(&self, path: &Path) -> Result<String, ConfigError> {
+    ///
+    /// Takes the registry by mutable reference so that the section lands in
+    /// the document rather than in a copy of it: a registry of any size is
+    /// rendered without the whole document being cloned twice on the way.
+    fn render(&mut self, path: &Path) -> Result<String, ConfigError> {
         let mut section = Table::new();
         for (name, entry) in &self.entries {
             // An entry that was already in the file keeps its own sub-table,
             // unknown keys and all; the known keys are then overwritten on top
             // of it. An entry that is new starts empty.
-            let mut table = self.raw.get(name.as_str()).cloned().unwrap_or_default();
+            let mut table = self.raw.get(name).cloned().unwrap_or_default();
             table.insert(
                 ROOT_KEY.to_string(),
-                Value::String(entry.root.as_path().display().to_string()),
+                Value::String(entry.root.as_str().to_string()),
             );
             document::set_optional(
                 &mut table,
@@ -265,7 +306,7 @@ impl Registry {
                 entry
                     .schema_source
                     .as_ref()
-                    .map(|source| Value::String(source.display().to_string())),
+                    .map(|source| Value::String(source.as_str().to_string())),
             );
             table.insert(
                 SEMANTIC_SEARCH_KEY.to_string(),
@@ -280,10 +321,19 @@ impl Registry {
             );
             section.insert(name.as_str().to_string(), Value::Table(table));
         }
-        let mut document = self.document.clone();
-        document.set_section(VAULTS_KEY, section);
-        document.render(path)
+        self.document.set_section(VAULTS_KEY, section);
+        self.document.render(path)
     }
+}
+
+/// The registry file, as this crate reads and replaces it.
+fn stored(dirs: &ConfigDirs) -> Stored<Registry> {
+    Stored::new(
+        dirs.registry_file(),
+        Sensitivity::Shared,
+        Registry::load,
+        Registry::render,
+    )
 }
 
 /// Read the registry. Never writes, whatever it finds.
@@ -293,9 +343,13 @@ impl Registry {
 /// an error. A file written by an older build is migrated in memory and left
 /// on disk as it was — the migrated form reaches the file on the next
 /// [`mutate`], not on this read.
+///
+/// The registry file is not a secret and is not held to the token file's mode:
+/// it is written at `0644` and read at whatever mode it has. A mode somebody
+/// tightened by hand is honoured until the next write, which restores the
+/// one this crate writes.
 pub fn read(dirs: &ConfigDirs) -> Result<Registry, ConfigError> {
-    let path = dirs.registry_file();
-    Registry::load(&path, file::read(&path)?)
+    stored(dirs).read()
 }
 
 /// Read the registry, hand it to `apply`, and write back what `apply` leaves.
@@ -307,17 +361,17 @@ pub fn read(dirs: &ConfigDirs) -> Result<Registry, ConfigError> {
 /// unbounded — the thing being waited for is another writer's rewrite of a
 /// small file.
 ///
-/// A refusal from `apply` leaves the file untouched.
+/// A refusal from `apply` leaves the file untouched, and so does a mutation
+/// that changes nothing: bytes identical to the ones read are not written back.
+///
+/// **`apply` must not call [`mutate`] again.** The lock is exclusive and held
+/// across the whole call, so a nested mutation would wait on its own caller;
+/// it is refused with
+/// [`NestedMutation`](ConfigError::NestedMutation) rather than allowed to
+/// hang.
 pub fn mutate<T>(
     dirs: &ConfigDirs,
     apply: impl FnOnce(&mut Registry) -> Result<T, ConfigError>,
 ) -> Result<T, ConfigError> {
-    let path = dirs.registry_file();
-    file::locked_update(
-        &path,
-        file::SHARED_MODE,
-        Registry::load,
-        apply,
-        |registry| registry.render(&path),
-    )
+    stored(dirs).mutate(apply)
 }

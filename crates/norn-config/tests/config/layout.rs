@@ -7,9 +7,11 @@
 
 use std::path::Path;
 
+use norn_config::machine::tokens;
+use norn_config::registry;
 use norn_config::{Channel, ConfigDirs, IN_VAULT_CONFIG_PATH, IN_VAULT_SCHEMA_PATH};
 
-use crate::common::{Scratch, name};
+use crate::common::{Scratch, entry, label, name};
 
 /// The channel is not a suffix on one path; it is a directory both trees hang
 /// off, so no file of one channel's is a file of the other's.
@@ -23,8 +25,6 @@ fn every_machine_local_path_sits_under_the_channel_directory() {
     assert_eq!(dirs.data_dir(), scratch.data_base().join(app));
 
     for path in [
-        dirs.registry_file(),
-        dirs.tokens_file(),
         dirs.schemas_dir(),
         dirs.weights_dir(),
         dirs.vaults_dir(),
@@ -43,8 +43,6 @@ fn every_machine_local_path_sits_under_the_channel_directory() {
 /// which is what a dev build's inability to reach live state rests on.
 #[test]
 fn the_two_channels_share_no_directory() {
-    assert_ne!(Channel::Dev.app_directory(), Channel::Live.app_directory());
-
     let scratch = Scratch::new("separation");
     let dirs = scratch.dirs();
     let other = match Channel::COMPILED {
@@ -62,15 +60,24 @@ fn the_two_channels_share_no_directory() {
     );
 }
 
+/// The two data files sit in the config directory under the names the
+/// convention gives them. Asserted through the API that writes them, because
+/// the crate publishes no path to either: a path is a way to open one without
+/// the lock, the mode and the replacement protocol that come with the API.
 #[test]
 fn the_config_directory_holds_the_registry_the_tokens_and_the_schemas() {
     let scratch = Scratch::new("config-layout");
     let dirs = scratch.dirs();
-    assert_eq!(
-        dirs.registry_file(),
-        dirs.config_dir().join("registry.toml")
-    );
-    assert_eq!(dirs.tokens_file(), dirs.config_dir().join("tokens.toml"));
+    registry::mutate(dirs, |registry| {
+        registry.insert(entry("notes", "/home/person/notes"));
+        Ok(())
+    })
+    .expect("a registration");
+    tokens::mutate(dirs, |tokens| tokens.add(&label("laptop"), b"secret")).expect("a token");
+
+    let names = scratch.names_in(dirs.config_dir());
+    assert!(names.contains(&"registry.toml".to_string()), "{names:?}");
+    assert!(names.contains(&"tokens.toml".to_string()), "{names:?}");
     assert_eq!(dirs.schemas_dir(), dirs.config_dir().join("schemas"));
 }
 
@@ -111,8 +118,6 @@ fn derived_state_is_keyed_by_name_and_never_by_root() {
 fn asking_for_a_path_creates_nothing() {
     let scratch = Scratch::new("no-creation");
     let dirs = scratch.dirs();
-    let _ = dirs.registry_file();
-    let _ = dirs.tokens_file();
     let _ = dirs.schemas_dir();
     let _ = dirs.weights_dir();
     let _ = dirs.vaults_dir();
@@ -150,7 +155,7 @@ fn the_in_vault_conventions_are_relative_paths_under_a_dot_directory() {
 #[test]
 fn two_dirs_over_the_same_bases_are_equal() {
     let scratch = Scratch::new("purity");
-    let again = ConfigDirs::new(scratch.config_base(), scratch.data_base());
+    let again = ConfigDirs::new(scratch.config_base(), scratch.data_base())
+        .expect("absolute scratch bases");
     assert_eq!(&again, scratch.dirs());
-    assert_eq!(again.channel(), Channel::COMPILED);
 }

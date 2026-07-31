@@ -162,6 +162,7 @@ dependencies = [
 name = "norn-config"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "toml",
 ]
 

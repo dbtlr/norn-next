@@ -13,9 +13,17 @@
 //! # The endpoint is a convention, not a discovery
 //!
 //! There is no endpoint file and no discovery handshake. A channel has one
-//! default port, fixed at compile time, and a host listens on it while a
-//! client dials it. A dev host and a live host therefore coexist on one
-//! machine without either knowing the other exists.
+//! default port, fixed at compile time and reached through
+//! [`default_endpoint`], and a host listens on it while a client dials it. The
+//! two channels' defaults differ, so a dev host and a live host started with
+//! no arguments coexist on one machine.
+//!
+//! **That is a default, not a wall.** [`Endpoint::at`] names any port, which
+//! is what a `--port` override is made of, so a dev build can be pointed at a
+//! live host's socket by an explicit act. What the channel separates
+//! structurally is machine-local *state*: the two channels' directory trees
+//! share no path, and no argument reaches across them because no API takes a
+//! channel.
 
 pub mod tokens;
 
@@ -24,20 +32,23 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::Channel;
 
-/// The port a released host listens on.
+/// The port a released host listens on by default.
 ///
 /// Chosen from a block the IANA registry leaves unassigned, and below the
 /// ephemeral ranges both Linux and macOS allocate out of, so that a host's
 /// port is not one an unrelated process may already have been handed.
-pub const LIVE_ENDPOINT_PORT: u16 = 28471;
+///
+/// Private: [`default_endpoint`] is the door. A caller that names a port names
+/// it because somebody asked for that port, not because it copied a constant
+/// from the channel it is not.
+const LIVE_ENDPOINT_PORT: u16 = 28471;
 
-/// The port a development host listens on.
+/// The port a development host listens on by default.
 ///
 /// Adjacent to [`LIVE_ENDPOINT_PORT`] and never equal to it: the two hosts run
-/// side by side on one machine, and a shared port would make the dev client's
-/// requests reach live state over a socket even though it cannot reach live
-/// state through a path.
-pub const DEV_ENDPOINT_PORT: u16 = 28472;
+/// side by side on one machine, and a shared default would put a dev client's
+/// requests on a live host's socket with nobody asking for it.
+const DEV_ENDPOINT_PORT: u16 = 28472;
 
 /// Where a host listens, and where a client dials.
 ///
@@ -51,6 +62,9 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// The loopback endpoint at `port`.
+    ///
+    /// The one way to name a port that is not the channel's default, which is
+    /// what a `--port` override needs.
     pub const fn at(port: u16) -> Self {
         Endpoint { port }
     }
@@ -63,11 +77,6 @@ impl Endpoint {
     pub const fn address(self) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.port)
     }
-
-    /// The origin a request's URL is built on.
-    pub fn origin(self) -> String {
-        format!("http://{}", self.address())
-    }
 }
 
 impl fmt::Display for Endpoint {
@@ -78,9 +87,9 @@ impl fmt::Display for Endpoint {
 
 /// The endpoint this build's channel uses.
 ///
-/// The only endpoint anything reaches for by default, and it is a function of
-/// the compiled channel alone. Nothing takes a channel, so a dev build has no
-/// way to ask for the live one.
+/// The endpoint everything reaches for unless somebody named another one, and
+/// it is a function of the compiled channel alone: nothing takes a channel, so
+/// there is no argument that asks for the other one's default.
 pub const fn default_endpoint() -> Endpoint {
     match Channel::COMPILED {
         Channel::Dev => Endpoint::at(DEV_ENDPOINT_PORT),
@@ -103,9 +112,10 @@ mod tests {
         let endpoint = default_endpoint();
         assert_eq!(endpoint.address().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(
-            endpoint.origin(),
-            format!("http://127.0.0.1:{}", endpoint.port())
+            endpoint.to_string(),
+            format!("127.0.0.1:{}", endpoint.port())
         );
+        assert_eq!(Endpoint::at(endpoint.port()), endpoint);
     }
 
     #[test]

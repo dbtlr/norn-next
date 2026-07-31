@@ -4,10 +4,15 @@
 //! Everything norn keeps on a machine and outside a vault lives here: where
 //! the config and data directories are, the registry of vaults the host
 //! serves, the bearer tokens loopback requests carry, the weights directory,
-//! and the per-vault derived-state directory. Every read and write of those
-//! bytes goes through this API, so there is exactly one writer of a
-//! security-relevant file and exactly one spelling of every machine-local
-//! path.
+//! and the per-vault derived-state directory.
+//!
+//! **One write protocol, and it is in this crate.** The registry file and the
+//! token file are opened by one module — locking, replacement and mode are
+//! decided in a single place, and the paths to those two files are not public,
+//! so the API is the only door to them from inside the workspace. What that
+//! does not do is stop a process from opening a config-directory path it
+//! spells itself; the workspace-wide `std::fs` lint and review are what hold
+//! the rest, and the crate map records this crate as the owner of those bytes.
 //!
 //! **This crate never touches a vault.** It does not read vault content, does
 //! not walk a tree, does not watch anything, and holds no opinion about what a
@@ -57,7 +62,12 @@
 //! the app-directory name — so a development build's registry, tokens, weights
 //! and derived state are a different directory tree from a released build's,
 //! and there is **no API that takes a channel**. A dev binary cannot reach
-//! live state by passing the wrong argument, because there is no argument.
+//! live state through a path, because no path it can build names one.
+//!
+//! The channel also selects the default port
+//! ([`machine::default_endpoint`]), and that half is a default rather than a
+//! wall: a caller may name any port, which is what the `--port` override is.
+//! The guarantee is over machine-local state, not over sockets.
 
 mod document;
 mod error;
@@ -154,18 +164,28 @@ pub struct ConfigDirs {
 }
 
 impl ConfigDirs {
-    /// The directories under `config_home` and `data_home`.
+    /// The directories under `config_home` and `data_home`, or a refusal if
+    /// either base is not a path machine-local state can live under.
     ///
     /// The two arguments are the **base** directories — the XDG bases, or a
     /// temporary directory in a test. The channel-qualified app directory is
     /// appended here, which is what makes channel separation a property of
     /// construction rather than of every caller remembering it.
-    pub fn new(config_home: impl AsRef<Path>, data_home: impl AsRef<Path>) -> Self {
+    ///
+    /// Both bases are absolute and both are UTF-8. A relative base names a
+    /// different directory to every process that reads it, and one process
+    /// here is a service whose working directory nobody chose.
+    pub fn new(
+        config_home: impl AsRef<Path>,
+        data_home: impl AsRef<Path>,
+    ) -> Result<Self, ConfigError> {
         let app = Channel::COMPILED.app_directory();
-        ConfigDirs {
-            config: config_home.as_ref().join(app),
-            data: data_home.as_ref().join(app),
-        }
+        let config = absolute_path(config_home.as_ref().to_path_buf(), "config base")?;
+        let data = absolute_path(data_home.as_ref().to_path_buf(), "data base")?;
+        Ok(ConfigDirs {
+            config: config.join(app),
+            data: data.join(app),
+        })
     }
 
     /// The directories this machine's environment names.
@@ -182,13 +202,7 @@ impl ConfigDirs {
             std::env::var_os("XDG_DATA_HOME"),
             std::env::var_os("HOME"),
         )?;
-        Ok(ConfigDirs::new(config_home, data_home))
-    }
-
-    /// The channel this build is pinned to, and therefore the one these
-    /// directories belong to.
-    pub fn channel(&self) -> Channel {
-        Channel::COMPILED
+        ConfigDirs::new(config_home, data_home)
     }
 
     /// The config directory: the registry file, the token file and the
@@ -203,12 +217,19 @@ impl ConfigDirs {
     }
 
     /// Where the registry file sits.
-    pub fn registry_file(&self) -> PathBuf {
+    ///
+    /// **In-crate only.** A path to one of the two data files is a way to open
+    /// it without the lock, the mode and the replacement protocol that come
+    /// with it, so the door to those bytes is [`registry`] and [`machine`] —
+    /// which is also what makes "no registry surface outside the orchestrator"
+    /// a rule a symbol-level lint can state.
+    pub(crate) fn registry_file(&self) -> PathBuf {
         self.config.join(REGISTRY_FILE)
     }
 
-    /// Where the token file sits.
-    pub fn tokens_file(&self) -> PathBuf {
+    /// Where the token file sits. In-crate only, on the same terms as
+    /// [`ConfigDirs::registry_file`].
+    pub(crate) fn tokens_file(&self) -> PathBuf {
         self.config.join(TOKENS_FILE)
     }
 
@@ -240,6 +261,38 @@ impl ConfigDirs {
     pub fn derived_dir(&self, name: &VaultName) -> PathBuf {
         self.vaults_dir().join(name.as_str())
     }
+}
+
+/// `path`, if it is a path machine-local state can be expressed over.
+///
+/// Two demands, and they are one function because every path this crate
+/// records or builds under has both. **Absolute**, because a relative path
+/// names a different directory to every process that reads it and this state
+/// is read by a service, a CLI and a shim in three different ones.
+/// **UTF-8**, because a recorded path is written into a TOML file and read
+/// back out of one: bytes that are not text do not survive that round trip,
+/// and rendering them lossily would report success while writing a different
+/// path from the one that was asked for.
+///
+/// `subject` names which path it is, so the refusal reads as a sentence about
+/// the caller's argument rather than about a rule.
+pub(crate) fn absolute_path(path: PathBuf, subject: &'static str) -> Result<PathBuf, ConfigError> {
+    if path.to_str().is_none() {
+        return Err(ConfigError::IllegalPath {
+            path,
+            subject,
+            problem: "a path here is written into a text file and read back, so it is UTF-8",
+        });
+    }
+    if !path.is_absolute() {
+        return Err(ConfigError::IllegalPath {
+            path,
+            subject,
+            problem: "a path here is absolute, because it is read by processes whose working \
+                      directories differ",
+        });
+    }
+    Ok(path)
 }
 
 /// The XDG base directories the given environment names.

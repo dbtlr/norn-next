@@ -1,10 +1,8 @@
 //! The registry file: what round-trips, what is refused, and what a read
 //! never does.
 
-use std::path::PathBuf;
-
 use norn_config::ConfigError;
-use norn_config::registry::{self, Entry, PollBackend};
+use norn_config::registry::{self, Entry, PollBackend, SchemaSource};
 
 use crate::common::{Scratch, entry, name, root};
 
@@ -14,8 +12,6 @@ use crate::common::{Scratch, entry, name, root};
 fn a_registry_that_is_not_there_reads_as_an_empty_one() {
     let scratch = Scratch::new("absent");
     let registry = registry::read(scratch.dirs()).expect("an empty registry");
-    assert!(registry.is_empty());
-    assert_eq!(registry.len(), 0);
     assert_eq!(registry.entries().count(), 0);
 }
 
@@ -37,7 +33,8 @@ fn an_entry_round_trips_through_the_file() {
     let dirs = scratch.dirs();
 
     let mut written = entry("notes", "/home/person/notes");
-    written.schema_source = Some(PathBuf::from("/home/person/schemas/notes.yaml"));
+    written.schema_source =
+        Some(SchemaSource::new("/home/person/schemas/notes.yaml").expect("a schema source"));
     written.semantic_search = true;
     written.poll_backend = Some(PollBackend::Poll);
 
@@ -65,7 +62,7 @@ fn an_entry_with_the_defaults_writes_no_optional_field() {
     })
     .expect("a registration");
 
-    let text = scratch.text_at(&dirs.registry_file());
+    let text = scratch.text_at(&scratch.registry_file());
     assert!(text.contains("root = \"/home/person/notes\""), "{text}");
     assert!(text.contains("semantic_search = false"), "{text}");
     assert!(!text.contains("schema_source"), "{text}");
@@ -91,7 +88,7 @@ fn entries_are_read_back_in_name_order() {
     .expect("three registrations");
 
     let read = registry::read(dirs).expect("the registry");
-    let names: Vec<&str> = read.names().map(|name| name.as_str()).collect();
+    let names: Vec<&str> = read.entries().map(|entry| entry.name.as_str()).collect();
     assert_eq!(names, ["archive", "notes", "work"]);
 }
 
@@ -119,7 +116,7 @@ fn an_entry_is_replaced_by_name_and_removed_by_name() {
     );
 
     let read = registry::read(dirs).expect("the registry");
-    assert_eq!(read.len(), 1);
+    assert_eq!(read.entries().count(), 1);
     assert_eq!(
         read.get(&name("notes")).expect("the entry").root,
         root("/home/person/moved")
@@ -128,7 +125,13 @@ fn an_entry_is_replaced_by_name_and_removed_by_name() {
     let removed =
         registry::mutate(dirs, |registry| Ok(registry.remove(&name("notes")))).expect("a removal");
     assert!(removed.is_some());
-    assert!(registry::read(dirs).expect("the registry").is_empty());
+    assert_eq!(
+        registry::read(dirs)
+            .expect("the registry")
+            .entries()
+            .count(),
+        0
+    );
 
     let missing = registry::mutate(dirs, |registry| Ok(registry.remove(&name("notes"))))
         .expect("a removal of nothing");
@@ -147,7 +150,7 @@ fn a_mutation_that_refuses_writes_nothing() {
         Ok(())
     })
     .expect("a registration");
-    let before = scratch.text_at(&dirs.registry_file());
+    let before = scratch.text_at(&scratch.registry_file());
 
     let error = registry::mutate(dirs, |registry| {
         registry.insert(entry("work", "/home/person/work"));
@@ -158,8 +161,14 @@ fn a_mutation_that_refuses_writes_nothing() {
     .expect_err("a refused mutation");
     assert!(matches!(error, ConfigError::DuplicateLabel { .. }));
 
-    assert_eq!(scratch.text_at(&dirs.registry_file()), before);
-    assert_eq!(registry::read(dirs).expect("the registry").len(), 1);
+    assert_eq!(scratch.text_at(&scratch.registry_file()), before);
+    assert_eq!(
+        registry::read(dirs)
+            .expect("the registry")
+            .entries()
+            .count(),
+        1
+    );
 }
 
 /// The registry names roots; it does not resolve them. Two entries pointing at
@@ -174,7 +183,13 @@ fn two_entries_may_name_the_same_root() {
         Ok(())
     })
     .expect("two registrations naming one root");
-    assert_eq!(registry::read(dirs).expect("the registry").len(), 2);
+    assert_eq!(
+        registry::read(dirs)
+            .expect("the registry")
+            .entries()
+            .count(),
+        2
+    );
 }
 
 /// An entry whose name is not a name at rest. The file is machine-local and a
@@ -185,23 +200,92 @@ fn a_file_naming_a_vault_illegally_is_refused_on_read() {
     let scratch = Scratch::new("illegal-in-file");
     let dirs = scratch.dirs();
     scratch.place(
-        &dirs.registry_file(),
+        &scratch.registry_file(),
         "version = 1\n\n[vaults.Notes_1]\nroot = \"/home/person/notes\"\n",
     );
     let error = registry::read(dirs).expect_err("an illegal name in the file");
     assert!(matches!(error, ConfigError::IllegalName { .. }), "{error}");
 }
 
+/// A path in the file is held to what the constructor holds a path to, in both
+/// fields: the boundary is the parse, not the API.
 #[test]
-fn a_file_naming_a_relative_root_is_refused_on_read() {
-    let scratch = Scratch::new("relative-in-file");
+fn a_file_naming_a_relative_path_is_refused_on_read() {
+    for (body, subject) in [
+        (
+            "version = 1\n\n[vaults.notes]\nroot = \"notes\"\n",
+            "vault root",
+        ),
+        (
+            "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\n\
+             schema_source = \"schemas/notes.yaml\"\n",
+            "schema source",
+        ),
+    ] {
+        let scratch = Scratch::new("relative-in-file");
+        let dirs = scratch.dirs();
+        scratch.place(&scratch.registry_file(), body);
+        let error = registry::read(dirs).expect_err("a relative path in the file");
+        let ConfigError::IllegalPath {
+            subject: refused, ..
+        } = error
+        else {
+            panic!("`{body}` was refused as something other than an illegal path");
+        };
+        assert_eq!(refused, subject);
+    }
+}
+
+/// A name is a key for as long as an entry lives under it, and no longer.
+/// Keeping a removed entry's unknown keys against its name would graft a
+/// newer build's state — a revocation, a scope — onto whatever is registered
+/// under that name next.
+#[test]
+fn a_name_registered_again_carries_nothing_of_the_entry_that_had_it() {
+    let scratch = Scratch::new("re-registration");
     let dirs = scratch.dirs();
     scratch.place(
-        &dirs.registry_file(),
-        "version = 1\n\n[vaults.notes]\nroot = \"notes\"\n",
+        &scratch.registry_file(),
+        "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\nfuture_field = \"stale\"\n",
     );
-    let error = registry::read(dirs).expect_err("a relative root in the file");
-    assert!(matches!(error, ConfigError::RelativeRoot { .. }), "{error}");
+
+    registry::mutate(dirs, |registry| {
+        registry.remove(&name("notes"));
+        registry.insert(entry("notes", "/home/person/fresh"));
+        Ok(())
+    })
+    .expect("a removal and a re-registration");
+
+    let text = scratch.text_at(&scratch.registry_file());
+    assert!(
+        !text.contains("future_field"),
+        "the removed entry's fields were grafted onto the new one: {text}"
+    );
+    assert!(text.contains("/home/person/fresh"), "{text}");
+}
+
+/// The other direction, which was already right and stays that way: an entry
+/// that is renamed rather than replaced leaves its unknown keys behind with
+/// the name it had.
+#[test]
+fn renaming_an_entry_leaves_its_unknown_keys_with_the_old_name() {
+    let scratch = Scratch::new("rename");
+    let dirs = scratch.dirs();
+    scratch.place(
+        &scratch.registry_file(),
+        "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\nfuture_field = \"stale\"\n",
+    );
+
+    registry::mutate(dirs, |registry| {
+        let moved = registry.remove(&name("notes")).expect("the entry");
+        registry.insert(Entry::new(name("archive"), moved.root));
+        Ok(())
+    })
+    .expect("a rename");
+
+    let text = scratch.text_at(&scratch.registry_file());
+    assert!(!text.contains("future_field"), "{text}");
+    assert!(text.contains("[vaults.archive]"), "{text}");
 }
 
 /// Every corrupt shape says what is wrong, because the resolution is a person
@@ -230,7 +314,7 @@ fn a_malformed_entry_is_refused_with_the_reason() {
     ] {
         let scratch = Scratch::new("malformed");
         let dirs = scratch.dirs();
-        scratch.place(&dirs.registry_file(), body);
+        scratch.place(&scratch.registry_file(), body);
         let error = registry::read(dirs).expect_err("a malformed registry");
         let ConfigError::Corrupt { reason, .. } = error else {
             panic!("`{body}` was refused as something other than corrupt");

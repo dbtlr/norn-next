@@ -19,7 +19,19 @@
 //!   and a write edits the keys the typed view owns and leaves every other key
 //!   exactly where it was. This is why the reader is not a derived
 //!   deserializer: a struct with named fields cannot hold what it has no field
-//!   for.
+//!   for. **Keys are what is preserved, not text**: a write re-renders the
+//!   document, so comments and key order are the writer's rather than the
+//!   file's.
+//!
+//! # What is refused, and how it is repaired
+//!
+//! A file this reader cannot make sense of is refused whole — a zero-byte file
+//! carries no `version` and is corrupt rather than empty, and one malformed
+//! entry refuses the file it is in rather than being dropped. Nothing here
+//! repairs a file: a mutation reads before it writes, so it refuses on the same
+//! terms, and the recovery is a person editing the file (or removing it, which
+//! reads as a first run). Guessing at what a broken entry meant is how a
+//! reader turns a file somebody can still fix into one nobody can.
 //!
 //! Only version 1 exists. What is built here is the seam, not a migration
 //! ladder: [`migrate`] is the one place a version-behind reading is handled,
@@ -103,9 +115,9 @@ impl Document {
     }
 
     /// The document at `path`, or the empty one when nothing is there.
-    pub(crate) fn read(path: &Path, bytes: Option<Vec<u8>>) -> Result<Self, ConfigError> {
+    pub(crate) fn read(path: &Path, bytes: Option<&[u8]>) -> Result<Self, ConfigError> {
         match bytes {
-            Some(bytes) => Document::parse(path, &bytes),
+            Some(bytes) => Document::parse(path, bytes),
             None => Ok(Document::empty()),
         }
     }
@@ -137,11 +149,13 @@ impl Document {
     ///
     /// Stamping here is what makes an in-memory migration durable exactly once
     /// and only on a write: a document read from an older version carries the
-    /// older number until something legitimately rewrites the file.
-    pub(crate) fn render(&self, path: &Path) -> Result<String, ConfigError> {
-        let mut table = self.table.clone();
-        table.insert(VERSION_KEY.to_string(), Value::Integer(SCHEMA_VERSION));
-        toml::to_string_pretty(&table).map_err(|error| {
+    /// older number until something legitimately rewrites the file. The stamp
+    /// lands in the document rather than in a copy of it, so rendering a
+    /// registry does not duplicate the registry.
+    pub(crate) fn render(&mut self, path: &Path) -> Result<String, ConfigError> {
+        self.table
+            .insert(VERSION_KEY.to_string(), Value::Integer(SCHEMA_VERSION));
+        toml::to_string_pretty(&self.table).map_err(|error| {
             corrupt(
                 path,
                 format!("the document is not writable as TOML: {error}"),
@@ -276,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_file_that_is_not_there_reads_as_the_current_version() {
-        let document = Document::read(at(), None).expect("the empty document");
+        let mut document = Document::read(at(), None).expect("the empty document");
         let rendered = document.render(at()).expect("rendering");
         assert!(rendered.contains("version = 1"), "{rendered}");
     }

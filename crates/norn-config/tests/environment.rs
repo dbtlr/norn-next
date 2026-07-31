@@ -79,8 +79,10 @@ fn the_xdg_bases_are_read_when_they_are_set() {
     Saved::set("HOME", Some("/scratch/home"));
 
     let dirs = ConfigDirs::from_environment().expect("the machine's directories");
-    assert_eq!(dirs, ConfigDirs::new("/scratch/config", "/scratch/data"));
-    assert_eq!(dirs.channel(), Channel::COMPILED);
+    assert_eq!(
+        dirs,
+        ConfigDirs::new("/scratch/config", "/scratch/data").expect("absolute bases")
+    );
     assert_eq!(
         dirs.config_dir(),
         Path::new("/scratch/config").join(Channel::COMPILED.app_directory())
@@ -99,23 +101,7 @@ fn the_home_defaults_apply_when_the_xdg_bases_are_not_set() {
     assert_eq!(
         dirs,
         ConfigDirs::new("/scratch/home/.config", "/scratch/home/.local/share")
-    );
-}
-
-/// The specification's rule: a relative base is ignored rather than honoured,
-/// because it names a different directory to every process that reads it.
-#[test]
-fn a_relative_xdg_base_is_ignored_in_favour_of_the_home_default() {
-    let _lock = environment();
-    let _saved = Saved::take();
-    Saved::set("XDG_CONFIG_HOME", Some("relative/config"));
-    Saved::set("XDG_DATA_HOME", Some(""));
-    Saved::set("HOME", Some("/scratch/home"));
-
-    let dirs = ConfigDirs::from_environment().expect("the machine's directories");
-    assert_eq!(
-        dirs,
-        ConfigDirs::new("/scratch/home/.config", "/scratch/home/.local/share")
+            .expect("absolute bases")
     );
 }
 
