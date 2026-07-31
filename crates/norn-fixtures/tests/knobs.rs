@@ -11,7 +11,7 @@
 
 mod scratch;
 
-use std::fs;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use norn_fixtures::Profile;
@@ -22,57 +22,23 @@ fn profile(name: &str) -> Profile {
     Profile::by_name(name).unwrap_or_else(|| panic!("no profile named `{name}`"))
 }
 
-#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
-fn markdown_files(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "md") {
-                out.push(path);
-            }
-        }
-    }
-    out
-}
-
 /// Occurrences of the inline link lead-in across the whole tree.
-#[allow(clippy::disallowed_methods)] // Reads the generated documents the case counts.
 fn inline_link_lead_ins(dir: &Path) -> usize {
-    markdown_files(dir)
+    scratch::document_texts(dir)
         .iter()
-        .map(|path| {
-            fs::read_to_string(path)
-                .expect("reading a generated document")
-                .matches("\nRelated: ")
-                .count()
-        })
+        .map(|text| text.matches("\nRelated: ").count())
         .sum()
 }
 
 /// The largest number of documents any single directory holds.
-#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
 fn fullest_directory(dir: &Path) -> usize {
-    let mut best = 0;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let mut here = 0;
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "md") {
-                here += 1;
-            }
-        }
-        best = best.max(here);
+    let mut per_directory: BTreeMap<String, usize> = BTreeMap::new();
+    for document in scratch::documents(dir) {
+        *per_directory
+            .entry(document.parent().to_string())
+            .or_insert(0) += 1;
     }
-    best
+    per_directory.values().copied().max().unwrap_or(0)
 }
 
 /// Where a document's links sit is what this knob decides, and a probe reading

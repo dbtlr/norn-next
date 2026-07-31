@@ -8,8 +8,6 @@
 
 mod scratch;
 
-use std::fs;
-
 use norn_fixtures::Profile;
 use norn_fixtures::probe::{self, CALIBRATION};
 
@@ -113,23 +111,94 @@ fn the_probe_and_the_manifest_agree_on_the_tree() {
             stats.markdown_bytes as usize, manifest.markdown_bytes,
             "{name}: the Markdown bytes on disk must equal the bytes the generator emitted"
         );
+        // Species by species, because the totals agreeing would let two
+        // species swap: a dangling link written where an outbound one was
+        // planned keeps the count and changes what the tree exercises.
+        assert_eq!(
+            [
+                stats.in_vault_file_symlinks as usize,
+                stats.in_vault_dir_symlinks as usize,
+                stats.dangling_symlinks as usize,
+                stats.outbound_symlinks as usize,
+            ],
+            [
+                manifest.symlinks.in_vault_file,
+                manifest.symlinks.in_vault_dir,
+                manifest.symlinks.dangling,
+                manifest.symlinks.outbound,
+            ],
+            "{name}: the links on disk must be the species the generator reported emitting"
+        );
     }
 }
 
+/// Every link a profile asks for lands, as the species it was asked for.
+///
+/// This is the masking inversion the platform posture exists to prevent, put
+/// the other way round: a generation that quietly emitted fewer links than its
+/// profile declares — or the same number in the wrong species — would report
+/// success and leave every consumer measuring link handling measuring nothing.
 #[test]
-#[allow(clippy::disallowed_methods)] // Reads the generated documents the case counts links in.
+fn a_generation_emits_every_species_its_profile_declares() {
+    for name in ["tiny", "small", "ambiguous", "realistic"] {
+        let profile = profile(name);
+        with_tree(
+            &format!("cal-symlinks-{name}"),
+            &profile,
+            23,
+            |dir, manifest| {
+                assert_eq!(
+                    manifest.symlinks, profile.symlinks,
+                    "{name}: the manifest reports links the profile did not ask for"
+                );
+                let links = scratch::symlinks(dir);
+                assert_eq!(
+                    links.len(),
+                    profile.symlinks.total(),
+                    "{name}: the tree holds {} links against a declared {}",
+                    links.len(),
+                    profile.symlinks.total()
+                );
+            },
+        );
+    }
+}
+
+/// A link is never a document, whatever it is named or resolves to.
+///
+/// A `.md` link naming a document is the case: counted as a document it adds
+/// one that was never generated, and the count on disk stops being the count
+/// the profile declares.
+#[test]
+fn a_markdown_named_link_is_not_counted_as_a_document() {
+    let profile = profile("small");
+    with_tree("cal-link-not-document", &profile, 29, |dir, manifest| {
+        let markdown_links = scratch::symlinks(dir)
+            .iter()
+            .filter(|(entry, _)| entry.rel.ends_with(".md"))
+            .count();
+        assert!(
+            markdown_links > 0,
+            "the profile emitted no `.md`-named link, so this case proves nothing"
+        );
+        assert_eq!(
+            scratch::documents(dir).len(),
+            manifest.documents,
+            "the tree holds a different number of documents than the generator emitted"
+        );
+    });
+}
+
+#[test]
 fn the_dangling_share_lands_where_the_knob_puts_it() {
     // The generator reports how many links it made dangle; the tree names
     // those targets in a form nothing else emits, so the claim is checkable.
     let profile = profile("small");
     with_tree("cal-dangling", &profile, 19, |dir, manifest| {
-        let mut counted = 0;
-        for entry in walk_markdown(dir) {
-            counted += fs::read_to_string(&entry)
-                .expect("reading a generated document")
-                .matches("absent-")
-                .count();
-        }
+        let counted: usize = scratch::document_texts(dir)
+            .iter()
+            .map(|text| text.matches("absent-").count())
+            .sum();
         assert_eq!(
             counted, manifest.dangling_links,
             "the tree holds {counted} absent targets against a reported {}",
@@ -142,22 +211,4 @@ fn the_dangling_share_lands_where_the_knob_puts_it() {
             "{per_mille} per mille dangling against a declared {declared}"
         );
     });
-}
-
-#[allow(clippy::disallowed_methods)] // Walks the generated tree the case measures.
-fn walk_markdown(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "md") {
-                out.push(path);
-            }
-        }
-    }
-    out
 }
