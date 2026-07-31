@@ -12,11 +12,18 @@
 //! whole arrangement — so both halves are asserted. Development dependencies
 //! are outside it: they are absent from every build that is not a test run.
 //!
+//! **What a manifest states is what this crate asks for, not what a build of
+//! it links.** A feature belongs to the dependent: a consumer writing
+//! `norn-embed = { features = [..] }`, or forwarding one of its own defaults
+//! into this crate, turns an optional dependency into a dependency of every
+//! development build with every assertion here still green. That half is read
+//! off the resolve graph by the architecture gate in `norn-testkit`, which
+//! holds this crate to linking nothing under the default selection.
+//!
 //! The absent-edge half of the blind-crate invariant — no `embed -> store` and
-//! no `embed -> fs`, direct or composed — is the architecture gate's, in
-//! `norn-testkit`. What is asserted here is that no dependency reaches a local
-//! crate at all, which fails at this crate's own boundary rather than at the
-//! workspace's.
+//! no `embed -> fs`, direct or composed — is that same gate's. What is
+//! asserted here is that no dependency reaches a local crate at all, which
+//! fails at this crate's own boundary rather than at the workspace's.
 
 const MANIFEST: &str = include_str!("../Cargo.toml");
 

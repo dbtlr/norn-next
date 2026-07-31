@@ -35,6 +35,11 @@
 //!   [`FEATURE_MATRIX`] and judges the readings together, and
 //!   [`feature_coverage_violations`] fails when a member declares a feature no
 //!   selection turns on.
+//! - **A dependency a *consumer* switched on.** Features belong to the
+//!   dependent, so a crate that links nothing on its own terms links whatever
+//!   a dependent's `features = [..]` reaches. [`isolation_violations`] reads
+//!   what [`ISOLATED_CRATES`] actually resolve under the default selection,
+//!   which is where both halves of that show.
 //! - **A local crate the workspace does not hold.** A package excluded from
 //!   the workspace, or living outside the workspace root, is not a member, so
 //!   neither its edges nor its lints nor its tests are anyone's subject. A
@@ -98,6 +103,21 @@ pub const ALLOWED_EDGES: &[(&str, &str)] = &[
     ("norn-testkit", "norn-store"),
 ];
 
+/// The crates that link nothing at all in a build that is not a test run.
+///
+/// `norn-embed` is here for heavy-dependency isolation: a model runtime never
+/// enters a development build. That crate's own manifest is held to the rule
+/// in `crates/norn-embed/tests/isolation.rs`, and a manifest is only half of
+/// it — **features belong to the dependent**, so a consumer writing
+/// `norn-embed = { features = [..] }`, or forwarding one of its own defaults
+/// into it, would compile the runtime into every development build with that
+/// manifest test still green. The resolve graph is where both halves show,
+/// which is why the second half is read here.
+pub const ISOLATED_CRATES: &[&str] = &["norn-embed"];
+
+/// The name of the reading a plain `cargo build` corresponds to.
+pub const DEFAULT_SELECTION: &str = "default";
+
 /// One reading of the workspace: the arguments that select which edges
 /// `cargo metadata` reports.
 pub struct FeatureSelection {
@@ -118,7 +138,7 @@ pub struct FeatureSelection {
 /// [`MatrixReading::violations`].
 pub const FEATURE_MATRIX: &[FeatureSelection] = &[
     FeatureSelection {
-        name: "default",
+        name: DEFAULT_SELECTION,
         args: &[],
     },
     FeatureSelection {
@@ -145,6 +165,13 @@ pub struct WorkspaceGraph {
     /// Normal or build edges from a member to a local package the workspace
     /// does not hold as a member, as `(from, name of the dependency)`.
     pub unearned: BTreeSet<(String, String)>,
+    /// Every normal or build edge from a member to *any* package under this
+    /// reading, registry crates included, as `(from, name of the
+    /// dependency)`. The allowlist's subject is member-to-member edges; this
+    /// is what a member actually links, which is [`isolation_violations`]'s
+    /// subject. Development edges are absent: they are in no build that is
+    /// not a test run.
+    pub linked: BTreeSet<(String, String)>,
     /// Every feature a member declares, as `(crate, feature)`. Cargo lists an
     /// optional dependency's implicit feature here under the dependency's own
     /// name; a `dep:`-prefixed spelling is only ever a value, never a key.
@@ -243,22 +270,23 @@ impl WorkspaceGraph {
                     return Err("a resolve edge carries no `pkg`".to_string());
                 };
                 let member = member_ids.contains(pkg);
-                if !member && !is_local_package(pkg) {
-                    continue;
-                }
+                let local = is_local_package(pkg);
                 let to = named(pkg)?;
                 for dep_kind in array(dep, "dep_kinds")? {
                     let edge = (from.clone(), to.clone());
                     let kind = dep_kind.get("kind").and_then(Value::as_str);
+                    // A normal dependency reports no kind at all.
+                    if matches!(kind, None | Some("build")) {
+                        graph.linked.insert(edge.clone());
+                    }
                     match (member, kind) {
-                        // A normal dependency reports no kind at all.
                         (true, None) => {
                             graph.normal.insert(edge);
                         }
                         (true, Some("build")) => {
                             graph.build.insert(edge);
                         }
-                        (false, None | Some("build")) => {
+                        (false, None | Some("build")) if local => {
                             graph.unearned.insert(edge);
                         }
                         _ => {}
@@ -374,6 +402,14 @@ impl MatrixReading {
         &self.readings
     }
 
+    /// The reading taken under the named selection, if the matrix names one.
+    pub fn under(&self, selection: &str) -> Option<&WorkspaceGraph> {
+        self.readings
+            .iter()
+            .find(|(name, _)| *name == selection)
+            .map(|(_, graph)| graph)
+    }
+
     /// The workspace root, as the first selection reported it.
     pub fn root(&self) -> &Path {
         &self.readings[0].1.root
@@ -438,6 +474,29 @@ fn missing_edges(
         }
     }
     problems
+}
+
+/// Every dependency an [isolated crate](ISOLATED_CRATES) links under this
+/// reading, one line each. A conforming workspace produces none.
+///
+/// Read this against the [default](DEFAULT_SELECTION) reading and no other.
+/// A selection passing `--all-features` turns on the optional dependency an
+/// isolated crate is allowed to have behind a feature, which is the whole
+/// arrangement working rather than a violation of it.
+pub fn isolation_violations(graph: &WorkspaceGraph) -> Vec<String> {
+    let isolated: BTreeSet<&str> = ISOLATED_CRATES.iter().copied().collect();
+    graph
+        .linked
+        .iter()
+        .filter(|(from, _)| isolated.contains(from.as_str()))
+        .map(|(from, to)| {
+            format!(
+                "`{from}` links `{to}` in a default build. `{from}` links nothing outside a \
+                 test run: a heavy dependency belongs behind a feature, and a feature a \
+                 dependent turns on is a dependency of every build that reaches it"
+            )
+        })
+        .collect()
 }
 
 /// Every declared feature the matrix cannot turn on, one line each.
@@ -988,6 +1047,102 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    /// The shape the manifest half of the rule cannot see: `norn-embed`
+    /// declares its runtime `optional = true` behind a feature — which its
+    /// own isolation test passes on — and a consumer turns that feature on.
+    /// Cargo resolves the dependency into the default build, and the edge is
+    /// there to be read.
+    #[test]
+    fn a_dependency_a_consumer_switched_on_fails_an_isolated_crate() {
+        let metadata = r#"{
+          "workspace_root": "/workspace",
+          "workspace_members": ["path+file:///workspace/crates/norn-embed#0.0.0",
+                                "path+file:///workspace/crates/norn-host#0.0.0"],
+          "packages": [
+            {"id": "path+file:///workspace/crates/norn-embed#0.0.0", "name": "norn-embed"},
+            {"id": "path+file:///workspace/crates/norn-host#0.0.0", "name": "norn-host"},
+            {"id": "registry+https://github.com/rust-lang/crates.io-index#a-runtime@1.0.0",
+             "name": "a-runtime"},
+            {"id": "registry+https://github.com/rust-lang/crates.io-index#toml@1.0.0",
+             "name": "toml"}
+          ],
+          "resolve": {"nodes": [
+            {"id": "path+file:///workspace/crates/norn-embed#0.0.0", "deps": [
+              {"pkg": "registry+https://github.com/rust-lang/crates.io-index#a-runtime@1.0.0",
+               "dep_kinds": [{"kind": null}]},
+              {"pkg": "registry+https://github.com/rust-lang/crates.io-index#toml@1.0.0",
+               "dep_kinds": [{"kind": "dev"}]}
+            ]},
+            {"id": "path+file:///workspace/crates/norn-host#0.0.0", "deps": [
+              {"pkg": "path+file:///workspace/crates/norn-embed#0.0.0",
+               "dep_kinds": [{"kind": null}]}
+            ]}
+          ]}
+        }"#;
+        let graph = WorkspaceGraph::parse(metadata).expect("parsing metadata");
+        let problems = isolation_violations(&graph);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("`norn-embed` links `a-runtime`"),
+            "{problems:?}"
+        );
+        assert_eq!(
+            graph.violations(),
+            Vec::<String>::new(),
+            "the allowlist's subject is member edges, and this one is permitted"
+        );
+    }
+
+    /// A development dependency is in no build that is not a test run, and
+    /// `norn-embed`'s own manifest reader is one.
+    #[test]
+    fn a_development_dependency_does_not_break_isolation() {
+        let metadata = r#"{
+          "workspace_root": "/workspace",
+          "workspace_members": ["path+file:///workspace/crates/norn-embed#0.0.0"],
+          "packages": [
+            {"id": "path+file:///workspace/crates/norn-embed#0.0.0", "name": "norn-embed"},
+            {"id": "registry+https://github.com/rust-lang/crates.io-index#toml@1.0.0",
+             "name": "toml"}
+          ],
+          "resolve": {"nodes": [
+            {"id": "path+file:///workspace/crates/norn-embed#0.0.0", "deps": [
+              {"pkg": "registry+https://github.com/rust-lang/crates.io-index#toml@1.0.0",
+               "dep_kinds": [{"kind": "dev"}]}
+            ]}
+          ]}
+        }"#;
+        let graph = WorkspaceGraph::parse(metadata).expect("parsing metadata");
+        assert!(graph.linked.is_empty());
+        assert_eq!(isolation_violations(&graph), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_isolated_crate_is_a_crate_the_map_names() {
+        let known: BTreeSet<&str> = WORKSPACE_CRATES.iter().copied().collect();
+        for name in ISOLATED_CRATES {
+            assert!(known.contains(name), "`{name}` is not a known crate");
+        }
+    }
+
+    #[test]
+    fn the_matrix_names_the_default_selection() {
+        assert!(
+            FEATURE_MATRIX
+                .iter()
+                .any(|selection| selection.name == DEFAULT_SELECTION),
+            "the isolation reading is taken under the default selection, and \
+             the matrix does not name one"
+        );
+    }
+
+    #[test]
+    fn a_reading_is_found_by_the_selection_it_was_taken_under() {
+        let reading = matrix(&[("default", conforming())]);
+        assert!(reading.under(DEFAULT_SELECTION).is_some());
+        assert!(reading.under("all features").is_none());
     }
 
     #[test]

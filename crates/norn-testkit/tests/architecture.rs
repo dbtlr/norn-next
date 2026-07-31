@@ -13,9 +13,9 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use norn_testkit::architecture::{
-    ALLOWED_EDGES, DocumentedMap, FEATURE_MATRIX, MatrixReading, WORKSPACE_CRATES,
-    crate_directories, documented_invariants, documented_map, exclusion_gaps,
-    feature_coverage_violations, read_architecture_document,
+    ALLOWED_EDGES, DEFAULT_SELECTION, DocumentedMap, FEATURE_MATRIX, MatrixReading,
+    WORKSPACE_CRATES, crate_directories, documented_invariants, documented_map, exclusion_gaps,
+    feature_coverage_violations, isolation_violations, read_architecture_document,
 };
 use norn_testkit::invariants::{
     ClippyConfig, INVARIANTS, LINT_RULES, LintState, consistency_violations,
@@ -41,6 +41,18 @@ fn document() -> &'static DocumentedMap {
 #[test]
 fn the_workspace_dependency_graph_matches_the_allowlist() {
     assert_eq!(reading().violations(), Vec::<String>::new());
+}
+
+/// Heavy-dependency isolation, read off the resolve graph. A crate's own
+/// manifest test can only say what that crate asks for; a feature is the
+/// dependent's to turn on, and what the workspace actually links under a
+/// plain `cargo build` is visible only here.
+#[test]
+fn an_isolated_crate_links_nothing_under_the_default_selection() {
+    let graph = reading()
+        .under(DEFAULT_SELECTION)
+        .expect("the matrix carries the default selection");
+    assert_eq!(isolation_violations(graph), Vec::<String>::new());
 }
 
 #[test]
