@@ -21,15 +21,66 @@ mod scratch;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use norn_fixtures::{Manifest, Profile, digest, generate};
+use norn_fixtures::{Manifest, Profile, Symlinks, digest, generate};
 
 use scratch::generate_and_digest;
 
 /// The profiles whose determinism is asserted on every pull request.
 const PER_PR_PROFILES: &[&str] = &["tiny", "small", "ambiguous", "realistic"];
 
+/// The contract digest each named `(profile, seed)` produces, pinned.
+///
+/// Two generations agreeing catches a generator that is unstable inside one
+/// run. It cannot catch one that moved every tree consistently, and this table
+/// is what does: a value here is **read from a reviewed diff, never derived**,
+/// so a revision that changes what a pair produces arrives as an edit somebody
+/// made and a reviewer read rather than as a silent change of subject. The
+/// identity it holds is scoped to a build, per [ADR 0002][identity] — the
+/// table says what this generator produces today, not what any build of it
+/// must produce.
+///
+/// [identity]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0002-fixture-determinism-and-calibration.md
+const PINNED_TREE_DIGESTS: &[(&str, u64, &str)] = &[
+    (
+        "tiny",
+        7,
+        "9a2a61028bdf73140c6607a6961c332b537d87b63f1e6ad75f33efdaf8c80d1b",
+    ),
+    (
+        "small",
+        7,
+        "77c985a7fb3530da37a3b8193b022d6a50a70346b6a14c0777c281a3aa99d818",
+    ),
+    (
+        "ambiguous",
+        7,
+        "dec7aa1017d9067a308386f82a374fb32aecfe48652198b1c359dd8a23d1f3e5",
+    ),
+    (
+        "realistic",
+        7,
+        "de5bbcdc1a3f2fcc7dcaba4dcaad1fb7a65d01b606242d4767ba47017d8c2398",
+    ),
+    (
+        "soak",
+        3,
+        "3988ec54df577dbb0b824afd0a2fb8701b659ccc9bc5e8037533787872a53197",
+    ),
+];
+
 fn profile(name: &str) -> Profile {
     Profile::by_name(name).unwrap_or_else(|| panic!("no profile named `{name}`"))
+}
+
+/// The pinned digest for one pair. A pair with no entry is an error rather
+/// than a skip: a case that asks for a pin and quietly compares nothing is the
+/// failure the table exists to prevent.
+fn pinned(name: &str, seed: u64) -> &'static str {
+    PINNED_TREE_DIGESTS
+        .iter()
+        .find(|(profile, at, _)| *profile == name && *at == seed)
+        .map(|(_, _, hex)| *hex)
+        .unwrap_or_else(|| panic!("no pinned digest for `{name}` at seed {seed}"))
 }
 
 #[test]
@@ -47,6 +98,24 @@ fn every_per_pr_profile_reproduces_its_tree() {
     }
 }
 
+/// Each per-PR pair produces the tree the pinned table says it produces.
+///
+/// The failure this catches is the one two agreeing generations cannot: a
+/// generator change that moves every tree consistently. Updating the constant
+/// is the act that turns such a change from an accident into a decision
+/// somebody made and a reviewer read.
+#[test]
+fn every_per_pr_profile_produces_its_pinned_tree() {
+    for name in PER_PR_PROFILES {
+        let (tree, _) = generate_and_digest(&format!("pin-{name}"), &profile(name), 7);
+        assert_eq!(
+            digest::hex(&tree),
+            pinned(name, 7),
+            "`{name}` at seed 7 no longer produces its pinned tree"
+        );
+    }
+}
+
 #[test]
 #[ignore = "soak-lane case: the >=5k profile is nightly work, not per-PR"]
 fn the_soak_profile_reproduces_its_tree() {
@@ -58,6 +127,117 @@ fn the_soak_profile_reproduces_its_tree() {
         digest::hex(&second),
         "`soak` at seed 3 produced two different trees"
     );
+    assert_eq!(
+        digest::hex(&first),
+        pinned("soak", 3),
+        "`soak` at seed 3 no longer produces its pinned tree"
+    );
+}
+
+/// The symbolic links are inside the contract digest, and each setting of the
+/// knob reproduces itself.
+///
+/// Turning the knob off changes nothing else: the links are planned after
+/// every document and clutter file is drawn, and a knob at zero draws nothing,
+/// so the two trees hold the same directories and the same bytes at the same
+/// paths and differ only by the links. A digest that skipped the links would
+/// therefore report the two trees as one, and a generation could lose every
+/// link it was asked for without moving a single hash.
+#[test]
+fn the_symlink_knob_is_inside_the_contract_digest() {
+    let with_links = profile("small");
+    assert!(
+        with_links.symlinks.total() > 0,
+        "the sample profile asks for no link, so this case proves nothing"
+    );
+    let mut without_links = with_links;
+    without_links.symlinks = Symlinks::NONE;
+
+    let (on_first, on) = generate_and_digest("knob-symlinks-on-a", &with_links, 13);
+    let (on_second, _) = generate_and_digest("knob-symlinks-on-b", &with_links, 13);
+    let (off_first, off) = generate_and_digest("knob-symlinks-off-a", &without_links, 13);
+    let (off_second, _) = generate_and_digest("knob-symlinks-off-b", &without_links, 13);
+
+    assert_eq!(
+        digest::hex(&on_first),
+        digest::hex(&on_second),
+        "the knob on produced two different trees at one seed"
+    );
+    assert_eq!(
+        digest::hex(&off_first),
+        digest::hex(&off_second),
+        "the knob off produced two different trees at one seed"
+    );
+    assert_ne!(
+        digest::hex(&on_first),
+        digest::hex(&off_first),
+        "the same tree with and without its symbolic links shares a contract \
+         digest, so the digest cannot see them"
+    );
+    assert_eq!(on.symlinks, with_links.symlinks);
+    assert_eq!(off.symlinks, Symlinks::NONE);
+    assert_eq!(
+        (on.documents, on.files, on.markdown_bytes),
+        (off.documents, off.files, off.markdown_bytes),
+        "turning the knob moved something other than the links, so the two \
+         trees differ for a second reason"
+    );
+}
+
+/// A symbolic link contributes the target it names, and the walk digest never
+/// reads through one.
+///
+/// Three trees hold the same one document. Two add a link to it under one
+/// name, spelled two ways that resolve to the same file with the same bytes;
+/// the third puts a regular file of that name holding the target string as its
+/// contents. A digest that followed the links would report the first two as
+/// one tree, and a digest that dropped the node kind would report the third as
+/// one of them.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::disallowed_methods)] // The case builds the three trees it digests.
+fn the_walk_digest_reads_a_links_target_and_never_through_it() {
+    const DOCUMENT: &[u8] = b"---\ntitle: Target\n---\n";
+
+    let plain = link_case("walk-digest-plain", |dir| {
+        fs::write(dir.join("alias.md"), b"doc.md").expect("writing a regular file")
+    });
+    let direct = link_case("walk-digest-direct", |dir| {
+        std::os::unix::fs::symlink("doc.md", dir.join("alias.md")).expect("creating a link")
+    });
+    let dotted = link_case("walk-digest-dotted", |dir| {
+        std::os::unix::fs::symlink("./doc.md", dir.join("alias.md")).expect("creating a link")
+    });
+
+    assert_ne!(
+        direct, dotted,
+        "two spellings of one target share a digest, so the target is outside it"
+    );
+    assert_ne!(
+        direct, plain,
+        "a link and a regular file holding the same bytes share a digest, so \
+         the node kind is outside it"
+    );
+
+    // Nothing is at the far end of this one, so a digest that read through a
+    // link could not produce a value at all.
+    let dangling = link_case("walk-digest-dangling", |dir| {
+        std::os::unix::fs::symlink("removed-000.md", dir.join("alias.md")).expect("creating a link")
+    });
+    assert_ne!(dangling, direct);
+
+    /// Build a tree holding one document plus whatever `add` puts in it, and
+    /// return its walk digest.
+    #[allow(clippy::disallowed_methods)] // Builds and removes its own scratch tree.
+    fn link_case(label: &str, add: impl FnOnce(&Path)) -> String {
+        let dir = scratch::fresh(label);
+        fs::create_dir_all(&dir).expect("creating a scratch directory");
+        fs::write(dir.join("doc.md"), DOCUMENT).expect("writing the document");
+        add(&dir);
+        let digest = digest::tree_hex(&dir).expect("digesting a scratch tree");
+        fs::remove_dir_all(&dir).expect("removing a scratch tree");
+        digest
+    }
 }
 
 #[test]
@@ -201,44 +381,22 @@ fn decompose(name: &str) -> String {
 }
 
 /// Every name the directory tree reports, sorted.
-#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
 fn reported_names(dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            }
-            out.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    out.sort();
-    out
+    let mut names: Vec<String> = scratch::walk(dir)
+        .iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
+    names.sort();
+    names
 }
 
 /// Generated documents whose file name is not pure ASCII.
-#[allow(clippy::disallowed_methods)] // Reads back what the filesystem reports a generated tree to hold.
-fn non_ascii_documents(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).expect("reading a generated directory") {
-            let entry = entry.expect("reading a generated directory entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if !entry.file_name().to_string_lossy().is_ascii()
-                && path.extension().is_some_and(|e| e == "md")
-            {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
+fn non_ascii_documents(dir: &Path) -> Vec<PathBuf> {
+    scratch::documents(dir)
+        .into_iter()
+        .filter(|entry| !entry.name().is_ascii())
+        .map(|entry| entry.path)
+        .collect()
 }
 
 /// "cafe" followed by U+0301 COMBINING ACUTE ACCENT — the decomposed spelling

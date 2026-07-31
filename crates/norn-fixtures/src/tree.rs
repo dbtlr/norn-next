@@ -1,13 +1,29 @@
 //! Reading a directory tree back off disk, in one fixed order.
 //!
-//! Both consumers — the tree digest and the calibration probe — need the same
-//! thing: every node under a root, named by a forward-slash relative path, in
-//! an order that does not depend on the filesystem's readdir order. The sort
-//! is what makes the digest a property of the tree rather than of the machine.
+//! Every consumer needs the same thing: each node under a root, named by a
+//! forward-slash relative path, in an order that does not depend on the
+//! filesystem's readdir order. The sort is what makes the digest a property of
+//! the tree rather than of the machine. The tree digest and the calibration
+//! probe read it here, and so does anything outside the crate that reads a
+//! generated tree back, so that "a symbolic link is not the thing it names" is
+//! decided once.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// What a walked node is, as the directory reports it.
+///
+/// A symbolic link is its own kind rather than the kind of whatever it points
+/// at: a link to a directory that counted as a directory would be descended
+/// into twice, and a link to a document that counted as a document would count
+/// one document twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Dir,
+    File,
+    Symlink,
+}
 
 /// One node of a walked tree.
 pub struct Node {
@@ -15,12 +31,13 @@ pub struct Node {
     pub rel: String,
     /// The absolute (or root-relative) path to read.
     pub path: PathBuf,
-    pub is_dir: bool,
+    pub kind: Kind,
 }
 
 /// Every node under `root`, sorted by relative path. Symbolic links are
 /// reported by their own metadata and never followed: a walk that follows
-/// links can revisit a subtree, and a generated tree contains none.
+/// links can revisit a subtree, leave the tree it was asked about, or fail on
+/// a target that is not there.
 pub fn walk(root: &Path) -> io::Result<Vec<Node>> {
     let mut out = Vec::new();
     collect(root, "", &mut out)?;
@@ -45,11 +62,20 @@ fn collect(dir: &Path, prefix: &str, out: &mut Vec<Node>) -> io::Result<()> {
             format!("{prefix}/{name}")
         };
         let path = entry.path();
-        let is_dir = entry.file_type()?.is_dir();
-        if is_dir {
+        // `DirEntry::file_type` reports the entry itself, so a symbolic link
+        // is a symbolic link whatever it names.
+        let file_type = entry.file_type()?;
+        let kind = if file_type.is_symlink() {
+            Kind::Symlink
+        } else if file_type.is_dir() {
+            Kind::Dir
+        } else {
+            Kind::File
+        };
+        if kind == Kind::Dir {
             collect(&path, &rel, out)?;
         }
-        out.push(Node { rel, path, is_dir });
+        out.push(Node { rel, path, kind });
     }
     Ok(())
 }

@@ -128,6 +128,61 @@ pub struct Clutter {
     pub empty_dirs: usize,
 }
 
+/// **Knob 6 — symbolic links.** How many links of each species the tree
+/// carries, as a count per species rather than a rate: links are exotica a
+/// walk must survive, and what matters is that each kind is present at all.
+///
+/// The four species are four different questions for whatever walks the tree,
+/// and a tree carrying three of them answers three:
+///
+/// - **In-vault file link** — a second name for a document that is already in
+///   the tree. A walk that follows it counts one document twice.
+/// - **In-vault dir link** — a second name for a directory. A walk that
+///   follows it descends a whole subtree twice.
+/// - **Dangling link** — a link whose target is not there. Reading through it
+///   fails, so a walk that reads before it looks is the one that breaks.
+/// - **Outbound link** — a link naming a location above the vault root. A walk
+///   that follows it leaves the tree it was asked about.
+///
+/// This type is both the request and the account: a profile states the counts
+/// it wants, and [`crate::Manifest`] reports the counts that were emitted, in
+/// the same shape so the two compare directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Symlinks {
+    pub in_vault_file: usize,
+    pub in_vault_dir: usize,
+    pub dangling: usize,
+    pub outbound: usize,
+}
+
+impl Symlinks {
+    /// The knob turned off: a tree with no symbolic link in it.
+    pub const NONE: Symlinks = Symlinks {
+        in_vault_file: 0,
+        in_vault_dir: 0,
+        dangling: 0,
+        outbound: 0,
+    };
+
+    /// Links across all four species.
+    pub fn total(&self) -> usize {
+        self.in_vault_file + self.in_vault_dir + self.dangling + self.outbound
+    }
+
+    /// How many of the four species are present.
+    pub fn species_present(&self) -> usize {
+        [
+            self.in_vault_file,
+            self.in_vault_dir,
+            self.dangling,
+            self.outbound,
+        ]
+        .iter()
+        .filter(|count| **count > 0)
+        .count()
+    }
+}
+
 /// A named generation profile: a document count plus one setting per knob.
 #[derive(Clone, Copy)]
 pub struct Profile {
@@ -141,6 +196,7 @@ pub struct Profile {
     pub links: LinkDensity,
     pub dirs: DirShape,
     pub clutter: Clutter,
+    pub symlinks: Symlinks,
 }
 
 /// The long-tailed body-length mixture. Weights sum to 1000; the weighted mean
@@ -210,6 +266,13 @@ const REALISTIC_CLUTTER: Clutter = Clutter {
     empty_dirs: 8,
 };
 
+const REALISTIC_SYMLINKS: Symlinks = Symlinks {
+    in_vault_file: 6,
+    in_vault_dir: 3,
+    dangling: 3,
+    outbound: 2,
+};
+
 const REALISTIC_BODY: BodyShape = BodyShape {
     length: LONG_TAILED_BODY,
     bytes_per_heading: 700,
@@ -253,6 +316,14 @@ pub const PROFILES: &[Profile] = &[
             max_file_bytes: 2_000,
             empty_dirs: 2,
         },
+        // One of each: a twelve-document tree is read by hand, and one link per
+        // species is what makes every species inspectable at that size.
+        symlinks: Symlinks {
+            in_vault_file: 1,
+            in_vault_dir: 1,
+            dangling: 1,
+            outbound: 1,
+        },
     },
     // The everyday integration-test profile: realistic in shape, cheap enough
     // to generate several times in one test run.
@@ -281,6 +352,12 @@ pub const PROFILES: &[Profile] = &[
             binary_per_mille: 400,
             max_file_bytes: 8_000,
             empty_dirs: 4,
+        },
+        symlinks: Symlinks {
+            in_vault_file: 2,
+            in_vault_dir: 1,
+            dangling: 1,
+            outbound: 1,
         },
     },
     // Ambiguity past the point where a bounded candidate list has to truncate.
@@ -319,6 +396,15 @@ pub const PROFILES: &[Profile] = &[
             max_file_bytes: 8_000,
             empty_dirs: 4,
         },
+        // An in-vault file link is a second name for a document, so it is the
+        // species that interacts with stem resolution: this profile carries
+        // more of them than the others.
+        symlinks: Symlinks {
+            in_vault_file: 4,
+            in_vault_dir: 1,
+            dangling: 1,
+            outbound: 1,
+        },
     },
     // The profile per-PR measurement gates run against.
     Profile {
@@ -338,6 +424,7 @@ pub const PROFILES: &[Profile] = &[
             spaced_stem_per_mille: 50,
         },
         clutter: REALISTIC_CLUTTER,
+        symlinks: REALISTIC_SYMLINKS,
     },
     // The soak profile: more documents, more directories, larger classes.
     Profile {
@@ -368,6 +455,12 @@ pub const PROFILES: &[Profile] = &[
             binary_per_mille: 400,
             max_file_bytes: 64_000,
             empty_dirs: 12,
+        },
+        symlinks: Symlinks {
+            in_vault_file: 12,
+            in_vault_dir: 6,
+            dangling: 6,
+            outbound: 4,
         },
     },
 ];
@@ -562,6 +655,36 @@ mod tests {
                 profile.ambiguity.k
             );
         }
+    }
+
+    /// Every shipped profile carries all four species.
+    ///
+    /// A profile missing one emits a tree that answers three of the four
+    /// questions a symbolic link poses, and nothing else in the suite would
+    /// say which one went missing.
+    #[test]
+    fn every_shipped_profile_carries_every_symlink_species() {
+        for profile in Profile::all() {
+            assert_eq!(
+                profile.symlinks.species_present(),
+                4,
+                "{} declares {:?}, which leaves a species out of its tree",
+                profile.name,
+                profile.symlinks
+            );
+        }
+    }
+
+    #[test]
+    fn the_symlink_knob_counts_what_it_holds() {
+        assert_eq!(Symlinks::NONE.total(), 0);
+        assert_eq!(Symlinks::NONE.species_present(), 0);
+        let one_species = Symlinks {
+            in_vault_file: 3,
+            ..Symlinks::NONE
+        };
+        assert_eq!(one_species.total(), 3);
+        assert_eq!(one_species.species_present(), 1);
     }
 
     #[test]

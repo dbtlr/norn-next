@@ -18,6 +18,11 @@
 //! its manifest, because the generator knows which links it made dangle and
 //! no byte-level reading can tell.
 //!
+//! A symbolic link's species is measured rather than taken from intent: the
+//! target is read, resolved lexically against the walk root, and stat'd once.
+//! That is the same kind of question as "do these bytes decode" — where a link
+//! points is a fact about the tree, not an interpretation of a document.
+//!
 //! # Where the checked-in parameters come from
 //!
 //! [`CALIBRATION`] is an **authored envelope**, not a measurement. Each entry
@@ -41,6 +46,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::symlinks;
 use crate::tree;
 
 /// Shape statistics for one directory tree.
@@ -75,6 +81,14 @@ pub struct VaultStats {
     pub binary_files: u64,
     pub ambiguous_stem_classes: u64,
     pub largest_stem_class: u64,
+    /// Symbolic links naming a file inside the tree.
+    pub in_vault_file_symlinks: u64,
+    /// Symbolic links naming a directory inside the tree.
+    pub in_vault_dir_symlinks: u64,
+    /// Symbolic links whose target is inside the tree and not there.
+    pub dangling_symlinks: u64,
+    /// Symbolic links naming a location above the tree root.
+    pub outbound_symlinks: u64,
 }
 
 impl VaultStats {
@@ -523,11 +537,24 @@ pub fn measure(root: &Path) -> io::Result<VaultStats> {
     let mut stems: BTreeMap<String, u64> = BTreeMap::new();
 
     for node in tree::walk(root)? {
-        if node.is_dir {
-            stats.directories += 1;
-            let depth = node.rel.split('/').count() as u64;
-            stats.max_directory_depth = stats.max_directory_depth.max(depth);
-            continue;
+        match node.kind {
+            tree::Kind::Dir => {
+                stats.directories += 1;
+                let depth = node.rel.split('/').count() as u64;
+                stats.max_directory_depth = stats.max_directory_depth.max(depth);
+                continue;
+            }
+            tree::Kind::Symlink => {
+                let target = fs::read_link(&node.path)?;
+                match symlinks::classify(root, &node.rel, &target.to_string_lossy()) {
+                    symlinks::Species::InVaultFile => stats.in_vault_file_symlinks += 1,
+                    symlinks::Species::InVaultDir => stats.in_vault_dir_symlinks += 1,
+                    symlinks::Species::Dangling => stats.dangling_symlinks += 1,
+                    symlinks::Species::Outbound => stats.outbound_symlinks += 1,
+                }
+                continue;
+            }
+            tree::Kind::File => {}
         }
         let Some(stem) = node.rel.strip_suffix(".md") else {
             stats.non_markdown_files += 1;
