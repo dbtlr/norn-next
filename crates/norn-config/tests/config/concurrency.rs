@@ -321,6 +321,33 @@ fn a_dead_writers_temporary_is_swept_by_the_next_one() {
     );
 }
 
+/// The sweep removes only regular files. Anything else wearing the temporary
+/// prefix is not this protocol's leftover, and refusing the mutation over it
+/// would let one planted directory wedge the file for good.
+#[test]
+fn a_directory_wearing_the_temporary_prefix_neither_wedges_nor_is_removed() {
+    let scratch = Scratch::new("planted-dir");
+    let dirs = scratch.dirs();
+    let planted = scratch.make_config_dir().join(".registry.toml.tmp-planted");
+    #[allow(clippy::disallowed_methods)]
+    // Harness scaffolding: arranging a shape the sweep must skip.
+    std::fs::create_dir(&planted).expect("a planted directory");
+
+    registry::mutate(dirs, |registry| {
+        registry.insert(entry("notes", "/home/person/notes"));
+        Ok(())
+    })
+    .expect("a mutation beside a planted directory");
+
+    #[allow(clippy::disallowed_methods)]
+    // Harness scaffolding: judging what the sweep left behind.
+    let still_a_directory = planted.is_dir();
+    assert!(
+        still_a_directory,
+        "the sweep removed a directory it does not own"
+    );
+}
+
 /// The lock file is opened without following a link. A link planted at the
 /// lock name would otherwise hand this writer's lock — and the `0600` file it
 /// creates — to a path nothing here guards, and every writer would then be

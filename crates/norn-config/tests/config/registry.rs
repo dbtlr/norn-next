@@ -264,6 +264,32 @@ fn a_name_registered_again_carries_nothing_of_the_entry_that_had_it() {
     assert!(text.contains("/home/person/fresh"), "{text}");
 }
 
+/// The same scope holds when the old entry is displaced rather than removed:
+/// a bare `insert` under a taken name starts a new entry, and the displaced
+/// one's unmodeled keys go with it.
+#[test]
+fn an_entry_displaced_by_insert_carries_nothing_of_its_predecessor() {
+    let scratch = Scratch::new("displacement");
+    let dirs = scratch.dirs();
+    scratch.place(
+        &scratch.registry_file(),
+        "version = 1\n\n[vaults.notes]\nroot = \"/home/person/notes\"\nfuture_field = \"stale\"\n",
+    );
+
+    registry::mutate(dirs, |registry| {
+        registry.insert(entry("notes", "/home/person/fresh"));
+        Ok(())
+    })
+    .expect("a displacement");
+
+    let text = scratch.text_at(&scratch.registry_file());
+    assert!(
+        !text.contains("future_field"),
+        "the displaced entry's fields were grafted onto its replacement: {text}"
+    );
+    assert!(text.contains("/home/person/fresh"), "{text}");
+}
+
 /// The other direction, which was already right and stays that way: an entry
 /// that is renamed rather than replaced leaves its unknown keys behind with
 /// the name it had.

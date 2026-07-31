@@ -218,7 +218,10 @@ impl Registry {
     /// Register `entry`, replacing whatever was registered under its name.
     ///
     /// Keyed by the entry's own name, so the key and the field cannot disagree.
+    /// A displaced entry takes the keys this build does not model with it —
+    /// the replacement is a new entry, not a continuation of the old one.
     pub fn insert(&mut self, entry: Entry) -> Option<Entry> {
+        self.raw.remove(&entry.name);
         self.entries.insert(entry.name.clone(), entry)
     }
 

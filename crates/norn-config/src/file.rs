@@ -417,7 +417,11 @@ fn sweep_temporaries(path: &Path) -> Result<(), ConfigError> {
     };
     for entry in entries {
         let entry = entry.map_err(|error| io("reading", directory, error))?;
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        // Only a regular file can be this protocol's leftover; anything else
+        // wearing the prefix is not ours to remove, and failing the mutation
+        // over it would let a planted directory wedge the file for good.
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if is_file && entry.file_name().to_string_lossy().starts_with(&prefix) {
             let stale = entry.path();
             std::fs::remove_file(&stale).map_err(|error| io("removing", &stale, error))?;
         }
