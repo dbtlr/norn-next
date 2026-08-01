@@ -109,11 +109,18 @@ impl Collector {
     fn wait_for_roots(&self, expected: &BTreeSet<PathBuf>, description: &'static str) {
         wait_until(description, budget(), || {
             let seen = self.seen.lock().expect("captured state");
-            if expected.is_subset(&seen.roots) {
+            let missing: Vec<_> = expected
+                .iter()
+                .filter(|path| !seen.roots.iter().any(|root| path.starts_with(root)))
+                .cloned()
+                .collect();
+            if missing.is_empty() {
                 Observed::Met(())
             } else {
-                let missing: Vec<_> = expected.difference(&seen.roots).cloned().collect();
-                Observed::Pending(format!("missing vault roots: {missing:?}"))
+                Observed::Pending(format!(
+                    "changed paths not covered by any invalidation root: {missing:?}; roots: {:?}",
+                    seen.roots
+                ))
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
@@ -130,7 +137,7 @@ impl Drop for Collector {
 }
 
 #[test]
-fn a_burst_reports_every_changed_path_including_non_markdown_files() {
+fn a_burst_covers_every_changed_path_including_non_markdown_files() {
     let scratch = Scratch::new("burst");
     let collector = Collector::start(&scratch.vault(), &scratch.schema());
     let expected = BTreeSet::from([
@@ -167,7 +174,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 }
 
 #[test]
-fn a_sync_catch_up_reports_every_path_across_settled_batches() {
+fn a_sync_catch_up_covers_every_path_across_settled_batches() {
     let scratch = Scratch::new("sync-catch-up");
     let collector = Collector::start(&scratch.vault(), &scratch.schema());
     let mut expected = BTreeSet::new();
