@@ -718,6 +718,7 @@ fn stat(metadata: &fs::Metadata) -> FileStat {
     }
 }
 
+#[allow(clippy::unnecessary_cast)] // st_dev's native width differs between supported Unix targets.
 fn stat_raw(metadata: &rustix::fs::Stat) -> FileStat {
     let mtime = if metadata.st_mtime >= 0 {
         SystemTime::UNIX_EPOCH
