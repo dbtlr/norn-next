@@ -713,7 +713,7 @@
       "sources": ["NRN-139", "NRN-146", "NRN-159", "NRN-162", "NRN-217", "NRN-442", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no write primitive and no cascade exist."
+        "reason": "the write primitive exists and carries two of this case's clauses — shadow, rename, fsync of the file and fsync of the parent, and a cross-device placement that refuses rather than copying. The rest have no subject: an interrupted run needs process-kill injection, no orphaned staging file needs the sweep that clears one, and there is no document-mutating path to route or destructive ordering to gate. A binding names tests for the whole property, so this stays dormant until those land."
       }
     },
     {
