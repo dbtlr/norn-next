@@ -385,7 +385,11 @@
           "crates/norn-testkit/src/wait.rs::a_slow_probe_is_named_as_a_slow_probe_rather_than_as_a_stuck_subject",
           "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored",
           "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored",
-          "crates/norn-testkit/src/wait.rs::a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound"
+          "crates/norn-testkit/src/wait.rs::a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound",
+          "crates/norn-fs/tests/watcher.rs::a_burst_covers_every_changed_path_including_non_markdown_files",
+          "crates/norn-fs/tests/watcher.rs::an_editor_atomic_save_reports_the_destination_path",
+          "crates/norn-fs/tests/watcher.rs::a_sync_catch_up_covers_every_path_across_settled_batches",
+          "crates/norn-fs/tests/watcher.rs::external_schema_changes_and_vault_root_loss_are_reported"
         ]
       }
     },

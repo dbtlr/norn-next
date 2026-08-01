@@ -17,6 +17,9 @@ publish = false
 
 [workspace.dependencies]
 libc = "0.2"
+# Platform notifications stay behind norn-fs; the crate erases backend event
+# shapes into Norn's own typed invalidation batches.
+notify = "8.2"
 rustix = { version = "1.1", features = ["fs"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
