@@ -98,7 +98,7 @@ impl std::error::Error for WatchError {}
 ///
 /// Dropping it tears down the backend. It is intentionally not cloneable.
 pub struct Subscription {
-    batches: mpsc::Receiver<Result<Batch, WatchError>>,
+    batches: Option<mpsc::Receiver<Result<Batch, WatchError>>>,
     watcher: Option<RecommendedWatcher>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -107,13 +107,20 @@ impl Subscription {
     /// Blocks until a settled batch or terminal error is available.
     pub fn recv(&self) -> Result<Batch, WatchError> {
         self.batches
+            .as_ref()
+            .expect("subscription receiver present")
             .recv()
             .unwrap_or_else(|_| Err(WatchError::Backend("watcher stopped".into())))
     }
 
     /// Waits at most `timeout` for a settled batch or terminal error.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<Batch>, WatchError> {
-        match self.batches.recv_timeout(timeout) {
+        match self
+            .batches
+            .as_ref()
+            .expect("subscription receiver present")
+            .recv_timeout(timeout)
+        {
             Ok(Ok(batch)) => Ok(Some(batch)),
             Ok(Err(error)) => Err(error),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
@@ -127,6 +134,10 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.watcher.take();
+        // Disconnect a worker blocked behind the bounded delivery slot before
+        // joining it. Backend callbacks write only shared pending state, so
+        // delivery backpressure never blocks event intake.
+        self.batches.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -196,7 +207,15 @@ impl OwnWrites {
 
     fn normalize(&self, path: &Path) -> Result<NormalizedPath, PathError> {
         if path.is_absolute() {
-            let relative = path
+            if let Ok(relative) = path.strip_prefix(&self.root) {
+                return self.normalizer.normalize(relative);
+            }
+            // Write callers can retain `/var/...` while the watcher keeps the
+            // canonical `/private/var/...` spelling reported by FSEvents. Do
+            // not resolve the replaceable file itself: resolve its parent and
+            // reattach the name, just as schema coverage does.
+            let canonical = canonical_parent_path(path).map_err(|_| PathError::Absolute)?;
+            let relative = canonical
                 .strip_prefix(&self.root)
                 .map_err(|_| PathError::Absolute)?;
             self.normalizer.normalize(relative)
@@ -235,7 +254,10 @@ pub fn watch(
         ledger.clone(),
     )));
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
-    let (batch_tx, batch_rx) = mpsc::channel();
+    // One delivered batch plus the bounded shared pending state is the whole
+    // queue. A stalled consumer backpressures only this worker; callbacks keep
+    // merging into State and widen to Rescan at the authored cap.
+    let (batch_tx, batch_rx) = mpsc::sync_channel(1);
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
     let mut watcher = RecommendedWatcher::new(
@@ -275,7 +297,7 @@ pub fn watch(
     };
     Ok((
         Subscription {
-            batches: batch_rx,
+            batches: Some(batch_rx),
             watcher: Some(watcher),
             worker: Some(worker),
         },
@@ -406,7 +428,7 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) {
     let mut state = shared.lock().expect("watch state poisoned");
     match result {
         Err(error) => {
-            state.terminal = Some(backend(error));
+            state.terminal.get_or_insert_with(|| backend(error));
         }
         Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
         Ok(event) => {
@@ -431,7 +453,8 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     if path == state.root {
         if kind.is_remove() || matches!(kind, EventKind::Modify(notify::event::ModifyKind::Name(_)))
         {
-            state.terminal = Some(WatchError::CoverageLost(state.root.clone()));
+            let root = state.root.clone();
+            state.terminal.get_or_insert(WatchError::CoverageLost(root));
         } else {
             state.rescan(RescanScope::Vault);
         }
@@ -441,7 +464,8 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
         path.parent() == Some(parent) && path.file_name() == state.root.file_name()
     });
     if root_name_relevant {
-        state.terminal = Some(WatchError::CoverageLost(state.root.clone()));
+        let root = state.root.clone();
+        state.terminal.get_or_insert(WatchError::CoverageLost(root));
         return;
     }
     let (schema_dirty, schema_rescan) = match &state.schema {
@@ -507,7 +531,7 @@ fn is_mechanism(path: &NormalizedPath) -> bool {
 fn run_coalescer(
     state: Arc<Mutex<State>>,
     wake: mpsc::Receiver<()>,
-    output: mpsc::Sender<Result<Batch, WatchError>>,
+    output: mpsc::SyncSender<Result<Batch, WatchError>>,
 ) {
     loop {
         let wait = {
@@ -792,6 +816,21 @@ mod tests {
     }
 
     #[test]
+    fn the_first_terminal_cause_is_preserved() {
+        let state = state();
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Remove(RemoveKind::Folder)).add_path("/vault".into())),
+        );
+        ingest(&state, Err(notify::Error::generic("later backend noise")));
+
+        assert_eq!(
+            state.lock().unwrap().terminal,
+            Some(WatchError::CoverageLost(PathBuf::from("/vault")))
+        );
+    }
+
+    #[test]
     fn a_queued_wake_cannot_starve_the_maximum_batch_age() {
         let state = state();
         {
@@ -812,7 +851,7 @@ mod tests {
         let (wake_tx, wake_rx) = mpsc::sync_channel(1);
         wake_tx.try_send(()).unwrap();
         drop(wake_tx);
-        let (output_tx, output_rx) = mpsc::channel();
+        let (output_tx, output_rx) = mpsc::sync_channel(1);
 
         let worker = thread::spawn(move || run_coalescer(state, wake_rx, output_tx));
         let batch = output_rx
@@ -867,6 +906,19 @@ mod tests {
             .landed(&path, Landed::Unchanged(observed(&path)))
             .unwrap();
         assert!(ledger.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement for alternate absolute root spellings.
+    fn own_writes_accept_an_absolute_path_under_the_canonical_root() {
+        let (scratch, _ledger, mut recorder) = own_write_harness("watch-canonical-recorder");
+        let path = scratch.place("note.md", b"bytes");
+        recorder.root = std::fs::canonicalize(&recorder.root).expect("a canonical vault root");
+
+        assert_eq!(
+            recorder.normalize(&path).unwrap().as_path(),
+            Path::new("note.md")
+        );
     }
 
     #[test]
