@@ -194,6 +194,48 @@ mod tests {
         assert_ne!(second, ContentHash::of(b""));
     }
 
+    /// **The bar on an interrupted read.** A read a signal cut short is asked
+    /// again, so the hash is of the whole file.
+    ///
+    /// The forbidden shape is treating `EINTR` as a failure. A signal arriving
+    /// mid-read is not a file that cannot be read, and the caller that meets it is
+    /// a write's precondition or its verification — so the answer would be an
+    /// environmental refusal on a machine where nothing is wrong, or worse, a
+    /// short read taken for the file.
+    #[test]
+    fn a_read_a_signal_interrupts_is_asked_again() {
+        /// A handle that is interrupted before every chunk it hands over.
+        struct Interrupted {
+            bytes: Cursor<Vec<u8>>,
+            interrupt: bool,
+        }
+
+        impl Read for Interrupted {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+                }
+                self.bytes.read(buffer)
+            }
+        }
+
+        impl Seek for Interrupted {
+            fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+                self.bytes.seek(to)
+            }
+        }
+
+        let content: Vec<u8> = (0..CHUNK * 2 + 7).map(|i| (i % 251) as u8).collect();
+        let mut handle = Interrupted {
+            bytes: Cursor::new(content.clone()),
+            interrupt: false,
+        };
+        let (hash, len) = hashed_from(&mut handle).expect("a read that was interrupted");
+        assert_eq!(hash, ContentHash::of(&content));
+        assert_eq!(len, content.len() as u64);
+    }
+
     #[test]
     fn the_hex_spelling_round_trips() {
         let hash = ContentHash::of(b"round trip");
