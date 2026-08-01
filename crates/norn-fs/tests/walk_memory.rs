@@ -33,6 +33,11 @@ const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
 const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
+// Other Unix targets have no hosted reading yet; use the same conservative
+// ceiling until one earns a target-specific measured bar.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
+
 // A retained-tree cost grows by several MiB between these profiles. A 2x bar
 // tolerates process-accounting noise around the executable's fixed floor but
 // still rejects growth proportional to the generated tree.

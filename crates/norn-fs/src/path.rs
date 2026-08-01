@@ -109,6 +109,7 @@ impl PathNormalizer {
     #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns path identity detection.
     pub fn detect(root: &Path) -> Result<Self, NormalizerError> {
         if let (Some(parent), Some(name)) = (root.parent(), root.file_name())
+            && same_device(root, parent)
             && let Some(sensitivity) = probe_case_behavior(parent, name)
         {
             return Ok(Self { sensitivity });
@@ -213,6 +214,14 @@ impl Hash for NormalizedPath {
 
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only mount detection.
+fn same_device(left: &Path, right: &Path) -> bool {
+    match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev(),
+        _ => false,
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
@@ -395,5 +404,14 @@ mod tests {
             Err(NormalizerError::Indeterminate { .. })
         ));
         fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: cleaning up the probe root.
+    fn mount_probe_guard_compares_device_identity() {
+        let root = scratch();
+        assert!(same_device(&root, &root));
+        assert!(!same_device(&root.join("missing"), &root));
+        fs::remove_dir(root).expect("remove scratch directory");
     }
 }

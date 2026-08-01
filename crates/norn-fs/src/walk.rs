@@ -59,7 +59,7 @@ pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
     );
     let first = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
     Ok(Walk {
-        root: root.to_owned(),
+        root: Arc::new(root.to_owned()),
         root_fd,
         normalizer,
         exclusions,
@@ -69,8 +69,11 @@ pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
 }
 
 /// A streaming vault walk.
+///
+/// Any yielded error is terminal: later calls return `None`, so exhaustion can
+/// describe a complete inventory only when every preceding item was `Ok`.
 pub struct Walk {
-    root: PathBuf,
+    root: Arc<PathBuf>,
     root_fd: Arc<OwnedFd>,
     normalizer: PathNormalizer,
     exclusions: BTreeSet<NormalizedPath>,
@@ -95,7 +98,10 @@ impl Iterator for Walk {
                     self.stack.pop();
                     continue;
                 }
-                Err(error) => return Some(Err(error)),
+                Err(error) => {
+                    self.stack.clear();
+                    return Some(Err(error));
+                }
             };
 
             if let Some(reason) = pending.skip {
@@ -125,6 +131,7 @@ impl Iterator for Walk {
                             .stack
                             .push(DirectoryFrontier::new(Arc::new(fd), pending.path.as_path())),
                         Err(source) => {
+                            self.stack.clear();
                             return Some(Err(environment_errno(
                                 "opening directory",
                                 &access,
@@ -163,7 +170,7 @@ impl WalkFact {
 /// A file observed during traversal, before its content is requested.
 #[derive(Debug)]
 pub struct FileFact {
-    root: PathBuf,
+    root: Arc<PathBuf>,
     root_fd: Arc<OwnedFd>,
     path: NormalizedPath,
     stat: FileStat,
@@ -1086,6 +1093,7 @@ mod tests {
             .expect("the blocked directory's position")
             .expect_err("an unreadable present directory");
         assert!(error.to_string().contains("z-blocked"), "{error}");
+        assert!(facts.next().is_none(), "a walk error must be terminal");
         scratch.set_mode(&blocked, 0o755);
     }
 

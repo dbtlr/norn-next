@@ -118,8 +118,9 @@ jobs:
   # otherwise this lane would run soak.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
-  # The generator is the subject because it is the one that exists. norn-store
-  # slots in at Layer 1, and its request paths become what this job measures;
+  # Two subjects run here: the fixture generator and the norn-fs streaming
+  # walk. norn-store slots in at Layer 1, and its request paths become another
+  # subject for this job;
   # the >=5k scale and the recorded peak-memory readings stay in soak.yml,
   # where a clock is legal to read.
   memory:
