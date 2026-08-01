@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 //! A streaming inventory of one vault tree.
 //!
-//! The walk keeps one sorted directory frontier per depth rather than a tree of
-//! every path. That makes its memory a function of directory depth and maximum
-//! fan-out, not of the number of documents in the vault. Files and typed skip
-//! notations are yielded in normalized-path lexicographic order; directories
-//! themselves are traversal machinery and are not facts.
+//! The walk keeps one bounded, sorted directory page per depth rather than a
+//! tree of every path. That makes its memory a function of directory depth and
+//! the fixed page size, not of the number of documents in the vault or one
+//! directory's fan-out. Files and typed skip notations are yielded in
+//! normalized-path lexicographic order; directories themselves are traversal
+//! machinery and are not facts.
 //!
 //! Symbolic links are facts about names, never traversal edges. Host exclusions
 //! are roots, not schema rules, and Norn's cross-device shadow fallback is the
@@ -13,43 +14,32 @@
 //! the vault and are walked normally.
 
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::fd::OwnedFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, readlinkat, statat};
 
 use crate::hash::ContentHash;
 use crate::identity::Identity;
 use crate::path::{NormalizedPath, NormalizerError, PathError, PathNormalizer};
 use crate::shadow::{FALLBACK, is_shadow_name};
 
-/// Host-owned roots the filesystem seam must not enter.
-#[derive(Clone, Debug, Default)]
-pub struct WalkOptions {
-    exclusions: Vec<PathBuf>,
-}
-
-impl WalkOptions {
-    /// Builds options from vault-relative exclusion roots.
-    pub fn new(exclusions: impl IntoIterator<Item = PathBuf>) -> Self {
-        Self {
-            exclusions: exclusions.into_iter().collect(),
-        }
-    }
-}
-
 /// Begins a deterministic streaming walk of `root`.
 ///
 /// Construction proves the root's case behavior, validates every exclusion,
 /// and opens only the first directory frontier. Later directory failures arrive
 /// from the iterator at their deterministic position.
-pub fn walk(root: &Path, options: WalkOptions) -> Result<Walk, WalkError> {
+pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
     let normalizer = PathNormalizer::detect(root).map_err(WalkError::Normalizer)?;
-    let exclusions = options
-        .exclusions
+    let exclusions = exclusions
         .iter()
         .map(|path| {
             normalizer
@@ -63,30 +53,29 @@ pub fn walk(root: &Path, options: WalkOptions) -> Result<Walk, WalkError> {
     let mechanism = normalizer
         .normalize(Path::new(FALLBACK))
         .expect("the fixed mechanism root is relative and normalized");
-    let first = directory_entries(
-        root,
-        root,
-        Path::new(""),
-        &normalizer,
-        &exclusions,
-        &mechanism,
-    )?;
+    let root_fd = Arc::new(
+        open(root, directory_flags(), Mode::empty())
+            .map_err(|source| environment_errno("opening directory", root, source))?,
+    );
+    let first = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
     Ok(Walk {
         root: root.to_owned(),
+        root_fd,
         normalizer,
         exclusions,
         mechanism,
-        stack: vec![first.into_iter()],
+        stack: vec![first],
     })
 }
 
 /// A streaming vault walk.
 pub struct Walk {
     root: PathBuf,
+    root_fd: Arc<OwnedFd>,
     normalizer: PathNormalizer,
     exclusions: BTreeSet<NormalizedPath>,
     mechanism: NormalizedPath,
-    stack: Vec<std::vec::IntoIter<Pending>>,
+    stack: Vec<DirectoryFrontier>,
 }
 
 impl Iterator for Walk {
@@ -95,9 +84,18 @@ impl Iterator for Walk {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let frontier = self.stack.last_mut()?;
-            let Some(pending) = frontier.next() else {
-                self.stack.pop();
-                continue;
+            let pending = match frontier.next_pending(
+                &self.root_fd,
+                &self.normalizer,
+                &self.exclusions,
+                &self.mechanism,
+            ) {
+                Ok(Some(pending)) => pending,
+                Ok(None) => {
+                    self.stack.pop();
+                    continue;
+                }
+                Err(error) => return Some(Err(error)),
             };
 
             if let Some(reason) = pending.skip {
@@ -110,25 +108,35 @@ impl Iterator for Walk {
                 EntryKind::File => {
                     return Some(Ok(WalkFact::File(FileFact {
                         root: self.root.clone(),
+                        parent: pending.parent,
+                        name: pending.name,
                         path: pending.path,
                         stat: pending.stat,
                     })));
                 }
                 EntryKind::Directory => {
                     let access = self.root.join(pending.path.as_path());
-                    match directory_entries(
-                        &self.root,
-                        &access,
-                        pending.path.as_path(),
-                        &self.normalizer,
-                        &self.exclusions,
-                        &self.mechanism,
+                    match openat(
+                        &pending.parent,
+                        &pending.name,
+                        directory_flags(),
+                        Mode::empty(),
                     ) {
-                        Ok(entries) => self.stack.push(entries.into_iter()),
-                        Err(error) => return Some(Err(error)),
+                        Ok(fd) => self
+                            .stack
+                            .push(DirectoryFrontier::new(Arc::new(fd), pending.path.as_path())),
+                        Err(source) => {
+                            return Some(Err(environment_errno(
+                                "opening directory",
+                                &access,
+                                source,
+                            )));
+                        }
                     }
                 }
-                EntryKind::Symlink => unreachable!("every symbolic link is a skip"),
+                EntryKind::Symlink | EntryKind::Special(_) => {
+                    unreachable!("unsupported entries are skips")
+                }
             }
         }
     }
@@ -157,6 +165,8 @@ impl WalkFact {
 #[derive(Debug)]
 pub struct FileFact {
     root: PathBuf,
+    parent: Arc<OwnedFd>,
+    name: OsString,
     path: NormalizedPath,
     stat: FileStat,
 }
@@ -181,11 +191,14 @@ impl FileFact {
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
     pub fn read(self) -> Result<ReadFile, WalkError> {
         let access = self.root.join(self.path.as_path());
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&access)
-            .map_err(|source| environment("opening", &access, source))?;
+        let fd = openat(
+            &self.parent,
+            &self.name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|source| environment_errno("opening", &access, source))?;
+        let mut file = fs::File::from(fd);
         let metadata = file
             .metadata()
             .map_err(|source| environment("stating", &access, source))?;
@@ -210,18 +223,22 @@ pub struct ReadFile {
 }
 
 impl ReadFile {
+    /// The normalized vault-relative identity whose bytes were read.
     pub fn path(&self) -> &NormalizedPath {
         &self.path
     }
 
+    /// The identity observed through the held file descriptor.
     pub fn stat(&self) -> &FileStat {
         &self.stat
     }
 
+    /// The bytes read in the single filesystem pass.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// The SHA-256 computed from exactly [`Self::bytes`].
     pub fn content_hash(&self) -> ContentHash {
         self.content_hash
     }
@@ -248,10 +265,12 @@ pub struct SkipFact {
 }
 
 impl SkipFact {
+    /// The normalized vault-relative root that was skipped.
     pub fn path(&self) -> &NormalizedPath {
         &self.path
     }
 
+    /// Why this root has no descendant facts.
     pub fn reason(&self) -> SkipReason {
         self.reason
     }
@@ -260,19 +279,44 @@ impl SkipFact {
 /// Why a root has one notation and no descendant facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkipReason {
+    /// A root supplied by the host.
     HostExclusion,
+    /// Norn's exact `.norn/tmp` fallback subtree.
     Mechanism,
+    /// An exact Norn shadow basename.
     Shadow,
+    /// A symbolic link, which is never traversed.
     SymbolicLink(LinkKind),
+    /// A device-like entry unsafe to open as document content.
+    SpecialFile(FileKind),
 }
 
 /// What an unsupported symbolic link was observed to name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkKind {
+    /// A direct, contained target that is a regular or special file.
     InVaultFile,
+    /// A direct, contained directory target.
     InVaultDirectory,
+    /// An absent target or a target path containing another symbolic link.
     Dangling,
+    /// A lexical target outside the vault root.
     Outbound,
+}
+
+/// A filesystem entry that is neither a document-like file nor a directory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileKind {
+    /// A named pipe.
+    Fifo,
+    /// A Unix-domain socket.
+    Socket,
+    /// A block device.
+    BlockDevice,
+    /// A character device.
+    CharacterDevice,
+    /// Another platform-specific special kind.
+    Other,
 }
 
 /// A walk or content-read failure, always naming the affected path.
@@ -321,9 +365,12 @@ enum EntryKind {
     Directory,
     File,
     Symlink,
+    Special(FileKind),
 }
 
 struct Pending {
+    parent: Arc<OwnedFd>,
+    name: OsString,
     path: NormalizedPath,
     kind: EntryKind,
     stat: FileStat,
@@ -331,52 +378,113 @@ struct Pending {
     sort_key: Vec<u8>,
 }
 
+const FRONTIER_PAGE: usize = 256;
+
+struct DirectoryFrontier {
+    fd: Arc<OwnedFd>,
+    relative: PathBuf,
+    cursor: Option<Vec<u8>>,
+    page: std::vec::IntoIter<Pending>,
+    done: bool,
+    #[cfg(test)]
+    max_page: usize,
+}
+
+impl DirectoryFrontier {
+    fn new(fd: Arc<OwnedFd>, relative: &Path) -> Self {
+        Self {
+            fd,
+            relative: relative.to_owned(),
+            cursor: None,
+            page: Vec::new().into_iter(),
+            done: false,
+            #[cfg(test)]
+            max_page: 0,
+        }
+    }
+
+    fn next_pending(
+        &mut self,
+        root_fd: &Arc<OwnedFd>,
+        normalizer: &PathNormalizer,
+        exclusions: &BTreeSet<NormalizedPath>,
+        mechanism: &NormalizedPath,
+    ) -> Result<Option<Pending>, WalkError> {
+        if let Some(item) = self.page.next() {
+            return Ok(Some(item));
+        }
+        if self.done {
+            return Ok(None);
+        }
+        let (items, more) = directory_page(
+            root_fd,
+            &self.fd,
+            &self.relative,
+            self.cursor.as_deref(),
+            normalizer,
+            exclusions,
+            mechanism,
+        )?;
+        self.done = !more;
+        #[cfg(test)]
+        {
+            self.max_page = self.max_page.max(items.len());
+        }
+        self.cursor = items.last().map(|item| item.sort_key.clone());
+        self.page = items.into_iter();
+        Ok(self.page.next())
+    }
+}
+
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
-fn directory_entries(
-    root: &Path,
-    directory: &Path,
+fn directory_page(
+    root_fd: &Arc<OwnedFd>,
+    directory: &Arc<OwnedFd>,
     relative: &Path,
+    cursor: Option<&[u8]>,
     normalizer: &PathNormalizer,
     exclusions: &BTreeSet<NormalizedPath>,
     mechanism: &NormalizedPath,
-) -> Result<Vec<Pending>, WalkError> {
-    let entries = fs::read_dir(directory)
-        .map_err(|source| environment("reading directory", directory, source))?;
+) -> Result<(Vec<Pending>, bool), WalkError> {
+    let display = relative;
+    let entries = Dir::read_from(directory)
+        .map_err(|source| environment_errno("reading directory", display, source))?;
     let mut pending = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|source| environment("reading entry in", directory, source))?;
-        let relative = relative.join(entry.file_name());
+        let entry =
+            entry.map_err(|source| environment_errno("reading entry in", display, source))?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let name = OsString::from_vec(name.to_vec());
+        let relative_path = relative.join(&name);
         let path = normalizer
-            .normalize(&relative)
+            .normalize(&relative_path)
             .map_err(|source| WalkError::Path {
-                path: relative.clone(),
+                path: relative_path.clone(),
                 source,
             })?;
-        let file_type = entry
-            .file_type()
-            .map_err(|source| environment("typing", &entry.path(), source))?;
-        let kind = if file_type.is_symlink() {
-            EntryKind::Symlink
-        } else if file_type.is_dir() {
-            EntryKind::Directory
-        } else {
-            EntryKind::File
-        };
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|source| environment("stating", &entry.path(), source))?;
+        let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| environment_errno("stating", &relative_path, source))?;
+        let file_type = FileType::from_raw_mode(metadata.st_mode as _);
+        let kind = classify_file_type(file_type);
         let skip = if exclusions.contains(&path) {
             Some(SkipReason::HostExclusion)
         } else if path == *mechanism {
             Some(SkipReason::Mechanism)
-        } else if is_shadow_name(entry.file_name().as_os_str()) {
+        } else if is_shadow_name(&name) {
             Some(SkipReason::Shadow)
         } else if kind == EntryKind::Symlink {
             Some(SkipReason::SymbolicLink(classify_link(
-                root,
+                root_fd,
                 path.as_path(),
-                &entry.path(),
+                directory,
+                &name,
                 normalizer,
             )?))
+        } else if let EntryKind::Special(kind) = kind {
+            Some(SkipReason::SpecialFile(kind))
         } else {
             None
         };
@@ -384,42 +492,54 @@ fn directory_entries(
         if kind == EntryKind::Directory && skip.is_none() {
             sort_key.push(b'/');
         }
+        if cursor.is_some_and(|cursor| sort_key.as_slice() <= cursor) {
+            continue;
+        }
         pending.push(Pending {
+            parent: directory.clone(),
+            name,
             path,
             kind,
-            stat: stat(&metadata),
+            stat: stat_raw(&metadata),
             skip,
             sort_key,
         });
+        pending.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+        if pending.len() > FRONTIER_PAGE + 1 {
+            pending.pop();
+        }
     }
     pending.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
-    Ok(pending)
+    let more = pending.len() > FRONTIER_PAGE;
+    pending.truncate(FRONTIER_PAGE);
+    Ok((pending, more))
 }
 
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault links and stat.
 fn classify_link(
-    root: &Path,
+    root_fd: &Arc<OwnedFd>,
     relative_link: &Path,
-    link: &Path,
+    parent: &Arc<OwnedFd>,
+    name: &OsStr,
     normalizer: &PathNormalizer,
 ) -> Result<LinkKind, WalkError> {
-    let target = fs::read_link(link).map_err(|source| environment("reading link", link, source))?;
+    let target = readlinkat(parent, name, Vec::new())
+        .map_err(|source| environment_errno("reading link", relative_link, source))?;
+    let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
     if target.is_absolute() {
         return Ok(LinkKind::Outbound);
     }
     let Some(relative) = resolve_relative_target(relative_link, &target) else {
         return Ok(LinkKind::Outbound);
     };
+    if relative.as_os_str().is_empty() {
+        return Ok(LinkKind::InVaultDirectory);
+    }
     let relative = normalizer
         .normalize(&relative)
         .expect("the lexical resolver returns a non-empty relative path without parents");
-    let candidate = root.join(relative.as_path());
-    match fs::metadata(candidate) {
-        Ok(metadata) if metadata.is_dir() => Ok(LinkKind::InVaultDirectory),
-        Ok(_) => Ok(LinkKind::InVaultFile),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(LinkKind::Dangling),
-        Err(source) => Err(environment("stating link target for", link, source)),
-    }
+    inspect_link_target(root_fd, relative.as_path())
+        .map_err(|source| environment_errno("stating link target for", relative_link, source))
 }
 
 /// Resolves a link target lexically against the link's vault-relative parent.
@@ -442,7 +562,64 @@ fn resolve_relative_target(link: &Path, target: &Path) -> Option<PathBuf> {
             Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    (!parts.is_empty()).then(|| parts.into_iter().collect())
+    Some(parts.into_iter().collect())
+}
+
+fn directory_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
+}
+
+fn classify_file_type(kind: FileType) -> EntryKind {
+    if kind == FileType::Directory {
+        EntryKind::Directory
+    } else if kind == FileType::RegularFile {
+        EntryKind::File
+    } else if kind == FileType::Symlink {
+        EntryKind::Symlink
+    } else if kind == FileType::Fifo {
+        EntryKind::Special(FileKind::Fifo)
+    } else if kind == FileType::Socket {
+        EntryKind::Special(FileKind::Socket)
+    } else if kind == FileType::BlockDevice {
+        EntryKind::Special(FileKind::BlockDevice)
+    } else if kind == FileType::CharacterDevice {
+        EntryKind::Special(FileKind::CharacterDevice)
+    } else {
+        EntryKind::Special(FileKind::Other)
+    }
+}
+
+fn inspect_link_target(
+    root: &Arc<OwnedFd>,
+    relative: &Path,
+) -> Result<LinkKind, rustix::io::Errno> {
+    let mut directory = root.clone();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let name = component.as_os_str();
+        if components.peek().is_some() {
+            match openat(&directory, name, directory_flags(), Mode::empty()) {
+                Ok(fd) => directory = Arc::new(fd),
+                Err(
+                    rustix::io::Errno::NOENT | rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR,
+                ) => return Ok(LinkKind::Dangling),
+                Err(error) => return Err(error),
+            }
+        } else {
+            return match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => match FileType::from_raw_mode(stat.st_mode as _) {
+                    FileType::Directory => Ok(LinkKind::InVaultDirectory),
+                    FileType::Symlink => Ok(LinkKind::Dangling),
+                    _ => Ok(LinkKind::InVaultFile),
+                },
+                Err(
+                    rustix::io::Errno::NOENT | rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR,
+                ) => Ok(LinkKind::Dangling),
+                Err(error) => Err(error),
+            };
+        }
+    }
+    Ok(LinkKind::InVaultDirectory)
 }
 
 /// One forward pass over `reader`; parsers receive the same bytes the hash saw.
@@ -462,6 +639,31 @@ fn stat(metadata: &fs::Metadata) -> FileStat {
             ino: metadata.ino(),
         },
     }
+}
+
+fn stat_raw(metadata: &rustix::fs::Stat) -> FileStat {
+    let mtime = if metadata.st_mtime >= 0 {
+        SystemTime::UNIX_EPOCH
+            + std::time::Duration::new(metadata.st_mtime as u64, metadata.st_mtime_nsec as u32)
+    } else {
+        SystemTime::UNIX_EPOCH
+    };
+    FileStat {
+        len: metadata.st_size as u64,
+        mtime,
+        identity: Identity {
+            dev: metadata.st_dev as u64,
+            ino: metadata.st_ino,
+        },
+    }
+}
+
+fn environment_errno(operation: &'static str, path: &Path, source: rustix::io::Errno) -> WalkError {
+    environment(
+        operation,
+        path,
+        io::Error::from_raw_os_error(source.raw_os_error()),
+    )
 }
 
 fn environment(operation: &'static str, path: &Path, source: io::Error) -> WalkError {
@@ -497,7 +699,7 @@ mod tests {
         scratch.place("a/x.bin", &[0xff]);
         scratch.place("a.md", b"a");
 
-        let facts = paths(walk(&scratch.at(""), WalkOptions::default()).expect("walk"));
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
         assert_eq!(
             facts,
             [
@@ -523,13 +725,7 @@ mod tests {
         scratch.place("norn-shadow-7-2", b"no");
         scratch.place("norn-shadow-notes.md", b"yes");
 
-        let facts = paths(
-            walk(
-                &scratch.at(""),
-                WalkOptions::new([PathBuf::from("./excluded")]),
-            )
-            .expect("walk"),
-        );
+        let facts = paths(walk(&scratch.at(""), &[PathBuf::from("./excluded")]).expect("walk"));
         assert_eq!(
             facts,
             vec![
@@ -545,7 +741,7 @@ mod tests {
     fn reading_returns_bytes_and_the_hash_of_those_same_bytes() {
         let scratch = Scratch::new("walk-read");
         scratch.place("note.md", b"one observation");
-        let fact = walk(&scratch.at(""), WalkOptions::default())
+        let fact = walk(&scratch.at(""), &[])
             .expect("walk")
             .next()
             .expect("one fact")
@@ -598,7 +794,7 @@ mod tests {
         std::os::unix::fs::symlink("../outside.md", scratch.at("outbound.md"))
             .expect("outbound link");
 
-        let facts = paths(walk(&scratch.at(""), WalkOptions::default()).expect("walk"));
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
         for (path, kind) in [
             ("dangling.md", LinkKind::Dangling),
             ("dir-link", LinkKind::InVaultDirectory),
@@ -618,11 +814,116 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn replacing_a_pending_directory_with_an_outbound_link_cannot_escape() {
+        let scratch = Scratch::new("walk-directory-swap");
+        scratch.place("a.md", b"first");
+        scratch.directory("vault/z-pending");
+        scratch.place("z-pending/inside.md", b"inside");
+        scratch.directory("outside");
+        fs::write(scratch.path("outside/canary.md"), b"outside").expect("outside canary");
+
+        let mut facts = walk(&scratch.at(""), &[]).expect("walk");
+        assert_eq!(
+            facts.next().expect("first").expect("fact").path().as_path(),
+            Path::new("a.md")
+        );
+        fs::remove_dir_all(scratch.at("z-pending")).expect("remove pending directory");
+        std::os::unix::fs::symlink("../../outside", scratch.at("z-pending"))
+            .expect("replacement link");
+
+        let error = facts
+            .next()
+            .expect("pending position")
+            .expect_err("nofollow refuses replacement");
+        assert!(error.to_string().contains("z-pending"), "{error}");
+        assert!(
+            facts.all(|fact| fact.expect("later fact").path().as_path()
+                != Path::new("z-pending/canary.md"))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_link_chain_is_classified_without_following_the_outbound_second_link() {
+        let scratch = Scratch::new("walk-link-chain");
+        fs::write(scratch.path("outside.md"), b"outside").expect("outside canary");
+        std::os::unix::fs::symlink("../outside.md", scratch.at("second.md"))
+            .expect("outbound second link");
+        std::os::unix::fs::symlink("second.md", scratch.at("first.md")).expect("first link");
+
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
+        assert!(facts.contains(&(
+            PathBuf::from("first.md"),
+            Some(SkipReason::SymbolicLink(LinkKind::Dangling))
+        )));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn links_resolving_to_the_vault_root_are_in_vault_directories() {
+        let scratch = Scratch::new("walk-link-root");
+        scratch.directory("vault/dir");
+        std::os::unix::fs::symlink(".", scratch.at("root-link")).expect("dot link");
+        std::os::unix::fs::symlink("..", scratch.at("dir/parent-link")).expect("parent link");
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
+        for path in ["root-link", "dir/parent-link"] {
+            assert!(facts.contains(&(
+                PathBuf::from(path),
+                Some(SkipReason::SymbolicLink(LinkKind::InVaultDirectory))
+            )));
+        }
+    }
+
+    #[test]
+    fn special_files_are_typed_skips_and_are_never_opened_for_content() {
+        let scratch = Scratch::new("walk-fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(scratch.at("pipe"))
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![(
+                PathBuf::from("pipe"),
+                Some(SkipReason::SpecialFile(FileKind::Fifo))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_wide_directory_never_retains_more_than_one_frontier_page() {
+        let scratch = Scratch::new("walk-wide-frontier");
+        for index in 0..(FRONTIER_PAGE * 3 + 17) {
+            scratch.place(&format!("{index:04}.md"), b"x");
+        }
+        let normalizer = PathNormalizer::detect(&scratch.at("")).expect("normalizer");
+        let root_fd =
+            Arc::new(open(scratch.at(""), directory_flags(), Mode::empty()).expect("root fd"));
+        let mechanism = normalizer
+            .normalize(Path::new(FALLBACK))
+            .expect("mechanism");
+        let mut frontier = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
+        let mut count = 0;
+        while frontier
+            .next_pending(&root_fd, &normalizer, &BTreeSet::new(), &mechanism)
+            .expect("page")
+            .is_some()
+        {
+            count += 1;
+            assert!(frontier.max_page <= FRONTIER_PAGE);
+        }
+        assert_eq!(count, FRONTIER_PAGE * 3 + 17);
+    }
+
+    #[test]
     fn only_the_root_mechanism_directory_is_special() {
         let scratch = Scratch::new("walk-nested-mechanism-spelling");
         scratch.directory("vault/notes/.norn/tmp");
         scratch.place("notes/.norn/tmp/theirs.md", b"ordinary nested content");
-        let facts = paths(walk(&scratch.at(""), WalkOptions::default()).expect("walk"));
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
         assert!(facts.contains(&(PathBuf::from("notes/.norn/tmp/theirs.md"), None)));
         assert!(
             !facts
@@ -646,7 +947,7 @@ mod tests {
             "this account can read a mode-000 directory, so the refusal case proves nothing"
         );
 
-        let mut facts = walk(&scratch.at(""), WalkOptions::default()).expect("walk");
+        let mut facts = walk(&scratch.at(""), &[]).expect("walk");
         assert_eq!(
             facts
                 .next()
@@ -678,7 +979,7 @@ mod tests {
             "this account can read a mode-000 file, so the refusal case proves nothing"
         );
 
-        let fact = walk(&scratch.at(""), WalkOptions::default())
+        let fact = walk(&scratch.at(""), &[])
             .expect("walk")
             .next()
             .expect("one fact")

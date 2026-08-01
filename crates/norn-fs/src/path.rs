@@ -99,13 +99,21 @@ pub struct PathNormalizer {
 impl PathNormalizer {
     /// Builds a normalizer after positively determining the root's case behavior.
     ///
-    /// Detection is read-only. For an existing entry whose name contains an
-    /// ASCII letter, the alternate-case spelling is looked up. The root is
-    /// insensitive only when both spellings have the same `(device, inode)`;
-    /// a missing alternate spelling or a different identity proves sensitivity.
-    /// If no entry can supply that evidence, construction refuses.
+    /// Detection is read-only. The root's own entry in its parent is tried
+    /// first, so an empty vault can still carry evidence. Existing children are
+    /// fallback probes. A same-identity alternate lookup proves insensitivity
+    /// only when the alternate spelling is not itself present as a directory
+    /// entry; this prevents hardlink aliases from masquerading as insensitive
+    /// lookup. A missing alternate spelling or a different identity proves
+    /// sensitivity. If no entry can supply safe evidence, construction refuses.
     #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns path identity detection.
     pub fn detect(root: &Path) -> Result<Self, NormalizerError> {
+        if let (Some(parent), Some(name)) = (root.parent(), root.file_name())
+            && let Some(sensitivity) = probe_case_behavior(parent, name)
+        {
+            return Ok(Self { sensitivity });
+        }
+
         let entries = fs::read_dir(root).map_err(|source| NormalizerError::ReadRoot {
             root: root.to_owned(),
             source,
@@ -117,32 +125,11 @@ impl PathNormalizer {
                 source,
             })?;
             let name = entry.file_name();
-            let Some(alternate) = alternate_ascii_case(&name) else {
+            if alternate_ascii_case(&name).is_none() {
                 continue;
-            };
-            let actual = entry.path();
-            let alternate = root.join(alternate);
-            let actual_metadata =
-                fs::symlink_metadata(&actual).map_err(|source| NormalizerError::ReadRoot {
-                    root: root.to_owned(),
-                    source,
-                })?;
-
-            match fs::symlink_metadata(alternate) {
-                Ok(other) => {
-                    let sensitivity = if same_identity(&actual_metadata, &other) {
-                        CaseSensitivity::Insensitive
-                    } else {
-                        CaseSensitivity::Sensitive
-                    };
-                    return Ok(Self { sensitivity });
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    return Ok(Self {
-                        sensitivity: CaseSensitivity::Sensitive,
-                    });
-                }
-                Err(_) => continue,
+            }
+            if let Some(sensitivity) = probe_case_behavior(root, &name) {
+                return Ok(Self { sensitivity });
             }
         }
 
@@ -193,7 +180,7 @@ impl NormalizedPath {
     }
 
     /// The opaque root-scoped comparison and sort key.
-    pub fn comparison_key(&self) -> &OsStr {
+    pub(crate) fn comparison_key(&self) -> &OsStr {
         &self.key
     }
 }
@@ -226,6 +213,28 @@ impl Hash for NormalizedPath {
 
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
+fn probe_case_behavior(parent: &Path, name: &OsStr) -> Option<CaseSensitivity> {
+    let alternate = alternate_ascii_case(name)?;
+    let actual_metadata = fs::symlink_metadata(parent.join(name)).ok()?;
+
+    match fs::symlink_metadata(parent.join(&alternate)) {
+        Ok(other) if !same_identity(&actual_metadata, &other) => Some(CaseSensitivity::Sensitive),
+        Ok(_) => {
+            // If both spellings are actual entries, they may merely be hardlink
+            // aliases. Only lookup of a spelling absent from the directory can
+            // positively demonstrate case-insensitive name resolution.
+            let alternate_is_entry = fs::read_dir(parent)
+                .ok()?
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name() == alternate);
+            (!alternate_is_entry).then_some(CaseSensitivity::Insensitive)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(CaseSensitivity::Sensitive),
+        Err(_) => None,
+    }
 }
 
 fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
@@ -320,7 +329,9 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
     fn detection_uses_an_existing_entry_and_matches_lookup_behavior() {
-        let root = scratch();
+        let parent = scratch();
+        let root = parent.join("123");
+        fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("CaseProbe"), b"").expect("probe entry");
         let same = fs::symlink_metadata(root.join("caseProbe"))
             .ok()
@@ -335,18 +346,54 @@ mod tests {
                 CaseSensitivity::Sensitive
             }
         );
+        fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
+    fn detection_uses_the_empty_root_entry_as_case_evidence() {
+        let root = scratch();
+        let parent = root.parent().expect("scratch parent");
+        let name = root.file_name().expect("scratch name");
+        let expected = probe_case_behavior(parent, name).expect("case-bearing root entry");
+
+        let detected = PathNormalizer::detect(&root).expect("detectable empty root");
+        assert_eq!(detected.case_sensitivity(), expected);
         fs::remove_dir_all(root).expect("remove scratch");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging hardlink aliases.
+    fn hardlinked_alternate_spellings_do_not_prove_insensitivity() {
+        let parent = scratch();
+        let root = parent.join("123");
+        fs::create_dir(&root).expect("uncased root");
+        fs::write(root.join("CaseProbe"), b"").expect("probe entry");
+        if fs::hard_link(root.join("CaseProbe"), root.join("caseProbe")).is_err() {
+            // A case-insensitive host cannot contain the distinct spellings
+            // needed to exercise the sensitive-filesystem hardlink case.
+            fs::remove_dir_all(parent).expect("remove scratch");
+            return;
+        }
+
+        assert!(matches!(
+            PathNormalizer::detect(&root),
+            Err(NormalizerError::Indeterminate { .. })
+        ));
+        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a root without case evidence.
     fn detection_refuses_when_the_root_has_no_case_evidence() {
-        let root = scratch();
+        let parent = scratch();
+        let root = parent.join("123");
+        fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("123"), b"").expect("uncased entry");
         assert!(matches!(
             PathNormalizer::detect(&root),
             Err(NormalizerError::Indeterminate { .. })
         ));
-        fs::remove_dir_all(root).expect("remove scratch");
+        fs::remove_dir_all(parent).expect("remove scratch");
     }
 }

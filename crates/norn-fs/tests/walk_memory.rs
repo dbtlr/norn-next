@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use norn_fixtures::Profile;
-use norn_fs::{WalkOptions, walk};
+use norn_fs::{WalkFact, walk};
 use norn_testkit::process::{Run, Sandbox};
 
 const CHILD_ROOT: &str = "NORN_FS_WALK_MEMORY_ROOT";
 const SEED: u64 = 7;
 
-// Six native macos-arm64 debug readings on 2026-08-01 put `ambiguous` at
-// 2.50-2.53 MiB and `realistic` at 2.62-2.69 MiB, ratios of 1.04-1.07. The
-// ceiling is about three times the observed top; the ratio below is the sharp
-// instrument against retaining the realistic tree's roughly 4.3 MiB of
-// clutter in addition to the test executable's resident floor.
+// Three native macos-arm64 debug readings after the descriptor-safe fix on
+// 2026-08-01 put `ambiguous` at 2.81-2.89 MiB and `realistic` at 3.22-3.27 MiB,
+// ratios of 1.13-1.16. The ceiling is more than twice the observed top; the
+// ratio below is the sharp instrument against retaining the realistic tree's
+// roughly 4.3 MiB of clutter in addition to the executable's resident floor.
 #[cfg(target_os = "macos")]
 const REALISTIC_PEAK_RSS_CEILING_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -131,8 +131,13 @@ fn measure(label: &str, profile_name: &str) -> Reading {
 #[allow(clippy::disallowed_macros)] // Harness protocol, not product rendering.
 fn drain_in_child(root: &Path) {
     let mut facts = 0usize;
-    for fact in walk(root, WalkOptions::default()).expect("starting the measured walk") {
-        fact.expect("draining the measured walk");
+    for fact in walk(root, &[]).expect("starting the measured walk") {
+        let fact = fact.expect("draining the measured walk");
+        if let WalkFact::File(file) = fact {
+            let read = file.read().expect("reading a measured file");
+            std::hint::black_box(read.content_hash());
+            std::hint::black_box(read.bytes().len());
+        }
         facts += 1;
     }
     // The parent needs the exact count from the process whose RSS it measured.

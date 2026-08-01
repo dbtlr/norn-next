@@ -17,6 +17,7 @@ publish = false
 
 [workspace.dependencies]
 libc = "0.2"
+rustix = { version = "1.1", features = ["fs"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
 # `bundled` vendors SQLite itself, which is also what enables FTS5 and JSON1 —

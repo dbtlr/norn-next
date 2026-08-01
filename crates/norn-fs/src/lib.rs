@@ -95,7 +95,7 @@ pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, Path
 pub use refusal::Refusal;
 pub use shadow::{Placement, ShadowHome, Swept, is_shadow_name};
 pub use walk::{
-    FileFact, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError, WalkFact,
-    WalkOptions, walk,
+    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
+    WalkFact, walk,
 };
 pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};
