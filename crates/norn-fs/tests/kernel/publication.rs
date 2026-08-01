@@ -173,6 +173,11 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
 /// document did not have before Norn touched it. Ownership itself cannot be
 /// carried at all, which is why dropping the bits is the only correct answer
 /// rather than a cautious one.
+///
+/// This is the published contract. Some kernels strip these bits again when the
+/// shadow is written, and would give the same answer here for a second reason;
+/// what makes the answer the same on every platform is the mask, which the
+/// crate's own suite pins where nothing else can agree with it by accident.
 #[test]
 fn a_replacement_carries_permission_bits_without_the_setuid_bits() {
     let scratch = Scratch::new("mode-setuid");

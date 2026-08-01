@@ -1543,6 +1543,42 @@ mod tests {
         );
     }
 
+    /// **The bar on the mask.** Carrying a mode forward carries the permission
+    /// bits and drops the set-user-id and set-group-id bits.
+    ///
+    /// Asked of the carry itself, because the published answer has more than one
+    /// cause: some kernels strip these bits again when a file is written, so an
+    /// end-to-end case agrees with the mask on those platforms whether the mask is
+    /// there or not. The forbidden shape is carrying `st_mode` whole — "run as the
+    /// file's owner" then names the user who ran the write, on a document that
+    /// never granted it.
+    #[test]
+    fn carrying_a_mode_forward_drops_the_setuid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("write-mode-mask");
+        let source = scratch.place("note.md", b"old");
+        scratch.set_mode(&source, 0o6755);
+        let (document, replaced) = opened_for_reading(&source)
+            .expect("the document")
+            .expect("a document");
+        let _ = document;
+        assert_eq!(
+            replaced.permissions().mode() & 0o7777,
+            0o6755,
+            "the filesystem did not keep the bits this case is about"
+        );
+
+        let (shadow, staged) = open_shadow(scratch.shadows(), Faults::NONE).expect("a shadow");
+        carry_mode_forward(&staged, &replaced);
+
+        assert_eq!(
+            scratch.mode_at(&shadow),
+            0o755,
+            "the carry put a set-user-id or set-group-id bit on a file this process owns"
+        );
+    }
+
     /// **The bar on when the mode is carried.** A staged shadow has the replaced
     /// file's permission bits before any content goes into it.
     ///
