@@ -8,9 +8,21 @@
 //! would make the decision a string match.
 //!
 //! **A refusal means nothing was published.** Every variant here is reached
-//! before the swap or in place of it, so a destination that a refusal names is
-//! byte-identical to what it held when the call began. The one thing a refusal
-//! may leave behind is a shadow, which is inert (see [`crate::shadow`]).
+//! before the swap or in place of it.
+//!
+//! For a **replacement, a removal or a move's source leg** that is exact: the
+//! path a refusal names holds byte for byte what it held when the call began, and
+//! the one thing left behind is a shadow, which is inert (see
+//! [`crate::shadow`]).
+//!
+//! For an **exclusive create** the honest statement is narrower, because the only
+//! primitive that claims a name atomically claims it empty. A create that fails
+//! after claiming takes the name back, and **never removes what it did not
+//! create** — the file is identified before it is removed, so a foreign document
+//! published at that name in the meantime survives. What that costs is the other
+//! direction: a cleanup the filesystem blocks, or one skipped because the name no
+//! longer means this call's file, leaves this call's own bytes — complete or
+//! partial — at a name that had nothing at it.
 //!
 //! Mapping a refusal onto the wire's structured envelope belongs to whoever
 //! serves it. What is here is the engineering fact: which path, and what about
@@ -98,9 +110,10 @@ pub enum Refusal {
     /// placement decision has to be made again rather than that the write was
     /// wrong.
     ///
-    /// The invariant across every one of them: **the destination is
-    /// byte-identical to what it held before the call**, and at most a shadow
-    /// is left behind.
+    /// The invariant across every one of them is the module's: a replacement's
+    /// destination is **byte-identical to what it held before the call** with at
+    /// most a shadow left behind, and a create's is a name this call either took
+    /// back or left holding its own bytes.
     Environment {
         /// What was being attempted, in words that complete "… failed".
         operation: &'static str,

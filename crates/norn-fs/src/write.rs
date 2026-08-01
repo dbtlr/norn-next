@@ -192,12 +192,19 @@ pub enum Landed {
     /// The content was published, and this is the identity of what is there.
     Written(PostState),
     /// The destination already held exactly this content, so no shadow was
-    /// staged, no rename ran, and nothing was verified.
+    /// staged and no rename ran.
     ///
     /// **Never reported as written**, and this is why: a suppression path keyed
     /// on Norn's own writes would be primed for a filesystem event that is
     /// never coming, and would then absorb the next foreign change to that
     /// document. The identity carried is the existing file's.
+    ///
+    /// The bytes are not re-read — there is nothing to compare them against a
+    /// second time — but the **name is confirmed to still resolve to the file
+    /// they were read from**. This outcome says the destination holds exactly
+    /// this content, and a foreign replacement that landed during the
+    /// precondition's read makes that false about a file a caller can go and
+    /// look at.
     Unchanged(PostState),
 }
 
