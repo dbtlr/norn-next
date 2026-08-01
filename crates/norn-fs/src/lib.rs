@@ -79,6 +79,7 @@ pub mod lock;
 pub mod path;
 pub mod shadow;
 pub mod walk;
+pub mod watch;
 pub mod write;
 
 mod faults;
@@ -98,4 +99,5 @@ pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
     WalkFact, walk,
 };
+pub use watch::{Batch, OwnWrites, RescanScope, Subscription, WatchError, watch};
 pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};

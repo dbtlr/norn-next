@@ -1,6 +1,6 @@
 [package]
 name = "norn-fs"
-description = "The vault filesystem seam — the compare-and-swap write kernel, the shadow protocol, and the per-vault maintainer lock"
+description = "The vault filesystem seam — normalized reads, guarded writes, locking, and change detection"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,8 +21,12 @@ publish.workspace = true
 # refused rather than followed, and `ENOSPC`/`EXDEV`, so a caller can tell a
 # full disk from a shadow directory on the wrong filesystem. Spelling either by
 # hand per platform is a portability bug waiting for its target.
+#
+# `notify` is the platform watcher backend. Its event vocabulary never crosses
+# this crate boundary; callers receive only typed dirty sets and rescan scopes.
 [dependencies]
 libc = { workspace = true }
+notify = { workspace = true }
 # Descriptor-relative traversal keeps containment true across name-replacement races.
 rustix = { workspace = true }
 sha2 = { workspace = true }
