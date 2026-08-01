@@ -108,8 +108,7 @@ impl Iterator for Walk {
                 EntryKind::File => {
                     return Some(Ok(WalkFact::File(FileFact {
                         root: self.root.clone(),
-                        parent: pending.parent,
-                        name: pending.name,
+                        root_fd: self.root_fd.clone(),
                         path: pending.path,
                         stat: pending.stat,
                     })));
@@ -165,8 +164,7 @@ impl WalkFact {
 #[derive(Debug)]
 pub struct FileFact {
     root: PathBuf,
-    parent: Arc<OwnedFd>,
-    name: OsString,
+    root_fd: Arc<OwnedFd>,
     path: NormalizedPath,
     stat: FileStat,
 }
@@ -191,17 +189,22 @@ impl FileFact {
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
     pub fn read(self) -> Result<ReadFile, WalkError> {
         let access = self.root.join(self.path.as_path());
-        let fd = openat(
-            &self.parent,
-            &self.name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )
-        .map_err(|source| environment_errno("opening", &access, source))?;
+        let fd = open_regular(&self.root_fd, self.path.as_path())
+            .map_err(|source| environment_errno("opening", &access, source))?;
         let mut file = fs::File::from(fd);
         let metadata = file
             .metadata()
             .map_err(|source| environment("stating", &access, source))?;
+        if !metadata.is_file() {
+            return Err(environment(
+                "reading",
+                &access,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the name no longer identifies a regular file",
+                ),
+            ));
+        }
         let (bytes, content_hash) =
             read_and_hash(&mut file).map_err(|source| environment("reading", &access, source))?;
         Ok(ReadFile {
@@ -378,6 +381,13 @@ struct Pending {
     sort_key: Vec<u8>,
 }
 
+struct Candidate {
+    name: OsString,
+    path: NormalizedPath,
+    kind: EntryKind,
+    sort_key: Vec<u8>,
+}
+
 const FRONTIER_PAGE: usize = 256;
 
 struct DirectoryFrontier {
@@ -416,7 +426,7 @@ impl DirectoryFrontier {
         if self.done {
             return Ok(None);
         }
-        let (items, more) = directory_page(
+        let (items, more) = match directory_page(
             root_fd,
             &self.fd,
             &self.relative,
@@ -424,7 +434,13 @@ impl DirectoryFrontier {
             normalizer,
             exclusions,
             mechanism,
-        )?;
+        ) {
+            Ok(page) => page,
+            Err(error) => {
+                self.done = true;
+                return Err(error);
+            }
+        };
         self.done = !more;
         #[cfg(test)]
         {
@@ -449,7 +465,7 @@ fn directory_page(
     let display = relative;
     let entries = Dir::read_from(directory)
         .map_err(|source| environment_errno("reading directory", display, source))?;
-    let mut pending = Vec::new();
+    let mut candidates = Vec::new();
     for entry in entries {
         let entry =
             entry.map_err(|source| environment_errno("reading entry in", display, source))?;
@@ -465,10 +481,61 @@ fn directory_page(
                 path: relative_path.clone(),
                 source,
             })?;
+        let kind = if entry.file_type() == FileType::Unknown {
+            let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|source| environment_errno("stating", &relative_path, source))?;
+            classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
+        } else {
+            classify_file_type(entry.file_type())
+        };
+        let mut sort_key = path.comparison_key().as_bytes().to_vec();
+        if kind == EntryKind::Directory
+            && !exclusions.contains(&path)
+            && path != *mechanism
+            && !is_shadow_name(&name)
+        {
+            sort_key.push(b'/');
+        }
+        if cursor.is_some_and(|cursor| sort_key.as_slice() <= cursor) {
+            continue;
+        }
+        candidates.push(Candidate {
+            name,
+            path,
+            kind,
+            sort_key,
+        });
+        candidates.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+        if candidates.len() > FRONTIER_PAGE + 1 {
+            candidates.pop();
+        }
+    }
+    candidates.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
+    let more = candidates.len() > FRONTIER_PAGE;
+    candidates.truncate(FRONTIER_PAGE);
+
+    let mut pending = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let Candidate {
+            name,
+            path,
+            kind,
+            sort_key,
+        } = candidate;
+        let relative_path = relative.join(&name);
         let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|source| environment_errno("stating", &relative_path, source))?;
-        let file_type = FileType::from_raw_mode(metadata.st_mode as _);
-        let kind = classify_file_type(file_type);
+        let observed_kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
+        if observed_kind != kind {
+            return Err(environment(
+                "paging directory entry",
+                &relative_path,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the entry changed kind during directory enumeration",
+                ),
+            ));
+        }
         let skip = if exclusions.contains(&path) {
             Some(SkipReason::HostExclusion)
         } else if path == *mechanism {
@@ -488,13 +555,6 @@ fn directory_page(
         } else {
             None
         };
-        let mut sort_key = path.comparison_key().as_bytes().to_vec();
-        if kind == EntryKind::Directory && skip.is_none() {
-            sort_key.push(b'/');
-        }
-        if cursor.is_some_and(|cursor| sort_key.as_slice() <= cursor) {
-            continue;
-        }
         pending.push(Pending {
             parent: directory.clone(),
             name,
@@ -504,14 +564,7 @@ fn directory_page(
             skip,
             sort_key,
         });
-        pending.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
-        if pending.len() > FRONTIER_PAGE + 1 {
-            pending.pop();
-        }
     }
-    pending.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
-    let more = pending.len() > FRONTIER_PAGE;
-    pending.truncate(FRONTIER_PAGE);
     Ok((pending, more))
 }
 
@@ -567,6 +620,30 @@ fn resolve_relative_target(link: &Path, target: &Path) -> Option<PathBuf> {
 
 fn directory_flags() -> OFlags {
     OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
+}
+
+fn open_regular(root: &Arc<OwnedFd>, relative: &Path) -> Result<OwnedFd, rustix::io::Errno> {
+    let mut directory = root.clone();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let name = component.as_os_str();
+        if components.peek().is_some() {
+            directory = Arc::new(openat(&directory, name, directory_flags(), Mode::empty())?);
+            continue;
+        }
+        let fd = openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+            Mode::empty(),
+        )?;
+        let metadata = rustix::fs::fstat(&fd)?;
+        if FileType::from_raw_mode(metadata.st_mode as _) != FileType::RegularFile {
+            return Err(rustix::io::Errno::INVAL);
+        }
+        return Ok(fd);
+    }
+    Err(rustix::io::Errno::INVAL)
 }
 
 fn classify_file_type(kind: FileType) -> EntryKind {
@@ -890,6 +967,52 @@ mod tests {
                 PathBuf::from("pipe"),
                 Some(SkipReason::SpecialFile(FileKind::Fifo))
             )]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: replacing a deferred name.
+    fn a_deferred_file_replaced_by_a_fifo_refuses_without_blocking() {
+        let scratch = Scratch::new("walk-file-fifo-swap");
+        scratch.place("note.md", b"first");
+        let fact = walk(&scratch.at(""), &[])
+            .expect("walk")
+            .next()
+            .expect("one fact")
+            .expect("file fact");
+        let WalkFact::File(file) = fact else {
+            panic!("file was skipped")
+        };
+        fs::remove_file(scratch.at("note.md")).expect("remove original");
+        let status = std::process::Command::new("mkfifo")
+            .arg(scratch.at("note.md"))
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let error = file.read().expect_err("a fifo is not document content");
+        assert!(error.to_string().contains("note.md"), "{error}");
+    }
+
+    #[test]
+    fn retained_file_facts_share_one_root_descriptor() {
+        let scratch = Scratch::new("walk-fact-descriptors");
+        for index in 0..300 {
+            scratch.directory(&format!("vault/{index:04}"));
+            scratch.place(&format!("{index:04}/note.md"), b"x");
+        }
+        let files = walk(&scratch.at(""), &[])
+            .expect("walk")
+            .map(|fact| match fact.expect("fact") {
+                WalkFact::File(file) => file,
+                WalkFact::Skipped(_) => panic!("fixture contains no skips"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 300);
+        assert!(
+            files
+                .iter()
+                .all(|file| Arc::ptr_eq(&files[0].root_fd, &file.root_fd))
         );
     }
 

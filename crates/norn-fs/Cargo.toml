@@ -23,6 +23,7 @@ publish.workspace = true
 # hand per platform is a portability bug waiting for its target.
 [dependencies]
 libc = { workspace = true }
+# Descriptor-relative traversal keeps containment true across name-replacement races.
 rustix = { workspace = true }
 sha2 = { workspace = true }
 
