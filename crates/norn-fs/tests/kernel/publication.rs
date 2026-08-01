@@ -77,7 +77,10 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
         let known: BTreeSet<Vec<u8>> = contents.iter().cloned().collect();
         thread::spawn(move || {
             let mut reads = 0usize;
-            while writing.load(Ordering::Relaxed) {
+            // The flag is checked after a read rather than before the first one,
+            // so at least one read happens even when the writer finishes before
+            // this thread is scheduled at all.
+            loop {
                 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the concurrent reader.
                 let seen = std::fs::read(&path).expect("the destination is always there");
                 assert!(
@@ -86,6 +89,9 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
                     String::from_utf8_lossy(&seen)
                 );
                 reads += 1;
+                if !writing.load(Ordering::Relaxed) {
+                    break;
+                }
                 thread::sleep(Duration::from_micros(200));
             }
             reads

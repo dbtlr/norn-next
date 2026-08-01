@@ -69,13 +69,22 @@ impl ContentHash {
         }
         let mut bytes = [0u8; 32];
         for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-            let digits = std::str::from_utf8(pair).ok()?;
-            if digits.bytes().any(|d| d.is_ascii_uppercase()) {
-                return None;
-            }
-            *byte = u8::from_str_radix(digits, 16).ok()?;
+            *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Some(ContentHash(bytes))
+    }
+}
+
+/// The value one lowercase hex digit spells, and `None` for every other byte.
+///
+/// Decoded by hand because the digits are the whole grammar: an integer parser
+/// would also take a leading sign, and `"+a"` read as `0x0a` is a salvage the
+/// doc on [`ContentHash::from_hex`] rules out.
+fn nibble(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -254,6 +263,9 @@ mod tests {
             good.to_uppercase(),
             "g".repeat(64),
             format!("{}zz", &good[..62]),
+            format!("+{}", &good[1..]),
+            format!("{}+a", &good[..62]),
+            format!("-{}", &good[1..]),
         ] {
             assert_eq!(
                 ContentHash::from_hex(&bad),

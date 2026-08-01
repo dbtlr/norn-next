@@ -783,19 +783,12 @@ fn fill(
 /// the document**: `0444` comes back `0444`, having been replaced. That is
 /// ordinary atomic-replace semantics — the rename needs the *directory*, not the
 /// file — and it is said here so that a `chmod` is not mistaken for a lock.
-#[cfg(unix)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn carry_mode_forward(file: &std::fs::File, replaced: &std::fs::Metadata) {
     use std::os::unix::fs::PermissionsExt;
     let permissions = replaced.permissions().mode() & 0o777;
     let _ = file.set_permissions(std::fs::Permissions::from_mode(permissions));
 }
-
-/// Off unix there are no permission bits to carry, so a staged shadow keeps
-/// whatever mode it was created with and this does nothing.
-#[cfg(not(unix))]
-#[allow(clippy::disallowed_types)]
-fn carry_mode_forward(_file: &std::fs::File, _replaced: &std::fs::Metadata) {}
 
 /// Re-observe the destination through the handle the precondition read, and
 /// confirm the name still resolves to it.

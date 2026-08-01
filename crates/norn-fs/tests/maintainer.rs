@@ -32,14 +32,15 @@ const ROLE: &str = "NORN_FS_MAINTAINER_ROLE";
 const LOCK: &str = "NORN_FS_MAINTAINER_LOCK";
 /// Where the child writes what it saw.
 const ANSWER: &str = "NORN_FS_MAINTAINER_ANSWER";
+/// The file whose appearance tells a holding child to take its `SIGKILL`.
+const DONE: &str = "NORN_FS_MAINTAINER_DONE";
 
-/// How long a child that holds the lock is given before the harness ends it with
-/// `SIGKILL`.
-///
-/// Generous against the work the parent does inside it — two file reads and two
-/// lock attempts — and short enough that the suite does not sit waiting for a
-/// process whose whole job is to be killed.
-const HOLD: Duration = Duration::from_secs(5);
+/// The backstop deadline on a holding child: never reached in a healthy run,
+/// because the child kills itself the moment the parent says it has seen
+/// everything it needs. What this bounds is a wedged run — a child that never
+/// acquires, or a parent observation that never lands — so it matches the
+/// parent's own wait budget rather than racing it.
+const BACKSTOP: Duration = Duration::from_secs(30);
 
 /// What the parent waits: far above anything the mechanism should approach, so a
 /// failure here is a lock that does not behave rather than a slow machine.
@@ -111,11 +112,23 @@ fn maintainer_role_child() {
         }
     }
     if role == "hold" {
-        // Held until something outside this process ends it, which is the whole
-        // point: the lock is released by the kernel when the holder dies and by
-        // nothing else.
+        // Held until this process dies, which is the whole point: the lock is
+        // released by the kernel when the holder ends and by nothing else. The
+        // death is a real `SIGKILL`, raised the moment the parent says it has
+        // observed everything — uncatchable, so nothing here runs after it and
+        // nothing graceful releases the lock.
+        let done = PathBuf::from(std::env::var(DONE).expect("a done path"));
         loop {
-            std::thread::sleep(Duration::from_millis(50));
+            #[allow(clippy::disallowed_methods)] // Harness scaffolding: the parent's signal to die.
+            let told_to_die = done.exists();
+            if told_to_die {
+                // SAFETY: raise(SIGKILL) delivers a signal this process cannot
+                // catch; the kernel ends it here and nothing returns.
+                unsafe {
+                    libc::raise(libc::SIGKILL);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -430,8 +443,11 @@ fn a_second_process_is_excluded_and_names_the_incumbent() {
 ///
 /// This is why there is no lock timeout and no way to break a lock: a lock still
 /// held is a process still alive, so an age threshold could only ever take one
-/// away from a live holder. The child is ended with `SIGKILL`, which it cannot
-/// catch, so nothing it does releases the lock — the kernel does.
+/// away from a live holder. The child ends with `SIGKILL`, which it cannot
+/// catch, so nothing it does releases the lock — the kernel does. The kill fires
+/// when the parent says it has observed the exclusion, so the case runs as fast
+/// as its observations rather than waiting out a clock, and a slow spawn only
+/// delays it.
 ///
 /// Both directions of the exclusion are observed here: the parent is excluded
 /// while the child holds, and the parent succeeds once the child is gone. Each is
@@ -443,6 +459,7 @@ fn a_killed_maintainer_releases_its_lock() {
     let child = installed_child(&sandbox);
     let lock = scratch.lock();
     let answer = scratch.path("answer");
+    let done = scratch.path("done");
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let held_by = {
@@ -450,6 +467,7 @@ fn a_killed_maintainer_releases_its_lock() {
         let child = &child;
         let lock = &lock;
         let answer = &answer;
+        let done = &done;
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 let outcome = Run::new(sandbox, child)
@@ -457,7 +475,8 @@ fn a_killed_maintainer_releases_its_lock() {
                     .env(ROLE, "hold")
                     .env(LOCK, lock)
                     .env(ANSWER, answer)
-                    .deadline(HOLD)
+                    .env(DONE, done)
+                    .deadline(BACKSTOP)
                     .wait();
                 let _ = sender.send(outcome);
             });
@@ -504,7 +523,11 @@ fn a_killed_maintainer_releases_its_lock() {
             );
             assert_eq!(*version, self::version());
 
-            // And free once the child is killed at its deadline.
+            // Everything observable while the child lives has been observed, so
+            // it may die now.
+            say(done, "die");
+
+            // And free once the child is killed.
             wait_until(
                 "the killed child's lock to be free",
                 budget(),
@@ -526,7 +549,7 @@ fn a_killed_maintainer_releases_its_lock() {
         .expect("waiting on the child");
     assert_eq!(
         outcome.status,
-        RunStatus::TimedOut { after: HOLD },
+        RunStatus::Signaled(libc::SIGKILL),
         "the child ended some other way, so the release was not caused by a kill"
     );
     assert_ne!(held_by, std::process::id());
