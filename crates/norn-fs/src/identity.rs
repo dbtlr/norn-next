@@ -11,9 +11,11 @@
 //! name still resolves to the handle that is held.
 
 use std::fmt;
+use std::path::Path;
 use std::time::SystemTime;
 
 use crate::hash::ContentHash;
+use crate::refusal::{Refusal, environment};
 
 /// The identity a landed write reports for what it published.
 ///
@@ -92,6 +94,20 @@ pub(crate) fn identity_of(metadata: &std::fs::Metadata) -> Identity {
     Identity {
         dev: metadata.dev(),
         ino: metadata.ino(),
+    }
+}
+
+/// The identity `path` resolves to now, or `None` when it resolves to nothing.
+///
+/// One spelling for both consumers: a write asks it to find out whether the name
+/// it read through still means the same file, and a lock acquisition asks it to
+/// find out whether the name it locked still means the file it holds.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
+pub(crate) fn name_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(identity_of(&metadata))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(environment("reading the identity of", path, &error)),
     }
 }
 

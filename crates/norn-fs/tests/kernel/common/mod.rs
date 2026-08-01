@@ -156,6 +156,18 @@ pub fn identity_at(path: &Path) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
+/// When `path` was last modified, as the filesystem records it now.
+///
+/// A fresh look rather than the value a write reported, so an outcome's `mtime`
+/// is judged against the filesystem instead of against itself.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: judging what a write reported.
+pub fn mtime_at(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("reading the identity of {}: {e}", path.display()))
+        .modified()
+        .unwrap_or_else(|e| panic!("reading the mtime of {}: {e}", path.display()))
+}
+
 /// The permission bits at `path`.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging the mode a write published.
 pub fn mode_at(path: &Path) -> u32 {

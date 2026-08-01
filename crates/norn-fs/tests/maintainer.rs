@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use norn_fs::{
-    Acquisition, ContentHash, Incumbent, Precondition, Refusal, ShadowHome, move_document,
-    try_acquire, vacate, write,
+    Acquisition, ContentHash, Incumbent, Maintainership, Precondition, Refusal, ShadowHome,
+    move_document, try_acquire, vacate, write,
 };
 use norn_testkit::process::{Run, RunStatus, Sandbox};
 use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -120,6 +120,19 @@ fn maintainer_role_child() {
     }
 }
 
+/// The guard, or a panic naming who has it.
+///
+/// A case whose subject is not contention says once that it wants the lock. The
+/// public surface has no such affordance on purpose: an acquisition is two
+/// outcomes and a method that handed back the guard alone would throw away the
+/// incumbent every real caller has to report.
+fn take(path: &Path) -> Maintainership {
+    match try_acquire(path).expect("an acquisition") {
+        Acquisition::Acquired(held) => held,
+        Acquisition::Contended { incumbent } => panic!("the lock is held by {incumbent}"),
+    }
+}
+
 /// Write what the child saw, where the parent will look for it.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the channel between the two processes.
 fn say(answer: &Path, what: &str) {
@@ -132,10 +145,7 @@ fn say(answer: &Path, what: &str) {
 fn a_free_lock_is_taken_and_names_what_it_holds() {
     let scratch = Scratch::new("free");
     let path = scratch.lock();
-    let held = try_acquire(&path)
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let held = take(&path);
 
     assert_eq!(held.path(), path);
     assert_eq!(held.identity(), identity_at(&path));
@@ -151,10 +161,7 @@ fn a_free_lock_is_taken_and_names_what_it_holds() {
 fn a_contended_lock_names_the_incumbent_rather_than_failing() {
     let scratch = Scratch::new("contended");
     let path = scratch.lock();
-    let _held = try_acquire(&path)
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let _held = take(&path);
 
     let Acquisition::Contended { incumbent } =
         try_acquire(&path).expect("contention is not a failure")
@@ -188,10 +195,7 @@ fn a_released_lock_is_free_again_and_its_file_remains() {
     let scratch = Scratch::new("released");
     let path = scratch.lock();
     let identity = {
-        let held = try_acquire(&path)
-            .expect("an acquisition")
-            .acquired()
-            .expect("the lock");
+        let held = take(&path);
         held.identity()
     };
 
@@ -200,10 +204,7 @@ fn a_released_lock_is_free_again_and_its_file_remains() {
         identity,
         "releasing the lock removed or replaced its file"
     );
-    let again = try_acquire(&path)
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let again = take(&path);
     assert_eq!(
         again.identity(),
         identity,
@@ -276,10 +277,7 @@ fn a_contended_vault_is_fully_workable() {
     let shadows =
         ShadowHome::resolve(&vault, &scratch.path("vaults/notes/tmp")).expect("a shadow home");
 
-    let _held = try_acquire(&scratch.lock())
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let _held = take(&scratch.lock());
     // And it is genuinely held: a second attempt is contended.
     assert!(
         matches!(
@@ -328,10 +326,7 @@ fn a_contended_vault_is_fully_workable() {
 fn a_waiter_converges_on_the_lock_file_the_name_means() {
     let scratch = Scratch::new("foreign-churn");
     let path = scratch.lock();
-    let held = try_acquire(&path)
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let held = take(&path);
     let doomed = held.identity();
 
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -407,10 +402,7 @@ fn a_second_process_is_excluded_and_names_the_incumbent() {
     let lock = scratch.lock();
     let answer = scratch.path("answer");
 
-    let held = try_acquire(&lock)
-        .expect("an acquisition")
-        .acquired()
-        .expect("the lock");
+    let held = take(&lock);
 
     run_child(&sandbox, &child, "try", &lock, &answer).assert_success();
     assert_eq!(

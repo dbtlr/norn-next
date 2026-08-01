@@ -6,10 +6,16 @@
 //! false "changed" costs a re-derivation.
 //!
 //! Reading and hashing a file is **one act against one file descriptor**, so
-//! the bytes hashed are provably the bytes read. [`hashed_from`] is that act,
-//! and it is the only way this crate turns a file into a hash: it takes a
-//! handle rather than a path, which is what makes the guarantee structural
-//! instead of a convention each call site keeps.
+//! the bytes hashed are provably the bytes read. [`hashed_from`] is that act: it
+//! takes a handle rather than a path, which is what makes the guarantee
+//! structural instead of a convention each call site keeps, and it is what every
+//! consumer that needs a file's hash asks.
+//!
+//! [`ContentHash::of`] is the same guarantee arrived at from the other side — a
+//! caller that already holds the bytes hashes those bytes, and the write kernel's
+//! source-reading leg uses it over a buffer it read through one handle in one
+//! act. What has no spelling anywhere is *open a path and hash whatever it turns
+//! out to be*, because that is the act whose two halves can be about two files.
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
@@ -71,11 +77,6 @@ impl ContentHash {
         }
         Some(ContentHash(bytes))
     }
-
-    /// The raw digest.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
 }
 
 impl fmt::Display for ContentHash {
@@ -94,19 +95,43 @@ impl fmt::Debug for ContentHash {
 
 /// The hash of everything `handle` holds, and how many bytes that was.
 ///
-/// The handle is rewound first, so a second reading through the same
+/// **The handle is rewound first**, so a second reading through the same
 /// descriptor hashes the whole file rather than the tail of it. That is what
 /// makes the verify stage of the write protocol possible at all: the
 /// precondition and the verification are two readings of **one** open file
 /// description, and a re-hash that started from wherever the last one stopped
-/// would hash nothing and conclude that everything matched.
-pub(crate) fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, u64)> {
+/// would hash nothing and conclude that everything matched. It also means the
+/// position is left at the end of the file, which a caller that reads afterwards
+/// has to know.
+///
+/// The whole file is read as a stream, so peak memory is one chunk rather than the
+/// weight of the document. A read interrupted by a signal is retried, because
+/// `EINTR` is not a failure to read and half a hash is not a smaller hash.
+///
+/// What this cannot promise is anything about the *name* the handle came from.
+/// The bytes hashed are the bytes of the file this descriptor refers to; whether
+/// some path still resolves to that file is a separate question, asked with a
+/// stat comparison by whoever needs the answer.
+///
+/// ```
+/// use norn_fs::{ContentHash, hashed_from};
+///
+/// let mut handle = std::io::Cursor::new(b"the bytes a reader read".to_vec());
+/// let (hash, len) = hashed_from(&mut handle).expect("hashing a handle");
+/// assert_eq!(hash, ContentHash::of(b"the bytes a reader read"));
+/// assert_eq!(len, 23);
+/// ```
+pub fn hashed_from<H: Read + Seek>(handle: &mut H) -> std::io::Result<(ContentHash, u64)> {
     handle.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; CHUNK];
     let mut len = 0u64;
     loop {
-        let read = handle.read(&mut buffer)?;
+        let read = match handle.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if read == 0 {
             break;
         }

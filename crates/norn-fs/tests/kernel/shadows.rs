@@ -6,38 +6,6 @@ use norn_fs::{Precondition, Refusal, is_shadow_name, write};
 
 use crate::common::{Scratch, bytes_at, exists, hard_link, hash, identity_at};
 
-/// A shadow is never a sibling of its destination, and its name is recognizable
-/// as a shadow rather than as a hidden file.
-///
-/// A sibling is the forbidden placement: the vault tree belongs to every
-/// consumer, and a mechanism file among documents is committed, synced and
-/// indexed by tools that cannot know to ignore it.
-#[test]
-fn a_shadow_is_staged_outside_the_vault_under_a_recognizable_name() {
-    let scratch = Scratch::new("shadow-placement");
-    assert!(
-        !scratch.shadows().directory().starts_with(scratch.vault()),
-        "the shadow home is inside the vault: {}",
-        scratch.shadows().directory().display()
-    );
-
-    // The name the next write will take, observed by taking one from the same
-    // home: a name is per-attempt, so this is the *shape*, not the value.
-    let path = scratch.place("note.md", b"old");
-    write(
-        &path,
-        b"new",
-        Precondition::Replace(hash(b"old")),
-        scratch.shadows(),
-    )
-    .expect("a replacement");
-
-    // And it took nothing with it. What the placement means is checked by the
-    // vault holding exactly the document.
-    let names = crate::common::names_in(&scratch.vault());
-    assert_eq!(names, vec!["note.md".to_string()]);
-}
-
 /// **The bar on cleanup after a success.** A landed write leaves no shadow.
 #[test]
 fn a_landed_write_leaves_no_shadow() {
@@ -131,15 +99,21 @@ fn a_leaked_aliased_shadow_is_never_reopened() {
 }
 
 /// A shadow home already holding residue neither blocks a write nor is consumed
-/// by one. A name is per-attempt, so nothing a previous life left behind is a
-/// name this life will compute.
+/// by one.
+///
+/// The residue's sequence number is one no run of this process reaches, so the
+/// case is deterministically about residue that is *not* in the way — whether it
+/// runs alone or beside every other case in the binary. A name that might or
+/// might not be the one the next write computes would make this two different
+/// cases depending on how many shadows the process had already staged, and the
+/// collision itself is a claim of its own with a bar of its own.
 #[test]
 fn residue_in_the_shadow_home_neither_blocks_nor_is_taken() {
     let scratch = Scratch::new("shadow-residue");
     let residue = scratch
         .shadows()
         .directory()
-        .join(format!("norn-shadow-{}-0", std::process::id()));
+        .join(format!("norn-shadow-{}-999999999999", std::process::id()));
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: a dead writer's residue.
     std::fs::write(&residue, b"a dead writer's bytes").expect("residue");
 
@@ -187,48 +161,6 @@ fn the_predicate_is_what_recognizes_a_shadow() {
         assert!(exists(&path));
     }
     assert!(is_shadow_name(OsStr::new("norn-shadow-1-0")));
-}
-
-/// **The bar on a refusal after staging.** A write that cannot publish takes its
-/// shadow with it, so a refusal costs nothing at rest.
-///
-/// The refusal here is reached after the shadow exists: the destination's own
-/// directory is unwritable, so the rename fails. The forbidden shape is a
-/// failure path that returns without cleaning up — every refused write would
-/// then leave a copy of a document in the shadow home.
-#[test]
-fn a_write_that_cannot_publish_takes_its_shadow_with_it() {
-    let scratch = Scratch::new("shadow-cleanup");
-    let folder = scratch.directory("folder");
-    let path = scratch.place("folder/note.md", b"old");
-    crate::common::set_mode(&folder, 0o500);
-    crate::common::demand_unwritable(&folder);
-
-    let refusal = write(
-        &path,
-        b"new",
-        Precondition::Replace(hash(b"old")),
-        scratch.shadows(),
-    )
-    .expect_err("a rename into a directory nothing may write");
-
-    assert!(
-        matches!(
-            &refusal,
-            Refusal::Environment {
-                kind: std::io::ErrorKind::PermissionDenied,
-                ..
-            }
-        ),
-        "{refusal}"
-    );
-    crate::common::set_mode(&folder, 0o755);
-    assert_eq!(bytes_at(&path), b"old", "the destination was touched");
-    assert!(
-        scratch.shadow_names().is_empty(),
-        "a refused write left {:?} behind",
-        scratch.shadow_names()
-    );
 }
 
 /// A shadow that cannot be staged at all refuses before the destination is

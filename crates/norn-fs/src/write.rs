@@ -17,9 +17,10 @@
 //! 2. **The precondition is evaluated against bytes read now**, through a
 //!    handle this call opens and holds. Not against a caller-supplied snapshot,
 //!    and not against anything an index remembers.
-//! 3. **The shadow is staged**: a file nothing else knows the name of, holding
-//!    the whole composed content, with the replaced file's mode carried
-//!    forward, fsynced before any name points at it.
+//! 3. **The shadow is staged**: a file nothing else knows the name of, opened
+//!    exclusively, given the replaced file's permission bits before a byte of
+//!    content goes in, then holding the whole composed content, fsynced before
+//!    any name points at it.
 //! 4. **The verification re-observes the destination through the same held
 //!    handle** — the same bytes, hashed again, plus one identity comparison
 //!    between the handle and the name. Any difference refuses.
@@ -62,6 +63,20 @@
 //! converges on the winner. A caller that needs to know whether it won compares
 //! the [`PostState`] it was handed against what is at the path.
 //!
+//! # Two durability barriers, and no third
+//!
+//! A replacement fsyncs exactly twice: **the shadow's bytes before the rename**,
+//! and **the destination's parent directory after it**. The second is
+//! best-effort, because past the rename the change is at the name.
+//!
+//! The barrier that is deliberately absent is an fsync of the *shadow's own*
+//! directory before the rename. It costs about a third of a write's latency, and
+//! what it buys is that a power cut leaves the shadow's directory entry
+//! recorded — a guarantee about residue. Residue is already the one class this
+//! protocol is allowed to leak: a shadow that survives a crash is inert and
+//! swept, and one whose directory entry did not survive is a shadow that swept
+//! itself. Nothing a reader can see depends on it.
+//!
 //! # Crash windows, as recovery claims
 //!
 //! A process that dies mid-write leaves one of these, and nothing else:
@@ -70,7 +85,9 @@
 //!    untouched. The shadow is leaked, and a leaked shadow is inert (see
 //!    [`crate::shadow`]) and swept.
 //! 2. **After the shadow's fsync, before the rename.** The same: the
-//!    destination is untouched and the shadow is leaked-inert.
+//!    destination is untouched and the shadow is leaked-inert. Whether the
+//!    shadow's *name* survives a power cut is not guaranteed, and nothing needs
+//!    it to.
 //! 3. **After the rename, before the parent directory's fsync.** The write is
 //!    published — every reader sees it. What is not yet guaranteed is that the
 //!    *directory entry* survives a power cut, which is what that fsync is for.
@@ -101,13 +118,13 @@
 //! re-composes against it, and calls once more — under a bound it declared.
 
 use std::io::{Read, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::faults::{Faults, Stage};
+use crate::faults::{Faults, Stage, Window};
 use crate::hash::{ContentHash, hashed_from};
-use crate::identity::{Identity, PostState, identity_of, post_state};
+use crate::identity::{Identity, PostState, identity_of, name_identity, post_state};
 use crate::refusal::{Refusal, environment};
-use crate::shadow::ShadowHome;
+use crate::shadow::{NAME_ATTEMPTS, ShadowHome};
 
 /// What must be true of the destination for a write to happen.
 ///
@@ -202,9 +219,14 @@ impl Landed {
 /// A removal that happened.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Vacated {
-    /// The identity of what was removed. Carried for the same reason a write
-    /// carries one: the removal comes back as a filesystem event, and an event
-    /// Norn cannot recognize as its own is re-derived for nothing.
+    /// The identity of what was removed, as it was read just before the unlink.
+    ///
+    /// **None of the five fields is re-observable after a removal**, so this is
+    /// not something a caller can go and check. What it is for is the caller's
+    /// own ledger: the removal comes back as a filesystem event about the path
+    /// that was vacated, and the correlation is by that path — this value is what
+    /// the ledger entry for it says, so an event Norn caused is not re-derived
+    /// for nothing.
     pub removed: PostState,
 }
 
@@ -231,8 +253,12 @@ pub enum MoveRefusal {
     /// The source did not satisfy its precondition. Nothing was written: both
     /// paths are as they were.
     Source(Refusal),
-    /// The destination could not be created. Both paths are as they were — the
-    /// source was read and not touched.
+    /// The destination could not be created, and the source was read and not
+    /// touched.
+    ///
+    /// The destination is what a create's cleanup arm promises about: this call
+    /// never removes what it did not create, and a cleanup the filesystem blocks
+    /// can leave this call's own partial bytes at a name that had nothing at it.
     Destination(Refusal),
     /// The destination holds the content and the source's removal was refused,
     /// so **both paths hold the document**. The created identity is carried
@@ -275,15 +301,19 @@ pub fn write(
     precondition: Precondition,
     shadows: &ShadowHome,
 ) -> Result<Landed, Refusal> {
-    write_where(destination, content, precondition, shadows, Faults::NONE)
+    write_disturbed(
+        destination,
+        content,
+        precondition,
+        shadows,
+        Faults::NONE,
+        &mut |_| {},
+    )
 }
 
 /// [`write`], with a stage made to fail rather than waiting for a machine that
 /// fails there.
-///
-/// The parameter is what makes two of the contract's claims checkable at all: a
-/// disk that fills mid-shadow, and a directory fsync that fails after the
-/// rename already published a name.
+#[cfg(test)]
 fn write_where(
     destination: &Path,
     content: &[u8],
@@ -297,30 +327,36 @@ fn write_where(
         precondition,
         shadows,
         faults,
-        &mut || {},
+        &mut |_| {},
     )
 }
 
-/// [`write`], with something allowed to happen inside the window between the
-/// precondition's reading and the verification.
+/// [`write`], with a stage made to fail and something allowed to happen inside
+/// the windows a foreign writer would land in.
 ///
-/// `disturb` is called once, after the precondition has been satisfied and
-/// before anything is staged, which is the window a foreign writer would land
-/// in. It is the only way to reach the verify stage's two refusals
-/// deterministically: waiting for a real writer to arrive inside a window one
-/// call wide is a race nobody can arrange, and the defense would then be
-/// asserted rather than checked.
+/// The two parameters are what make the contract's claims checkable at all. A
+/// disk that fills mid-shadow and a directory fsync that fails after the rename
+/// already published a name are conditions no temporary directory produces; a
+/// foreign writer arriving inside a window one call wide is a race nobody can
+/// arrange, and a defense against it would otherwise be asserted rather than
+/// checked.
 fn write_disturbed(
     destination: &Path,
     content: &[u8],
     precondition: Precondition,
     shadows: &ShadowHome,
     faults: Faults,
-    disturb: &mut dyn FnMut(),
+    disturb: &mut dyn FnMut(Window),
 ) -> Result<Landed, Refusal> {
     refuse_symlink(destination)?;
     match precondition {
-        Precondition::Create => create_exclusively(destination, content, faults),
+        Precondition::Create => create_exclusively(
+            destination,
+            content,
+            ContentHash::of(content),
+            faults,
+            disturb,
+        ),
         Precondition::Replace(expected) => {
             replace_observed(destination, content, expected, shadows, faults, disturb)
         }
@@ -344,16 +380,20 @@ fn write_disturbed(
 /// mean a different file, and the removal would take that one. The window is
 /// the width of one call and POSIX offers nothing to close it.
 pub fn vacate(path: &Path, expected: ContentHash) -> Result<Vacated, Refusal> {
+    vacate_disturbed(path, expected, &mut |_| {})
+}
+
+/// [`vacate`], with something allowed to happen inside the window between the
+/// precondition's reading and the identity confirmation.
+fn vacate_disturbed(
+    path: &Path,
+    expected: ContentHash,
+    disturb: &mut dyn FnMut(Window),
+) -> Result<Vacated, Refusal> {
     refuse_symlink(path)?;
-    let (mut held, _) = match opened_for_reading(path)? {
-        Some(open) => open,
-        None => return Err(drifted(path, expected, None)),
-    };
-    let observed = observed_state(&mut held, path)?;
-    if observed.content_hash != expected {
-        return Err(drifted(path, expected, Some(observed)));
-    }
-    confirm_name_still_resolves(path, observed.identity())?;
+    let (_held, observed, _) = observed_under(path, expected)?;
+    disturb(Window::Vacating);
+    confirm_name_still_resolves(path, observed.identity(), expected)?;
 
     remove(path)?;
     // The removal is a directory entry, so the directory is what has to reach
@@ -382,10 +422,31 @@ pub fn move_document(
     expected: ContentHash,
     shadows: &ShadowHome,
 ) -> Result<Moved, MoveRefusal> {
-    let content = read_verified(source, expected).map_err(MoveRefusal::Source)?;
-    let created = write(destination, &content, Precondition::Create, shadows)
+    move_disturbed(source, destination, expected, shadows, &mut |_| {})
+}
+
+/// [`move_document`], with something allowed to happen inside the source leg's
+/// read window and inside the window between the two legs.
+///
+/// The shadow home is taken and not used: both legs of a move are an exclusive
+/// create and a hash-verified removal, and neither stages a shadow. It is a
+/// parameter of the pair for the reason it is a parameter of [`write`] — a
+/// precondition is data a caller passes, not a shape the callee picks — and a
+/// signature that dropped it would have the two verbs disagree about that.
+fn move_disturbed(
+    source: &Path,
+    destination: &Path,
+    expected: ContentHash,
+    _shadows: &ShadowHome,
+    disturb: &mut dyn FnMut(Window),
+) -> Result<Moved, MoveRefusal> {
+    let content = read_verified(source, expected, disturb).map_err(MoveRefusal::Source)?;
+    // The bytes came back from a read that hashed them to `expected`, so the
+    // create's own hash of them is already known and is not computed twice.
+    let created = create_destination(destination, &content, expected)
         .map_err(MoveRefusal::Destination)?
         .post_state();
+    disturb(Window::BetweenLegs);
     match vacate(source, expected) {
         Ok(vacated) => Ok(Moved {
             created,
@@ -398,6 +459,17 @@ pub fn move_document(
     }
 }
 
+/// A move's destination leg: the same exclusive create every other create runs,
+/// over content whose hash the source leg already established.
+fn create_destination(
+    destination: &Path,
+    content: &[u8],
+    composed: ContentHash,
+) -> Result<Landed, Refusal> {
+    refuse_symlink(destination)?;
+    create_exclusively(destination, content, composed, Faults::NONE, &mut |_| {})
+}
+
 /// Claim `destination` exclusively and put `content` in it.
 ///
 /// `create_new` is `O_EXCL`: the name is claimed atomically, so a destination
@@ -405,14 +477,27 @@ pub fn move_document(
 /// with the racer's bytes untouched. No precheck decides this — a precheck
 /// would be a second answer to a question the open already answers correctly.
 ///
-/// A failure after the name is claimed removes it. The file is one this call
-/// created, so removing it is not a guess, and leaving a prefix of a document at
-/// a name that had nothing at it would be a document nobody wrote.
+/// A failure after the name is claimed takes the name back, but **only while it
+/// still means the file this call created**. The identity of the handle is
+/// compared against a fresh look at the name, and a mismatch leaves the name
+/// alone: between the failure and the cleanup a foreign writer can publish its
+/// own document over that name, and a removal by name would delete somebody
+/// else's atomically published work while reporting a refusal about this call's.
+///
+/// What the comparison cannot close is the width of one `unlink`: a foreign
+/// publish landing between the comparison and the removal is removed anyway.
+/// That window is one call wide and nothing widens it. The claim this arm makes
+/// is exact — **it never removes what this call did not create** — and the price
+/// is the other direction: a cleanup that is skipped or that the filesystem
+/// blocks leaves this call's own bytes, complete or partial, at a name that had
+/// nothing at it.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn create_exclusively(
     destination: &Path,
     content: &[u8],
+    composed: ContentHash,
     faults: Faults,
+    disturb: &mut dyn FnMut(Window),
 ) -> Result<Landed, Refusal> {
     faults
         .check(Stage::Create)
@@ -430,15 +515,19 @@ fn create_exclusively(
         }
         Err(error) => return Err(environment("creating", destination, &error)),
     };
+    // Read from the handle, so it is the identity of the file the exclusive open
+    // just made and not of whatever the name means by the time cleanup runs.
+    let claimed = identity_of(&observed_metadata(&file, destination)?);
 
+    disturb(Window::Claimed);
     let filled = fill(&mut file, content, destination, faults);
     let state = filled.and_then(|()| observed_metadata(&file, destination));
     let state = match state {
-        Ok(metadata) => post_state(ContentHash::of(content), content.len() as u64, &metadata),
+        Ok(metadata) => post_state(composed, content.len() as u64, &metadata),
         Err(refusal) => {
             // A file this call created and could not finish is a file this call
-            // takes back.
-            remove_quietly(destination, faults);
+            // takes back — and nothing else is.
+            remove_if_still_claimed(destination, claimed, faults);
             return Err(refusal);
         }
     };
@@ -455,104 +544,158 @@ fn replace_observed(
     expected: ContentHash,
     shadows: &ShadowHome,
     faults: Faults,
-    disturb: &mut dyn FnMut(),
+    disturb: &mut dyn FnMut(Window),
 ) -> Result<Landed, Refusal> {
     // Stage 2. One handle, opened here and held until the swap.
-    let (mut held, replaced) = match opened_for_reading(destination)? {
-        Some(open) => open,
-        None => return Err(drifted(destination, expected, None)),
-    };
-    let observed = observed_state(&mut held, destination)?;
-    if observed.content_hash != expected {
-        return Err(drifted(destination, expected, Some(observed)));
-    }
+    let (mut held, observed, replaced) = observed_under(destination, expected)?;
+    disturb(Window::Composed);
+
     let composed = ContentHash::of(content);
     if composed == observed.content_hash {
         // Nothing to do, and doing it anyway would cost a new inode, a shadow,
-        // and a filesystem event for a document that did not change.
+        // and a filesystem event for a document that did not change. The name is
+        // still confirmed to resolve to the handle that was read: `Unchanged`
+        // says the destination holds exactly this content, and a foreign
+        // replacement that landed while the precondition was being read makes
+        // that sentence false about a file the caller can see.
+        confirm_name_still_resolves(destination, observed.identity(), expected)?;
         return Ok(Landed::Unchanged(observed));
     }
-    disturb();
 
     // Stage 3.
-    let shadow = shadows.next_shadow();
-    let staged = match stage(&shadow, content, &replaced, faults) {
-        Ok(staged) => staged,
+    let (shadow, staged) = open_shadow(shadows, faults)?;
+    // Stages 3 through 5 in one arm, because cleanup-on-refusal is one clause and
+    // an auditor should find one place it happens rather than four.
+    let published = match fill_verify_swap(
+        staged,
+        &shadow,
+        content,
+        composed,
+        &replaced,
+        Destination {
+            path: destination,
+            held: &mut held,
+            expected,
+            read: observed.identity(),
+        },
+        faults,
+    ) {
+        Ok(published) => published,
         Err(refusal) => {
             remove_quietly(&shadow, faults);
             return Err(refusal);
         }
     };
-    // Read before the swap: after it, a failure here would have to be reported
-    // over a write that already landed.
-    let published = match observed_metadata(&staged, &shadow) {
-        Ok(metadata) => post_state(composed, content.len() as u64, &metadata),
-        Err(refusal) => {
-            remove_quietly(&shadow, faults);
-            return Err(refusal);
-        }
-    };
-
-    // Stage 4.
-    if let Err(refusal) = verify(&mut held, destination, expected, observed.identity()) {
-        remove_quietly(&shadow, faults);
-        return Err(refusal);
-    }
-
-    // Stage 5.
-    if let Err(refusal) = swap(&shadow, destination, faults) {
-        remove_quietly(&shadow, faults);
-        return Err(refusal);
-    }
 
     // Past the rename the change is at the name and every reader sees it, so
     // what is left is durability alone — and a failure of it is not a write
     // that did not happen.
-    sync_directory(shadows.directory(), faults);
     sync_directory(parent_of(destination), faults);
     Ok(Landed::Written(published))
 }
 
-/// Put `content` in a shadow nothing else knows the name of, with the replaced
-/// file's mode carried forward, and get it onto the disk.
+/// What the swap is about to happen to, and what has to still be true of it.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+struct Destination<'a> {
+    path: &'a Path,
+    /// The handle the precondition read, through which the verification re-reads.
+    held: &'a mut std::fs::File,
+    /// The hash the caller observed and composed against.
+    expected: ContentHash,
+    /// The identity the name resolved to when the bytes were read.
+    read: Identity,
+}
+
+/// Fill the staged shadow, verify the destination through the held handle, and
+/// publish — the three stages whose failure leaves a shadow to clean up.
 ///
-/// The mode is carried **here, before the swap**, so the published file has it
-/// from the moment its name exists rather than for a moment after. It is
-/// best-effort and never fatal: a mode that could not be read or set is a
-/// cosmetic loss, and failing the write over it would refuse a correct document
-/// to protect a permission bit.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
-fn stage(
+/// The mode is carried **first, onto an unpublished file with no content in it
+/// yet**, and that ordering is the point: an open handle is unaffected by
+/// `fchmod`, so the write goes in either way, and the alternative leaves a full
+/// replacement of a `0600` document sitting at the umask's defaults for as long
+/// as the write and its fsync take. It is best-effort and never fatal — a mode
+/// that could not be read or set is a cosmetic loss, and failing the write over
+/// it would refuse a correct document to protect a permission bit.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+fn fill_verify_swap(
+    mut staged: std::fs::File,
     shadow: &Path,
     content: &[u8],
+    composed: ContentHash,
     replaced: &std::fs::Metadata,
+    destination: Destination<'_>,
     faults: Faults,
-) -> Result<std::fs::File, Refusal> {
-    faults
-        .check(Stage::Create)
-        .map_err(|error| environment("creating", shadow, &error))?;
-    // `create_new` and nothing else: a shadow name is unique per attempt, so a
-    // name that is somehow taken belongs to somebody else and refuses the write
-    // rather than truncating whatever is at it.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(shadow)
-        .map_err(|error| environment("creating", shadow, &error))?;
+) -> Result<PostState, Refusal> {
+    carry_mode_forward(&staged, replaced);
+    fill(&mut staged, content, shadow, faults)?;
+    // Read before the swap: after it, a failure here would have to be reported
+    // over a write that already landed.
+    let published = post_state(
+        composed,
+        content.len() as u64,
+        &observed_metadata(&staged, shadow)?,
+    );
 
-    faults
-        .check(Stage::Write)
-        .map_err(|error| environment("writing", shadow, &error))?;
-    file.write_all(content)
-        .map_err(|error| environment("writing", shadow, &error))?;
-    carry_mode_forward(&file, replaced);
+    // Stage 4.
+    verify(
+        destination.held,
+        destination.path,
+        destination.expected,
+        destination.read,
+    )?;
+    // Stage 5.
+    swap(shadow, destination.path, faults)?;
+    Ok(published)
+}
 
-    faults
-        .check(Stage::Sync)
-        .map_err(|error| environment("syncing", shadow, &error))?;
-    file.sync_all()
-        .map_err(|error| environment("syncing", shadow, &error))?;
-    Ok(file)
+/// Open a shadow nothing has taken, advancing past any name that is already
+/// taken.
+///
+/// **The open is `create_new` and never anything else.** A shadow name is unique
+/// per attempt, so a name that is somehow taken is residue of a previous life —
+/// a process whose identifier this one now reuses, most plainly — and truncating
+/// it is the forbidden shape: the residue may be a second link to a live
+/// document, and the truncation would go through it. So a taken name is skipped
+/// rather than opened or refused, because refusing would make one leaked shadow
+/// break the first write of every process that inherits its identifier.
+///
+/// Bounded at [`NAME_ATTEMPTS`]. Exhausting it means every one of that many
+/// distinct names is taken, which is the shadow home being unusable rather than
+/// a name being unlucky, and it reads as the environmental refusal the last open
+/// gave.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+fn open_shadow(shadows: &ShadowHome, faults: Faults) -> Result<(PathBuf, std::fs::File), Refusal> {
+    open_named_shadow(&mut || shadows.next_shadow(), faults)
+}
+
+/// [`open_shadow`], with the names it tries handed to it.
+///
+/// The generator is what makes the collision arm checkable: a name a test can
+/// occupy first is a name it can watch survive.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+fn open_named_shadow(
+    next: &mut dyn FnMut() -> PathBuf,
+    faults: Faults,
+) -> Result<(PathBuf, std::fs::File), Refusal> {
+    let mut last = None;
+    for _ in 0..NAME_ATTEMPTS {
+        let shadow = next();
+        faults
+            .check(Stage::Create)
+            .map_err(|error| environment("creating", &shadow, &error))?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&shadow)
+        {
+            Ok(file) => return Ok((shadow, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last = Some(environment("creating", &shadow, &error));
+            }
+            Err(error) => return Err(environment("creating", &shadow, &error)),
+        }
+    }
+    Err(last.expect("a bound of at least one attempt"))
 }
 
 /// Put `content` in an already-open handle and get it onto the disk.
@@ -575,22 +718,41 @@ fn fill(
         .map_err(|error| environment("syncing", path, &error))
 }
 
-/// Carry the replaced file's permission mode onto the staged shadow.
+/// Carry the replaced file's permission bits onto the staged shadow.
 ///
 /// **Replacement is the mechanism; a surgical edit is the observable
 /// contract.** What a caller sees is a document whose content outside the edit,
-/// mode, path and name are all as they were. What cannot be carried is named
-/// rather than papered over: the **inode number** changes, so any **foreign
-/// hard link** to the document keeps the old content, and on macOS the
-/// **birth time** is the new file's. Extended attributes and access-control
-/// lists are not carried either — the standard library has no API for them and
-/// no dependency has been taken for one.
+/// permission bits, path and name are all as they were.
+///
+/// **The permission bits and nothing else**: the mode is masked to `0o777`, so
+/// the **set-user-id and set-group-id bits are dropped**. Carrying them would
+/// take a bit that means "run as the file's owner" and put it on a file this
+/// process owns — a `04755` document written by one user comes back `04755`
+/// owned by another, which is a privilege the document did not have before Norn
+/// touched it. A Markdown document has no use for either bit, so there is
+/// nothing to weigh against that.
+///
+/// What cannot be carried is named rather than papered over:
+///
+/// - **Ownership.** The published file is owned by the writing user and group.
+///   Changing that needs privileges Norn does not have and would not ask for, so
+///   a document a second user replaces changes hands. This is irreducible.
+/// - **The inode number**, which is why any **foreign hard link** to the
+///   document keeps the old content, and on macOS why the **birth time** is the
+///   new file's.
+/// - **Extended attributes and access-control lists** — the standard library has
+///   no API for them and no dependency has been taken for one.
+///
+/// A mode that denies writing is carried like any other and **does not protect
+/// the document**: `0444` comes back `0444`, having been replaced. That is
+/// ordinary atomic-replace semantics — the rename needs the *directory*, not the
+/// file — and it is said here so that a `chmod` is not mistaken for a lock.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn carry_mode_forward(file: &std::fs::File, replaced: &std::fs::Metadata) {
     use std::os::unix::fs::PermissionsExt;
-    let mode = replaced.permissions().mode();
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+    let permissions = replaced.permissions().mode() & 0o777;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(permissions));
 }
 
 /// A fresh create takes the umask's defaults, because there is nothing to
@@ -625,7 +787,7 @@ fn verify(
             Some(post_state(again, len, &metadata)),
         ));
     }
-    confirm_name_still_resolves(destination, read)
+    confirm_name_still_resolves(destination, read, expected)
 }
 
 /// Publish the shadow's name as the destination's.
@@ -643,35 +805,29 @@ fn swap(shadow: &Path, destination: &Path, faults: Faults) -> Result<(), Refusal
 }
 
 /// Confirm `path` still names the file identified by `read`.
-fn confirm_name_still_resolves(path: &Path, read: Identity) -> Result<(), Refusal> {
-    let current = match name_identity(path)? {
-        Some(current) => current,
-        None => {
-            return Err(Refusal::Republished {
-                path: path.to_path_buf(),
-                read,
-                current: None,
-            });
-        }
+///
+/// Two outcomes, and they are two events rather than one shape with a hole in
+/// it. A name that resolves to a *different* file was republished by somebody
+/// else. A name that resolves to *nothing* is a document that was removed, which
+/// is the same event a precondition met at an empty path reports, so it reports
+/// it the same way — `expected` is carried for exactly that. A caller re-planning
+/// against absence matches one variant either way.
+fn confirm_name_still_resolves(
+    path: &Path,
+    read: Identity,
+    expected: ContentHash,
+) -> Result<(), Refusal> {
+    let Some(current) = name_identity(path)? else {
+        return Err(drifted(path, expected, None));
     };
     if current != read {
         return Err(Refusal::Republished {
             path: path.to_path_buf(),
             read,
-            current: Some(current),
+            current,
         });
     }
     Ok(())
-}
-
-/// The identity `path` resolves to now, or `None` when it resolves to nothing.
-#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
-fn name_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(identity_of(&metadata))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(environment("reading the identity of", path, &error)),
-    }
 }
 
 /// Refuse a path that is a symbolic link.
@@ -725,18 +881,55 @@ fn observed_state(held: &mut std::fs::File, path: &Path) -> Result<PostState, Re
     Ok(post_state(hash, len, &metadata))
 }
 
+/// Open `path`, hash it through the handle this opened, and refuse unless it
+/// holds `expected`.
+///
+/// The prologue every precondition-bearing verb runs, in one place: a
+/// replacement and a removal ask the identical question and an answer that
+/// differed between them would be two preconditions wearing one name. The handle
+/// comes back because the verb that asked is not finished with it — the
+/// replacement verifies through it, and the removal confirms the name against
+/// what it says.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
+fn observed_under(
+    path: &Path,
+    expected: ContentHash,
+) -> Result<(std::fs::File, PostState, std::fs::Metadata), Refusal> {
+    let (mut held, metadata) = match opened_for_reading(path)? {
+        Some(open) => open,
+        None => return Err(drifted(path, expected, None)),
+    };
+    let observed = observed_state(&mut held, path)?;
+    if observed.content_hash != expected {
+        return Err(drifted(path, expected, Some(observed)));
+    }
+    Ok((held, observed, metadata))
+}
+
 /// Read `path`'s bytes through one handle and confirm they hash to `expected`.
 ///
 /// The bytes hashed are the bytes returned — one read of one handle — so a
 /// caller that acts on the content is acting on the content that satisfied the
 /// precondition.
+///
+/// And the name is confirmed to still resolve to that handle, for the reason the
+/// replacement's verify stage does it: a foreign writer that staged its own copy
+/// and renamed it over `path` leaves this handle on an orphaned inode whose bytes
+/// hash to exactly what the caller asked for. Without the confirmation a move
+/// would publish an orphan's bytes at the destination and then measure the source
+/// against them.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
-fn read_verified(path: &Path, expected: ContentHash) -> Result<Vec<u8>, Refusal> {
+fn read_verified(
+    path: &Path,
+    expected: ContentHash,
+    disturb: &mut dyn FnMut(Window),
+) -> Result<Vec<u8>, Refusal> {
     refuse_symlink(path)?;
-    let (mut held, _) = match opened_for_reading(path)? {
+    let (mut held, metadata) = match opened_for_reading(path)? {
         Some(open) => open,
         None => return Err(drifted(path, expected, None)),
     };
+    let read = identity_of(&metadata);
     let mut content = Vec::new();
     held.read_to_end(&mut content)
         .map_err(|error| environment("reading", path, &error))?;
@@ -749,6 +942,8 @@ fn read_verified(path: &Path, expected: ContentHash) -> Result<Vec<u8>, Refusal>
             Some(post_state(hash, content.len() as u64, &metadata)),
         ));
     }
+    disturb(Window::SourceRead);
+    confirm_name_still_resolves(path, read, expected)?;
     Ok(content)
 }
 
@@ -765,18 +960,38 @@ fn remove(path: &Path) -> Result<(), Refusal> {
     std::fs::remove_file(path).map_err(|error| environment("removing", path, &error))
 }
 
-/// Remove a shadow, or a destination this call created and could not finish,
-/// and say nothing about a failure to.
+/// Remove a shadow and say nothing about a failure to.
 ///
 /// **Cleanup is attempted on every path that does not publish, and its failure
 /// is swallowed by design.** Three legs hold that up: it is always attempted, a
 /// shadow left behind is inert because its name is unique per attempt, and the
-/// residue is bounded because the host sweeps the shadow home. Reporting the
-/// failure instead would turn a clean refusal into two problems, and on the
-/// create path it would report a landed write as failed.
+/// residue is bounded because the host sweeps the shadow home
+/// ([`ShadowHome::sweep`](crate::ShadowHome::sweep)). Reporting the failure
+/// instead would turn a clean refusal into two problems, and tell the caller
+/// something other than why its write did not happen.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault paths.
 fn remove_quietly(path: &Path, faults: Faults) {
     if faults.check(Stage::Cleanup).is_err() {
+        return;
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+/// Remove a name a create claimed, but only while it still resolves to
+/// `claimed`.
+///
+/// Same swallowed failure as [`remove_quietly`], and one question more. A shadow
+/// has a name nothing else computes, so removing it by name is removing this
+/// call's own file by construction. A destination's name belongs to the vault and
+/// to everybody who writes there, so the file is identified before it is removed:
+/// a foreign writer that published over the name between this call's failure and
+/// this line is a document this call must not delete.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault paths.
+fn remove_if_still_claimed(path: &Path, claimed: Identity, faults: Faults) {
+    if faults.check(Stage::Cleanup).is_err() {
+        return;
+    }
+    if name_identity(path).ok().flatten() != Some(claimed) {
         return;
     }
     let _ = std::fs::remove_file(path);
@@ -803,13 +1018,24 @@ fn sync_directory(directory: &Path, faults: Faults) {
     }
 }
 
-/// The directory a path sits in, or the path itself when it names no parent.
+/// The directory a path sits in.
 ///
-/// A path with no parent is one the swap could not have reached — a rename onto
-/// it would have failed first — so this is the shape of a directory fsync
-/// having nothing to sync rather than a case to refuse.
+/// Two cases the standard library spells oddly, and both are real. A
+/// single-component relative path — `note.md` — has a parent, and it is the
+/// **empty path**, which opens as nothing; the directory it means is the working
+/// directory, so that is what comes back. A path with no parent at all is a root,
+/// which the swap could not have reached, and the path itself is the honest
+/// answer for it.
+///
+/// Getting the first case wrong is silent: the fsync is best-effort, so an open
+/// of `""` fails with nothing to report and the published name is left
+/// undurable.
 fn parent_of(path: &Path) -> &Path {
-    path.parent().unwrap_or(path)
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => path,
+    }
 }
 
 fn drifted(path: &Path, expected: ContentHash, observed: Option<PostState>) -> Refusal {
@@ -822,82 +1048,8 @@ fn drifted(path: &Path, expected: ContentHash, observed: Option<PostState>) -> R
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
-    use crate::shadow::Placement;
-
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-    /// A vault and a shadow home, for the length of one test.
-    struct Scratch {
-        root: PathBuf,
-        shadows: ShadowHome,
-    }
-
-    impl Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this test works over.
-        fn new(label: &str) -> Scratch {
-            let root = std::env::temp_dir().join(format!(
-                "norn-fs-write-{label}-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(root.join("vault")).expect("a vault root");
-            let shadows =
-                ShadowHome::resolve(&root.join("vault"), &root.join("tmp")).expect("a shadow home");
-            assert_eq!(shadows.placement(), Placement::DataRoot);
-            Scratch { root, shadows }
-        }
-
-        fn at(&self, relative: &str) -> PathBuf {
-            self.root.join("vault").join(relative)
-        }
-
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging the bytes a case reads.
-        fn place(&self, relative: &str, content: &[u8]) -> PathBuf {
-            let path = self.at(relative);
-            std::fs::write(&path, content).expect("placing a document");
-            path
-        }
-
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: reading what the kernel wrote.
-        fn read(&self, path: &Path) -> Vec<u8> {
-            std::fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
-        }
-
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging what the protocol left behind.
-        fn shadow_count(&self) -> usize {
-            std::fs::read_dir(self.shadows.directory())
-                .expect("the shadow home")
-                .count()
-        }
-
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging what the protocol left behind.
-        fn shadow_names(&self) -> Vec<String> {
-            let mut names: Vec<String> = std::fs::read_dir(self.shadows.directory())
-                .expect("the shadow home")
-                .map(|entry| {
-                    entry
-                        .expect("an entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect();
-            names.sort();
-            names
-        }
-    }
-
-    impl Drop for Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this test made.
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
+    use crate::scratch::Scratch;
 
     /// **The bar on the shadow's fsync.** The shadow's bytes are on the disk
     /// before any name points at them, so a stage that cannot sync them refuses
@@ -908,13 +1060,13 @@ mod tests {
     /// file whose content never reached the platter.
     #[test]
     fn a_shadow_that_cannot_be_synced_refuses_before_the_swap() {
-        let scratch = Scratch::new("shadow-sync");
+        let scratch = Scratch::new("write-shadow-sync");
         let path = scratch.place("note.md", b"old");
         let refusal = write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::Sync, std::io::ErrorKind::Other)]),
         )
         .expect_err("a shadow that cannot be synced");
@@ -924,7 +1076,10 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(scratch.read(&path), b"old", "the destination was touched");
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
     /// **The bar on a full disk.** A shadow that cannot take the content
@@ -935,13 +1090,13 @@ mod tests {
     /// truncated document.
     #[test]
     fn a_shadow_that_cannot_take_the_content_refuses_and_cleans_up() {
-        let scratch = Scratch::new("shadow-write");
+        let scratch = Scratch::new("write-shadow-write");
         let path = scratch.place("note.md", b"old");
         let refusal = write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
         )
         .expect_err("a shadow that cannot be written");
@@ -951,20 +1106,23 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(scratch.read(&path), b"old");
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
     /// **The bar on the swap.** A rename that fails refuses, leaves the
     /// destination as it was, and takes the shadow with it.
     #[test]
     fn a_swap_that_fails_leaves_the_destination_as_it_was() {
-        let scratch = Scratch::new("swap");
+        let scratch = Scratch::new("write-swap");
         let path = scratch.place("note.md", b"old");
         let refusal = write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::Swap, std::io::ErrorKind::PermissionDenied)]),
         )
         .expect_err("a rename that fails");
@@ -978,7 +1136,10 @@ mod tests {
             "{refusal}"
         );
         assert_eq!(scratch.read(&path), b"old");
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
     /// **The bar on the parent fsync.** A directory fsync that fails after the
@@ -990,13 +1151,13 @@ mod tests {
     /// a document it had just published.
     #[test]
     fn a_parent_fsync_that_fails_never_un_lands_the_write() {
-        let scratch = Scratch::new("parent-sync");
+        let scratch = Scratch::new("write-parent-sync");
         let path = scratch.place("note.md", b"old");
         let landed = write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
         )
         .expect("a landed write whose durability was not confirmed");
@@ -1012,7 +1173,7 @@ mod tests {
             &created,
             b"fresh",
             Precondition::Create,
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
         )
         .expect("a landed create whose durability was not confirmed");
@@ -1025,13 +1186,13 @@ mod tests {
     /// a prefix of one.
     #[test]
     fn a_create_that_cannot_be_finished_takes_its_name_back() {
-        let scratch = Scratch::new("create-write");
+        let scratch = Scratch::new("write-create-write");
         let path = scratch.at("fresh.md");
         let refusal = write_where(
             &path,
             b"fresh",
             Precondition::Create,
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
         )
         .expect_err("a create that cannot be written");
@@ -1040,36 +1201,103 @@ mod tests {
             matches!(&refusal, Refusal::Environment { operation, .. } if *operation == "writing"),
             "{refusal}"
         );
-        #[allow(clippy::disallowed_methods)] // Asserting on what the failure path left behind.
-        let left = std::fs::metadata(&path).is_ok();
-        assert!(!left, "a half-written document was left at the destination");
+        assert!(
+            !scratch.exists(&path),
+            "a half-written document was left at the destination"
+        );
     }
 
-    /// A create that cannot claim its name at all leaves nothing behind and
-    /// removes nothing. The injected failure stands in for a full disk met
-    /// before the open.
+    /// **The bar on the create arm's cleanup.** A create that fails after
+    /// claiming its name removes only the file it created, so a foreign document
+    /// published at that name in the meantime survives.
+    ///
+    /// The forbidden shape is a cleanup that unlinks by name. A foreign writer
+    /// with its own atomic-replace protocol lands a complete document at the name
+    /// while this call is failing; an unlink by name then deletes it, and the
+    /// caller is handed a refusal about a write that never happened while
+    /// somebody else's published work is gone. The identity comparison is what
+    /// distinguishes the two files.
     #[test]
-    fn a_create_that_cannot_claim_its_name_leaves_nothing() {
-        let scratch = Scratch::new("create-open");
-        let existing = scratch.place("taken.md", b"somebody else's bytes");
-        let refusal = write_where(
-            &existing,
+    fn a_create_that_fails_never_removes_a_foreign_document() {
+        let scratch = Scratch::new("write-create-foreign");
+        let path = scratch.at("fresh.md");
+        let mut landed_first = false;
+        let refusal = write_disturbed(
+            &path,
             b"ours",
             Precondition::Create,
-            &scratch.shadows,
-            Faults::at(&[(Stage::Create, std::io::ErrorKind::Other)]),
+            scratch.shadows(),
+            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
+            &mut |window| {
+                if window != Window::Claimed {
+                    return;
+                }
+                // A foreign writer publishing over the name this call just
+                // claimed: staged elsewhere, renamed into place.
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                {
+                    let theirs = scratch.at("theirs");
+                    std::fs::write(&theirs, b"a foreign document").expect("a foreign staging");
+                    std::fs::rename(&theirs, &path).expect("a foreign publish");
+                }
+                landed_first = true;
+            },
         )
-        .expect_err("a create that cannot open");
+        .expect_err("a create that cannot be written");
+
+        assert!(landed_first, "the window was never entered");
         assert!(
-            matches!(&refusal, Refusal::Environment { operation, .. } if *operation == "creating"),
+            matches!(&refusal, Refusal::Environment { operation, .. } if *operation == "writing"),
             "{refusal}"
         );
         assert_eq!(
-            scratch.read(&existing),
-            b"somebody else's bytes",
-            "the failure path removed a file it did not create"
+            scratch.read(&path),
+            b"a foreign document",
+            "the cleanup removed a document this call did not create"
         );
     }
+
+    /// **The bar on the create arm's blocked cleanup.** A removal the filesystem
+    /// refuses does not change the refusal the caller is given, and what it
+    /// leaves is this call's own file.
+    ///
+    /// Two failures are injected: the write, which is why the create refuses, and
+    /// the removal after it. The forbidden shape is reporting the cleanup — the
+    /// caller is then told something other than why its write did not happen.
+    /// What that costs is stated rather than claimed away: the name holds this
+    /// call's own bytes, and nothing else ever will.
+    #[test]
+    fn a_create_whose_cleanup_cannot_happen_still_returns_the_original_outcome() {
+        let scratch = Scratch::new("write-create-cleanup");
+        let path = scratch.at("fresh.md");
+        let refusal = write_where(
+            &path,
+            b"fresh",
+            Precondition::Create,
+            scratch.shadows(),
+            Faults::at(&[
+                (Stage::Write, std::io::ErrorKind::Other),
+                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+            ]),
+        )
+        .expect_err("a create that cannot be written with a removal that cannot happen");
+
+        assert!(
+            matches!(
+                &refusal,
+                Refusal::Environment { operation, kind, .. }
+                    if *operation == "writing" && *kind == std::io::ErrorKind::Other
+            ),
+            "the caller was told about the cleanup instead of the write: {refusal}"
+        );
+        assert_eq!(
+            scratch.read(&path),
+            b"",
+            "the blocked cleanup ran anyway, so the seam is not what stopped it"
+        );
+    }
+
     /// **The bar on the verification.** A foreign write that lands inside the
     /// window is caught before the swap, and the foreign bytes are what remain.
     ///
@@ -1080,16 +1308,19 @@ mod tests {
     /// composed against.
     #[test]
     fn a_foreign_write_inside_the_window_is_caught_before_the_swap() {
-        let scratch = Scratch::new("verify-drift");
+        let scratch = Scratch::new("write-verify-drift");
         let path = scratch.place("note.md", b"old");
         let mut landed_first = false;
         let refusal = write_disturbed(
             &path,
             b"ours",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::NONE,
-            &mut || {
+            &mut |window| {
+                if window != Window::Composed {
+                    return;
+                }
                 // A foreign writer editing the same file: the inode is the same
                 // and only the bytes moved, which is what the re-hash sees.
                 #[allow(clippy::disallowed_methods)]
@@ -1117,7 +1348,10 @@ mod tests {
             b"theirs",
             "the swap ran over the foreign writer"
         );
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
     /// **The bar the hash cannot carry.** A foreign writer that *replaced* the
@@ -1132,39 +1366,25 @@ mod tests {
     /// alone: it publishes over a document somebody else just published.
     #[test]
     fn a_foreign_replacement_that_keeps_the_bytes_is_still_refused() {
-        let scratch = Scratch::new("verify-republished");
+        let scratch = Scratch::new("write-verify-republished");
         let path = scratch.place("note.md", b"old");
-        let original = crate::identity::identity_of(
-            #[allow(clippy::disallowed_methods)]
-            &std::fs::metadata(&path).expect("the original"),
-        );
+        let original = identity_at(&path);
 
         let refusal = write_disturbed(
             &path,
             b"ours",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::NONE,
-            &mut || {
-                // A foreign writer with its own atomic-replace protocol: same
-                // bytes, different file.
-                #[allow(clippy::disallowed_methods)]
-                // Harness scaffolding: playing the foreign writer.
-                {
-                    let theirs = scratch.at("theirs");
-                    std::fs::write(&theirs, b"old").expect("a foreign staging");
-                    std::fs::rename(&theirs, &path).expect("a foreign publish");
+            &mut |window| {
+                if window == Window::Composed {
+                    republish(&scratch, &path, b"old");
                 }
             },
         )
         .expect_err("a foreign replacement inside the window");
 
-        let Refusal::Republished {
-            read,
-            current: Some(current),
-            ..
-        } = &refusal
-        else {
+        let Refusal::Republished { read, current, .. } = &refusal else {
             panic!("a foreign replacement was not reported as one: {refusal}");
         };
         assert_eq!(*read, original);
@@ -1174,22 +1394,66 @@ mod tests {
             b"old",
             "the swap ran over the foreign writer"
         );
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
-    /// A document removed inside the window is reported as a name that no longer
-    /// resolves, and the swap does not resurrect it.
+    /// **The bar on the unchanged outcome's honesty.** Content identical to what
+    /// was read is only `Unchanged` while the name still resolves to the file it
+    /// was read from.
+    ///
+    /// The forbidden shape is returning the outcome on the strength of the hash
+    /// alone. A foreign writer that replaced the document with a copy of itself
+    /// leaves the held handle on an orphaned inode, so the hashes agree and the
+    /// caller is told the destination holds exactly this content — about a file
+    /// nothing points at. Its own write is suppressed for a document it never
+    /// looked at.
+    #[test]
+    fn an_unchanged_outcome_whose_name_was_republished_is_refused() {
+        let scratch = Scratch::new("write-unchanged-republished");
+        let path = scratch.place("note.md", b"already right");
+        let original = identity_at(&path);
+
+        let refusal = write_disturbed(
+            &path,
+            b"already right",
+            Precondition::Replace(ContentHash::of(b"already right")),
+            scratch.shadows(),
+            Faults::NONE,
+            &mut |window| {
+                if window == Window::Composed {
+                    republish(&scratch, &path, b"already right");
+                }
+            },
+        )
+        .expect_err("an unchanged outcome over a republished name");
+
+        let Refusal::Republished { read, current, .. } = &refusal else {
+            panic!("a republished name was reported as unchanged: {refusal}");
+        };
+        assert_eq!(*read, original);
+        assert_ne!(*current, original);
+    }
+
+    /// A document removed inside the window is drift onto nothing — the same
+    /// answer a precondition met at an empty path gets, because it is the same
+    /// event — and the swap does not resurrect it.
     #[test]
     fn a_document_removed_inside_the_window_is_not_resurrected() {
-        let scratch = Scratch::new("verify-removed");
+        let scratch = Scratch::new("write-verify-removed");
         let path = scratch.place("note.md", b"old");
         let refusal = write_disturbed(
             &path,
             b"ours",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::NONE,
-            &mut || {
+            &mut |window| {
+                if window != Window::Composed {
+                    return;
+                }
                 #[allow(clippy::disallowed_methods)]
                 // Harness scaffolding: playing the foreign writer.
                 std::fs::remove_file(&path).expect("a foreign removal");
@@ -1198,13 +1462,17 @@ mod tests {
         .expect_err("a removal inside the window");
 
         assert!(
-            matches!(&refusal, Refusal::Republished { current: None, .. }),
+            matches!(&refusal, Refusal::Drifted { observed: None, .. }),
             "{refusal}"
         );
-        #[allow(clippy::disallowed_methods)] // Asserting on what the refusal left behind.
-        let resurrected = std::fs::metadata(&path).is_ok();
-        assert!(!resurrected, "the swap ran after the document was removed");
-        assert_eq!(scratch.shadow_count(), 0, "a shadow was left behind");
+        assert!(
+            !scratch.exists(&path),
+            "the swap ran after the document was removed"
+        );
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
     }
 
     /// **The bar on a cleanup that cannot happen.** A shadow the filesystem
@@ -1214,20 +1482,19 @@ mod tests {
     /// Two failures are injected: the swap, which is why the write refuses, and
     /// the removal after it, which is why the shadow is still there. The
     /// forbidden shape is reporting the cleanup's failure — a clean refusal
-    /// becomes two problems, the caller is told something other than why its
-    /// write did not happen, and on the create path the same code would report a
-    /// landed write as failed. What the leak costs is bounded instead: its name
-    /// is one nothing recomputes, so nothing reopens it, and the host's sweep
-    /// clears it.
+    /// becomes two problems, and the caller is told something other than why its
+    /// write did not happen. What the leak costs is bounded instead: its name is
+    /// one nothing recomputes, so nothing reopens it, and the host's sweep clears
+    /// it.
     #[test]
     fn a_cleanup_that_cannot_happen_still_returns_the_original_outcome() {
-        let scratch = Scratch::new("cleanup-blocked");
+        let scratch = Scratch::new("write-cleanup-blocked");
         let path = scratch.place("note.md", b"old");
         let refusal = write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::at(&[
                 (Stage::Swap, std::io::ErrorKind::PermissionDenied),
                 (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
@@ -1264,7 +1531,7 @@ mod tests {
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
+            scratch.shadows(),
             Faults::NONE,
         )
         .expect("a replacement over a leaked shadow");
@@ -1276,22 +1543,273 @@ mod tests {
         );
     }
 
-    /// An injected cleanup failure on a path that publishes changes nothing: a
-    /// landed write has no shadow to remove. The clause only ever bites where a
-    /// write refuses.
+    /// **The bar on when the mode is carried.** A staged shadow has the replaced
+    /// file's permission bits before any content goes into it.
+    ///
+    /// Read off a shadow that leaked before its first byte: the write is made to
+    /// fail at the content, and the cleanup is made to fail after it, so what is
+    /// left at rest is the file exactly as staging made it.
+    ///
+    /// The forbidden shape is carrying the mode after the content. A full
+    /// replacement of a `0600` document then sits in the shadow home at the
+    /// umask's defaults — world-readable on an ordinary machine — for as long as
+    /// the write and its fsync take, which for a large document is not a moment.
     #[test]
-    fn an_injected_cleanup_failure_never_fails_a_landed_write() {
-        let scratch = Scratch::new("cleanup-landed");
+    fn a_shadow_carries_its_mode_before_any_content() {
+        let scratch = Scratch::new("write-mode-first");
         let path = scratch.place("note.md", b"old");
-        let landed = write_where(
+        scratch.set_mode(&path, 0o600);
+
+        write_where(
             &path,
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
-            &scratch.shadows,
-            Faults::at(&[(Stage::Cleanup, std::io::ErrorKind::PermissionDenied)]),
+            scratch.shadows(),
+            Faults::at(&[
+                (Stage::Write, std::io::ErrorKind::Other),
+                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+            ]),
         )
-        .expect("a landed write whose cleanup was refused");
-        assert!(landed.wrote());
-        assert_eq!(scratch.read(&path), b"new");
+        .expect_err("a shadow that cannot take the content");
+
+        let leaked = scratch.shadow_names();
+        assert_eq!(
+            leaked.len(),
+            1,
+            "expected one leaked shadow, got {leaked:?}"
+        );
+        let leaked = scratch.shadows().directory().join(&leaked[0]);
+        assert_eq!(
+            scratch.read(&leaked),
+            b"",
+            "the shadow took content, so this is not the pre-content state"
+        );
+        assert_eq!(
+            scratch.mode_at(&leaked),
+            0o600,
+            "a shadow held content-shaped bytes at a mode the document did not have"
+        );
+    }
+
+    /// **The bar on a shadow name that is already taken.** The taken name is
+    /// skipped, the write lands under the next one, and what was at the taken
+    /// name is neither truncated nor reopened.
+    ///
+    /// The forbidden shape is an open that creates or truncates. A process
+    /// identifier is reused across boots, so a shadow leaked by a dead writer is
+    /// a name a fresh process really does compute — and if that residue had
+    /// become a second link to a live document, the truncation would go through
+    /// it. Refusing instead is the other forbidden shape: one leaked shadow would
+    /// then break the first write of every process that inherits its identifier.
+    #[test]
+    fn a_taken_shadow_name_is_skipped_rather_than_opened() {
+        let scratch = Scratch::new("write-shadow-collision");
+        let taken = scratch.shadows().directory().join("norn-shadow-1-0");
+        let free = scratch.shadows().directory().join("norn-shadow-1-1");
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: a dead writer's residue.
+        std::fs::write(&taken, b"a dead writer's bytes").expect("residue");
+        let residue = identity_at(&taken);
+
+        let mut names = vec![free.clone(), taken.clone()];
+        let (opened, mut handle) =
+            open_named_shadow(&mut || names.pop().expect("a name to try"), Faults::NONE)
+                .expect("a shadow under a free name");
+
+        assert_eq!(opened, free, "the taken name was opened");
+        assert_eq!(
+            scratch.read(&taken),
+            b"a dead writer's bytes",
+            "the residue was truncated or written through"
+        );
+        assert_eq!(identity_at(&taken), residue, "the residue was replaced");
+        // And the handle is a usable, empty shadow rather than something reopened.
+        handle.write_all(b"ours").expect("writing the shadow");
+        assert_eq!(scratch.read(&opened), b"ours");
+    }
+
+    /// **The bar on the removal's identity confirmation.** A document replaced
+    /// while its removal's precondition was being read is refused, and the
+    /// replacement is still there.
+    ///
+    /// The forbidden shape is a removal justified by the hash alone. A foreign
+    /// writer that published a copy of the same bytes leaves the read handle on
+    /// an orphaned inode, so the hash agrees, and the unlink then takes a
+    /// document nobody read.
+    #[test]
+    fn a_removal_whose_name_was_republished_is_refused() {
+        let scratch = Scratch::new("write-vacate-republished");
+        let path = scratch.place("note.md", b"to be removed");
+        let original = identity_at(&path);
+
+        let refusal = vacate_disturbed(&path, ContentHash::of(b"to be removed"), &mut |window| {
+            if window == Window::Vacating {
+                republish(&scratch, &path, b"to be removed");
+            }
+        })
+        .expect_err("a removal over a republished name");
+
+        let Refusal::Republished { read, current, .. } = &refusal else {
+            panic!("a republished name was not reported as one: {refusal}");
+        };
+        assert_eq!(*read, original);
+        assert_ne!(*current, original);
+        assert_eq!(
+            scratch.read(&path),
+            b"to be removed",
+            "the removal took a document nobody read"
+        );
+    }
+
+    /// **The bar on the move's source read.** A source republished while it is
+    /// being read refuses the source leg, so nothing is published from an
+    /// orphaned inode's bytes.
+    ///
+    /// The forbidden shape is a read that hashes and returns. The bytes would
+    /// satisfy the precondition — a foreign atomic replace can keep them exactly
+    /// — while belonging to a file the name no longer resolves to; the move would
+    /// then publish them at the destination and go on to measure the source
+    /// against them.
+    #[test]
+    fn a_move_whose_source_is_republished_while_it_is_read_is_refused() {
+        let scratch = Scratch::new("write-move-source-read");
+        let source = scratch.place("from.md", b"the document");
+        let destination = scratch.at("to.md");
+
+        let refusal = move_disturbed(
+            &source,
+            &destination,
+            ContentHash::of(b"the document"),
+            scratch.shadows(),
+            &mut |window| {
+                if window == Window::SourceRead {
+                    republish(&scratch, &source, b"the document");
+                }
+            },
+        )
+        .expect_err("a source republished while it was read");
+
+        assert!(
+            matches!(&refusal, MoveRefusal::Source(Refusal::Republished { .. })),
+            "{refusal}"
+        );
+        assert!(
+            !scratch.exists(&destination),
+            "a refused source leg created the destination"
+        );
+        assert_eq!(scratch.read(&source), b"the document");
+    }
+
+    /// **The bar on the move's second leg, through the move itself.** A source
+    /// rewritten between the legs is not removed: the vacate has a precondition
+    /// of its own, which is why the source is read twice.
+    ///
+    /// The forbidden shape is one handle, or one reading, held across both legs.
+    /// The removal would then be justified by a reading taken before the
+    /// destination existed, and a document somebody edited in between would be
+    /// gone. The residue this leaves is the one the pair promises — both paths
+    /// hold a document, never neither.
+    #[test]
+    fn a_move_whose_source_is_rewritten_between_the_legs_keeps_it() {
+        let scratch = Scratch::new("write-move-between-legs");
+        let source = scratch.place("from.md", b"the document");
+        let destination = scratch.at("to.md");
+        let mut rewritten = false;
+
+        let refusal = move_disturbed(
+            &source,
+            &destination,
+            ContentHash::of(b"the document"),
+            scratch.shadows(),
+            &mut |window| {
+                if window != Window::BetweenLegs {
+                    return;
+                }
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                std::fs::write(&source, b"what somebody else wrote").expect("a foreign write");
+                rewritten = true;
+            },
+        )
+        .expect_err("a source rewritten between the legs");
+
+        assert!(rewritten, "the window was never entered");
+        let MoveRefusal::SourceRemains { created, refusal } = &refusal else {
+            panic!("the leg that refused was not named: {refusal}");
+        };
+        assert_eq!(created.content_hash, ContentHash::of(b"the document"));
+        assert!(matches!(refusal, Refusal::Drifted { .. }), "{refusal}");
+        assert_eq!(
+            scratch.read(&source),
+            b"what somebody else wrote",
+            "the second leg removed a source nobody looked at again"
+        );
+        assert_eq!(scratch.read(&destination), b"the document");
+    }
+
+    /// **The bar on `O_NOFOLLOW`.** A symbolic link planted at a path between the
+    /// link check and the reading open fails the open, and reads as the refusal
+    /// the check would have given.
+    ///
+    /// Driven at the open directly, because that gap is a window one call wide.
+    /// The forbidden shape is an open without the flag: the link is followed, the
+    /// precondition is evaluated against a file somewhere else, and the swap
+    /// publishes at a name the caller did not ask about.
+    #[test]
+    fn the_reading_open_refuses_a_symlink_rather_than_following_it() {
+        let scratch = Scratch::new("write-nofollow");
+        let real = scratch.place("real.md", b"the target's bytes");
+        let link = scratch.at("link.md");
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: planting a link.
+        std::os::unix::fs::symlink(&real, &link).expect("a link");
+
+        let refusal = opened_for_reading(&link).expect_err("a link at the open's path");
+        assert_eq!(
+            refusal,
+            Refusal::SymlinkDestination { path: link.clone() },
+            "{refusal}"
+        );
+    }
+
+    /// The directory a destination sits in, including the two spellings the
+    /// standard library answers oddly.
+    ///
+    /// The forbidden shape is `path.parent().unwrap_or(path)`. A single-component
+    /// relative destination has `Some("")` as its parent, `""` opens as nothing,
+    /// and the fsync is best-effort — so the published name is silently left
+    /// undurable.
+    #[test]
+    fn the_parent_of_a_destination_is_a_directory_that_can_be_opened() {
+        assert_eq!(parent_of(Path::new("/vault/note.md")), Path::new("/vault"));
+        assert_eq!(parent_of(Path::new("folder/note.md")), Path::new("folder"));
+        assert_eq!(
+            parent_of(Path::new("note.md")),
+            Path::new("."),
+            "a single-component destination named a directory nothing can open"
+        );
+        assert_eq!(parent_of(Path::new("/")), Path::new("/"));
+
+        #[allow(clippy::disallowed_methods)] // Asserting that the answer is openable.
+        for path in ["/vault/note.md", "note.md", "/"] {
+            let parent = parent_of(Path::new(path));
+            assert!(
+                !parent.as_os_str().is_empty(),
+                "the parent of {path} is the empty path, which opens as nothing"
+            );
+        }
+    }
+
+    /// A foreign writer with its own atomic-replace protocol: `content` at
+    /// `path`, in a different file.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign writer.
+    fn republish(scratch: &Scratch, path: &Path, content: &[u8]) {
+        let theirs = scratch.at("norn-fs-foreign-staging");
+        std::fs::write(&theirs, content).expect("a foreign staging");
+        std::fs::rename(&theirs, path).expect("a foreign publish");
+    }
+
+    /// The `(device, inode)` pair `path` resolves to.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging which file a name means.
+    fn identity_at(path: &Path) -> Identity {
+        identity_of(&std::fs::metadata(path).expect("a file at the path"))
     }
 }

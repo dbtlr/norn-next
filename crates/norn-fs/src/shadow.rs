@@ -53,9 +53,10 @@
 //!
 //! # A leaked shadow is bounded by a sweep, in two tiers
 //!
-//! Nothing reopens a shadow, so a leaked one costs bytes and nothing else. Two
-//! sweeps bound that cost, and both belong to the host that owns a vault's
-//! lifecycle rather than to this kernel:
+//! Nothing reopens a shadow, and a name that is somehow taken is skipped rather
+//! than opened, so a leaked one costs bytes and nothing else. Two sweeps bound
+//! that cost. [`ShadowHome::sweep`] is the act; *when* it runs belongs to the
+//! host that owns a vault's lifecycle rather than to this kernel:
 //!
 //! - **At attach, under a freshly taken maintainer lock, the sweep is total.**
 //!   Holding the lock means no other Norn host is writing this vault, so every
@@ -66,6 +67,10 @@
 //!   separates residue from work in flight without ever needing to ask which
 //!   process a name belongs to.
 //!
+//! The sweep is exported here because it has to be: no other crate may touch
+//! vault mechanism files, so no other crate could implement one — and a bound
+//! that nothing can enforce is not a bound.
+//!
 //! **No sweep ever breaks a lock, and no lock has a timeout.** The kernel
 //! releases a `flock` when the holding process dies, so a lock still held is a
 //! process still alive. Taking a lock away on age grounds is what manufactures
@@ -75,14 +80,18 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::identity::identity_of;
 use crate::refusal::{Refusal, environment};
 
 /// What every shadow name begins with, and therefore the first thing
 /// [`is_shadow_name`] asks about.
-pub const SHADOW_PREFIX: &str = "norn-shadow-";
+///
+/// In-crate: the predicate is the surface, so nothing outside has a reason to
+/// know the spelling, and one that matched the prefix itself would take a
+/// document called `norn-shadow-notes.md` for residue.
+pub(crate) const SHADOW_PREFIX: &str = "norn-shadow-";
 
 /// Where shadows go when the norn data directory is on another filesystem,
 /// relative to the vault root.
@@ -101,6 +110,15 @@ pub const FALLBACK: &str = ".norn/tmp";
 /// rather than by asking which process owns a name, because a name's process
 /// identifier is reused across boots and is not evidence of anything.
 pub const SHADOW_AGE_THRESHOLD: Duration = Duration::from_secs(600);
+
+/// How many shadow names one write tries before the shadow home is declared
+/// unusable.
+///
+/// A name is unique per attempt, so one taken name is residue and the next name
+/// is free — this is the house bound on retrying, not an expectation. Reaching it
+/// means this many distinct names are all taken, which is a directory somebody is
+/// filling rather than a name that was unlucky.
+pub(crate) const NAME_ATTEMPTS: usize = 64;
 
 /// Distinguishes two shadows staged by the same process.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -156,13 +174,16 @@ impl ShadowHome {
     /// with one filesystem: the case that matters is the one where the two
     /// devices differ, and a test that cannot arrange two mounts has no other
     /// way to reach it.
+    ///
+    /// `data_tmp` is expected to exist already — reading its device is what
+    /// [`ShadowHome::resolve`] decides `same_device` from, so it has been made by
+    /// the time an answer is available.
     fn resolve_where(
         vault_root: &Path,
         data_tmp: &Path,
         same_device: bool,
     ) -> Result<ShadowHome, Refusal> {
         if same_device {
-            make_directory(data_tmp)?;
             return Ok(ShadowHome {
                 directory: data_tmp.to_path_buf(),
                 placement: Placement::DataRoot,
@@ -194,6 +215,80 @@ impl ShadowHome {
     pub(crate) fn next_shadow(&self) -> PathBuf {
         self.directory.join(shadow_name())
     }
+
+    /// Remove the shadows in this home that are at least `older_than` old.
+    ///
+    /// **Only entries [`is_shadow_name`] accepts are candidates.** Everything
+    /// else in the directory is somebody else's and is counted by nobody: the
+    /// home is Norn's, but a sweep that removed whatever it found would be a
+    /// sweep that removed a near-miss the moment the predicate and the naming
+    /// scheme drifted apart.
+    ///
+    /// `older_than` is what makes this the same act at both tiers:
+    ///
+    /// - **`Duration::ZERO` is the total attach-time sweep.** Every shadow goes,
+    ///   whatever its age. That is only sound under a *freshly taken* maintainer
+    ///   lock: holding it means no other Norn host is writing this vault, so
+    ///   every shadow in the home is residue of a write that is already over. A
+    ///   caller that has not just won the lock must not pass zero.
+    /// - **[`SHADOW_AGE_THRESHOLD`] is the in-life sweep**, on the host's
+    ///   maintenance schedule, and its margin is what keeps a live write's shadow
+    ///   out of reach.
+    ///
+    /// A removal the filesystem refuses is left rather than reported, for the
+    /// reason a write's cleanup failure is: residue is bounded by this sweep, and
+    /// the next one comes round.
+    #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+    pub fn sweep(&self, older_than: Duration) -> Result<Swept, Refusal> {
+        let entries = std::fs::read_dir(&self.directory)
+            .map_err(|error| environment("reading", &self.directory, &error))?;
+        let now = SystemTime::now();
+        let mut swept = Swept {
+            removed: 0,
+            left: 0,
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| environment("reading", &self.directory, &error))?;
+            if !is_shadow_name(&entry.file_name()) {
+                continue;
+            }
+            // `DirEntry::metadata` does not follow links, so a link left at a
+            // shadow's name is aged and removed as itself.
+            if age_of(&entry, now).is_none_or(|age| age < older_than) {
+                swept.left += 1;
+                continue;
+            }
+            if std::fs::remove_file(entry.path()).is_ok() {
+                swept.removed += 1;
+            } else {
+                swept.left += 1;
+            }
+        }
+        Ok(swept)
+    }
+}
+
+/// What one sweep of a shadow home did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Swept {
+    /// How many shadows the sweep removed.
+    pub removed: usize,
+    /// How many shadows the sweep recognized and left: younger than the
+    /// threshold, or a removal the filesystem refused. Residue that persists
+    /// across sweeps is a health finding rather than an error here.
+    pub left: usize,
+}
+
+/// How long ago `entry` was last modified, or `None` when the filesystem will
+/// not say.
+///
+/// An entry whose age cannot be established is never swept: age is the whole
+/// basis for calling something residue, and a missing answer is not a small age.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns the shadow home.
+fn age_of(entry: &std::fs::DirEntry, now: SystemTime) -> Option<Duration> {
+    let modified = entry.metadata().ok()?.modified().ok()?;
+    // A shadow stamped in the future is not old, and is not an error either.
+    Some(now.duration_since(modified).unwrap_or(Duration::ZERO))
 }
 
 /// A shadow name nothing in this process has been handed before.
@@ -261,34 +356,7 @@ fn device_of(path: &Path) -> Result<u64, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A scratch directory for the length of one test.
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this test works over.
-        fn new(label: &str) -> Scratch {
-            let root = std::env::temp_dir().join(format!(
-                "norn-fs-shadow-{label}-{}-{}",
-                std::process::id(),
-                SEQUENCE.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).expect("a scratch directory");
-            Scratch(root)
-        }
-
-        fn path(&self, relative: &str) -> PathBuf {
-            self.0.join(relative)
-        }
-    }
-
-    impl Drop for Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this test made.
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::scratch::Scratch;
 
     /// **The bar on unique-per-attempt naming.** Two shadows taken in one
     /// process never share a name, and neither name mentions a destination.
@@ -319,27 +387,6 @@ mod tests {
         }
     }
 
-    /// A shadow name is a function of the process and the counter, and of
-    /// nothing else. Two destinations get two names, which is what says the
-    /// destination is not an input.
-    #[test]
-    fn a_shadow_name_does_not_come_from_its_destination() {
-        let home = ShadowHome {
-            directory: PathBuf::from("/data/vaults/notes/tmp"),
-            placement: Placement::DataRoot,
-        };
-        let first = home.next_shadow();
-        let second = home.next_shadow();
-        assert_ne!(first, second);
-        for taken in [&first, &second] {
-            let name = taken.file_name().expect("a file name").to_string_lossy();
-            assert!(
-                !name.contains("glossary") && !name.contains(".md"),
-                "{name} carries something from a destination"
-            );
-        }
-    }
-
     /// **The bar on the predicate.** Every name this crate hands out is
     /// recognized, and every adversarial near-miss is not.
     ///
@@ -354,33 +401,37 @@ mod tests {
                 "{ours} was not recognized"
             );
         }
-        for theirs in [
-            "",
-            "norn-shadow",
-            "norn-shadow-",
-            "norn-shadow-1",
-            "norn-shadow-1-",
-            "norn-shadow--1",
-            "norn-shadow-1-2-3",
-            "norn-shadow-1-2.md",
-            "norn-shadow-abc-1",
-            "norn-shadow-1-abc",
-            "norn-shadow-notes.md",
-            "norn-shadow-1-0 ",
-            " norn-shadow-1-0",
-            "xnorn-shadow-1-0",
-            "Norn-Shadow-1-0",
-            ".norn-shadow-1-0",
-            "norn-shadow-1-0.tmp",
-            "norn-shadow-+1-0",
-            "norn-shadow-1_0",
-        ] {
+        for theirs in NEAR_MISSES {
             assert!(
                 !is_shadow_name(OsStr::new(theirs)),
                 "{theirs:?} was taken for a shadow"
             );
         }
     }
+
+    /// Names that are not shadows, several of which are one character away from
+    /// being one. Shared by the predicate's bar and the sweep's.
+    const NEAR_MISSES: &[&str] = &[
+        "",
+        "norn-shadow",
+        "norn-shadow-",
+        "norn-shadow-1",
+        "norn-shadow-1-",
+        "norn-shadow--1",
+        "norn-shadow-1-2-3",
+        "norn-shadow-1-2.md",
+        "norn-shadow-abc-1",
+        "norn-shadow-1-abc",
+        "norn-shadow-notes.md",
+        "norn-shadow-1-0 ",
+        " norn-shadow-1-0",
+        "xnorn-shadow-1-0",
+        "Norn-Shadow-1-0",
+        ".norn-shadow-1-0",
+        "norn-shadow-1-0.tmp",
+        "norn-shadow-+1-0",
+        "norn-shadow-1_0",
+    ];
 
     /// A name that is not text is not one of ours: every name this crate hands
     /// out is ASCII.
@@ -394,10 +445,9 @@ mod tests {
     /// belong.
     #[test]
     fn one_filesystem_stages_shadows_outside_the_vault() {
-        let scratch = Scratch::new("one-device");
-        let vault = scratch.path("vault");
-        make_directory(&vault).expect("a vault root");
-        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let scratch = Scratch::new("shadow-one-device");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("other-data/vaults/notes/tmp");
 
         let home = ShadowHome::resolve(&vault, &data_tmp).expect("a shadow home");
         assert_eq!(home.placement(), Placement::DataRoot);
@@ -416,17 +466,17 @@ mod tests {
     /// instead would publish bytes without a rename.
     #[test]
     fn two_filesystems_fall_back_inside_the_vault() {
-        let scratch = Scratch::new("two-devices");
-        let vault = scratch.path("vault");
-        make_directory(&vault).expect("a vault root");
-        let data_tmp = scratch.path("data/vaults/notes/tmp");
+        let scratch = Scratch::new("shadow-two-devices");
+        let vault = scratch.directory("other-vault");
+        let data_tmp = scratch.path("other-data/vaults/notes/tmp");
 
         let home = ShadowHome::resolve_where(&vault, &data_tmp, false).expect("a shadow home");
         assert_eq!(home.placement(), Placement::VaultFallback);
         assert_eq!(home.directory(), vault.join(FALLBACK));
-        #[allow(clippy::disallowed_methods)] // Asserting on what the resolution created.
-        let made = std::fs::metadata(home.directory()).is_ok();
-        assert!(made, "the fallback directory was not created");
+        assert!(
+            scratch.exists(home.directory()),
+            "the fallback directory was not created"
+        );
     }
 
     /// The fallback is one dot-directory, so a walk excluding it excludes every
@@ -444,5 +494,105 @@ mod tests {
             segments.next().is_some(),
             "{FALLBACK} is the dot-directory itself, which holds more than shadows"
         );
+    }
+
+    /// **The bar on what a sweep is allowed to touch.** Only names the predicate
+    /// accepts are removed, at every threshold including the total one.
+    ///
+    /// The forbidden shape is a sweep that empties the directory. The home is
+    /// Norn's, but the predicate and the naming scheme are two pieces of code, and
+    /// a sweep that trusted the directory instead of the name would remove
+    /// whatever a near-miss turned out to be the moment they drifted apart.
+    #[test]
+    fn a_sweep_removes_only_what_the_predicate_recognizes() {
+        let scratch = Scratch::new("shadow-sweep-names");
+        let home = scratch.shadows();
+        for theirs in NEAR_MISSES {
+            if theirs.is_empty() || theirs.contains('/') {
+                continue;
+            }
+            #[allow(clippy::disallowed_methods)] // Harness scaffolding: somebody else's files.
+            std::fs::write(home.directory().join(theirs), b"somebody else's bytes")
+                .unwrap_or_else(|e| panic!("placing {theirs:?}: {e}"));
+        }
+        // A name no near-miss above collides with, including on a
+        // case-insensitive filesystem, where `Norn-Shadow-1-0` and
+        // `norn-shadow-1-0` are one entry.
+        let residue = home.directory().join("norn-shadow-77-3");
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: our own residue.
+        std::fs::write(&residue, b"residue").expect("residue");
+
+        let swept = home.sweep(Duration::ZERO).expect("a total sweep");
+
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                left: 0
+            }
+        );
+        for theirs in NEAR_MISSES {
+            if theirs.is_empty() || theirs.contains('/') {
+                continue;
+            }
+            assert!(
+                scratch.exists(&home.directory().join(theirs)),
+                "the sweep removed {theirs:?}, which is not one of ours"
+            );
+        }
+        assert!(
+            !scratch.exists(&residue),
+            "our own residue survived a total sweep"
+        );
+    }
+
+    /// **The bar on the thresholded sweep.** A shadow younger than the threshold
+    /// survives, and the same shadow aged past it does not.
+    ///
+    /// The forbidden shape is an in-life sweep that removes whatever it finds: a
+    /// live write's shadow exists for the length of one document's write and
+    /// fsync, and a sweep that took it would make every concurrent write a race
+    /// against the maintenance schedule.
+    #[test]
+    fn a_thresholded_sweep_spares_a_shadow_younger_than_its_threshold() {
+        let scratch = Scratch::new("shadow-sweep-age");
+        let home = scratch.shadows();
+        let young = home.directory().join("norn-shadow-1-0");
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: a write in flight.
+        std::fs::write(&young, b"a live write's bytes").expect("a young shadow");
+
+        let spared = home.sweep(SHADOW_AGE_THRESHOLD).expect("an in-life sweep");
+        assert_eq!(
+            spared,
+            Swept {
+                removed: 0,
+                left: 1
+            }
+        );
+        assert!(
+            scratch.exists(&young),
+            "an in-life sweep took a shadow a live write could still be holding"
+        );
+
+        // The same shadow, aged past the threshold, is residue and goes. The age
+        // is arranged rather than waited for: ten minutes of a test's time buys
+        // nothing the timestamp does not.
+        let aged = std::time::SystemTime::now() - SHADOW_AGE_THRESHOLD - Duration::from_secs(60);
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        // Harness scaffolding: aging the residue.
+        std::fs::File::open(&young)
+            .expect("the shadow")
+            .set_times(std::fs::FileTimes::new().set_modified(aged))
+            .expect("aging the shadow");
+
+        let swept = home.sweep(SHADOW_AGE_THRESHOLD).expect("an in-life sweep");
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                left: 0
+            }
+        );
+        assert!(!scratch.exists(&young), "aged residue survived a sweep");
     }
 }

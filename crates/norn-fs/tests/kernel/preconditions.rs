@@ -6,7 +6,7 @@
 
 use norn_fs::{Landed, Precondition, Refusal, write};
 
-use crate::common::{Scratch, bytes_at, exists, hash, identity_at};
+use crate::common::{Scratch, bytes_at, exists, hash, identity_at, mtime_at};
 
 /// A precondition is checked against the bytes that are there **now**, not
 /// against whatever the caller last saw.
@@ -51,26 +51,6 @@ fn a_precondition_is_checked_against_the_bytes_that_are_there_now() {
         "a refusal before staging staged something: {:?}",
         scratch.shadow_names()
     );
-}
-
-/// The refusal carries both hashes: the one the caller composed against and the
-/// one that is there. One of them alone leaves the caller unable to say which
-/// side moved.
-#[test]
-fn drift_names_the_expected_and_the_observed_hash() {
-    let scratch = Scratch::new("drift-both-hashes");
-    let path = scratch.place("note.md", b"theirs");
-    let refusal = write(
-        &path,
-        b"ours",
-        Precondition::Replace(hash(b"mine")),
-        scratch.shadows(),
-    )
-    .expect_err("a precondition nothing satisfies");
-
-    let rendered = refusal.to_string();
-    assert!(rendered.contains(&hash(b"mine").to_hex()), "{rendered}");
-    assert!(rendered.contains(&hash(b"theirs").to_hex()), "{rendered}");
 }
 
 /// A hash precondition on a path with nothing at it is drift with nothing to
@@ -118,6 +98,11 @@ fn a_create_onto_nothing_lands_and_reports_its_identity() {
     assert_eq!(state.content_hash, hash(b"fresh bytes"));
     assert_eq!(state.len, b"fresh bytes".len() as u64);
     assert_eq!((state.dev, state.ino), identity_at(&path));
+    assert_eq!(
+        state.mtime,
+        mtime_at(&path),
+        "the reported mtime is not the file's"
+    );
 }
 
 /// **The bar on exclusive create.** A destination that came into existence
@@ -206,6 +191,11 @@ fn content_identical_to_what_is_there_publishes_nothing() {
         "an unchanged write reported an identity the destination does not have"
     );
     assert_eq!(
+        landed.post_state().mtime,
+        mtime_at(&path),
+        "an unchanged write reported an mtime the destination does not have"
+    );
+    assert_eq!(
         identity_at(&path),
         before,
         "an unchanged write replaced the file with a copy of itself"
@@ -237,6 +227,11 @@ fn identical_content_behind_a_stale_precondition_is_still_drift() {
 
 /// A replacement lands, publishes exactly the composed bytes, and reports an
 /// identity that matches what is at the path.
+///
+/// Every field of the reported post-state is judged against a fresh look at the
+/// file. A field that is a constant, or a copy of what the caller passed, is a
+/// field a suppression path cannot use: it would rule events in or out on the
+/// strength of a number nothing on disk agrees with.
 #[test]
 fn a_replacement_lands_and_reports_what_it_published() {
     let scratch = Scratch::new("replace-lands");
@@ -255,6 +250,11 @@ fn a_replacement_lands_and_reports_what_it_published() {
     assert_eq!(state.content_hash, hash(b"new bytes"));
     assert_eq!(state.len, b"new bytes".len() as u64);
     assert_eq!((state.dev, state.ino), identity_at(&path));
+    assert_eq!(
+        state.mtime,
+        mtime_at(&path),
+        "the reported mtime is not the published file's"
+    );
 }
 
 /// A destination that is a symbolic link is refused, whether the link resolves

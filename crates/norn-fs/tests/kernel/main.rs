@@ -10,10 +10,11 @@
 //! own — `tests/maintainer.rs` — because its cases spawn processes, and a case
 //! that spawns nothing should not wait on one that does.
 //!
-//! Two claims are checked from inside the crate rather than here, and both for
+//! Some claims are checked from inside the crate rather than here, and all for
 //! the same reason: they need a stage of the protocol to fail, or a foreign
 //! writer to land in a window one call wide. Those are `src/write.rs`'s own
-//! unit tests, which reach the injection seams this file cannot.
+//! unit tests, which reach the injection seams this file cannot — every identity
+//! confirmation, every cleanup arm, and the shadow name that is already taken.
 
 mod common;
 

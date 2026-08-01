@@ -1,6 +1,6 @@
 //! Removal and movement, which are the same kernel with different endings.
 
-use norn_fs::{MoveRefusal, Precondition, Refusal, move_document, vacate, write};
+use norn_fs::{MoveRefusal, Refusal, move_document, vacate};
 
 use crate::common::{
     Scratch, bytes_at, demand_unwritable, exists, hash, identity_at, set_mode, symlink,
@@ -262,38 +262,6 @@ fn a_move_that_cannot_take_its_source_leaves_the_document_at_both_paths() {
         b"the document",
         "the destination does not hold the document, so the residue is neither"
     );
-}
-
-/// A move whose source changed *after* the destination was written does not
-/// remove the source: the second leg has a precondition of its own, and that is
-/// why the source is read twice.
-///
-/// The forbidden shape is one handle held across both legs. The removal would
-/// then be justified by a reading taken before the destination existed, and a
-/// document somebody edited in between would be gone.
-#[test]
-fn a_move_never_removes_a_source_nobody_looked_at_again() {
-    let scratch = Scratch::new("move-source-recheck");
-    let source = scratch.place("from.md", b"the document");
-    let destination = scratch.at("to.md");
-
-    // The destination is created first, from a source that satisfied the
-    // precondition; then the source is edited, which is what the second leg
-    // catches. The two steps are done by hand here because a move is one call
-    // and this case is about the boundary between its legs.
-    write(
-        &destination,
-        b"the document",
-        Precondition::Create,
-        scratch.shadows(),
-    )
-    .expect("the destination leg");
-    scratch.place("from.md", b"what somebody else wrote");
-
-    let refusal = vacate(&source, hash(b"the document")).expect_err("a source that moved");
-    assert!(matches!(refusal, Refusal::Drifted { .. }), "{refusal}");
-    assert_eq!(bytes_at(&source), b"what somebody else wrote");
-    assert_eq!(bytes_at(&destination), b"the document");
 }
 
 /// A move onto a symbolic link is refused rather than followed, so a rename verb

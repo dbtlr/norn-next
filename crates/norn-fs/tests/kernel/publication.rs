@@ -1,8 +1,10 @@
 //! How a write becomes visible: the swap, and what it carries with it.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use norn_fs::{Precondition, Refusal, write};
 
@@ -54,9 +56,14 @@ fn a_replacement_publishes_a_new_file_rather_than_editing_the_old_one() {
 /// claim itself. It is here for what it would surface: a read that found a
 /// prefix, an absent path, or a shadow's name in the vault would fail loudly,
 /// and none of those is something the structural assertion can observe.
+///
+/// The reader looks up what it saw in a set and pauses between reads, and the
+/// round count is deliberately modest. A soak that spins at full speed over a
+/// linear scan spends its wall time proving nothing new — the interleavings it
+/// samples repeat long before the rounds do.
 #[test]
 fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
-    const ROUNDS: usize = 200;
+    const ROUNDS: usize = 50;
     let scratch = Scratch::new("swap-reader");
     let path = scratch.place("note.md", b"round 0");
     let contents: Vec<Vec<u8>> = (0..=ROUNDS)
@@ -67,7 +74,7 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
     let reader = {
         let path = path.clone();
         let writing = Arc::clone(&writing);
-        let known: Vec<Vec<u8>> = contents.clone();
+        let known: BTreeSet<Vec<u8>> = contents.iter().cloned().collect();
         thread::spawn(move || {
             let mut reads = 0usize;
             while writing.load(Ordering::Relaxed) {
@@ -79,6 +86,7 @@ fn a_reader_beside_a_stream_of_replacements_never_sees_a_partial_document() {
                     String::from_utf8_lossy(&seen)
                 );
                 reads += 1;
+                thread::sleep(Duration::from_micros(200));
             }
             reads
         })
@@ -154,8 +162,76 @@ fn a_replacement_carries_the_mode_forward_and_a_create_does_not() {
     );
 }
 
+/// **The bar on the bits that are not carried.** A document with the
+/// set-user-id or set-group-id bit set comes back with its permission bits and
+/// without those, because the file the write publishes is owned by whoever ran
+/// the write.
+///
+/// The forbidden shape is carrying the whole mode. A `04755` document owned by
+/// one user is replaced by a `04755` file owned by another, and "run as the
+/// file's owner" now names somebody who never asked for it — a privilege the
+/// document did not have before Norn touched it. Ownership itself cannot be
+/// carried at all, which is why dropping the bits is the only correct answer
+/// rather than a cautious one.
+#[test]
+fn a_replacement_carries_permission_bits_without_the_setuid_bits() {
+    let scratch = Scratch::new("mode-setuid");
+    let path = scratch.place("note.md", b"old");
+    set_mode(&path, 0o6755);
+    assert_eq!(
+        mode_at(&path),
+        0o6755,
+        "the filesystem did not keep the bits this case is about"
+    );
+
+    write(
+        &path,
+        b"new",
+        Precondition::Replace(hash(b"old")),
+        scratch.shadows(),
+    )
+    .expect("a replacement");
+
+    assert_eq!(
+        mode_at(&path),
+        0o755,
+        "the replacement carried a set-user-id or set-group-id bit onto a file it owns"
+    );
+}
+
+/// A destination nothing may write to is still replaced, and its mode comes
+/// forward with it.
+///
+/// Ordinary atomic-replace semantics: the rename needs the *directory*, and the
+/// file's own bits have nothing to say about it. Stated as a case so that a
+/// `chmod` on a document is not mistaken for protection against Norn — the
+/// protection a caller has is the hash precondition, which is the whole point of
+/// there being one.
+#[test]
+fn a_read_only_destination_is_still_replaced_with_its_mode_carried() {
+    let scratch = Scratch::new("mode-read-only");
+    let path = scratch.place("note.md", b"old");
+    set_mode(&path, 0o444);
+
+    write(
+        &path,
+        b"new",
+        Precondition::Replace(hash(b"old")),
+        scratch.shadows(),
+    )
+    .expect("a replacement of a read-only document");
+
+    assert_eq!(bytes_at(&path), b"new");
+    assert_eq!(mode_at(&path), 0o444);
+}
+
 /// A replacement into a directory nothing may write into refuses, and neither
 /// the destination nor the shadow home is left holding anything.
+///
+/// The refusal is reached after the shadow exists — the rename is what the
+/// directory's mode stops — so this is also the bar on cleanup after staging: a
+/// failure path that returned without cleaning up would leave a copy of the
+/// document in the shadow home on every refused write.
 ///
 /// `ENOSPC` reaches the same arm; a permission is what a test can arrange.
 #[test]

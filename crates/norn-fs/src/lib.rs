@@ -26,11 +26,20 @@
 //!   swap. [`vacate`] and [`move_document`] are the same kernel with different
 //!   endings.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
-//!   and why a leaked one is inert.
+//!   why a leaked one is inert, and the [sweep](ShadowHome::sweep) that bounds
+//!   what they cost.
 //! - [`lock`] — the per-vault maintainer lock: at most one host maintains a
 //!   vault's derived state, and that is the *only* thing it decides.
-//! - [`ContentHash`] and [`PostState`] — the hash that concludes, and the
-//!   identity a landed write reports.
+//! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
+//!   concludes, the one act that produces one from a file, and the identity a
+//!   landed write reports.
+//!
+//! **A vault's own mechanism files are part of that.** Norn keeps two per vault —
+//! the maintainer lock file and the shadow home — and both live in the machine's
+//! norn data directory rather than among documents, because a mechanism file in
+//! the vault tree gets committed, synced and indexed by tools that cannot know to
+//! ignore it. They are outside the vault and they are still this crate's: no other
+//! crate creates, reads, writes or sweeps them.
 //!
 //! # Two rejected shapes, named so they stay rejected
 //!
@@ -70,10 +79,12 @@ mod faults;
 mod hash;
 mod identity;
 mod refusal;
+#[cfg(test)]
+mod scratch;
 
-pub use hash::ContentHash;
+pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use refusal::Refusal;
-pub use shadow::{Placement, ShadowHome, is_shadow_name};
+pub use shadow::{Placement, ShadowHome, Swept, is_shadow_name};
 pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};

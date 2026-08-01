@@ -11,10 +11,17 @@
 //! costs one comparison; the in-crate suite passes a stage and an error and
 //! reads what the protocol did with it.
 //!
+//! The same shape carries the other half of what a test cannot arrange: a
+//! foreign writer landing inside a window one call wide. [`Window`] names those
+//! windows, and a disturbance is handed the window it is standing in.
+//!
 //! **The seam is deliberately small.** It names *where* a write can be made to
-//! fail and never *what happens next* — the answer to that is the code under
-//! test. The formal disk-full and process-kill bars are the lockdown layer's,
-//! and they inject through this same seam rather than growing a second one.
+//! fail or be disturbed, and never *what happens next* — the answer to that is
+//! the code under test. Both halves are `pub(crate)` and behind `cfg(test)`
+//! where they take a value, so nothing outside this crate injects through them
+//! today; a lockdown layer that wants the disk-full and process-kill bars widens
+//! this seam rather than growing a second one, and that widening is its decision
+//! to take.
 
 use std::io;
 
@@ -43,13 +50,36 @@ pub(crate) enum Stage {
     Cleanup,
 }
 
+/// A point in the protocol where a foreign actor's act can be made to land.
+///
+/// Each window is one call wide in a real run, which is why a test arranges it
+/// rather than races for it: the defense would otherwise be asserted instead of
+/// checked. The windows are the ones where something outside this process can
+/// make a statement the protocol is about to make untrue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Window {
+    /// A replacement's precondition is satisfied and nothing is staged yet.
+    Composed,
+    /// A create has claimed its name and has not filled it.
+    Claimed,
+    /// A removal's precondition is satisfied and the name has not been confirmed
+    /// to still resolve to the handle that was read.
+    Vacating,
+    /// A move's source has been read and the name has not been confirmed to
+    /// still resolve to the handle it was read through.
+    SourceRead,
+    /// A move's destination holds the document and its source has not been
+    /// removed yet.
+    BetweenLegs,
+}
+
 /// Which stages of a write fail, and how.
 ///
 /// A list rather than one entry, because two of the claims are about what
 /// happens when a *second* thing goes wrong: a swap that fails and then a
 /// cleanup that cannot happen either is the condition under which a shadow
 /// leaks, and it is unreachable if only one stage at a time can be made to fail.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Faults {
     injected: &'static [(Stage, io::ErrorKind)],
 }

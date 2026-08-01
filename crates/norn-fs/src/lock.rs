@@ -65,6 +65,13 @@
 //! error, because failing to parse a diagnostic is not a reason to fail an
 //! acquisition that already knows its answer.
 //!
+//! **Writing it is tolerant in the same direction.** A stamp that fails never
+//! fails the acquisition: exclusivity was won by `flock` and confirmed by the
+//! recheck before a byte was written, and a full data volume would otherwise
+//! leave no host able to maintain any vault at exactly the moment maintenance is
+//! what is needed. A body that was never written, or was written halfway, is one
+//! every reader already reports as an unknown incumbent.
+//!
 //! **`flock` is a local-filesystem guarantee.** On NFS it is emulated through
 //! the lock manager and on some configurations degrades to advisory-only or to
 //! nothing at all. The lock lives in the machine's own data directory, which is
@@ -76,7 +83,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::identity::{Identity, identity_of};
+use crate::identity::{Identity, identity_of, name_identity};
 use crate::refusal::{Refusal, environment};
 
 /// How many times the lock is taken before the file at the lock name is
@@ -92,7 +99,11 @@ pub const LOCK_ATTEMPTS: usize = 64;
 /// A reader that meets a number it does not know reports
 /// [`Incumbent::Unknown`]: the body is a diagnostic, so a newer writer's shape
 /// is a message this build cannot read rather than a state it must refuse.
-pub const BODY_VERSION: u32 = 1;
+///
+/// In-crate: the body is written and read here and nothing outside routes on it,
+/// so a number in another crate's hands could only be a second reader of a
+/// diagnostic.
+pub(crate) const BODY_VERSION: u32 = 1;
 
 /// The version a winner stamps into the lock body.
 const NORN_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,26 +117,32 @@ pub enum Acquisition {
     Contended { incumbent: Incumbent },
 }
 
-impl Acquisition {
-    /// The guard, or `None` when the lock was contended.
-    pub fn acquired(self) -> Option<Maintainership> {
-        match self {
-            Acquisition::Acquired(held) => Some(held),
-            Acquisition::Contended { .. } => None,
-        }
-    }
-}
-
 /// Maintainership of one vault, held for as long as this value lives.
 ///
 /// Dropping it releases the lock. **It does not remove the lock file**, which is
 /// what keeps the next acquirer's identity recheck a check of a stable name
 /// rather than a race against this one's cleanup.
+///
+/// # What holding this stops guaranteeing, and when
+///
+/// The lock is on the *file*, and exclusivity is the file's. So a foreign actor
+/// that unlinks the lock file and creates another at the same name **voids the
+/// exclusivity of a maintainership already held**: this handle still locks the
+/// file it took, and the next acquirer opens the new one and meets no contention.
+/// Nothing here can prevent it — the same act is what the acquisition-time
+/// recheck exists to survive, and after acquisition there is no moment to recheck
+/// at that is not arbitrary.
+///
+/// What there is instead is [`Maintainership::still_current`], which a host asks
+/// on its own health schedule. Its answer going false is a **health finding about
+/// the machine**, never grounds to take a lock away from anybody: a lock still
+/// held is a process still alive.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the lock handle.
 pub struct Maintainership {
     /// The lock file's handle. Dropping it releases the lock, which is why it is
-    /// held rather than discarded, and why nothing reads it.
-    _file: std::fs::File,
+    /// held rather than discarded; it is also what
+    /// [`Maintainership::still_current`] asks about the file it holds.
+    file: std::fs::File,
     path: PathBuf,
     identity: Identity,
 }
@@ -142,6 +159,24 @@ impl Maintainership {
     /// the path resolved to at the moment exclusivity became true.
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+
+    /// Whether the lock name still resolves to the file this maintainership is
+    /// held on.
+    ///
+    /// `false` means the exclusivity is gone: something removed or replaced the
+    /// lock file, so a second host acquiring at that name meets no contention and
+    /// two maintainers can believe they are the one. Norn does not do this to
+    /// itself — it never unlinks a lock file — so a `false` here is a report about
+    /// something else on the machine.
+    ///
+    /// **This is a health question and never a decision to steal.** There is
+    /// nothing to take: the other holder is holding a real lock on a real file.
+    /// What a host does with the answer is surface it.
+    pub fn still_current(&self) -> bool {
+        let held = self.file.metadata().map(|metadata| identity_of(&metadata));
+        held.is_ok_and(|held| held == self.identity)
+            && name_identity(&self.path).ok().flatten() == Some(self.identity)
     }
 }
 
@@ -228,27 +263,38 @@ impl fmt::Display for Incumbent {
 /// let waited = try_acquire(&std::path::PathBuf::from("/tmp/x.lock"), Duration::from_secs(5));
 /// ```
 pub fn try_acquire(path: &Path) -> Result<Acquisition, Refusal> {
-    try_acquire_where(path, |_| {})
+    try_acquire_where(path, |_| {}, stamp)
 }
 
 /// [`try_acquire`], with something allowed to happen between taking the lock
-/// and rechecking the name.
+/// and rechecking the name, and with the stamping made to fail.
 ///
 /// `disturb` is called with the attempt number at exactly the point the
 /// dead-inode hazard opens: the lock is held and the name has not been asked
 /// about yet. That is the only place a test can manufacture the hazard
 /// deterministically — waiting for it to happen by chance is a race nobody can
 /// arrange, and the defense would then be asserted rather than checked.
-fn try_acquire_where(path: &Path, mut disturb: impl FnMut(usize)) -> Result<Acquisition, Refusal> {
+///
+/// `stamp` is a parameter for the other half: a body this process cannot write is
+/// what a full data volume looks like, and the claim is that it changes nothing
+/// about the acquisition.
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the lock handle.
+fn try_acquire_where(
+    path: &Path,
+    mut disturb: impl FnMut(usize),
+    stamp: impl Fn(&std::fs::File, &Path) -> Result<(), Refusal>,
+) -> Result<Acquisition, Refusal> {
     prepare_directory(path)?;
     for attempt in 0..LOCK_ATTEMPTS {
-        let file = open_lock_file(path)?;
+        let mut file = open_lock_file(path)?;
         match file.try_lock() {
             Ok(()) => {}
             // Contention is the answer, not a failure.
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Ok(Acquisition::Contended {
-                    incumbent: read_body(path),
+                    // Through the handle that just met the contention, so the
+                    // body read is the body of the file that refused the lock.
+                    incumbent: read_body(&mut file),
                 });
             }
             // Anything else is the machine, and it travels as itself rather
@@ -268,9 +314,11 @@ fn try_acquire_where(path: &Path, mut disturb: impl FnMut(usize)) -> Result<Acqu
                 .map_err(|error| environment("reading the identity of", path, &error))?,
         );
         if name_identity(path)? == Some(held) {
-            stamp(&file, path)?;
+            // Best-effort, and the discard is the contract: exclusivity is
+            // already true and the body is a message for an operator.
+            let _ = stamp(&file, path);
             return Ok(Acquisition::Acquired(Maintainership {
-                _file: file,
+                file,
                 path: path.to_path_buf(),
                 identity: held,
             }));
@@ -311,16 +359,6 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File, Refusal> {
         .map_err(|error| environment("opening", path, &error))
 }
 
-/// The identity `path` resolves to now, or `None` when it resolves to nothing.
-#[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault stat.
-fn name_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(identity_of(&metadata))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(environment("reading the identity of", path, &error)),
-    }
-}
-
 /// Write this process's three diagnostic fields into the lock body.
 ///
 /// The body is replaced rather than appended to, and the file is truncated to
@@ -347,20 +385,27 @@ fn stamp(file: &std::fs::File, path: &Path) -> Result<(), Refusal> {
         .map_err(|error| environment("stamping", path, &error))
 }
 
-/// Read who holds the lock at `path`, tolerantly.
+/// Read who holds the lock, tolerantly, through the handle that met it.
+///
+/// **The handle rather than the name**, and for two reasons. It is the file that
+/// refused the lock, so the body read describes the holder that was actually met
+/// and not whatever the name has come to mean since. And it is the crate's one
+/// remaining by-name open removed: an open of the lock's name would follow a
+/// symbolic link planted at it, which is exactly what the acquiring open uses
+/// `O_NOFOLLOW` to refuse.
 ///
 /// Every failure is [`Incumbent::Unknown`]. The body is a diagnostic, and the
 /// caller already knows the answer to the question it asked — turning an
 /// unreadable message into an error would fail an acquisition over prose.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns the lock file.
-fn read_body(path: &Path) -> Incumbent {
-    let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(path) else {
+#[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns the lock file.
+fn read_body(file: &mut std::fs::File) -> Incumbent {
+    if file.seek(SeekFrom::Start(0)).is_err() {
         return Incumbent::Unknown;
-    };
+    }
     let mut bytes = Vec::new();
     // A body is four short lines. A file grown past that is not one of ours,
     // and reading all of it would be reading whatever somebody put there.
-    if Read::by_ref(&mut file)
+    if Read::by_ref(file)
         .take(4096)
         .read_to_end(&mut bytes)
         .is_err()
@@ -400,36 +445,21 @@ fn parse_body(text: &str) -> Incumbent {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
+    use crate::scratch::Scratch;
 
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-    struct Scratch(PathBuf);
-
-    impl Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: the directory this test works over.
-        fn new(label: &str) -> Scratch {
-            let root = std::env::temp_dir().join(format!(
-                "norn-fs-lock-{label}-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).expect("a scratch directory");
-            Scratch(root)
-        }
-
-        fn lock_path(&self) -> PathBuf {
-            self.0.join("vaults/notes/maintainer.lock")
-        }
+    /// The lock file a case works over: inside the norn data directory, keyed by
+    /// the vault.
+    fn lock_path(scratch: &Scratch) -> PathBuf {
+        scratch.path("data/vaults/notes/maintainer.lock")
     }
 
-    impl Drop for Scratch {
-        #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this test made.
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+    /// The guard, or a panic naming who has it. Callers of the real surface match
+    /// on the outcome; a case that only ever wants the guard says so once.
+    fn take(path: &Path) -> Maintainership {
+        match try_acquire(path).expect("an acquisition") {
+            Acquisition::Acquired(held) => held,
+            Acquisition::Contended { incumbent } => panic!("the lock is held by {incumbent}"),
         }
     }
 
@@ -444,29 +474,35 @@ mod tests {
     /// contention at all.
     #[test]
     fn a_lock_file_replaced_under_the_acquirer_is_not_settled_for() {
-        let scratch = Scratch::new("aba");
-        let path = scratch.lock_path();
+        let scratch = Scratch::new("lock-aba");
+        let path = lock_path(&scratch);
         prepare_directory(&path).expect("the lock's directory");
 
         let mut disturbed = Vec::new();
-        let acquisition = try_acquire_where(&path, |attempt| {
-            // A foreign actor — nothing in this crate ever removes a lock file —
-            // takes the name away and puts a different file at it. Once only, so
-            // the retry has a stable name to converge on.
-            if attempt == 0 {
-                #[allow(clippy::disallowed_methods)]
-                // Harness scaffolding: playing the foreign actor.
-                {
-                    std::fs::remove_file(&path).expect("removing the lock file");
-                    std::fs::write(&path, b"").expect("a replacement lock file");
+        let acquisition = try_acquire_where(
+            &path,
+            |attempt| {
+                // A foreign actor — nothing in this crate ever removes a lock
+                // file — takes the name away and puts a different file at it.
+                // Once only, so the retry has a stable name to converge on.
+                if attempt == 0 {
+                    #[allow(clippy::disallowed_methods)]
+                    // Harness scaffolding: playing the foreign actor.
+                    {
+                        std::fs::remove_file(&path).expect("removing the lock file");
+                        std::fs::write(&path, b"").expect("a replacement lock file");
+                    }
+                    disturbed.push(attempt);
                 }
-                disturbed.push(attempt);
-            }
-        })
+            },
+            stamp,
+        )
         .expect("an acquisition");
 
         assert_eq!(disturbed, vec![0], "the hazard was not manufactured");
-        let held = acquisition.acquired().expect("the lock");
+        let Acquisition::Acquired(held) = acquisition else {
+            panic!("a free lock was reported as contended");
+        };
         let current = name_identity(&path)
             .expect("the lock path")
             .expect("a lock file");
@@ -479,31 +515,78 @@ mod tests {
 
     /// Foreign interference that never stops is a refusal that names the bound,
     /// rather than a loop nobody can see.
+    ///
+    /// The bound is asserted as the number it is. Asserting it against its own
+    /// constant says only that the loop counts to whatever it counts to: a bound
+    /// of two would satisfy that and would refuse an ordinary acquisition racing
+    /// a busy machine.
     #[test]
     fn a_lock_file_replaced_on_every_attempt_refuses_at_the_bound() {
-        let scratch = Scratch::new("aba-forever");
-        let path = scratch.lock_path();
+        let scratch = Scratch::new("lock-aba-forever");
+        let path = lock_path(&scratch);
         prepare_directory(&path).expect("the lock's directory");
 
         let mut attempts = 0usize;
-        let refusal = try_acquire_where(&path, |_| {
-            attempts += 1;
-            #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
-            {
-                let _ = std::fs::remove_file(&path);
-                std::fs::write(&path, b"").expect("a replacement lock file");
-            }
-        })
+        let refusal = try_acquire_where(
+            &path,
+            |_| {
+                attempts += 1;
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign actor.
+                {
+                    let _ = std::fs::remove_file(&path);
+                    std::fs::write(&path, b"").expect("a replacement lock file");
+                }
+            },
+            stamp,
+        )
         .expect_err("a lock file that is never stable");
 
-        assert_eq!(attempts, LOCK_ATTEMPTS);
+        assert_eq!(attempts, 64, "the house bound is 64 attempts");
         assert_eq!(
             refusal,
             Refusal::LockFileReplaced {
                 path: path.clone(),
-                attempts: LOCK_ATTEMPTS
+                attempts: 64
             }
         );
+    }
+
+    /// **The bar on the stamp.** A body this process cannot write does not fail
+    /// an acquisition that has already won.
+    ///
+    /// The forbidden shape is propagating it. Exclusivity was decided by `flock`
+    /// and confirmed against the name before a byte was written, and the body is
+    /// a message for an operator — so a full data volume would otherwise leave no
+    /// host able to maintain any vault at exactly the moment maintenance is what
+    /// is needed. The reader already reports an unwritten body as an unknown
+    /// incumbent.
+    #[test]
+    fn a_stamp_that_cannot_be_written_still_yields_the_lock() {
+        let scratch = Scratch::new("lock-stamp");
+        let path = lock_path(&scratch);
+
+        let acquisition = try_acquire_where(
+            &path,
+            |_| {},
+            |_, path| {
+                Err(environment(
+                    "stamping",
+                    path,
+                    &std::io::Error::from_raw_os_error(libc::ENOSPC),
+                ))
+            },
+        )
+        .expect("an acquisition whose stamp failed");
+
+        let Acquisition::Acquired(held) = acquisition else {
+            panic!("a free lock was reported as contended");
+        };
+        assert_eq!(held.path(), path);
+        // And the unwritten body reads as the tolerant answer rather than as an
+        // error, which is what makes the discard safe.
+        let mut file = open_lock_file(&path).expect("the lock file");
+        assert_eq!(read_body(&mut file), Incumbent::Unknown);
     }
 
     /// The winner's three fields come back as the incumbent's, behind the
@@ -549,19 +632,19 @@ mod tests {
         }
     }
 
-    /// A stamped body is read back through the file, so the format the winner
-    /// writes is the format the reader parses. Two spellings of one format is
-    /// the drift this forbids.
+    /// A stamped body is read back through the acquisition that met it, so the
+    /// format the winner writes is the format the reader parses. Two spellings of
+    /// one format is the drift this forbids.
     #[test]
     fn the_body_a_winner_writes_is_the_body_a_reader_understands() {
-        let scratch = Scratch::new("round-trip");
-        let path = scratch.lock_path();
-        let held = try_acquire(&path)
-            .expect("an acquisition")
-            .acquired()
-            .expect("the lock");
+        let scratch = Scratch::new("lock-round-trip");
+        let path = lock_path(&scratch);
+        let _held = take(&path);
 
-        let Incumbent::Named { pid, version, .. } = read_body(held.path()) else {
+        let Acquisition::Contended { incumbent } = try_acquire(&path).expect("an attempt") else {
+            panic!("a held lock was taken twice");
+        };
+        let Incumbent::Named { pid, version, .. } = incumbent else {
             panic!("the stamped body did not read back as a named incumbent");
         };
         assert_eq!(pid, std::process::id());
@@ -573,8 +656,8 @@ mod tests {
     /// could take a field from each.
     #[test]
     fn stamping_leaves_no_tail_of_a_previous_body() {
-        let scratch = Scratch::new("tail");
-        let path = scratch.lock_path();
+        let scratch = Scratch::new("lock-tail");
+        let path = lock_path(&scratch);
         prepare_directory(&path).expect("the lock's directory");
         #[allow(clippy::disallowed_methods)]
         // Harness scaffolding: a previous holder's longer body.
@@ -584,14 +667,46 @@ mod tests {
         )
         .expect("a previous body");
 
-        let held = try_acquire(&path)
-            .expect("an acquisition")
-            .acquired()
-            .expect("the lock");
+        let held = take(&path);
         #[allow(clippy::disallowed_methods)] // Asserting on the bytes the stamp left.
         let bytes = std::fs::read(held.path()).expect("the lock body");
         let text = String::from_utf8(bytes).expect("text");
         assert!(!text.contains("extra"), "{text:?}");
         assert!(!text.contains("999999"), "{text:?}");
+    }
+
+    /// **The bar on a maintainership whose file was taken away.** A held lock
+    /// stops being exclusive when something outside the lifecycle unlinks the
+    /// lock file and creates another at its name, and the guard says so.
+    ///
+    /// The forbidden shape is a guard that reports itself current on the strength
+    /// of still existing. Two hosts then each hold a real lock on a different file
+    /// and each believes it is the maintainer, which is the one condition the lock
+    /// exists to prevent. Norn never does this to itself; what the answer is for is
+    /// a host's own health check, and its only use is to be surfaced — there is
+    /// nothing here to take away from anybody.
+    #[test]
+    fn a_maintainership_whose_lock_file_was_replaced_is_no_longer_current() {
+        let scratch = Scratch::new("lock-voided");
+        let path = lock_path(&scratch);
+        let held = take(&path);
+        assert!(
+            held.still_current(),
+            "a fresh maintainership is not current"
+        );
+
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
+        {
+            std::fs::remove_file(&path).expect("removing the lock file");
+            std::fs::write(&path, b"").expect("a replacement lock file");
+        }
+
+        assert!(
+            !held.still_current(),
+            "a maintainership on an inode the name no longer resolves to called itself current"
+        );
+        // And the proof that the exclusivity really is gone: the replacement is
+        // free to a second acquirer while this one still holds its file.
+        let _second = take(&path);
     }
 }

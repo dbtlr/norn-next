@@ -37,6 +37,11 @@ pub enum Refusal {
     /// drift with no content to describe, and it is a refusal rather than a
     /// success, because the intent behind the write was derived from bytes that
     /// somebody has since removed.
+    ///
+    /// A destination that was there when the call began and is gone by the time
+    /// the name is confirmed reaches this same arm, and deliberately: it is one
+    /// real-world event — the document was removed — and a caller re-planning
+    /// against absence should not have to match two variants to hear about it.
     Drifted {
         path: PathBuf,
         /// The hash the caller observed and composed its content against.
@@ -59,14 +64,15 @@ pub enum Refusal {
     /// published. The identity comparison is what catches it, and this is what
     /// it reports.
     ///
-    /// `current` is `None` when the name resolves to nothing at all, which is
-    /// the same event with the replacement half missing.
+    /// **A name that resolves to nothing is [`Refusal::Drifted`], not this.**
+    /// This variant is the replacement — one file for another — so `current`
+    /// always names the file that displaced the one that was read.
     Republished {
         path: PathBuf,
         /// The file the bytes were read from.
         read: Identity,
         /// The file the name means now.
-        current: Option<Identity>,
+        current: Identity,
     },
     /// A create found the destination already taken.
     ///
@@ -146,19 +152,10 @@ impl fmt::Display for Refusal {
             Refusal::Republished {
                 path,
                 read,
-                current: Some(current),
+                current,
             } => write!(
                 f,
                 "{} named {read} when it was read and names {current} now",
-                path.display()
-            ),
-            Refusal::Republished {
-                path,
-                read,
-                current: None,
-            } => write!(
-                f,
-                "{} named {read} when it was read and names nothing now",
                 path.display()
             ),
             Refusal::DestinationExists { path } => {
