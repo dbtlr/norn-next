@@ -495,9 +495,23 @@ fn create_destination(
 /// publish landing between the comparison and the removal is removed anyway.
 /// That window is one call wide and nothing widens it. The claim this arm makes
 /// is exact — **it never removes what this call did not create** — and the price
-/// is the other direction: a cleanup that is skipped or that the filesystem
-/// blocks leaves this call's own bytes, complete or partial, at a name that had
-/// nothing at it.
+/// is the other direction, in the three shapes a cleanup that does not remove
+/// takes. They leave different things behind, so they are stated separately:
+///
+/// - **A removal the filesystem blocks** leaves this call's own bytes, complete
+///   or partial, at a name that had nothing at it.
+/// - **A removal skipped because the name no longer resolves to the file this
+///   call created** leaves the foreign document that displaced it. The rename
+///   that published that document unlinked this call's file on its way, so this
+///   call's bytes are on an orphaned inode nothing can reach rather than at the
+///   name.
+/// - **A removal never attempted**, because the identity the comparison needs is
+///   what could not be read. The `fstat` on the freshly claimed handle is that
+///   failure: it refuses before a byte of content goes in, and it reaches the
+///   cleanup arm with no proof of which file this call made, so the name is left
+///   as it stands — the empty file `create_new` claimed, unless somebody has
+///   since taken the name. Unlinking by name without the proof is exactly what
+///   this arm promises never to do.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn create_exclusively(
     destination: &Path,
@@ -523,18 +537,30 @@ fn create_exclusively(
         Err(error) => return Err(environment("creating", destination, &error)),
     };
     // Read from the handle, so it is the identity of the file the exclusive open
-    // just made and not of whatever the name means by the time cleanup runs.
-    let claimed = identity_of(&observed_metadata(&file, destination)?);
+    // just made and not of whatever the name means by the time cleanup runs. A
+    // read that fails is a refusal like any other rather than an early return:
+    // the name is claimed by now, so every failure past this point goes through
+    // the one cleanup arm below.
+    let claimed = observed_metadata(&file, destination).map(|metadata| identity_of(&metadata));
 
     disturb(Window::Claimed);
-    let filled = fill(&mut file, content, destination, faults);
-    let state = filled.and_then(|()| observed_metadata(&file, destination));
+    let state = match &claimed {
+        // No content goes into a file whose own identity could not be read: the
+        // refusal is the same either way, and filling first would only widen
+        // what is left at the name.
+        Err(refusal) => Err(refusal.clone()),
+        Ok(_) => fill(&mut file, content, destination, faults)
+            .and_then(|()| observed_metadata(&file, destination))
+            .map(|metadata| post_state(composed, content.len() as u64, &metadata)),
+    };
     let state = match state {
-        Ok(metadata) => post_state(composed, content.len() as u64, &metadata),
+        Ok(state) => state,
         Err(refusal) => {
             // A file this call created and could not finish is a file this call
-            // takes back — and nothing else is.
-            remove_if_still_claimed(destination, claimed, faults);
+            // takes back — and nothing else is. The identity read off the handle
+            // is the proof of which file that is, so the arm that could not read
+            // one takes nothing back.
+            remove_if_still_claimed(destination, claimed.ok(), faults);
             return Err(refusal);
         }
     };
@@ -702,6 +728,9 @@ fn open_named_shadow(
             Err(error) => return Err(environment("creating", &shadow, &error)),
         }
     }
+    // Reaching here means every attempt met a taken name, and each of those
+    // recorded its refusal. NAME_ATTEMPTS is a non-zero constant, so the loop ran
+    // at least once and the value is there.
     Err(last.expect("a bound of at least one attempt"))
 }
 
@@ -762,8 +791,8 @@ fn carry_mode_forward(file: &std::fs::File, replaced: &std::fs::Metadata) {
     let _ = file.set_permissions(std::fs::Permissions::from_mode(permissions));
 }
 
-/// A fresh create takes the umask's defaults, because there is nothing to
-/// preserve.
+/// Off unix there are no permission bits to carry, so a staged shadow keeps
+/// whatever mode it was created with and this does nothing.
 #[cfg(not(unix))]
 #[allow(clippy::disallowed_types)]
 fn carry_mode_forward(_file: &std::fs::File, _replaced: &std::fs::Metadata) {}
@@ -985,7 +1014,7 @@ fn remove_quietly(path: &Path, faults: Faults) {
 }
 
 /// Remove a name a create claimed, but only while it still resolves to
-/// `claimed`.
+/// `claimed` — and never at all when there is no `claimed` to compare against.
 ///
 /// Same swallowed failure as [`remove_quietly`], and one question more. A shadow
 /// has a name nothing else computes, so removing it by name is removing this
@@ -993,8 +1022,16 @@ fn remove_quietly(path: &Path, faults: Faults) {
 /// to everybody who writes there, so the file is identified before it is removed:
 /// a foreign writer that published over the name between this call's failure and
 /// this line is a document this call must not delete.
+///
+/// **The identity is the proof, so `None` removes nothing.** A create whose own
+/// `fstat` failed knows the name is claimed and not which file the name means,
+/// and the fallback an unlink by name would be is the very thing the comparison
+/// exists to prevent.
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns vault paths.
-fn remove_if_still_claimed(path: &Path, claimed: Identity, faults: Faults) {
+fn remove_if_still_claimed(path: &Path, claimed: Option<Identity>, faults: Faults) {
+    let Some(claimed) = claimed else {
+        return;
+    };
     if faults.check(Stage::Cleanup).is_err() {
         return;
     }
@@ -1302,6 +1339,135 @@ mod tests {
             scratch.read(&path),
             b"",
             "the blocked cleanup ran anyway, so the seam is not what stopped it"
+        );
+    }
+
+    /// **The bar on a cleanup with no proof of what to remove.** A create that
+    /// could not read the identity of the file it claimed removes nothing, so
+    /// whatever the name means is left alone.
+    ///
+    /// Driven at the cleanup itself, because the failure that reaches it this way
+    /// is an `fstat` of a handle the kernel has just handed back. The forbidden
+    /// shape is falling back to an unlink by name when there is no identity to
+    /// compare: the name is the one thing a foreign writer can have taken over in
+    /// the meantime, which is why the comparison exists at all.
+    #[test]
+    fn a_cleanup_with_no_identity_proof_removes_nothing() {
+        let scratch = Scratch::new("write-cleanup-unproven");
+        let path = scratch.place("fresh.md", b"a foreign document");
+
+        remove_if_still_claimed(&path, None, Faults::NONE);
+
+        assert_eq!(
+            scratch.read(&path),
+            b"a foreign document",
+            "a cleanup with no identity to compare against removed a file by name"
+        );
+    }
+
+    /// **The bar on a create whose destination cannot be opened.** A create that
+    /// fails at the open refuses environmentally and claims nothing.
+    ///
+    /// `EACCES` on the destination's directory is the case this stands in for. The
+    /// forbidden shape is a refusal that reads as a precondition failure, which
+    /// would have a caller re-plan against drift that never happened — and a name
+    /// left behind, which is what an open that half-succeeded would be.
+    #[test]
+    fn a_create_that_cannot_be_opened_claims_nothing() {
+        let scratch = Scratch::new("write-create-open");
+        let path = scratch.at("fresh.md");
+        let refusal = write_where(
+            &path,
+            b"fresh",
+            Precondition::Create,
+            scratch.shadows(),
+            Faults::at(&[(Stage::Create, std::io::ErrorKind::PermissionDenied)]),
+        )
+        .expect_err("a create whose open fails");
+
+        assert!(
+            matches!(
+                &refusal,
+                Refusal::Environment { operation, kind, .. }
+                    if *operation == "creating"
+                        && *kind == std::io::ErrorKind::PermissionDenied
+            ),
+            "{refusal}"
+        );
+        assert!(
+            !scratch.exists(&path),
+            "a create that never opened left something at the name"
+        );
+
+        // And the same stage on the replacement path, where the open being
+        // refused is the shadow's: the destination keeps its bytes and no shadow
+        // is staged to leak.
+        let document = scratch.place("note.md", b"old");
+        let refusal = write_where(
+            &document,
+            b"new",
+            Precondition::Replace(ContentHash::of(b"old")),
+            scratch.shadows(),
+            Faults::at(&[(Stage::Create, std::io::ErrorKind::PermissionDenied)]),
+        )
+        .expect_err("a replacement whose shadow cannot be opened");
+
+        assert!(
+            matches!(&refusal, Refusal::Environment { operation, .. } if *operation == "creating"),
+            "{refusal}"
+        );
+        assert_eq!(
+            scratch.read(&document),
+            b"old",
+            "the destination was touched"
+        );
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was left behind"
+        );
+    }
+
+    /// **The bar on the shadow-name bound.** A shadow home in which every name
+    /// this write is handed is already taken refuses at the bound, with the
+    /// refusal the last open gave.
+    ///
+    /// The forbidden shape is a loop that does not end — a directory somebody is
+    /// filling would hang the write rather than report the home as unusable — and
+    /// the other one is a panic at the bound, which is a failed write taking the
+    /// process with it.
+    #[test]
+    fn a_shadow_home_whose_every_name_is_taken_refuses_at_the_bound() {
+        let scratch = Scratch::new("write-shadow-exhausted");
+        let mut tried: Vec<PathBuf> = Vec::new();
+
+        let refusal = open_named_shadow(
+            &mut || {
+                let taken = scratch
+                    .shadows()
+                    .directory()
+                    .join(format!("norn-shadow-1-{}", tried.len()));
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: a home somebody else is filling.
+                std::fs::write(&taken, b"somebody else's bytes").expect("a taken name");
+                tried.push(taken.clone());
+                taken
+            },
+            Faults::NONE,
+        )
+        .expect_err("a home in which every name is taken");
+
+        assert_eq!(tried.len(), 64, "the house bound is 64 attempts");
+        assert_eq!(NAME_ATTEMPTS, 64, "the bound the write counts to moved");
+        let last = tried.last().expect("a name tried");
+        assert!(
+            matches!(
+                &refusal,
+                Refusal::Environment { operation, kind, path, .. }
+                    if *operation == "creating"
+                        && *kind == std::io::ErrorKind::AlreadyExists
+                        && path == last
+            ),
+            "the refusal is not the last open's: {refusal}"
         );
     }
 

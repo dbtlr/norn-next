@@ -20,9 +20,14 @@
 //! after claiming takes the name back, and **never removes what it did not
 //! create** — the file is identified before it is removed, so a foreign document
 //! published at that name in the meantime survives. What that costs is the other
-//! direction: a cleanup the filesystem blocks, or one skipped because the name no
-//! longer means this call's file, leaves this call's own bytes — complete or
-//! partial — at a name that had nothing at it.
+//! direction, and it reads differently depending on why the name was not taken
+//! back. A cleanup the filesystem blocks, or one with no identity to compare
+//! against, leaves this call's own file — holding the content, a prefix of it, or
+//! none of it yet — at a name that had nothing at it. A cleanup skipped because
+//! the name no longer means this
+//! call's file leaves the foreign document that displaced it: the rename that
+//! published that document unlinked this call's file on its way, so these bytes
+//! are on an orphaned inode rather than at the name.
 //!
 //! Mapping a refusal onto the wire's structured envelope belongs to whoever
 //! serves it. What is here is the engineering fact: which path, and what about
@@ -113,7 +118,8 @@ pub enum Refusal {
     /// The invariant across every one of them is the module's: a replacement's
     /// destination is **byte-identical to what it held before the call** with at
     /// most a shadow left behind, and a create's is a name this call either took
-    /// back or left holding its own bytes.
+    /// back, left holding its own bytes, or left to the foreign document that
+    /// displaced them.
     Environment {
         /// What was being attempted, in words that complete "… failed".
         operation: &'static str,
