@@ -30,6 +30,10 @@
 //!   what they cost.
 //! - [`lock`] — the per-vault maintainer lock: at most one host maintains a
 //!   vault's derived state, and that is the *only* thing it decides.
+//! - [`walk`] — the streaming, deterministic filesystem inventory, typed skip
+//!   notations, and the one-open/one-read content observation.
+//! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
+//!   by walks today and watcher invalidation roots next.
 //! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
 //!   concludes, the one act that produces one from a file, and the identity a
 //!   landed write reports.
@@ -72,7 +76,9 @@
 //! that mount provides rather than the ones stated here.
 
 pub mod lock;
+pub mod path;
 pub mod shadow;
+pub mod walk;
 pub mod write;
 
 mod faults;
@@ -85,6 +91,11 @@ mod scratch;
 pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
+pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
 pub use refusal::Refusal;
 pub use shadow::{Placement, ShadowHome, Swept, is_shadow_name};
+pub use walk::{
+    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
+    WalkFact, walk,
+};
 pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};
