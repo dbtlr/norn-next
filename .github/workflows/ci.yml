@@ -43,6 +43,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       # The toolchain comes from rust-toolchain.toml, which rustup honors.
       - name: Show toolchain
         run: |
@@ -58,6 +60,28 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
+  # A targeted second-architecture gate. The default build already runs the
+  # full workspace on Linux x86_64; this job holds the two contracts whose
+  # answers can otherwise drift with architecture or filesystem behavior
+  # without paying to duplicate that entire suite. Pin the image rather than
+  # following macos-latest, and assert the machine architecture so a future
+  # runner-label migration refuses instead of silently weakening the gate.
+  platform:
+    name: determinism and filesystem (macOS ARM64)
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Assert architecture
+        run: test "$(uname -m)" = arm64
+      - uses: Swatinem/rust-cache@v2
+      - name: Embedding determinism
+        run: cargo test --locked -p norn-embed --test determinism
+      - name: Filesystem contracts
+        run: cargo test --locked -p norn-fs
+
   # The architecture gate: it reads `cargo metadata` once per entry in the
   # pinned feature matrix and asserts the workspace normal-dependency graph
   # against the allowlist in docs/architecture.md; it asserts the transcribed
@@ -71,6 +95,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Gate
         run: cargo test --locked -p norn-testkit --test architecture
@@ -129,6 +155,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Memory bars
         run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
