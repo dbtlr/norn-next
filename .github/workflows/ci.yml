@@ -131,3 +131,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Memory bars
         run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
+      - name: Walker memory bars
+        run: .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
