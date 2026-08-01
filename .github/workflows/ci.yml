@@ -43,6 +43,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       # The toolchain comes from rust-toolchain.toml, which rustup honors.
       - name: Show toolchain
         run: |
@@ -70,6 +72,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Assert architecture
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
@@ -91,6 +95,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Gate
         run: cargo test --locked -p norn-testkit --test architecture
@@ -149,6 +155,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Memory bars
         run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1

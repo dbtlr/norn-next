@@ -73,6 +73,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Determinism at the soak profile
         run: .github/scripts/lane-suite.sh norn-fixtures determinism
