@@ -9,9 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
-use norn_host::{
-    Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
-};
+use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
 use norn_wire::TrustState;
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
@@ -97,7 +95,11 @@ fn run_probe() {
         "descriptor cost changed across attach cycles"
     );
     detach_and_wait(&host, &fixture.name);
-    assert_eq!(open_fd_count(), baseline, "repeat detach retained descriptors");
+    assert_eq!(
+        open_fd_count(),
+        baseline,
+        "repeat detach retained descriptors"
+    );
 }
 
 fn attach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
@@ -106,7 +108,8 @@ fn attach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
 }
 
 fn detach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    host.reap_idle(Instant::now()).expect("schedule idle detach");
+    host.reap_idle(Instant::now())
+        .expect("schedule idle detach");
     wait_for_state(host, name, TrustState::Unattached);
 }
 
@@ -181,6 +184,7 @@ impl Fixture {
             LifecyclePolicy {
                 idle_after: Duration::ZERO,
                 worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(5),
             },
         )
         .expect("host")
