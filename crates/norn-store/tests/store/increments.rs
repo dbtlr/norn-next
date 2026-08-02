@@ -31,6 +31,46 @@ fn death(at: &str, provenance: Provenance) -> Change {
     }
 }
 
+#[test]
+fn stored_document_pages_are_bounded_ordered_and_exclusive() {
+    let scratch = Scratch::new("document-pages");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("c.md", "hash-c", "c\n"),
+            document("a.md", "hash-a", "a\n"),
+            document("b.md", "hash-b", "b\n"),
+        ],
+    );
+
+    let first = request
+        .stored_documents_after(None, 2)
+        .expect("the first page");
+    assert_eq!(
+        first
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.md", "b.md"]
+    );
+    let second = request
+        .stored_documents_after(Some(&first[1].path), 2)
+        .expect("the second page");
+    assert_eq!(
+        second
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["c.md"]
+    );
+    assert!(matches!(
+        request.stored_documents_after(None, 0),
+        Err(StoreError::Bound { .. })
+    ));
+}
+
 /// **One generation stamps every row a changeset wrote.** Generations order
 /// writes in the store, and a changeset is one write however many documents it
 /// names — so a reader comparing generations sees it arrive at an instant rather

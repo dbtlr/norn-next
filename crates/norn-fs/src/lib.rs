@@ -90,7 +90,7 @@ mod refusal;
 mod scratch;
 
 pub use hash::{ContentHash, hashed_from};
-pub use identity::{Identity, PostState};
+pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
 pub use refusal::Refusal;

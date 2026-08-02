@@ -530,6 +530,40 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page of document rows in normalized path order.
+    ///
+    /// `after` is exclusive, so a caller can advance it only after committing
+    /// the work derived from the returned page. This is the store half of a
+    /// streaming heal merge: callers never need a vault-sized path map.
+    pub fn stored_documents_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
+        const MAX_PAGE: usize = 1024;
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a stored-document page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        let limit = i64::try_from(limit).expect("the page bound fits i64");
+        let after = after.map(DocumentPath::as_str);
+        Self::read_all(
+            &self.store.connection,
+            "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+                    frontmatter_diagnostic_count, generation, derived_at
+             FROM documents
+             WHERE (?1 IS NULL OR path > ?1)
+             ORDER BY path
+             LIMIT ?2",
+            params![after, limit],
+            |row| stored_document(row, 0),
+            "reading the stored-document page",
+        )
+    }
+
     /// One document's row, its body, and every fact row derived from it, in
     /// ordinal order.
     ///
