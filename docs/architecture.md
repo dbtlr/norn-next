@@ -519,8 +519,11 @@ graph LR
 
 Placement notes:
 
-- The per-vault flock primitive lives in `norn-fs`; the host applies it per entry,
-  flock-then-bind.
+- The per-vault flock primitive lives in `norn-fs`; the host applies it lazily
+  per entry, **flock-then-attach**. A contended vault refuses without preventing
+  the process from serving unrelated registry entries. The channel-scoped
+  listening socket is `norn-serve`'s independent process-level concern; a
+  per-vault maintainer lock never gates it.
 - Disposable derivation for unregistered roots is a host attach mode over a throwaway store.
 - The first-run janitor that clears orphaned legacy cache directories is a host startup task
   over machine-local paths.
