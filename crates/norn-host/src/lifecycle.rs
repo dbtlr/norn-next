@@ -32,8 +32,9 @@ pub trait EntryOps: Send + Sync + 'static {
     type Attachment: Send + 'static;
 
     /// Acquire maintainership, establish watcher coverage, and only then run
-    /// the full hash-authoritative heal. An implementation must drain facts
-    /// observed during healing before returning the Ready-capable attachment.
+    /// one full hash-authoritative heal. After this returns, the lifecycle
+    /// performs one nonblocking [`EntryOps::poll`] before it may publish Ready;
+    /// raced and continuing facts then use ordinary coalesced reconciliation.
     fn attach(
         &self,
         name: &VaultName,
@@ -697,6 +698,10 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = None;
                     state.pending = Batch::default();
                     state.trust = TrustState::Unattached;
+                }
+                Err(JobFailure::WatcherTerminal(_)) => {
+                    state.terminal_watcher = true;
+                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
                 }
                 Err(_) => {
                     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
