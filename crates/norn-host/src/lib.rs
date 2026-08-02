@@ -14,7 +14,9 @@ pub use lifecycle::{
     Demand, DemandLease, EntryOps, Host, HostError, JobFailure, LifecyclePolicy, ProgressReporter,
     ReconcileWork,
 };
-pub use production::{ProductionEntryOps, ProductionPolicy, ProductionPolicyError};
+pub use production::{
+    MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
+};
 pub use registry::{AliasConflict, ServingRegistry};
 
 // These imports are boundary witnesses. The concrete substrate adapter lands

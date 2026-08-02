@@ -17,6 +17,9 @@ use norn_wire::MaintainerIdentity;
 
 use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
 
+/// Maximum number of document changes materialized for one store transaction.
+pub const MAX_CHANGESET_SIZE: usize = 1024;
+
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct ProductionPolicy {
@@ -34,8 +37,8 @@ impl ProductionPolicy {
         if store_page_size == 0 || store_page_size > norn_store::MAX_STORED_DOCUMENT_PAGE {
             return Err(ProductionPolicyError::StorePageSize(store_page_size));
         }
-        if changeset_size == 0 {
-            return Err(ProductionPolicyError::ChangesetSize);
+        if changeset_size == 0 || changeset_size > MAX_CHANGESET_SIZE {
+            return Err(ProductionPolicyError::ChangesetSize(changeset_size));
         }
         Ok(Self {
             store_page_size,
@@ -47,7 +50,7 @@ impl ProductionPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductionPolicyError {
     StorePageSize(usize),
-    ChangesetSize,
+    ChangesetSize(usize),
 }
 
 impl fmt::Display for ProductionPolicyError {
@@ -58,7 +61,10 @@ impl fmt::Display for ProductionPolicyError {
                 "store page size must be between 1 and {}, got {given}",
                 norn_store::MAX_STORED_DOCUMENT_PAGE
             ),
-            Self::ChangesetSize => f.write_str("changesets must be non-empty"),
+            Self::ChangesetSize(given) => write!(
+                f,
+                "changeset size must be between 1 and {MAX_CHANGESET_SIZE}, got {given}"
+            ),
         }
     }
 }
@@ -744,6 +750,20 @@ mod tests {
         assert!(matches!(
             ProductionPolicy::new(norn_store::MAX_STORED_DOCUMENT_PAGE + 1, 1),
             Err(ProductionPolicyError::StorePageSize(1025))
+        ));
+    }
+
+    #[test]
+    fn production_policy_enforces_the_changeset_allocation_bound() {
+        assert!(matches!(
+            ProductionPolicy::new(1, 0),
+            Err(ProductionPolicyError::ChangesetSize(0))
+        ));
+        assert!(ProductionPolicy::new(1, MAX_CHANGESET_SIZE).is_ok());
+        assert!(matches!(
+            ProductionPolicy::new(1, MAX_CHANGESET_SIZE + 1),
+            Err(ProductionPolicyError::ChangesetSize(given))
+                if given == MAX_CHANGESET_SIZE + 1
         ));
     }
 
