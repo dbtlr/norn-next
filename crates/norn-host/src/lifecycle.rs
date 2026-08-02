@@ -163,6 +163,7 @@ struct EntryState<A> {
     attachment: Option<A>,
     pending: Batch,
     recovery_required: bool,
+    identity_refused: bool,
     runnable: bool,
     queued: bool,
     active_epoch: Option<u64>,
@@ -267,6 +268,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.pending_dispatch = None;
         state.pending = Batch::default();
         state.recovery_required = false;
+        state.identity_refused = false;
         state.duplicate_root = Some(conflict.clone());
         state.trust = TrustState::Unattached;
         if state.active_epoch.is_none() && !state.detach_in_flight {
@@ -282,25 +284,61 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     }
 }
 
+fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
+    let Some(entry) = shared.entries.get(name) else {
+        return;
+    };
+    let attachment = {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        state.epoch += 1;
+        state.queued = false;
+        state.pending_dispatch = None;
+        state.pending.merge(Batch::rescan(RescanScope::Vault));
+        state.recovery_required = true;
+        state.identity_refused = true;
+        state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+        if state.active_epoch.is_none() && !state.detach_in_flight {
+            state.runnable = false;
+            state.attachment.take()
+        } else {
+            None
+        }
+    };
+    if let Some(attachment) = attachment {
+        shared.ops.detach(name, attachment);
+    }
+}
+
 fn recheck_and_refuse<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     name: &VaultName,
 ) -> Result<Option<AliasConflict>, HostError> {
-    if shared
-        .registry
-        .recheck(name)
-        .map_err(|_| HostError::WorkerStopped)?
-        .is_none()
-    {
+    if let Ok(None) = shared.registry.recheck(name) {
+        if let Some(entry) = shared.entries.get(name) {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .identity_refused = false;
+        }
         return Ok(None);
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
-    let conflict = shared
-        .registry
-        .recheck(name)
-        .map_err(|_| HostError::WorkerStopped)?;
+    let conflict = match shared.registry.recheck(name) {
+        Ok(conflict) => conflict,
+        Err(_) => {
+            refuse_identity_error(shared, name);
+            return Ok(None);
+        }
+    };
     if let Some(conflict) = &conflict {
         refuse_conflict(shared, conflict);
+    } else if let Some(entry) = shared.entries.get(name) {
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .identity_refused = false;
     }
     Ok(conflict)
 }
@@ -436,6 +474,7 @@ impl<O: EntryOps> Host<O> {
                             attachment: None,
                             pending: Batch::default(),
                             recovery_required: false,
+                            identity_refused: false,
                             runnable: false,
                             queued: false,
                             active_epoch: None,
@@ -553,7 +592,8 @@ impl<O: EntryOps> Host<O> {
         let schedule = matches!(
             state.trust,
             TrustState::Unattached | TrustState::Untrusted { .. }
-        ) && !state.runnable;
+        ) && !state.runnable
+            && !state.identity_refused;
         if schedule {
             state.runnable = true;
             state.trust = TrustState::warming(0, None);
@@ -759,6 +799,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 && state.attachment.is_none()
                 && !state.runnable
                 && state.duplicate_root.is_none()
+                && !state.identity_refused
             {
                 state.trust = TrustState::warming(0, None);
                 state.epoch += 1;
@@ -900,6 +941,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
                     state.recovery_required = false;
+                    state.identity_refused = false;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
                     if state.pending.is_empty() {
@@ -1133,7 +1175,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             state.detach_due = false;
             state.detach_scheduled = false;
             state.trust = TrustState::Unattached;
-            if state.demand_leases > 0 && state.duplicate_root.is_none() {
+            if state.demand_leases > 0 && state.duplicate_root.is_none() && !state.identity_refused
+            {
                 state.runnable = true;
                 state.trust = TrustState::warming(0, None);
                 state.epoch += 1;
@@ -1908,6 +1951,75 @@ mod tests {
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         drop((refused, a_lease, b_lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_recheck_refusal_invalidates_and_detaches_a_live_entry() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-identity-refusal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new(&root).unwrap(),
+        )])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_poll.store(true, Ordering::SeqCst);
+        while !ops.poll_started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+
+        std::fs::remove_dir(&root).unwrap();
+        symlink("root", &root).unwrap();
+        let demand = host.demand(&name).unwrap();
+        assert_eq!(
+            demand.completion(),
+            Demand::State(TrustState::untrusted(
+                UntrustedReason::environmental_refusal()
+            ))
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        ops.poll_release.store(true, Ordering::SeqCst);
+        for _ in 0..200 {
+            if ops.detaches.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(
+                UntrustedReason::environmental_refusal()
+            ))
+        );
+        drop((demand, host));
         let _ = std::fs::remove_dir_all(base);
     }
 
