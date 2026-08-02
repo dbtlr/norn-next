@@ -5,6 +5,32 @@ use std::path::{Path, PathBuf};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::refusal::{Refusal, environment};
 
+/// What kind of filesystem object a watcher invalidation root names now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathKind {
+    Missing,
+    RegularFile,
+    Directory,
+    Other,
+}
+
+#[allow(clippy::disallowed_methods)]
+pub fn path_kind(path: &Path) -> Result<PathKind, Refusal> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(PathKind::Missing),
+        Err(error) => return Err(environment("stating", path, &error)),
+    };
+    let kind = metadata.file_type();
+    Ok(if kind.is_file() {
+        PathKind::RegularFile
+    } else if kind.is_dir() {
+        PathKind::Directory
+    } else {
+        PathKind::Other
+    })
+}
+
 /// Bytes and their content hash from one read of one held file descriptor.
 #[derive(Clone, Debug)]
 pub struct ReadAndHash {

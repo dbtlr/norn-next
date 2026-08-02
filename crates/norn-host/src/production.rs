@@ -355,6 +355,20 @@ fn scoped_increment(
     let mut changes = Vec::with_capacity(policy.changeset_size);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
+        match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
+            norn_fs::PathKind::Directory => {
+                commit(store, &mut changes)?;
+                heal_subtree(store, root, path, policy, progress)?;
+                continue;
+            }
+            norn_fs::PathKind::Missing if !is_markdown(path) => {
+                commit(store, &mut changes)?;
+                prune_subtree(store, path, policy, progress)?;
+                continue;
+            }
+            norn_fs::PathKind::Other => continue,
+            norn_fs::PathKind::RegularFile | norn_fs::PathKind::Missing => {}
+        }
         if !is_markdown(path) {
             continue;
         }
@@ -385,6 +399,148 @@ fn scoped_increment(
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
     commit(store, &mut changes)
+}
+
+fn heal_subtree(
+    store: &mut Store,
+    vault_root: &Path,
+    relative_root: &Path,
+    policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
+) -> Result<(), JobFailure> {
+    let subtree = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
+    let prefix = relative_root.to_string_lossy();
+    let mut files = walk(&vault_root.join(relative_root), &[])
+        .map_err(effect)?
+        .filter_map(|fact| match fact {
+            Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
+                Some(Ok(file))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .peekable();
+    let mut after = None;
+    let mut stored = Vec::new();
+    let mut index = 0;
+    let mut exhausted = false;
+    let mut changes = Vec::with_capacity(policy.changeset_size);
+    let mut healed = 0;
+    loop {
+        if index == stored.len() && !exhausted {
+            stored = store
+                .begin_request()
+                .stored_documents_in_subtree_after(&subtree, after.as_ref(), policy.store_page_size)
+                .map_err(effect)?;
+            index = 0;
+            exhausted = stored.is_empty();
+        }
+        let fs_path = match files.peek() {
+            Some(Ok(file)) => Some(format!(
+                "{prefix}/{}",
+                file.path().as_path().to_string_lossy()
+            )),
+            Some(Err(error)) => return Err(effect(error)),
+            None => None,
+        };
+        let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
+        match (fs_path, db_path) {
+            (None, None) => break,
+            (Some(fp), Some(dp)) if fp == dp => {
+                let read = files
+                    .next()
+                    .expect("peeked")
+                    .map_err(effect)?
+                    .read()
+                    .map_err(effect)?;
+                if read.content_hash().to_string() != stored[index].content_hash {
+                    changes.push(Change::Upsert(map_document(
+                        &fp,
+                        read.bytes(),
+                        read.content_hash().to_string(),
+                    )?));
+                }
+                after = Some(stored[index].path.clone());
+                index += 1;
+            }
+            (Some(fp), Some(dp)) if fp < dp => {
+                let read = files
+                    .next()
+                    .expect("peeked")
+                    .map_err(effect)?
+                    .read()
+                    .map_err(effect)?;
+                changes.push(Change::Upsert(map_document(
+                    &fp,
+                    read.bytes(),
+                    read.content_hash().to_string(),
+                )?));
+            }
+            (_, Some(_)) => {
+                let path = stored[index].path.clone();
+                after = Some(path.clone());
+                index += 1;
+                changes.push(Change::Death {
+                    path,
+                    provenance: Provenance::WatcherRemoval,
+                });
+            }
+            (Some(fp), None) => {
+                let read = files
+                    .next()
+                    .expect("peeked")
+                    .map_err(effect)?
+                    .read()
+                    .map_err(effect)?;
+                changes.push(Change::Upsert(map_document(
+                    &fp,
+                    read.bytes(),
+                    read.content_hash().to_string(),
+                )?));
+            }
+        }
+        if changes.len() == policy.changeset_size {
+            commit(store, &mut changes)?;
+        }
+        healed += 1;
+        progress.report(healed, None);
+    }
+    commit(store, &mut changes)
+}
+
+fn prune_subtree(
+    store: &mut Store,
+    relative_root: &Path,
+    policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
+) -> Result<(), JobFailure> {
+    let root = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
+    let mut after = None;
+    let mut healed = 0;
+    loop {
+        let page = store
+            .begin_request()
+            .stored_documents_in_subtree_after(&root, after.as_ref(), policy.store_page_size)
+            .map_err(effect)?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|row| row.path.clone());
+        let changes = page
+            .into_iter()
+            .map(|row| Change::Death {
+                path: row.path,
+                provenance: Provenance::WatcherRemoval,
+            })
+            .collect::<Vec<_>>();
+        healed += changes.len() as u64;
+        store
+            .begin_request()
+            .apply_increment(IncrementProvenance::Derived, changes)
+            .map_err(effect)?;
+        progress.report(healed, None);
+    }
+    Ok(())
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -682,6 +838,93 @@ mod tests {
         assert_eq!(
             rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
             ["note.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn directory_roots_merge_add_remove_and_rename_without_touching_siblings() {
+        let f = Fixture::new("directory-roots");
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/a.md"), "a").unwrap();
+        fs::write(f.vault().join("unrelated.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let unrelated = DocumentPath::new("unrelated.md").unwrap();
+        let generation = attachment
+            .store
+            .begin_request()
+            .stored_document(&unrelated)
+            .unwrap()
+            .unwrap()
+            .generation;
+
+        fs::remove_dir_all(f.vault().join("folder")).unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("folder/a.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+
+        fs::create_dir_all(f.vault().join("source")).unwrap();
+        fs::write(f.vault().join("source/b.md"), "b").unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        fs::rename(f.vault().join("source"), f.vault().join("renamed")).unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("source/b.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("renamed/b.md").unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&unrelated)
+                .unwrap()
+                .unwrap()
+                .generation,
+            generation
         );
         ops.detach(&name, attachment);
     }
