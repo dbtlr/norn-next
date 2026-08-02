@@ -177,7 +177,7 @@ impl Fixture {
         let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
         let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
             .expect("config directories");
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(64, 64));
+        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(64, 64).unwrap());
         Host::new(
             registry,
             ops,

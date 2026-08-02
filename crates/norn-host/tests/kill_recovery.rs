@@ -198,7 +198,7 @@ impl Fixture {
             .expect("config directories");
         Host::new(
             registry,
-            ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 8)),
+            ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 8).unwrap()),
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,15 +27,43 @@ pub struct ProductionPolicy {
 }
 
 impl ProductionPolicy {
-    pub fn new(store_page_size: usize, changeset_size: usize) -> Self {
-        assert!(store_page_size > 0, "store pages must be non-empty");
-        assert!(changeset_size > 0, "changesets must be non-empty");
-        Self {
+    pub fn new(
+        store_page_size: usize,
+        changeset_size: usize,
+    ) -> Result<Self, ProductionPolicyError> {
+        if store_page_size == 0 || store_page_size > norn_store::MAX_STORED_DOCUMENT_PAGE {
+            return Err(ProductionPolicyError::StorePageSize(store_page_size));
+        }
+        if changeset_size == 0 {
+            return Err(ProductionPolicyError::ChangesetSize);
+        }
+        Ok(Self {
             store_page_size,
             changeset_size,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductionPolicyError {
+    StorePageSize(usize),
+    ChangesetSize,
+}
+
+impl fmt::Display for ProductionPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StorePageSize(given) => write!(
+                f,
+                "store page size must be between 1 and {}, got {given}",
+                norn_store::MAX_STORED_DOCUMENT_PAGE
+            ),
+            Self::ChangesetSize => f.write_str("changesets must be non-empty"),
         }
     }
 }
+
+impl std::error::Error for ProductionPolicyError {}
 
 /// The production implementation of the lifecycle effect seam.
 pub struct ProductionEntryOps {
@@ -209,6 +238,9 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        if !attachment.maintainership.still_current() {
+            return Err(JobFailure::LostMaintainership);
+        }
         if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
             attachment
                 ._shadows
@@ -359,7 +391,18 @@ fn scoped_increment(
                 prune_subtree(store, path, policy, progress)?;
                 continue;
             }
-            norn_fs::PathKind::Other => continue,
+            norn_fs::PathKind::Other => {
+                if is_markdown(path) {
+                    changes.push(Change::Death {
+                        path: DocumentPath::new(&path.to_string_lossy()).map_err(effect)?,
+                        provenance: Provenance::WatcherRemoval,
+                    });
+                    if changes.len() == policy.changeset_size {
+                        commit(store, &mut changes)?;
+                    }
+                }
+                continue;
+            }
             norn_fs::PathKind::RegularFile => {}
         }
         if !is_markdown(path) {
@@ -691,6 +734,19 @@ mod tests {
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn production_policy_enforces_the_store_page_bound() {
+        assert!(matches!(
+            ProductionPolicy::new(0, 1),
+            Err(ProductionPolicyError::StorePageSize(0))
+        ));
+        assert!(ProductionPolicy::new(norn_store::MAX_STORED_DOCUMENT_PAGE, 1).is_ok());
+        assert!(matches!(
+            ProductionPolicy::new(norn_store::MAX_STORED_DOCUMENT_PAGE + 1, 1),
+            Err(ProductionPolicyError::StorePageSize(1025))
+        ));
+    }
+
     struct Fixture {
         root: PathBuf,
     }
@@ -714,7 +770,7 @@ mod tests {
             let entry = Entry::new(name.clone(), VaultRoot::new(self.vault()).unwrap());
             let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data")).unwrap();
             (
-                ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(page, 2)),
+                ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(page, 2).unwrap()),
                 name,
             )
         }
@@ -816,6 +872,39 @@ mod tests {
                 .generation,
             generation,
             "a scoped watcher increment re-derived an unrelated document"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_nonregular_markdown_path_tombstones_the_stored_document() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("markdown-to-symlink");
+        let note = f.vault().join("note.md");
+        fs::write(&note, "before").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::remove_file(&note).unwrap();
+        symlink("missing-target", &note).unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .expect("replacement watcher batch");
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .is_none()
         );
         ops.detach(&name, attachment);
     }
@@ -967,7 +1056,7 @@ mod tests {
         let mut entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
         entry.schema_source = Some(SchemaSource::new(&schema).unwrap());
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2));
+        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap());
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::write(&schema, "version: two").unwrap();
@@ -1070,7 +1159,7 @@ mod tests {
             SlowProduction(ProductionEntryOps::new(
                 [entry],
                 dirs,
-                ProductionPolicy::new(2, 2),
+                ProductionPolicy::new(2, 2).unwrap(),
             )),
             crate::LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
@@ -1094,6 +1183,155 @@ mod tests {
         assert_eq!(
             row.content_hash,
             norn_fs::ContentHash::of(b"after").to_string()
+        );
+    }
+
+    #[test]
+    fn dispatcher_poll_refuses_a_replaced_maintainer_lock() {
+        let f = Fixture::new("poll-maintainership");
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let lock = dirs.derived_dir(&name).join("maintainer.lock");
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&name).unwrap());
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, "replacement").unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Unattached);
+    }
+
+    struct BlockedRecovery {
+        inner: ProductionEntryOps,
+        started: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        observed: std::sync::Mutex<Option<norn_fs::Batch>>,
+    }
+
+    impl EntryOps for BlockedRecovery {
+        type Attachment = ProductionAttachment;
+
+        fn attach(
+            &self,
+            name: &VaultName,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.attach(name, progress)
+        }
+
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+
+        fn recover(
+            &self,
+            _: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            if !attachment.maintainership.still_current() {
+                return Err(JobFailure::LostMaintainership);
+            }
+            let schema = ProductionEntryOps::schema_path(&attachment.entry);
+            let (subscription, _) =
+                watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
+            attachment.subscription = Some(subscription);
+            self.inner.heal(attachment, progress)?;
+            self.started
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
+                thread::yield_now();
+            }
+            loop {
+                if let Some(batch) = poll_subscription(attachment)? {
+                    *self.observed.lock().unwrap() = Some(batch);
+                    break;
+                }
+                thread::yield_now();
+            }
+            Ok(())
+        }
+
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            if let Some(batch) = self.observed.lock().unwrap().take() {
+                return Ok(Some(batch));
+            }
+            self.inner.poll(name, attachment)
+        }
+
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment);
+        }
+    }
+
+    #[test]
+    fn recovery_handoff_reconciles_an_event_observed_during_the_heal() {
+        let f = Fixture::new("recovery-handoff");
+        let note = f.vault().join("note.md");
+        fs::write(&note, "before").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let host = crate::Host::new(
+            registry,
+            BlockedRecovery {
+                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                started: std::sync::Arc::clone(&started),
+                release: std::sync::Arc::clone(&release),
+                observed: std::sync::Mutex::new(None),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&name).unwrap());
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        host.watcher_failed(&name, norn_fs::WatchError::Backend("test".into()));
+        drop(host.demand(&name).unwrap());
+        while !started.load(std::sync::atomic::Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        fs::write(&note, "during recovery").unwrap();
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        drop(host);
+        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let row = store
+            .begin_request()
+            .stored_document(&DocumentPath::new("note.md").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.content_hash,
+            norn_fs::ContentHash::of(b"during recovery").to_string()
         );
     }
 
@@ -1152,7 +1390,7 @@ mod tests {
         let name = VaultName::new("notes").unwrap();
         let entry = Entry::new(name.clone(), VaultRoot::new(root.join("vault")).unwrap());
         let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 10));
+        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 10).unwrap());
         norn_store::induced_failure::abort_after_changeset_entries(1);
         let _never_returns = ops.attach(&name, &ProgressReporter::disconnected());
         panic!("induced process tear did not abort");

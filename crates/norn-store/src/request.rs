@@ -69,6 +69,9 @@ use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
+/// Maximum row count accepted by ordered stored-document page readers.
+pub const MAX_STORED_DOCUMENT_PAGE: usize = 1024;
+
 /// A row reading that can fail twice: the driver may not produce the row, and
 /// the row may hold a value this schema does not describe.
 type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
@@ -540,11 +543,10 @@ impl<'a> Request<'a> {
         after: Option<&DocumentPath>,
         limit: usize,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        const MAX_PAGE: usize = 1024;
-        if limit == 0 || limit > MAX_PAGE {
+        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document page",
-                limit: MAX_PAGE,
+                limit: MAX_STORED_DOCUMENT_PAGE,
                 given: limit,
             });
         }
@@ -576,11 +578,10 @@ impl<'a> Request<'a> {
         after: Option<&DocumentPath>,
         limit: usize,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        const MAX_PAGE: usize = 1024;
-        if limit == 0 || limit > MAX_PAGE {
+        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document subtree page",
-                limit: MAX_PAGE,
+                limit: MAX_STORED_DOCUMENT_PAGE,
                 given: limit,
             });
         }

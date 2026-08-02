@@ -850,9 +850,17 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 };
                 attachment
             };
+            let mut observed = Batch::default();
+            let mut handoff_saturated = false;
             let result = shared
                 .ops
-                .recover(&name, &mut attachment, &reporter(entry, epoch));
+                .recover(&name, &mut attachment, &reporter(entry, epoch))
+                .and_then(|()| {
+                    let (batch, saturated) = drain_observed(&shared.ops, &name, &mut attachment)?;
+                    observed = batch;
+                    handoff_saturated = saturated;
+                    Ok(())
+                });
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins -= 1;
             if state.epoch != epoch {
@@ -864,11 +872,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let mut next = None;
             match result {
                 Ok(()) => {
+                    state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
-                    } else if state.pending.is_empty() {
+                    } else if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
                         state.runnable = true;
