@@ -12,6 +12,7 @@ use norn_store::{
     IncrementProvenance, LinkFact, LinkFamily, Provenance, Span, Store, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
+use norn_wire::MaintainerIdentity;
 
 use crate::{EntryOps, JobFailure, ReconcileWork};
 
@@ -146,7 +147,7 @@ impl EntryOps for ProductionEntryOps {
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
             Acquisition::Acquired(guard) => guard,
             Acquisition::Contended { incumbent } => {
-                return Err(JobFailure::MaintainerContended(incumbent.to_string()));
+                return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
             }
         };
         let shadows =
@@ -193,6 +194,14 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
         attachment.subscription = subscription;
         self.heal(attachment)
+    }
+
+    fn poll(
+        &self,
+        _: &VaultName,
+        attachment: &mut Self::Attachment,
+    ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        attachment.subscription.try_recv().map_err(watcher)
     }
 
     fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
@@ -404,12 +413,31 @@ fn watcher(error: impl std::fmt::Display) -> JobFailure {
     JobFailure::WatcherTerminal(error.to_string())
 }
 
+fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
+    match incumbent {
+        norn_fs::Incumbent::Named {
+            pid,
+            version,
+            started,
+        } => MaintainerIdentity::named(
+            pid,
+            version,
+            started
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ),
+        norn_fs::Incumbent::Unknown => MaintainerIdentity::unknown(),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test fixtures impersonate external editors and cleanup.
 mod tests {
     use super::*;
     use norn_config::registry::VaultRoot;
     use std::fs;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct Fixture {
@@ -508,6 +536,109 @@ mod tests {
             norn_fs::ContentHash::of(b"after").to_string()
         );
         ops.detach(&name, attachment);
+    }
+
+    struct SlowProduction(ProductionEntryOps);
+    impl EntryOps for SlowProduction {
+        type Attachment = ProductionAttachment;
+        fn attach(&self, name: &VaultName) -> Result<Self::Attachment, JobFailure> {
+            self.0.attach(name)
+        }
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+        ) -> Result<(), JobFailure> {
+            thread::sleep(Duration::from_millis(30));
+            self.0.reconcile(name, attachment, work)
+        }
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<(), JobFailure> {
+            self.0.recover(name, attachment)
+        }
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.0.poll(name, attachment)
+        }
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.0.detach(name, attachment)
+        }
+    }
+
+    #[test]
+    fn external_edit_is_autonomously_pumped_through_warming_to_ready() {
+        let f = Fixture::new("host-watch-edit");
+        fs::write(f.vault().join("note.md"), "before").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let host = crate::Host::new(
+            registry,
+            SlowProduction(ProductionEntryOps::new(
+                [entry],
+                dirs,
+                ProductionPolicy::new(2, 2),
+            )),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let _ = host.demand(&name).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        fs::write(f.vault().join("note.md"), "after").unwrap();
+        wait_state_kind(&host, &name, true);
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        drop(host);
+        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let row = store
+            .begin_request()
+            .stored_document(&DocumentPath::new("note.md").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.content_hash,
+            norn_fs::ContentHash::of(b"after").to_string()
+        );
+    }
+
+    fn wait_state<O: EntryOps>(
+        host: &crate::Host<O>,
+        name: &VaultName,
+        expected: norn_wire::TrustState,
+    ) {
+        for _ in 0..500 {
+            if host.state(name) == Some(expected.clone()) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("state did not become {expected:?}");
+    }
+
+    fn wait_state_kind<O: EntryOps>(host: &crate::Host<O>, name: &VaultName, warming: bool) {
+        for _ in 0..500 {
+            if matches!(
+                host.state(name),
+                Some(norn_wire::TrustState::Warming { .. })
+            ) == warming
+            {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("state did not become warming");
     }
 
     #[test]

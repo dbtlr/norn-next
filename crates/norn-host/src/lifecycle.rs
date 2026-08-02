@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
 use norn_fs::{Batch, RescanScope, WatchError};
-use norn_wire::{TrustState, UntrustedReason};
+use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason};
 
 use crate::registry::{AliasConflict, ServingRegistry};
 
@@ -16,6 +16,8 @@ use crate::registry::{AliasConflict, ServingRegistry};
 pub struct LifecyclePolicy {
     pub idle_after: Duration,
     pub worker_slots: usize,
+    /// Cadence of the one host-wide nonblocking watcher scan.
+    pub watch_poll_interval: Duration,
 }
 
 /// Work coalesced behind an entry's capacity-one runnable marker.
@@ -48,6 +50,12 @@ pub trait EntryOps: Send + Sync + 'static {
         name: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<(), JobFailure>;
+    /// Nonblocking read of at most one settled watcher batch.
+    fn poll(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+    ) -> Result<Option<Batch>, JobFailure>;
     fn detach(&self, name: &VaultName, attachment: Self::Attachment);
 }
 
@@ -57,14 +65,14 @@ pub enum JobFailure {
     Environmental(String),
     WatcherTerminal(String),
     LostMaintainership,
-    MaintainerContended(String),
+    MaintainerContended(MaintainerIdentity),
 }
 
 /// The immediate answer to client demand. Warming never blocks the caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Demand {
     State(TrustState),
-    MaintainerContended(String),
+    MaintainerContended(MaintainerIdentity),
     DuplicateRoot(AliasConflict),
     UnknownVault,
 }
@@ -72,6 +80,7 @@ pub enum Demand {
 #[derive(Debug)]
 pub enum HostError {
     NoWorkerSlots,
+    ZeroWatchPollInterval,
     WorkerStopped,
 }
 
@@ -79,6 +88,9 @@ impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoWorkerSlots => f.write_str("the host requires at least one worker slot"),
+            Self::ZeroWatchPollInterval => {
+                f.write_str("the host requires a nonzero watcher poll interval")
+            }
             Self::WorkerStopped => f.write_str("the host worker pool stopped"),
         }
     }
@@ -96,6 +108,7 @@ struct EntryState<A> {
     pending: Batch,
     runnable: bool,
     terminal_watcher: bool,
+    maintainer_contended: Option<MaintainerIdentity>,
     last_demand: Instant,
     demand_leases: usize,
     safety_pins: usize,
@@ -120,10 +133,16 @@ struct Shared<O: EntryOps> {
 pub struct Host<O: EntryOps> {
     shared: Arc<Shared<O>>,
     _workers: Vec<thread::JoinHandle<()>>,
+    dispatcher_stop: mpsc::Sender<()>,
+    dispatcher: Option<thread::JoinHandle<()>>,
 }
 
 impl<O: EntryOps> Drop for Host<O> {
     fn drop(&mut self) {
+        let _ = self.dispatcher_stop.send(());
+        if let Some(dispatcher) = self.dispatcher.take() {
+            let _ = dispatcher.join();
+        }
         let mut attached = Vec::new();
         for (name, entry) in &self.shared.entries {
             let attachment = {
@@ -153,6 +172,9 @@ impl<O: EntryOps> Host<O> {
         if policy.worker_slots == 0 {
             return Err(HostError::NoWorkerSlots);
         }
+        if policy.watch_poll_interval.is_zero() {
+            return Err(HostError::ZeroWatchPollInterval);
+        }
         let now = Instant::now();
         let entries = registry
             .entries()
@@ -166,6 +188,7 @@ impl<O: EntryOps> Host<O> {
                             pending: Batch::default(),
                             runnable: false,
                             terminal_watcher: false,
+                            maintainer_contended: None,
                             last_demand: now,
                             demand_leases: 0,
                             safety_pins: 0,
@@ -203,9 +226,25 @@ impl<O: EntryOps> Host<O> {
                 }
             }));
         }
+        let (dispatcher_stop, stop) = mpsc::channel();
+        let dispatcher_shared = Arc::downgrade(&shared);
+        let dispatcher = thread::spawn(move || {
+            loop {
+                match stop.recv_timeout(policy.watch_poll_interval) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let Some(shared) = dispatcher_shared.upgrade() else {
+                    break;
+                };
+                poll_watchers(&shared);
+            }
+        });
         Ok(Self {
             shared,
             _workers: workers,
+            dispatcher_stop,
+            dispatcher: Some(dispatcher),
         })
     }
 
@@ -251,7 +290,11 @@ impl<O: EntryOps> Host<O> {
             } else {
                 Job::Attach(name.clone(), epoch)
             };
-            let answer = Demand::State(state.trust.clone());
+            let answer = state
+                .maintainer_contended
+                .take()
+                .map(Demand::MaintainerContended)
+                .unwrap_or_else(|| Demand::State(state.trust.clone()));
             state.demand_leases -= 1;
             drop(state);
             self.shared
@@ -329,6 +372,101 @@ impl<O: EntryOps> Host<O> {
     }
 }
 
+/// Scan every attached entry once. The dispatcher is the only caller, and the
+/// effect is nonblocking, so one slow vault cannot consume a worker slot or
+/// manufacture a thread per attachment.
+fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
+    for (name, entry) in &shared.entries {
+        let (mut attachment, epoch) = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.runnable {
+                continue;
+            }
+            if !state.pending.is_empty() && state.attachment.is_some() {
+                state.runnable = true;
+                state.epoch += 1;
+                let epoch = state.epoch;
+                drop(state);
+                try_schedule_reconcile(shared, name, entry, epoch);
+                continue;
+            }
+            let Some(attachment) = state.attachment.take() else {
+                continue;
+            };
+            (attachment, state.epoch)
+        };
+        let result = shared.ops.poll(name, &mut attachment);
+        let mut schedule = None;
+        let mut detach = None;
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.epoch != epoch {
+                detach = Some(attachment);
+            } else {
+                match result {
+                    Ok(None) => state.attachment = Some(attachment),
+                    Ok(Some(batch)) => {
+                        let rescan = !batch.rescans().is_empty();
+                        state.pending.merge(batch);
+                        state.trust = if rescan {
+                            TrustState::untrusted(UntrustedReason::WatcherOverflow)
+                        } else {
+                            TrustState::warming(0, None)
+                        };
+                        state.attachment = Some(attachment);
+                        state.runnable = true;
+                        state.epoch += 1;
+                        schedule = Some(Job::Reconcile(name.clone(), state.epoch));
+                    }
+                    Err(JobFailure::LostMaintainership) => {
+                        state.pending = Batch::default();
+                        state.trust = TrustState::Unattached;
+                        state.epoch += 1;
+                        detach = Some(attachment);
+                    }
+                    Err(JobFailure::WatcherTerminal(_)) => {
+                        state.terminal_watcher = true;
+                        state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                        state.attachment = Some(attachment);
+                    }
+                    Err(_) => {
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                        state.attachment = Some(attachment);
+                    }
+                }
+            }
+        }
+        if let Some(attachment) = detach {
+            shared.ops.detach(name, attachment);
+        }
+        if let Some(job) = schedule {
+            let Job::Reconcile(_, epoch) = job else {
+                unreachable!()
+            };
+            try_schedule_reconcile(shared, name, entry, epoch);
+        }
+    }
+}
+
+fn try_schedule_reconcile<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    name: &VaultName,
+    entry: &Arc<Entry<O::Attachment>>,
+    epoch: u64,
+) {
+    if shared
+        .jobs
+        .try_send(Job::Reconcile(name.clone(), epoch))
+        .is_err()
+    {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.epoch == epoch {
+            state.runnable = false;
+        }
+    }
+}
+
 fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     let name = match &job {
         Job::Attach(name, _)
@@ -355,6 +493,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok(attachment) => {
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
+                    state.maintainer_contended = None;
                     if state.pending.is_empty() {
                         state.trust = TrustState::Ready;
                     } else {
@@ -365,7 +504,10 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         let _ = shared.jobs.send(Job::Reconcile(name, epoch));
                     }
                 }
-                Err(JobFailure::MaintainerContended(_)) => state.trust = TrustState::Unattached,
+                Err(JobFailure::MaintainerContended(incumbent)) => {
+                    state.maintainer_contended = Some(incumbent);
+                    state.trust = TrustState::Unattached;
+                }
                 Err(JobFailure::LostMaintainership) => {
                     state.attachment = None;
                     state.pending = Batch::default();
@@ -524,6 +666,10 @@ mod tests {
             Ok(())
         }
 
+        fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+            Ok(None)
+        }
+
         fn detach(&self, _: &VaultName, _: ()) {
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
@@ -542,6 +688,7 @@ mod tests {
             LifecyclePolicy {
                 idle_after,
                 worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
             },
         )
         .unwrap();
@@ -592,5 +739,72 @@ mod tests {
         wait_for(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct PollingOps {
+        emit: std::sync::atomic::AtomicBool,
+    }
+
+    impl EntryOps for Arc<PollingOps> {
+        type Attachment = ();
+        fn attach(&self, _: &VaultName) -> Result<(), JobFailure> {
+            Ok(())
+        }
+        fn reconcile(&self, _: &VaultName, _: &mut (), _: ReconcileWork) -> Result<(), JobFailure> {
+            thread::sleep(Duration::from_millis(30));
+            Ok(())
+        }
+        fn recover(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+            Ok(())
+        }
+        fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+            Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
+        }
+        fn detach(&self, _: &VaultName, _: ()) {}
+    }
+
+    #[test]
+    fn dispatcher_closes_ready_before_reconciling_a_polled_batch() {
+        let ops = Arc::new(PollingOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new("/tmp/norn-host-poll-fixture").unwrap(),
+        )])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let _ = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.emit.store(true, Ordering::SeqCst);
+        let mut saw_warming = false;
+        for _ in 0..100 {
+            if matches!(host.state(&name), Some(TrustState::Warming { .. })) {
+                saw_warming = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(saw_warming, "polled dirtiness never closed Ready");
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
+        for _ in 0..200 {
+            if host.state(name) == Some(expected.clone()) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("state did not become {expected:?}");
     }
 }
