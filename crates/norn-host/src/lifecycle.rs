@@ -28,7 +28,12 @@ pub struct ReconcileWork {
 pub trait EntryOps: Send + Sync + 'static {
     type Attachment: Send + 'static;
 
+    /// Acquire maintainership, establish watcher coverage, and only then run
+    /// the full hash-authoritative heal. An implementation must drain facts
+    /// observed during healing before returning the Ready-capable attachment.
     fn attach(&self, name: &VaultName) -> Result<Self::Attachment, JobFailure>;
+    /// Apply one coalesced envelope. Schema dirtiness dominates document roots;
+    /// a rescan widens rather than discarding uncertainty.
     fn reconcile(
         &self,
         name: &VaultName,
@@ -117,6 +122,28 @@ pub struct Host<O: EntryOps> {
     _workers: Vec<thread::JoinHandle<()>>,
 }
 
+impl<O: EntryOps> Drop for Host<O> {
+    fn drop(&mut self) {
+        let mut attached = Vec::new();
+        for (name, entry) in &self.shared.entries {
+            let attachment = {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                state.epoch += 1;
+                state.runnable = false;
+                state.pending = Batch::default();
+                state.trust = TrustState::Unattached;
+                state.attachment.take()
+            };
+            if let Some(attachment) = attachment {
+                attached.push((name.clone(), attachment));
+            }
+        }
+        for (name, attachment) in attached {
+            self.shared.ops.detach(&name, attachment);
+        }
+    }
+}
+
 impl<O: EntryOps> Host<O> {
     pub fn new(
         registry: ServingRegistry,
@@ -159,13 +186,18 @@ impl<O: EntryOps> Host<O> {
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
         for _ in 0..policy.worker_slots {
-            let shared = Arc::clone(&shared);
+            let shared = Arc::downgrade(&shared);
             let receiver = Arc::clone(&receiver);
             workers.push(thread::spawn(move || {
                 loop {
                     let job = receiver.lock().expect("worker receiver poisoned").recv();
                     match job {
-                        Ok(job) => run_job(&shared, job),
+                        Ok(job) => {
+                            let Some(shared) = shared.upgrade() else {
+                                break;
+                            };
+                            run_job(&shared, job);
+                        }
                         Err(_) => break,
                     }
                 }
@@ -420,10 +452,11 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    shared.ops.detach(&name, attachment);
                     state.pending = Batch::default();
                     state.runnable = false;
                     state.trust = TrustState::Unattached;
+                    drop(state);
+                    shared.ops.detach(&name, attachment);
                     break;
                 }
                 Err(_) => {
