@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn every_alias_is_refused_and_names_the_whole_conflict() {
         let registry =
-            ServingRegistry::from_entries([entry("alpha", "/tmp"), entry("beta", "/private/tmp")])
+            ServingRegistry::from_entries([entry("alpha", "/tmp"), entry("beta", "/tmp/.")])
                 .unwrap();
         let expected = vec![
             VaultName::new("alpha").unwrap(),
