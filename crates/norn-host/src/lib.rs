@@ -7,11 +7,13 @@
 //! filesystem and store crates remain the only owners of those effects.
 
 mod lifecycle;
+mod production;
 mod registry;
 
 pub use lifecycle::{
     Demand, EntryOps, Host, HostError, JobFailure, LifecyclePolicy, ReconcileWork,
 };
+pub use production::{ProductionEntryOps, ProductionPolicy};
 pub use registry::{AliasConflict, ServingRegistry};
 
 // These imports are boundary witnesses. The concrete substrate adapter lands
