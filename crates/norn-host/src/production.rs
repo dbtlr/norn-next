@@ -185,6 +185,7 @@ impl EntryOps for ProductionEntryOps {
             work.batch.vault_roots(),
             self.policy,
             progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
         )
     }
 
@@ -339,14 +340,18 @@ fn scoped_increment(
     dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
+    exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let mut changes = Vec::with_capacity(policy.changeset_size);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
+        if is_excluded(path, exclusions) {
+            continue;
+        }
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
                 commit(store, &mut changes)?;
-                heal_subtree(store, root, path, policy, progress)?;
+                heal_subtree(store, root, path, policy, progress, exclusions)?;
                 continue;
             }
             norn_fs::PathKind::Missing => {
@@ -395,14 +400,16 @@ fn heal_subtree(
     relative_root: &Path,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
+    exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let subtree = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
     let prefix = relative_root.to_string_lossy();
     let mut files = walk(&vault_root.join(relative_root), &[])
         .map_err(effect)?
         .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
-                Some(Ok(file))
+            Ok(norn_fs::WalkFact::File(file)) => {
+                let full = relative_root.join(file.path().as_path());
+                (is_markdown(&full) && !is_excluded(&full, exclusions)).then_some(Ok(file))
             }
             Ok(_) => None,
             Err(error) => Some(Err(error)),
@@ -533,6 +540,10 @@ fn prune_subtree(
 
 fn is_markdown(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "md")
+}
+
+fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
+    exclusions.iter().any(|excluded| path.starts_with(excluded))
 }
 
 fn commit(store: &mut Store, changes: &mut Vec<Change>) -> Result<(), JobFailure> {
@@ -675,7 +686,7 @@ fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
 #[allow(clippy::disallowed_methods)] // test fixtures impersonate external editors and cleanup.
 mod tests {
     use super::*;
-    use norn_config::registry::VaultRoot;
+    use norn_config::registry::{SchemaSource, VaultRoot};
     use std::fs;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -940,6 +951,40 @@ mod tests {
                 .store
                 .begin_request()
                 .stored_document(&DocumentPath::new("archive.md/child.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn scoped_schema_markdown_invalidation_never_indexes_the_schema() {
+        let f = Fixture::new("schema-markdown");
+        let schema = f.vault().join(".norn/schema.md");
+        fs::write(&schema, "version: one").unwrap();
+        fs::write(f.vault().join("note.md"), "note").unwrap();
+        let name = VaultName::new("notes").unwrap();
+        let mut entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        entry.schema_source = Some(SchemaSource::new(&schema).unwrap());
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2));
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::write(&schema, "version: two").unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new(".norn/schema.md").unwrap())
                 .unwrap()
                 .is_none()
         );

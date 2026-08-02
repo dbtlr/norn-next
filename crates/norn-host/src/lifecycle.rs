@@ -165,6 +165,7 @@ struct EntryState<A> {
     runnable: bool,
     terminal_watcher: bool,
     maintainer_contended: Option<MaintainerIdentity>,
+    duplicate_root: Option<AliasConflict>,
     last_demand: Instant,
     demand_leases: usize,
     safety_pins: usize,
@@ -246,6 +247,7 @@ impl<O: EntryOps> DemandLease<O> {
             .maintainer_contended
             .clone()
             .map(Demand::MaintainerContended)
+            .or_else(|| state.duplicate_root.clone().map(Demand::DuplicateRoot))
             .unwrap_or_else(|| Demand::State(state.trust.clone()))
     }
 }
@@ -324,6 +326,7 @@ impl<O: EntryOps> Host<O> {
                             runnable: false,
                             terminal_watcher: false,
                             maintainer_contended: None,
+                            duplicate_root: None,
                             last_demand: now,
                             demand_leases: 0,
                             safety_pins: 0,
@@ -468,11 +471,9 @@ impl<O: EntryOps> Host<O> {
     /// Explicitly retry a demand whose prior completion reported contention.
     pub fn retry(&self, name: &VaultName) -> Result<DemandLease<O>, HostError> {
         if let Some(entry) = self.shared.entries.get(name) {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .maintainer_contended = None;
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.maintainer_contended = None;
+            state.duplicate_root = None;
         }
         self.demand(name)
     }
@@ -508,6 +509,8 @@ impl<O: EntryOps> Host<O> {
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.terminal_watcher = true;
+            state.epoch += 1;
+            state.runnable = false;
             state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
             let _ = error;
         }
@@ -650,22 +653,43 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     };
     match job {
         Job::Attach(name, epoch) => {
+            match shared.registry.recheck(&name) {
+                Ok(Some(conflict)) => {
+                    let mut state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.epoch == epoch {
+                        state.runnable = false;
+                        state.duplicate_root = Some(conflict);
+                        state.trust = TrustState::Unattached;
+                    }
+                    return;
+                }
+                Err(_) => {
+                    let mut state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.epoch == epoch {
+                        state.runnable = false;
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    }
+                    return;
+                }
+                Ok(None) => {}
+            }
             let result =
                 shared
                     .ops
                     .attach(&name, &reporter(entry, epoch))
-                    .and_then(
-                        |mut attachment| match shared.ops.poll(&name, &mut attachment) {
-                            Ok(pending) => Ok((attachment, pending)),
+                    .and_then(|mut attachment| {
+                        match drain_observed(&shared.ops, &name, &mut attachment) {
+                            Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
                             Err(error) => {
                                 shared.ops.detach(&name, attachment);
                                 Err(error)
                             }
-                        },
-                    );
+                        }
+                    });
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.epoch != epoch {
-                if let Ok((attachment, _)) = result {
+                if let Ok((attachment, _, _)) = result {
                     drop(state);
                     shared.ops.detach(&name, attachment);
                 }
@@ -673,13 +697,12 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             state.runnable = false;
             match result {
-                Ok((attachment, observed)) => {
-                    if let Some(batch) = observed {
-                        state.pending.merge(batch);
-                    }
+                Ok((attachment, observed, _)) => {
+                    state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
                     state.maintainer_contended = None;
+                    state.duplicate_root = None;
                     if state.pending.is_empty() {
                         state.trust = TrustState::Ready;
                     } else {
@@ -687,7 +710,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         let epoch = state.epoch;
                         state.runnable = true;
                         drop(state);
-                        let _ = shared.jobs.send(Job::Reconcile(name, epoch));
+                        dispatch_followup(shared, Job::Reconcile(name, epoch));
                     }
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
@@ -769,7 +792,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             drop(state);
             if let Some(job) = next {
-                let _ = shared.jobs.send(job);
+                dispatch_followup(shared, job);
             }
         }
         Job::Reconcile(name, epoch) => loop {
@@ -792,10 +815,21 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 (attachment, work)
             };
-            let result =
+            let mut result =
                 shared
                     .ops
                     .reconcile(&name, &mut attachment, work, &reporter(entry, epoch));
+            let mut handoff_saturated = false;
+            let mut observed = Batch::default();
+            if result.is_ok() {
+                match drain_observed(&shared.ops, &name, &mut attachment) {
+                    Ok((batch, saturated)) => {
+                        observed = batch;
+                        handoff_saturated = saturated;
+                    }
+                    Err(error) => result = Err(error),
+                }
+            }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins -= 1;
             if state.epoch != epoch {
@@ -805,18 +839,23 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             match result {
                 Ok(()) => {
+                    state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     if state.detach_due {
                         state.runnable = false;
                         let next = schedule_due_detach(&mut state, &name);
                         drop(state);
                         if let Some(job) = next {
-                            let _ = shared.jobs.send(job);
+                            dispatch_followup(shared, job);
                         }
                         break;
                     } else if state.pending.is_empty() {
                         state.runnable = false;
                         state.trust = TrustState::Ready;
+                        break;
+                    } else if handoff_saturated {
+                        state.runnable = false;
+                        state.trust = TrustState::warming(0, None);
                         break;
                     }
                 }
@@ -836,7 +875,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
-                        let _ = shared.jobs.send(job);
+                        dispatch_followup(shared, job);
                     }
                     break;
                 }
@@ -847,7 +886,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
-                        let _ = shared.jobs.send(job);
+                        dispatch_followup(shared, job);
                     }
                     break;
                 }
@@ -880,9 +919,37 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 state.epoch += 1;
                 let next = Job::Attach(name.clone(), state.epoch);
                 drop(state);
-                let _ = shared.jobs.send(next);
+                dispatch_followup(shared, next);
             }
         }
+    }
+}
+
+const HANDOFF_BATCH_LIMIT: usize = 8;
+
+fn drain_observed<O: EntryOps>(
+    ops: &Arc<O>,
+    name: &VaultName,
+    attachment: &mut O::Attachment,
+) -> Result<(Batch, bool), JobFailure> {
+    let mut pending = Batch::default();
+    for _ in 0..HANDOFF_BATCH_LIMIT {
+        match ops.poll(name, attachment)? {
+            Some(batch) => pending.merge(batch),
+            None => return Ok((pending, false)),
+        }
+    }
+    Ok((pending, true))
+}
+
+/// A worker never waits for room in its own bounded queue. If every queue slot
+/// is occupied, the worker carries its capacity-one follow-up itself before it
+/// returns to the queued sibling.
+fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
+    match shared.jobs.try_send(job) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(job)) => run_job(shared, job),
+        Err(mpsc::TrySendError::Disconnected(_)) => {}
     }
 }
 
@@ -892,6 +959,7 @@ fn _schema_rescan_is_dominant(batch: &Batch) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures impersonate external filesystem retargets.
 mod tests {
     use super::*;
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
@@ -909,6 +977,9 @@ mod tests {
         block_detach: std::sync::atomic::AtomicBool,
         detach_started: std::sync::atomic::AtomicBool,
         detach_release: std::sync::atomic::AtomicBool,
+        block_reconcile: std::sync::atomic::AtomicBool,
+        reconcile_started: std::sync::atomic::AtomicBool,
+        reconcile_release: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -932,6 +1003,12 @@ mod tests {
             _: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
+            if self.block_reconcile.load(Ordering::SeqCst) {
+                self.reconcile_started.store(true, Ordering::SeqCst);
+                while !self.reconcile_release.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal("lost".into()));
             }
@@ -1161,9 +1238,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn watcher_failure_invalidates_an_in_flight_reconcile() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for(&host, &name, TrustState::Ready);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        for _ in 0..200 {
+            if ops.reconcile_started.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ops.reconcile_started.load(Ordering::SeqCst));
+        host.watcher_failed(&name, WatchError::Backend("lost".into()));
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for(
+            &host,
+            &name,
+            TrustState::untrusted(UntrustedReason::WatcherOverflow),
+        );
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
     #[derive(Default)]
     struct PollingOps {
         emit: std::sync::atomic::AtomicBool,
+        queued: AtomicUsize,
+        reconciles: AtomicUsize,
     }
 
     impl EntryOps for Arc<PollingOps> {
@@ -1179,6 +1289,7 @@ mod tests {
             progress: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
             progress.report(1, Some(2));
+            self.reconciles.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(30));
             progress.report(2, Some(2));
             Ok(())
@@ -1192,9 +1303,181 @@ mod tests {
             Ok(())
         }
         fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+            if self
+                .queued
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(Some(Batch::rescan(RescanScope::Vault)));
+            }
             Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
         }
         fn detach(&self, _: &VaultName, _: ()) {}
+    }
+
+    #[test]
+    fn attach_handoff_drains_two_already_queued_batches_before_ready() {
+        let ops = Arc::new(PollingOps::default());
+        ops.queued.store(2, Ordering::SeqCst);
+        let name = VaultName::new("notes").unwrap();
+        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new("/tmp/norn-host-two-batches").unwrap(),
+        )])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.queued.load(Ordering::SeqCst), 0);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    #[derive(Default)]
+    struct QueueFullOps {
+        a_started: std::sync::atomic::AtomicBool,
+        release_a: std::sync::atomic::AtomicBool,
+        a_polled: std::sync::atomic::AtomicBool,
+    }
+    impl EntryOps for Arc<QueueFullOps> {
+        type Attachment = VaultName;
+        fn attach(
+            &self,
+            name: &VaultName,
+            _: &ProgressReporter<VaultName>,
+        ) -> Result<VaultName, JobFailure> {
+            if name.as_str() == "a" {
+                self.a_started.store(true, Ordering::SeqCst);
+                while !self.release_a.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
+            Ok(name.clone())
+        }
+        fn reconcile(
+            &self,
+            _: &VaultName,
+            _: &mut VaultName,
+            _: ReconcileWork,
+            _: &ProgressReporter<VaultName>,
+        ) -> Result<(), JobFailure> {
+            Ok(())
+        }
+        fn recover(
+            &self,
+            _: &VaultName,
+            _: &mut VaultName,
+            _: &ProgressReporter<VaultName>,
+        ) -> Result<(), JobFailure> {
+            Ok(())
+        }
+        fn poll(&self, name: &VaultName, _: &mut VaultName) -> Result<Option<Batch>, JobFailure> {
+            Ok(
+                (name.as_str() == "a" && !self.a_polled.swap(true, Ordering::SeqCst))
+                    .then(|| Batch::rescan(RescanScope::Vault)),
+            )
+        }
+        fn detach(&self, _: &VaultName, _: VaultName) {}
+    }
+
+    #[test]
+    fn worker_carries_followup_when_a_sibling_fills_its_only_queue_slot() {
+        let ops = Arc::new(QueueFullOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-queue-a").unwrap()),
+            RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-queue-b").unwrap()),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let a_lease = host.demand(&a).unwrap();
+        for _ in 0..200 {
+            if ops.a_started.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let b_lease = host.demand(&b).unwrap();
+        ops.release_a.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_state(&host, &b, TrustState::Ready);
+        drop((a_lease, b_lease));
+    }
+
+    #[test]
+    fn async_attach_rechecks_aliases_after_a_registry_root_is_retargeted() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-alias-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        std::fs::create_dir_all(&a_root).unwrap();
+        std::fs::create_dir_all(&b_root).unwrap();
+        let ops = Arc::new(QueueFullOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
+            RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let a_lease = host.demand(&a).unwrap();
+        for _ in 0..200 {
+            if ops.a_started.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let b_lease = host.demand(&b).unwrap();
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        ops.release_a.store(true, Ordering::SeqCst);
+        for _ in 0..200 {
+            if matches!(b_lease.completion(), Demand::DuplicateRoot(_)) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
+        drop((a_lease, b_lease, host));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
