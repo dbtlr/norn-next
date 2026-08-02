@@ -1195,7 +1195,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 let attachment = state.attachment.take();
                 state.detach_in_flight = attachment.is_some();
-                state.trust = TrustState::Unattached;
+                // Teardown still owns live resources until EntryOps::detach
+                // returns. Warming is the existing non-Ready state that keeps
+                // demand nonblocking without claiming the entry is detached.
+                state.trust = TrustState::warming(0, None);
                 attachment
             };
             if let Some(attachment) = attachment {
@@ -1454,10 +1457,20 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(ops.detach_started.load(Ordering::SeqCst));
+        assert!(matches!(
+            host.state(&name),
+            Some(TrustState::Warming { .. })
+        ));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         let lease = host.demand(&name).unwrap();
-        assert_eq!(lease.completion(), Demand::State(TrustState::Unattached));
+        assert!(matches!(
+            lease.completion(),
+            Demand::State(TrustState::Warming { .. })
+        ));
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for(&host, &name, TrustState::Ready);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         drop(lease);
     }
 
