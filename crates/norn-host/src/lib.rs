@@ -11,7 +11,7 @@ mod production;
 mod registry;
 
 pub use lifecycle::{
-    Demand, EntryOps, Host, HostError, JobFailure, LifecyclePolicy, ReconcileWork,
+    Demand, DemandLease, EntryOps, Host, HostError, JobFailure, LifecyclePolicy, ReconcileWork,
 };
 pub use production::{ProductionEntryOps, ProductionPolicy};
 pub use registry::{AliasConflict, ServingRegistry};

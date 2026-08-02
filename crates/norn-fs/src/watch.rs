@@ -59,6 +59,14 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// One widened invalidation, useful when a host learns uncertainty outside
+    /// the platform backend itself.
+    pub fn rescan(scope: RescanScope) -> Self {
+        Self {
+            rescans: BTreeSet::from([scope]),
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots

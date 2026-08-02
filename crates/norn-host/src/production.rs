@@ -47,7 +47,7 @@ pub struct ProductionAttachment {
     entry: Entry,
     maintainership: Maintainership,
     store: Store,
-    subscription: Subscription,
+    subscription: Option<Subscription>,
     _shadows: ShadowHome,
 }
 
@@ -111,12 +111,7 @@ impl ProductionEntryOps {
             // complete pass has no fact queued behind it; no racing edit is
             // hidden by the heal that happened to overlap it.
             let mut raced = false;
-            while attachment
-                .subscription
-                .try_recv()
-                .map_err(watcher)?
-                .is_some()
-            {
+            while poll_subscription(attachment)?.is_some() {
                 raced = true;
             }
             if !raced {
@@ -160,7 +155,7 @@ impl EntryOps for ProductionEntryOps {
             entry,
             maintainership,
             store,
-            subscription,
+            subscription: Some(subscription),
             _shadows: shadows,
         };
         self.heal(&mut attachment)?;
@@ -181,9 +176,15 @@ impl EntryOps for ProductionEntryOps {
         if schema {
             Self::pin_schema(&mut attachment.store, &attachment.entry)?;
         }
-        // A full ordered heal is also a correct widening of every root batch;
-        // the bounded merge keeps its resource cost independent of vault size.
-        self.heal(attachment)
+        if work.batch.rescans().contains(&RescanScope::Vault) {
+            return self.heal(attachment);
+        }
+        scoped_increment(
+            &mut attachment.store,
+            attachment.entry.root.as_path(),
+            work.batch.vault_roots(),
+            self.policy,
+        )
     }
 
     fn recover(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
@@ -192,7 +193,7 @@ impl EntryOps for ProductionEntryOps {
         }
         let schema = Self::schema_path(&attachment.entry);
         let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
-        attachment.subscription = subscription;
+        attachment.subscription = Some(subscription);
         self.heal(attachment)
     }
 
@@ -201,13 +202,30 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-        attachment.subscription.try_recv().map_err(watcher)
+        poll_subscription(attachment)
     }
 
     fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
         drop(attachment.subscription);
         let _ = attachment.store.close();
         drop(attachment.maintainership);
+    }
+}
+
+fn poll_subscription(
+    attachment: &mut ProductionAttachment,
+) -> Result<Option<norn_fs::Batch>, JobFailure> {
+    let result = attachment
+        .subscription
+        .as_ref()
+        .ok_or_else(|| JobFailure::WatcherTerminal("watcher coverage is absent".into()))?
+        .try_recv();
+    match result {
+        Ok(batch) => Ok(batch),
+        Err(error) => {
+            attachment.subscription.take();
+            Err(watcher(error))
+        }
     }
 }
 
@@ -220,7 +238,10 @@ fn heal_documents(
     let mut files = walk(root, exclusions)
         .map_err(effect)?
         .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) => Some(Ok(file)),
+            Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
+                Some(Ok(file))
+            }
+            Ok(norn_fs::WalkFact::File(_)) => None,
             Ok(norn_fs::WalkFact::Skipped(_)) => None,
             Err(e) => Some(Err(e)),
         })
@@ -293,6 +314,50 @@ fn heal_documents(
         }
     }
     commit(store, &mut changes)
+}
+
+fn scoped_increment(
+    store: &mut Store,
+    root: &Path,
+    dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
+    policy: ProductionPolicy,
+) -> Result<(), JobFailure> {
+    let mut changes = Vec::with_capacity(policy.changeset_size);
+    for relative in dirty {
+        let path = relative.as_path();
+        if !is_markdown(path) {
+            continue;
+        }
+        let document_path = DocumentPath::new(&path.to_string_lossy()).map_err(effect)?;
+        match norn_fs::read_optional_and_hash(&root.join(path)).map_err(effect)? {
+            Some(observed) => {
+                let hash = observed.content_hash().to_string();
+                let standing = store
+                    .begin_request()
+                    .stored_document(&document_path)
+                    .map_err(effect)?;
+                if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
+                    changes.push(Change::Upsert(map_document(
+                        document_path.as_str(),
+                        observed.bytes(),
+                        hash,
+                    )?));
+                }
+            }
+            None => changes.push(Change::Death {
+                path: document_path,
+                provenance: Provenance::WatcherRemoval,
+            }),
+        }
+        if changes.len() == policy.changeset_size {
+            commit(store, &mut changes)?;
+        }
+    }
+    commit(store, &mut changes)
+}
+
+fn is_markdown(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "md")
 }
 
 fn commit(store: &mut Store, changes: &mut Vec<Change>) -> Result<(), JobFailure> {
@@ -487,8 +552,14 @@ mod tests {
         fs::write(f.vault().join("b.md"), "b").unwrap();
         fs::write(f.vault().join("c.md"), "changed").unwrap();
         fs::write(f.vault().join("h.md"), "h").unwrap();
-        ops.reconcile(&name, &mut attachment, ReconcileWork::default())
-            .unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+        )
+        .unwrap();
         let rows = attachment
             .store
             .begin_request()
@@ -515,11 +586,22 @@ mod tests {
     fn watcher_observes_an_edit_and_reconcile_converges_to_its_hash() {
         let f = Fixture::new("watch-edit");
         fs::write(f.vault().join("note.md"), "before").unwrap();
+        fs::write(f.vault().join("unrelated.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let mut attachment = ops.attach(&name).unwrap();
+        let unrelated = DocumentPath::new("unrelated.md").unwrap();
+        let generation = attachment
+            .store
+            .begin_request()
+            .stored_document(&unrelated)
+            .unwrap()
+            .unwrap()
+            .generation;
         fs::write(f.vault().join("note.md"), "after").unwrap();
         let batch = attachment
             .subscription
+            .as_ref()
+            .unwrap()
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .expect("watch batch");
@@ -534,6 +616,37 @@ mod tests {
         assert_eq!(
             row.content_hash,
             norn_fs::ContentHash::of(b"after").to_string()
+        );
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&unrelated)
+                .unwrap()
+                .unwrap()
+                .generation,
+            generation,
+            "a scoped watcher increment re-derived an unrelated document"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn attach_indexes_only_markdown_and_ignores_binary_clutter() {
+        let f = Fixture::new("markdown-only");
+        fs::write(f.vault().join("note.md"), "a note").unwrap();
+        fs::write(f.vault().join("readme.txt"), "text clutter").unwrap();
+        fs::write(f.vault().join("image.bin"), [0xff, 0x00, 0xfe]).unwrap();
+        let (ops, name) = f.ops(2);
+        let mut attachment = ops.attach(&name).unwrap();
+        let rows = attachment
+            .store
+            .begin_request()
+            .stored_documents_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            ["note.md"]
         );
         ops.detach(&name, attachment);
     }
@@ -655,5 +768,62 @@ mod tests {
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
         assert_eq!(facts.tags.len(), 2);
+    }
+
+    const TEAR_ROOT: &str = "NORN_HOST_TEAR_ROOT";
+
+    #[test]
+    fn kill_mid_increment_child() {
+        let Some(root) = std::env::var_os(TEAR_ROOT) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let name = VaultName::new("notes").unwrap();
+        let entry = Entry::new(name.clone(), VaultRoot::new(root.join("vault")).unwrap());
+        let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 10));
+        norn_store::induced_failure::abort_after_changeset_entries(1);
+        let _never_returns = ops.attach(&name);
+        panic!("induced process tear did not abort");
+    }
+
+    #[test]
+    fn attach_recovers_after_process_dies_mid_increment() {
+        let f = Fixture::new("tear-recovery");
+        fs::write(f.vault().join("a.md"), "old-a").unwrap();
+        fs::write(f.vault().join("b.md"), "old-b").unwrap();
+        let (ops, name) = f.ops(2);
+        let attachment = ops.attach(&name).unwrap();
+        ops.detach(&name, attachment);
+        fs::write(f.vault().join("a.md"), "new-a").unwrap();
+        fs::write(f.vault().join("b.md"), "new-b").unwrap();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "production::tests::kill_mid_increment_child",
+                "--nocapture",
+            ])
+            .env(TEAR_ROOT, &f.root)
+            .status()
+            .unwrap();
+        assert!(!status.success(), "tear child unexpectedly survived");
+
+        let (ops, name) = f.ops(2);
+        let mut attachment = ops.attach(&name).unwrap();
+        for (path, expected) in [("a.md", b"new-a".as_slice()), ("b.md", b"new-b".as_slice())] {
+            let row = attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new(path).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.content_hash,
+                norn_fs::ContentHash::of(expected).to_string()
+            );
+        }
+        attachment.store.verify_integrity().unwrap();
+        ops.detach(&name, attachment);
     }
 }

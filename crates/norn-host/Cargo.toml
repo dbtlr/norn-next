@@ -19,4 +19,5 @@ norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }
 
 [dev-dependencies]
+norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

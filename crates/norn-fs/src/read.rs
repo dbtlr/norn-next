@@ -41,17 +41,41 @@ impl ReadAndHash {
 /// identify a regular file are environmental refusals naming `path`.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns configured-file access.
 pub fn read_and_hash(path: &Path) -> Result<ReadAndHash, Refusal> {
-    let mut file = std::fs::File::open(path).map_err(|error| {
-        let operation = if error.kind() == std::io::ErrorKind::NotFound
-            && std::fs::symlink_metadata(path)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    read_optional_and_hash(path)?.ok_or_else(|| {
+        environment(
+            "opening",
+            path,
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+    })
+}
+
+/// Read one regular file atomically, or report an absent name without turning
+/// a watcher deletion into an environmental refusal.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+pub fn read_optional_and_hash(path: &Path) -> Result<Option<ReadAndHash>, Refusal> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && std::fs::symlink_metadata(path).is_err() =>
         {
-            "resolving dangling symbolic link at"
-        } else {
-            "opening"
-        };
-        environment(operation, path, &error)
-    })?;
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err({
+                let operation = if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    "resolving dangling symbolic link at"
+                } else {
+                    "opening"
+                };
+                environment(operation, path, &error)
+            });
+        }
+    };
     let metadata = file
         .metadata()
         .map_err(|error| environment("stating", path, &error))?;
@@ -67,9 +91,9 @@ pub fn read_and_hash(path: &Path) -> Result<ReadAndHash, Refusal> {
     }
     let (bytes, content_hash) =
         read_bytes_and_hash(&mut file).map_err(|error| environment("reading", path, &error))?;
-    Ok(ReadAndHash {
+    Ok(Some(ReadAndHash {
         path: path.to_owned(),
         bytes,
         content_hash,
-    })
+    }))
 }
