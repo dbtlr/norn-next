@@ -51,6 +51,15 @@ impl ServingRegistry {
         Ok(classify(&self.entries)?.remove(name))
     }
 
+    /// Resolve one registered root for an attach-time acquisition claim.
+    pub(crate) fn identity(&self, name: &VaultName) -> Result<Option<Identity>, Refusal> {
+        self.entries
+            .get(name)
+            .map(|entry| path_identity(entry.root.as_path()))
+            .transpose()
+            .map(Option::flatten)
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()
     }

@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
-use norn_fs::{Batch, RescanScope, WatchError};
+use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason};
 
 use crate::registry::{AliasConflict, ServingRegistry};
@@ -169,7 +169,6 @@ struct EntryState<A> {
     queued: bool,
     active_epoch: Option<u64>,
     pending_dispatch: Option<Job>,
-    terminal_watcher: bool,
     maintainer_contended: Option<MaintainerIdentity>,
     duplicate_root: Option<AliasConflict>,
     last_demand: Instant,
@@ -244,9 +243,7 @@ fn dispatch_pending<O: EntryOps>(
         Ok(()) => Ok(()),
         Err(mpsc::TrySendError::Full(_)) => {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if state.pending_dispatch.as_ref().map(Job::epoch) == Some(job.epoch()) {
-                state.queued = false;
-            }
+            state.queued = false;
             Ok(())
         }
         Err(mpsc::TrySendError::Disconnected(_)) => Err(HostError::WorkerStopped),
@@ -358,7 +355,7 @@ struct Shared<O: EntryOps> {
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
     idle_after: Duration,
-    attach_gate: Mutex<()>,
+    attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
 }
 
 pub struct Host<O: EntryOps> {
@@ -369,7 +366,7 @@ pub struct Host<O: EntryOps> {
 }
 
 /// One client operation's lifecycle guard and immediate trust answer.
-/// Dropping it ends the demand lease and may release an overdue idle detach.
+/// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
     outcome: Demand,
     held: Option<(Arc<Shared<O>>, VaultName)>,
@@ -415,18 +412,11 @@ impl<O: EntryOps> Drop for DemandLease<O> {
         let Some(entry) = shared.entries.get(&name) else {
             return;
         };
-        let schedule = {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.demand_leases = state.demand_leases.saturating_sub(1);
-            if state.demand_leases == 0 {
-                state.last_demand = Instant::now();
-                state.detach_due = false;
-            }
-            schedule_due_detach(&mut state, &name)
-        };
-        if let Some(job) = schedule {
-            let _ = job;
-            let _ = dispatch_pending(&shared, entry);
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        state.demand_leases = state.demand_leases.saturating_sub(1);
+        if state.demand_leases == 0 {
+            state.last_demand = Instant::now();
+            state.detach_due = false;
         }
     }
 }
@@ -504,7 +494,6 @@ impl<O: EntryOps> Host<O> {
                             queued: false,
                             active_epoch: None,
                             pending_dispatch: None,
-                            terminal_watcher: false,
                             maintainer_contended: None,
                             duplicate_root: None,
                             last_demand: now,
@@ -528,7 +517,7 @@ impl<O: EntryOps> Host<O> {
             jobs: Mutex::new(Some(jobs)),
             shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
-            attach_gate: Mutex::new(()),
+            attach_gate: Mutex::new(BTreeMap::new()),
         });
         let mut workers = Vec::with_capacity(policy.worker_slots);
         for _ in 0..policy.worker_slots {
@@ -689,7 +678,6 @@ impl<O: EntryOps> Host<O> {
     pub fn watcher_failed(&self, name: &VaultName, error: WatchError) {
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.terminal_watcher = true;
             state.recovery_required = true;
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.epoch += 1;
@@ -801,7 +789,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     Err(JobFailure::WatcherTerminal(_)) => {
                         state.active_epoch = None;
                         state.runnable = false;
-                        state.terminal_watcher = true;
                         state.recovery_required = true;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
@@ -896,10 +883,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     };
     match job {
         Job::Attach(name, epoch) => {
-            // Root identity classification, effectful acquisition, and publication are
-            // one host-global transaction. A second name cannot slip through a stale
-            // classification while this attachment is being acquired.
-            let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
+            // Classification and the identity claim are atomic, but the heal is
+            // deliberately outside this gate so unrelated vaults can attach in
+            // parallel. Publication revalidates under the same gate.
+            let mut attach_claims = shared.attach_gate.lock().expect("attach gate poisoned");
             match shared.registry.recheck(&name) {
                 Ok(Some(conflict)) => {
                     refuse_conflict(shared, &conflict);
@@ -922,7 +909,37 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 Ok(None) => {}
             }
-            let mut result =
+            let claim_identity = match shared.registry.identity(&name) {
+                Ok(identity) => identity,
+                Err(_) => {
+                    let mut state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.epoch == epoch {
+                        state.runnable = false;
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    }
+                    return;
+                }
+            };
+            if let Some(identity) = claim_identity {
+                if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
+                    let mut aliases = vec![owner.clone(), name.clone()];
+                    aliases.sort();
+                    let conflict = AliasConflict { aliases };
+                    drop(attach_claims);
+                    refuse_conflict(shared, &conflict);
+                    let mut state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.epoch == epoch {
+                        state.runnable = false;
+                        state.duplicate_root = Some(conflict);
+                        state.trust = TrustState::Unattached;
+                    }
+                    return;
+                }
+                attach_claims.insert(identity, name.clone());
+            }
+            drop(attach_claims);
+            let result =
                 shared
                     .ops
                     .attach(&name, &reporter(entry, epoch))
@@ -935,19 +952,38 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                             }
                         }
                     });
-            let post_conflict = match shared.registry.recheck(&name) {
+            let mut attach_claims = shared.attach_gate.lock().expect("attach gate poisoned");
+            if let Some(identity) = claim_identity
+                && attach_claims.get(&identity) == Some(&name)
+            {
+                attach_claims.remove(&identity);
+            }
+            let mut post_conflict = match shared.registry.recheck(&name) {
                 Ok(conflict) => conflict,
                 Err(_) => {
+                    drop(attach_claims);
                     if let Ok((attachment, _, _)) = result {
                         shared.ops.detach(&name, attachment);
                     }
-                    result = Err(JobFailure::Environmental(
-                        "root identity revalidation failed".into(),
-                    ));
-                    None
+                    let mut state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.epoch == epoch {
+                        state.runnable = false;
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    }
+                    return;
                 }
             };
+            if post_conflict.is_none()
+                && let Ok(Some(identity)) = shared.registry.identity(&name)
+                && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
+            {
+                let mut aliases = vec![owner.clone(), name.clone()];
+                aliases.sort();
+                post_conflict = Some(AliasConflict { aliases });
+            }
             if let Some(conflict) = post_conflict {
+                drop(attach_claims);
                 if let Ok((attachment, _, _)) = result {
                     shared.ops.detach(&name, attachment);
                 }
@@ -973,7 +1009,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok((attachment, observed, _)) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
-                    state.terminal_watcher = false;
                     state.recovery_required = false;
                     state.identity_refused = false;
                     state.maintainer_contended = None;
@@ -985,6 +1020,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         let epoch = state.epoch;
                         state.runnable = true;
                         drop(state);
+                        drop(attach_claims);
                         dispatch_followup(shared, Job::Reconcile(name, epoch));
                     }
                 }
@@ -998,7 +1034,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.trust = TrustState::Unattached;
                 }
                 Err(JobFailure::WatcherTerminal(_)) => {
-                    state.terminal_watcher = true;
                     state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
                 }
                 Err(_) => {
@@ -1044,7 +1079,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok(()) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
-                    state.terminal_watcher = false;
                     state.recovery_required = false;
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -1064,7 +1098,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(_)) => {
-                    state.terminal_watcher = true;
                     state.recovery_required = true;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
@@ -1159,7 +1192,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     break;
                 }
                 Err(JobFailure::WatcherTerminal(_)) => {
-                    state.terminal_watcher = true;
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
@@ -1243,8 +1275,8 @@ fn drain_observed<O: EntryOps>(
 }
 
 /// A worker never waits for room in its own bounded queue. If every queue slot
-/// is occupied, the worker carries its capacity-one follow-up itself before it
-/// returns to the queued sibling.
+/// is occupied, its capacity-one follow-up returns to `pending_dispatch` for a
+/// later dispatcher tick, after the queued sibling has had a chance to run.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     if shared.shutting_down.load(Ordering::SeqCst) {
         return;
@@ -1258,14 +1290,23 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     };
     match result {
         Ok(()) => {}
-        Err(mpsc::TrySendError::Full(job)) => run_job(shared, job),
+        Err(mpsc::TrySendError::Full(job)) => {
+            let name = match &job {
+                Job::Attach(name, _)
+                | Job::Recover(name, _)
+                | Job::Reconcile(name, _)
+                | Job::Detach(name, _) => name,
+            };
+            if let Some(entry) = shared.entries.get(name) {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if state.epoch == job.epoch() {
+                    state.queued = false;
+                    state.pending_dispatch = Some(job);
+                }
+            }
+        }
         Err(mpsc::TrySendError::Disconnected(_)) => {}
     }
-}
-
-#[allow(dead_code)]
-fn _schema_rescan_is_dominant(batch: &Batch) -> bool {
-    batch.schema_dirty() || batch.rescans().contains(&RescanScope::Schema)
 }
 
 #[cfg(test)]
@@ -1320,9 +1361,7 @@ mod tests {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             if self.block_reconcile.load(Ordering::SeqCst) {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                while !self.reconcile_release.load(Ordering::SeqCst) {
-                    thread::yield_now();
-                }
+                spin_until("reconcile_release", &self.reconcile_release);
             }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal("lost".into()));
@@ -1353,9 +1392,7 @@ mod tests {
         fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
-                while !self.poll_release.load(Ordering::SeqCst) {
-                    thread::yield_now();
-                }
+                spin_until("poll_release", &self.poll_release);
             }
             Ok(None)
         }
@@ -1363,9 +1400,7 @@ mod tests {
         fn detach(&self, _: &VaultName, _: ()) {
             if self.block_detach.load(Ordering::SeqCst) {
                 self.detach_started.store(true, Ordering::SeqCst);
-                while !self.detach_release.load(Ordering::SeqCst) {
-                    thread::yield_now();
-                }
+                spin_until("detach_release", &self.detach_release);
             }
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
@@ -1391,7 +1426,7 @@ mod tests {
         (host, name)
     }
 
-    fn wait_for(host: &Host<Arc<FakeOps>>, name: &VaultName, expected: TrustState) {
+    fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
         for _ in 0..200 {
             if host.state(name) == Some(expected.clone()) {
                 return;
@@ -1401,6 +1436,14 @@ mod tests {
         panic!("state did not become {expected:?}");
     }
 
+    fn spin_until(label: &str, flag: &std::sync::atomic::AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !flag.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "timed out waiting for {label}");
+            thread::yield_now();
+        }
+    }
+
     #[test]
     fn concurrent_demand_is_single_flight() {
         let ops = Arc::new(FakeOps::default());
@@ -1408,7 +1451,7 @@ mod tests {
         for _ in 0..20 {
             let _ = host.demand(&name).unwrap();
         }
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
 
@@ -1437,7 +1480,7 @@ mod tests {
         drop(lease);
         drop(initial);
         drop(host.retry(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
 
@@ -1446,7 +1489,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
         let initial = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(initial);
         ops.block_detach.store(true, Ordering::SeqCst);
         host.reap_idle(Instant::now()).unwrap();
@@ -1468,7 +1511,7 @@ mod tests {
             Demand::State(TrustState::Warming { .. })
         ));
         ops.detach_release.store(true, Ordering::SeqCst);
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         drop(lease);
@@ -1479,14 +1522,14 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
         let lease = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         thread::sleep(Duration::from_millis(30));
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         thread::sleep(Duration::from_millis(25));
         host.reap_idle(Instant::now()).unwrap();
-        wait_for(&host, &name, TrustState::Unattached);
+        wait_for_state(&host, &name, TrustState::Unattached);
     }
 
     #[test]
@@ -1495,7 +1538,7 @@ mod tests {
         let idle_after = Duration::from_millis(200);
         let (host, name) = fixture(Arc::clone(&ops), idle_after);
         let lease = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         thread::sleep(idle_after + Duration::from_millis(50));
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
@@ -1520,10 +1563,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
         let lease = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
-        wait_for(&host, &name, TrustState::Unattached);
+        wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
@@ -1532,14 +1575,14 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
         let lease = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
         for _ in 0..3 {
             host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
                 .unwrap();
             thread::sleep(Duration::from_millis(4));
         }
-        wait_for(&host, &name, TrustState::Unattached);
+        wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert!(ops.reconciles.load(Ordering::SeqCst) > 0);
     }
@@ -1549,13 +1592,13 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
         let lease = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now()).unwrap();
         thread::sleep(Duration::from_millis(10));
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         drop(lease);
-        wait_for(&host, &name, TrustState::Unattached);
+        wait_for_state(&host, &name, TrustState::Unattached);
     }
 
     #[test]
@@ -1563,11 +1606,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let _ = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
         let _ = host.demand(&name).unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
@@ -1577,12 +1620,12 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         let lease = host.demand(&name).unwrap();
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
         drop(lease);
     }
@@ -1592,11 +1635,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.terminal_recover.store(true, Ordering::SeqCst);
         drop(host.demand(&name).unwrap());
-        wait_for(
+        wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::WatcherOverflow),
@@ -1608,11 +1651,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         ops.terminal_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        wait_for(
+        wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::WatcherOverflow),
@@ -1624,11 +1667,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        wait_for(
+        wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::environmental_refusal()),
@@ -1644,7 +1687,7 @@ mod tests {
             ))
         );
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert!(ops.reconciles.load(Ordering::SeqCst) > failed_count);
     }
@@ -1654,11 +1697,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.environmental_recover.store(true, Ordering::SeqCst);
         drop(host.demand(&name).unwrap());
-        wait_for(
+        wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::environmental_refusal()),
@@ -1673,7 +1716,7 @@ mod tests {
             ))
         );
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 2);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
     }
@@ -1683,7 +1726,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
@@ -1698,7 +1741,7 @@ mod tests {
         let raced_demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for(
+        wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::WatcherOverflow),
@@ -1711,7 +1754,7 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(raced_demand);
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
 
@@ -1720,13 +1763,11 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        while !ops.reconcile_started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        spin_until("reconcile_started", &ops.reconcile_started);
         let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let drop_returned = Arc::clone(&returned);
         let dropper = thread::spawn(move || {
@@ -1747,7 +1788,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(host);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
@@ -1757,11 +1798,9 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        while !ops.poll_started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        spin_until("poll_started", &ops.poll_started);
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         let demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -1770,7 +1809,7 @@ mod tests {
             Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow))
         );
         ops.poll_release.store(true, Ordering::SeqCst);
-        wait_for(&host, &name, TrustState::Ready);
+        wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(demand);
@@ -1854,6 +1893,7 @@ mod tests {
     #[derive(Default)]
     struct QueueFullOps {
         a_started: std::sync::atomic::AtomicBool,
+        b_started: std::sync::atomic::AtomicBool,
         release_a: std::sync::atomic::AtomicBool,
         a_polled: std::sync::atomic::AtomicBool,
     }
@@ -1866,9 +1906,9 @@ mod tests {
         ) -> Result<VaultName, JobFailure> {
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
-                while !self.release_a.load(Ordering::SeqCst) {
-                    thread::yield_now();
-                }
+                spin_until("release_a", &self.release_a);
+            } else if name.as_str() == "b" {
+                self.b_started.store(true, Ordering::SeqCst);
             }
             Ok(name.clone())
         }
@@ -1899,7 +1939,45 @@ mod tests {
     }
 
     #[test]
-    fn worker_carries_followup_when_a_sibling_fills_its_only_queue_slot() {
+    fn unrelated_attaches_use_distinct_worker_slots() {
+        let ops = Arc::new(QueueFullOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(
+                a.clone(),
+                VaultRoot::new("/tmp/norn-host-parallel-a").unwrap(),
+            ),
+            RegistryEntry::new(
+                b.clone(),
+                VaultRoot::new("/tmp/norn-host-parallel-b").unwrap(),
+            ),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+
+        let a_lease = host.demand(&a).unwrap();
+        spin_until("a_started", &ops.a_started);
+        let b_lease = host.demand(&b).unwrap();
+        spin_until("b_started", &ops.b_started);
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        ops.release_a.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &a, TrustState::Ready);
+        drop((a_lease, b_lease));
+    }
+
+    #[test]
+    fn worker_defers_followup_when_a_sibling_fills_its_only_queue_slot() {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
@@ -1954,9 +2032,7 @@ mod tests {
         )
         .unwrap();
         let a = host.demand(&names[0]).unwrap();
-        while !ops.a_started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        spin_until("a_started", &ops.a_started);
         let b = host.demand(&names[1]).unwrap();
         let started = Instant::now();
         let c = host.demand(&names[2]).unwrap();
@@ -1970,6 +2046,73 @@ mod tests {
         drop((a, b, c));
     }
 
+    #[test]
+    fn failed_send_releases_the_marker_after_a_newer_epoch_is_installed() {
+        let ops = Arc::new(QueueFullOps::default());
+        let names = ["a", "b", "c"].map(|name| VaultName::new(name).unwrap());
+        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+            RegistryEntry::new(
+                name.clone(),
+                VaultRoot::new(format!("/tmp/norn-host-send-race-{name}")).unwrap(),
+            )
+        }))
+        .unwrap();
+        let mut host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        host.dispatcher_stop.send(()).unwrap();
+        host.dispatcher.take().unwrap().join().unwrap();
+        let a = host.demand(&names[0]).unwrap();
+        spin_until("a_started", &ops.a_started);
+        let b = host.demand(&names[1]).unwrap();
+
+        let entry = Arc::clone(host.shared.entries.get(&names[2]).unwrap());
+        let jobs_guard = host.shared.jobs.lock().unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.epoch = 1;
+            state.runnable = true;
+            state.pending_dispatch = Some(Job::Attach(names[2].clone(), 1));
+        }
+        let shared = Arc::clone(&host.shared);
+        let dispatched_entry = Arc::clone(&entry);
+        let dispatch = thread::spawn(move || dispatch_pending(&shared, &dispatched_entry));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let queued = entry.gate.lock().unwrap().queued;
+            if queued {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for queued marker"
+            );
+            thread::yield_now();
+        }
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.epoch = 2;
+            state.pending_dispatch = Some(Job::Attach(names[2].clone(), 2));
+        }
+        drop(jobs_guard);
+        dispatch.join().unwrap().unwrap();
+
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.queued);
+        assert_eq!(state.pending_dispatch.as_ref().map(Job::epoch), Some(2));
+        drop(state);
+        ops.release_a.store(true, Ordering::SeqCst);
+        drop((a, b));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn async_attach_rechecks_aliases_after_a_registry_root_is_retargeted() {
         use std::os::unix::fs::symlink;
@@ -2067,9 +2210,7 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Ready);
 
         ops.block_poll.store(true, Ordering::SeqCst);
-        while !ops.poll_started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        spin_until("poll_started", &ops.poll_started);
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
         let refused = host.demand(&b).unwrap();
@@ -2127,9 +2268,7 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        while !ops.poll_started.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        spin_until("poll_started", &ops.poll_started);
 
         std::fs::remove_dir(&root).unwrap();
         symlink("root", &root).unwrap();
@@ -2237,15 +2376,5 @@ mod tests {
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
-    }
-
-    fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
-        for _ in 0..200 {
-            if host.state(name) == Some(expected.clone()) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        panic!("state did not become {expected:?}");
     }
 }
