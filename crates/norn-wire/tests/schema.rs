@@ -10,7 +10,9 @@
 //! namespaced string, and that a detail refers to the reason type rather than
 //! restating it.
 
-use norn_wire::{ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason};
+use norn_wire::{
+    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -82,6 +84,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
         schema_of::<ReasonCode>(),
+        schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
         schema_of::<ErrorEnvelope>(),
     ] {
@@ -119,7 +122,26 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
 #[test]
 fn an_error_detail_advertises_the_code_as_its_tag() {
     let schema = schema_of::<ErrorDetail>();
-    assert_eq!(tag_constants(&schema, "code"), ["host/entry-untrusted"]);
+    assert_eq!(
+        tag_constants(&schema, "code"),
+        ["host/entry-untrusted", "host/maintainer-contended"]
+    );
+}
+
+#[test]
+fn a_maintainer_identity_advertises_named_and_unknown_shapes() {
+    let schema = schema_of::<MaintainerIdentity>();
+    assert_eq!(tag_constants(&schema, "kind"), ["named", "unknown"]);
+    let named = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "kind") == Some("named"))
+        .expect("the named branch");
+    assert_eq!(
+        property_names(named),
+        ["kind", "pid", "version", "started_unix_seconds"]
+            .into_iter()
+            .collect()
+    );
 }
 
 // ── The field names ──────────────────────────────────────────────────────
@@ -182,7 +204,7 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
                 .unwrap_or_else(|| panic!("a code branch is not a pinned string: {branch}"))
         })
         .collect();
-    assert_eq!(codes, ["host/entry-untrusted"]);
+    assert_eq!(codes, ["host/entry-untrusted", "host/maintainer-contended"]);
 }
 
 /// The detail composes the reason type rather than restating its variants, so
@@ -214,7 +236,12 @@ fn an_envelope_refers_to_the_code_and_the_detail() {
         schema["properties"]["detail"]["$ref"].as_str(),
         Some("#/$defs/ErrorDetail")
     );
-    for definition in ["ReasonCode", "ErrorDetail", "UntrustedReason"] {
+    for definition in [
+        "ReasonCode",
+        "ErrorDetail",
+        "UntrustedReason",
+        "MaintainerIdentity",
+    ] {
         assert!(
             schema["$defs"][definition].is_object(),
             "the envelope's schema carries no definition of {definition}"

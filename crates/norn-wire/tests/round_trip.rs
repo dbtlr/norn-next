@@ -13,7 +13,9 @@
 //!    field is dropped and an unknown variant is refused, and every value that
 //!    is built here is built through the constructors a consumer has.
 
-use norn_wire::{ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason};
+use norn_wire::{
+    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
@@ -42,15 +44,23 @@ fn trust_states() -> Vec<TrustState> {
 
 /// Every code the list holds.
 fn reason_codes() -> Vec<ReasonCode> {
-    vec![ReasonCode::HostEntryUntrusted]
+    vec![
+        ReasonCode::HostEntryUntrusted,
+        ReasonCode::HostMaintainerContended,
+    ]
 }
 
 /// Every detail variant, over every payload it can carry.
 fn error_details() -> Vec<ErrorDetail> {
-    untrusted_reasons()
+    let mut details: Vec<_> = untrusted_reasons()
         .into_iter()
         .map(ErrorDetail::entry_untrusted)
-        .collect()
+        .collect();
+    details.extend([
+        ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+        ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
+    ]);
+    details
 }
 
 fn round_trip<T>(value: &T)
@@ -174,6 +184,25 @@ fn an_envelope_is_a_code_a_message_and_a_detail() {
             r#""detail":{"code":"host/entry-untrusted","#,
             r#""reason":{"kind":"environmental_refusal"}}}"#
         )
+    );
+}
+
+#[test]
+fn maintainer_contention_carries_the_incumbent_identity() {
+    let envelope = ErrorEnvelope::new(
+        "another process maintains this vault",
+        ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
+    );
+    assert_eq!(
+        wire(&envelope),
+        concat!(
+            r#"{"code":"host/maintainer-contended","message":"another process maintains this vault","#,
+            r#""detail":{"code":"host/maintainer-contended","incumbent":{"kind":"named","pid":41,"version":"0.1.0","started_unix_seconds":1700000000}}}"#
+        )
+    );
+    assert_eq!(
+        wire(&MaintainerIdentity::unknown()),
+        r#"{"kind":"unknown"}"#
     );
 }
 
