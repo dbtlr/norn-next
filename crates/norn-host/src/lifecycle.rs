@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -232,7 +233,14 @@ fn dispatch_pending<O: EntryOps>(
         state.queued = true;
         job
     };
-    match shared.jobs.try_send(job.clone()) {
+    if shared.shutting_down.load(Ordering::SeqCst) {
+        return Err(HostError::WorkerStopped);
+    }
+    let jobs = shared.jobs.lock().expect("job sender poisoned");
+    let Some(jobs) = jobs.as_ref() else {
+        return Err(HostError::WorkerStopped);
+    };
+    match jobs.try_send(job.clone()) {
         Ok(()) => Ok(()),
         Err(mpsc::TrySendError::Full(_)) => {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -347,14 +355,15 @@ struct Shared<O: EntryOps> {
     registry: ServingRegistry,
     entries: BTreeMap<VaultName, Arc<Entry<O::Attachment>>>,
     ops: Arc<O>,
-    jobs: mpsc::SyncSender<Job>,
+    jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
+    shutting_down: AtomicBool,
     idle_after: Duration,
     attach_gate: Mutex<()>,
 }
 
 pub struct Host<O: EntryOps> {
     shared: Arc<Shared<O>>,
-    _workers: Vec<thread::JoinHandle<()>>,
+    workers: Vec<thread::JoinHandle<()>>,
     dispatcher_stop: mpsc::Sender<()>,
     dispatcher: Option<thread::JoinHandle<()>>,
 }
@@ -423,10 +432,9 @@ impl<O: EntryOps> Drop for DemandLease<O> {
 
 impl<O: EntryOps> Drop for Host<O> {
     fn drop(&mut self) {
+        self.shared.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.dispatcher_stop.send(());
-        if let Some(dispatcher) = self.dispatcher.take() {
-            let _ = dispatcher.join();
-        }
+        let dispatcher = self.dispatcher.take();
         let mut attached = Vec::new();
         for (name, entry) in &self.shared.entries {
             let attachment = {
@@ -434,14 +442,30 @@ impl<O: EntryOps> Drop for Host<O> {
                 state.epoch += 1;
                 state.runnable = false;
                 state.queued = false;
-                state.active_epoch = None;
                 state.pending_dispatch = None;
                 state.pending = Batch::default();
                 state.trust = TrustState::Unattached;
-                state.attachment.take()
+                if state.active_epoch.is_none() && !state.detach_in_flight {
+                    state.attachment.take()
+                } else {
+                    None
+                }
             };
             if let Some(attachment) = attachment {
                 attached.push((name.clone(), attachment));
+            }
+        }
+        self.shared.jobs.lock().expect("job sender poisoned").take();
+        if let Some(dispatcher) = dispatcher
+            && dispatcher.thread().id() != thread::current().id()
+        {
+            let _ = dispatcher.join();
+        }
+        for worker in self.workers.drain(..) {
+            // Re-entrant destruction from an EntryOps callback is exotic but
+            // must not attempt to join the thread currently running Drop.
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
             }
         }
         for (name, attachment) in attached {
@@ -500,7 +524,8 @@ impl<O: EntryOps> Host<O> {
             registry,
             entries,
             ops: Arc::new(ops),
-            jobs,
+            jobs: Mutex::new(Some(jobs)),
+            shutting_down: AtomicBool::new(false),
             idle_after: policy.idle_after,
             attach_gate: Mutex::new(()),
         });
@@ -540,7 +565,7 @@ impl<O: EntryOps> Host<O> {
         });
         Ok(Self {
             shared,
-            _workers: workers,
+            workers,
             dispatcher_stop,
             dispatcher: Some(dispatcher),
         })
@@ -1209,7 +1234,17 @@ fn drain_observed<O: EntryOps>(
 /// is occupied, the worker carries its capacity-one follow-up itself before it
 /// returns to the queued sibling.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
-    match shared.jobs.try_send(job) {
+    if shared.shutting_down.load(Ordering::SeqCst) {
+        return;
+    }
+    let result = {
+        let jobs = shared.jobs.lock().expect("job sender poisoned");
+        let Some(jobs) = jobs.as_ref() else {
+            return;
+        };
+        jobs.try_send(job)
+    };
+    match result {
         Ok(()) => {}
         Err(mpsc::TrySendError::Full(job)) => run_job(shared, job),
         Err(mpsc::TrySendError::Disconnected(_)) => {}
@@ -1612,6 +1647,43 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn host_drop_waits_for_in_flight_work_and_its_attachment_teardown() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for(&host, &name, TrustState::Ready);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        while !ops.reconcile_started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_returned = Arc::clone(&returned);
+        let dropper = thread::spawn(move || {
+            drop(host);
+            drop_returned.store(true, Ordering::SeqCst);
+        });
+        thread::sleep(Duration::from_millis(20));
+        assert!(!returned.load(Ordering::SeqCst));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        dropper.join().unwrap();
+        assert!(returned.load(Ordering::SeqCst));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn host_drop_detaches_an_idle_attachment_before_returning() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for(&host, &name, TrustState::Ready);
+        drop(host);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
     #[test]
