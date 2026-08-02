@@ -63,7 +63,8 @@ use crate::error::{self, StoreError};
 use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FindingFacts, HeadingFact, Invalidation, LinkFact,
     LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
-    StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
+    VectorFacts,
 };
 use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DocumentPath, SuffixProbe};
@@ -543,6 +544,16 @@ impl<'a> Request<'a> {
         after: Option<&DocumentPath>,
         limit: usize,
     ) -> Result<Vec<StoredDocument>, StoreError> {
+        self.stored_documents_after_ordered(after, limit, StoredPathOrder::Sensitive)
+    }
+
+    /// The next bounded page using the vault root's proven path ordering.
+    pub fn stored_documents_after_ordered(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
         if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document page",
@@ -552,14 +563,29 @@ impl<'a> Request<'a> {
         }
         let limit = i64::try_from(limit).expect("the page bound fits i64");
         let after = after.map(DocumentPath::as_str);
-        Self::read_all(
-            &self.store.connection,
-            "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+        let sql = match order {
+            StoredPathOrder::Sensitive => {
+                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
                     frontmatter_diagnostic_count, generation, derived_at
              FROM documents
              WHERE (?1 IS NULL OR path > ?1)
              ORDER BY path
-             LIMIT ?2",
+             LIMIT ?2"
+            }
+            StoredPathOrder::AsciiCaseInsensitive => {
+                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+                    frontmatter_diagnostic_count, generation, derived_at
+             FROM documents
+             WHERE (?1 IS NULL OR
+                    path > ?1 COLLATE NOCASE OR
+                    (path = ?1 COLLATE NOCASE AND path > ?1))
+             ORDER BY path COLLATE NOCASE, path
+             LIMIT ?2"
+            }
+        };
+        Self::read_all(
+            &self.store.connection,
+            sql,
             params![after, limit],
             |row| stored_document(row, 0),
             "reading the stored-document page",
@@ -578,6 +604,22 @@ impl<'a> Request<'a> {
         after: Option<&DocumentPath>,
         limit: usize,
     ) -> Result<Vec<StoredDocument>, StoreError> {
+        self.stored_documents_in_subtree_after_ordered(
+            root,
+            after,
+            limit,
+            StoredPathOrder::Sensitive,
+        )
+    }
+
+    /// The next bounded subtree page using the vault root's proven ordering.
+    pub fn stored_documents_in_subtree_after_ordered(
+        &self,
+        root: &DocumentPath,
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
         if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document subtree page",
@@ -588,15 +630,32 @@ impl<'a> Request<'a> {
         let limit = i64::try_from(limit).expect("the page bound fits i64");
         let (descendant_lower, descendant_upper) = root.descendant_bounds();
         let after = after.map(DocumentPath::as_str);
-        Self::read_all(
-            &self.store.connection,
-            "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+        let sql = match order {
+            StoredPathOrder::Sensitive => {
+                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
                     frontmatter_diagnostic_count, generation, derived_at
              FROM documents
              WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
                AND (?4 IS NULL OR path > ?4)
              ORDER BY path
-             LIMIT ?5",
+             LIMIT ?5"
+            }
+            StoredPathOrder::AsciiCaseInsensitive => {
+                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+                    frontmatter_diagnostic_count, generation, derived_at
+             FROM documents
+             WHERE (path = ?1 COLLATE NOCASE OR
+                    (path >= ?2 COLLATE NOCASE AND path < ?3 COLLATE NOCASE))
+               AND (?4 IS NULL OR
+                    path > ?4 COLLATE NOCASE OR
+                    (path = ?4 COLLATE NOCASE AND path > ?4))
+             ORDER BY path COLLATE NOCASE, path
+             LIMIT ?5"
+            }
+        };
+        Self::read_all(
+            &self.store.connection,
+            sql,
             params![
                 root.as_str(),
                 descendant_lower,

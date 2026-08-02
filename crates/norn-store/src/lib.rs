@@ -72,7 +72,8 @@ pub use error::StoreError;
 pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
     Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
-    StoredFacts, StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource,
+    VaultSchemaPin, VectorFacts,
 };
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};

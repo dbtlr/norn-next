@@ -148,6 +148,13 @@ impl Iterator for Walk {
     }
 }
 
+impl Walk {
+    /// The path ordering proven for this walk's root.
+    pub fn case_sensitivity(&self) -> crate::CaseSensitivity {
+        self.normalizer.case_sensitivity()
+    }
+}
+
 /// One filesystem fact from a walk.
 #[derive(Debug)]
 pub enum WalkFact {

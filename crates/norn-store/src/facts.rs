@@ -264,6 +264,15 @@ pub struct StoredDocument {
     pub derived_at: i64,
 }
 
+/// Ordering used by a bounded stored-document scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoredPathOrder {
+    /// Preserve bytewise UTF-8 path order.
+    Sensitive,
+    /// Fold ASCII case, matching SQLite's `NOCASE` collation.
+    AsciiCaseInsensitive,
+}
+
 /// A document's row and every fact row derived from it, in ordinal order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredFacts {

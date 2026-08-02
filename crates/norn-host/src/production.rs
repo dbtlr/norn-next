@@ -10,7 +10,8 @@ use norn_fs::{
 };
 use norn_store::{
     BlockFact, Change, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
-    IncrementProvenance, LinkFact, LinkFamily, Provenance, Span, Store, TagFact, TagSource,
+    IncrementProvenance, LinkFact, LinkFamily, Provenance, Span, Store, StoredPathOrder, TagFact,
+    TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::MaintainerIdentity;
@@ -288,8 +289,10 @@ fn heal_documents(
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
-    let mut files = walk(root, exclusions)
-        .map_err(effect)?
+    let walk = walk(root, exclusions).map_err(effect)?;
+    let sensitivity = walk.case_sensitivity();
+    let order = store_order(sensitivity);
+    let mut files = walk
         .filter_map(|fact| match fact {
             Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
                 Some(Ok(file))
@@ -309,7 +312,7 @@ fn heal_documents(
         if index == stored.len() && !exhausted {
             stored = store
                 .begin_request()
-                .stored_documents_after(after.as_ref(), policy.store_page_size)
+                .stored_documents_after_ordered(after.as_ref(), policy.store_page_size, order)
                 .map_err(effect)?;
             index = 0;
             exhausted = stored.is_empty();
@@ -322,7 +325,7 @@ fn heal_documents(
         let db_path = stored.get(index).map(|d| d.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
-            (Some(fp), Some(dp)) if fp == dp => {
+            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
                 if read.content_hash().to_string() != stored[index].content_hash {
@@ -335,7 +338,7 @@ fn heal_documents(
                 after = Some(stored[index].path.clone());
                 index += 1;
             }
-            (Some(fp), Some(dp)) if fp < dp => {
+            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
                 changes.push(Change::Upsert(map_document(
@@ -453,8 +456,10 @@ fn heal_subtree(
 ) -> Result<(), JobFailure> {
     let subtree = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
     let prefix = relative_root.to_string_lossy();
-    let mut files = walk(&vault_root.join(relative_root), &[])
-        .map_err(effect)?
+    let walk = walk(&vault_root.join(relative_root), &[]).map_err(effect)?;
+    let sensitivity = walk.case_sensitivity();
+    let order = store_order(sensitivity);
+    let mut files = walk
         .filter_map(|fact| match fact {
             Ok(norn_fs::WalkFact::File(file)) => {
                 let full = relative_root.join(file.path().as_path());
@@ -474,7 +479,12 @@ fn heal_subtree(
         if index == stored.len() && !exhausted {
             stored = store
                 .begin_request()
-                .stored_documents_in_subtree_after(&subtree, after.as_ref(), policy.store_page_size)
+                .stored_documents_in_subtree_after_ordered(
+                    &subtree,
+                    after.as_ref(),
+                    policy.store_page_size,
+                    order,
+                )
                 .map_err(effect)?;
             index = 0;
             exhausted = stored.is_empty();
@@ -490,7 +500,7 @@ fn heal_subtree(
         let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
-            (Some(fp), Some(dp)) if fp == dp => {
+            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
                 let read = files
                     .next()
                     .expect("peeked")
@@ -507,7 +517,7 @@ fn heal_subtree(
                 after = Some(stored[index].path.clone());
                 index += 1;
             }
-            (Some(fp), Some(dp)) if fp < dp => {
+            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
                 let read = files
                     .next()
                     .expect("peeked")
@@ -589,6 +599,13 @@ fn prune_subtree(
 
 fn is_markdown(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "md")
+}
+
+fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
+    match sensitivity {
+        norn_fs::CaseSensitivity::Sensitive => StoredPathOrder::Sensitive,
+        norn_fs::CaseSensitivity::Insensitive => StoredPathOrder::AsciiCaseInsensitive,
+    }
 }
 
 fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
@@ -844,6 +861,33 @@ mod tests {
             7
         );
         ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn case_sensitive_heal_preserves_distinct_mixed_case_prefixes() {
+        let f = Fixture::new("mixed-case-prefixes");
+        fs::create_dir_all(f.vault().join("A")).unwrap();
+        fs::create_dir_all(f.vault().join("a")).unwrap();
+        fs::write(f.vault().join("A/z.md"), "upper").unwrap();
+        fs::write(f.vault().join("a/b.md"), "lower").unwrap();
+        if norn_fs::path_identity(&f.vault().join("A")).unwrap()
+            == norn_fs::path_identity(&f.vault().join("a")).unwrap()
+        {
+            return;
+        }
+
+        let (ops, name) = f.ops(1);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let rows = attachment
+            .store
+            .begin_request()
+            .stored_documents_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            ["A/z.md", "a/b.md"]
+        );
     }
 
     #[test]

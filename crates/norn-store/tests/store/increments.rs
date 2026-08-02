@@ -16,7 +16,9 @@ use crate::common::{
     Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, violation,
     write_document, write_documents,
 };
-use norn_store::{Change, IncrementProvenance, OpenOutcome, Provenance, Store, StoreError};
+use norn_store::{
+    Change, IncrementProvenance, OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
+};
 
 /// One upsert entry, from a document and a hash.
 fn upsert(at: &str, hash: &str, body: &str) -> Change {
@@ -69,6 +71,83 @@ fn stored_document_pages_are_bounded_ordered_and_exclusive() {
         request.stored_documents_after(None, 0),
         Err(StoreError::Bound { .. })
     ));
+}
+
+#[test]
+fn stored_document_pages_share_ascii_folded_order_without_changing_sensitive_order() {
+    let scratch = Scratch::new("document-page-case-order");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("B.md", "hash-b", "b\n"),
+            document("a.md", "hash-a", "a\n"),
+            document("A.md", "hash-upper-a", "upper a\n"),
+        ],
+    );
+
+    let folded = request
+        .stored_documents_after_ordered(None, 10, StoredPathOrder::AsciiCaseInsensitive)
+        .expect("the folded page");
+    assert_eq!(
+        folded
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["A.md", "a.md", "B.md"]
+    );
+    let sensitive = request
+        .stored_documents_after_ordered(None, 10, StoredPathOrder::Sensitive)
+        .expect("the sensitive page");
+    assert_eq!(
+        sensitive
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["A.md", "B.md", "a.md"]
+    );
+}
+
+#[test]
+fn ascii_folded_subtree_pages_are_segment_safe_and_cursor_stable() {
+    let scratch = Scratch::new("document-subtree-case-order");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("A/Z.md", "hash-z", "z\n"),
+            document("a/b.md", "hash-b", "b\n"),
+            document("ab/no.md", "hash-no", "no\n"),
+        ],
+    );
+
+    let root = path("a");
+    let first = request
+        .stored_documents_in_subtree_after_ordered(
+            &root,
+            None,
+            1,
+            StoredPathOrder::AsciiCaseInsensitive,
+        )
+        .expect("the first folded subtree page");
+    assert_eq!(first[0].path.as_str(), "a/b.md");
+    let second = request
+        .stored_documents_in_subtree_after_ordered(
+            &root,
+            Some(&first[0].path),
+            2,
+            StoredPathOrder::AsciiCaseInsensitive,
+        )
+        .expect("the second folded subtree page");
+    assert_eq!(
+        second
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["A/Z.md"]
+    );
 }
 
 #[test]

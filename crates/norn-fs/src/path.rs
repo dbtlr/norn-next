@@ -12,6 +12,7 @@
 //! Unicode policy while still covering the case behavior Norn currently
 //! promises.
 
+use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -28,6 +29,21 @@ pub enum CaseSensitivity {
     Sensitive,
     /// Alternate ASCII case names resolve to the same directory entry.
     Insensitive,
+}
+
+impl CaseSensitivity {
+    /// Compare two UTF-8 vault-relative spellings with this root's proven
+    /// lookup semantics.
+    pub fn compare(self, left: &str, right: &str) -> Ordering {
+        match self {
+            Self::Sensitive => left.as_bytes().cmp(right.as_bytes()),
+            Self::Insensitive => left
+                .bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .cmp(right.bytes().map(|byte| byte.to_ascii_lowercase()))
+                .then_with(|| left.as_bytes().cmp(right.as_bytes())),
+        }
+    }
 }
 
 /// Why a root-scoped normalizer could not be constructed.
@@ -333,6 +349,17 @@ mod tests {
         let alpha = paths.normalize(Path::new("Z/alpha.md")).unwrap();
         let beta = paths.normalize(Path::new("a/BETA.md")).unwrap();
         assert!(beta < alpha);
+    }
+
+    #[test]
+    fn exposed_utf8_order_folds_ascii_only_and_keeps_a_stable_tiebreaker() {
+        assert!(
+            CaseSensitivity::Insensitive
+                .compare("a/Z.md", "A/b.md")
+                .is_gt()
+        );
+        assert!(CaseSensitivity::Insensitive.compare("A.md", "a.md").is_lt());
+        assert!(CaseSensitivity::Sensitive.compare("A.md", "a.md").is_lt());
     }
 
     #[test]
