@@ -628,6 +628,8 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 continue;
             };
             state.safety_pins += 1;
+            state.runnable = true;
+            state.active_epoch = Some(state.epoch);
             (attachment, state.epoch)
         };
         let result = shared.ops.poll(name, &mut attachment);
@@ -640,8 +642,14 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 detach = Some(attachment);
             } else {
                 match result {
-                    Ok(None) => state.attachment = Some(attachment),
+                    Ok(None) => {
+                        state.active_epoch = None;
+                        state.runnable = false;
+                        state.attachment = Some(attachment);
+                    }
                     Ok(Some(batch)) => {
+                        state.active_epoch = None;
+                        state.runnable = false;
                         let rescan = !batch.rescans().is_empty();
                         state.pending.merge(batch);
                         if !state.recovery_required {
@@ -667,6 +675,8 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         detach = Some(attachment);
                     }
                     Err(JobFailure::WatcherTerminal(_)) => {
+                        state.active_epoch = None;
+                        state.runnable = false;
                         state.terminal_watcher = true;
                         state.recovery_required = true;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -674,6 +684,8 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.attachment = Some(attachment);
                     }
                     Err(_) => {
+                        state.active_epoch = None;
+                        state.runnable = false;
                         state.recovery_required = true;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
@@ -688,6 +700,19 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         }
         if let Some(attachment) = detach {
             shared.ops.detach(name, attachment);
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.active_epoch == Some(epoch) {
+                state.active_epoch = None;
+                state.runnable = false;
+            }
+            if state.demand_leases > 0 && state.attachment.is_none() && !state.runnable {
+                state.trust = TrustState::warming(0, None);
+                state.epoch += 1;
+                state.runnable = true;
+                let job = Job::Attach(name.clone(), state.epoch);
+                state.pending_dispatch = Some(job.clone());
+                schedule = Some(job);
+            }
         }
         if let Some(job) = schedule {
             let _ = job;
@@ -1121,6 +1146,9 @@ mod tests {
         block_reconcile: std::sync::atomic::AtomicBool,
         reconcile_started: std::sync::atomic::AtomicBool,
         reconcile_release: std::sync::atomic::AtomicBool,
+        block_poll: std::sync::atomic::AtomicBool,
+        poll_started: std::sync::atomic::AtomicBool,
+        poll_release: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -1177,6 +1205,12 @@ mod tests {
         }
 
         fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+            if self.block_poll.load(Ordering::SeqCst) {
+                self.poll_started.store(true, Ordering::SeqCst);
+                while !self.poll_release.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
             Ok(None)
         }
 
@@ -1479,6 +1513,30 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn demand_during_invalidated_poll_waits_for_attachment_ownership() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for(&host, &name, TrustState::Ready);
+        ops.block_poll.store(true, Ordering::SeqCst);
+        while !ops.poll_started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        host.watcher_failed(&name, WatchError::Backend("lost".into()));
+        let demand = host.demand(&name).unwrap();
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            demand.completion(),
+            Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        drop(demand);
     }
 
     #[derive(Default)]
