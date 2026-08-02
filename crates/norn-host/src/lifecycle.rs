@@ -219,10 +219,14 @@ impl<O: EntryOps> Host<O> {
             } else {
                 Job::Attach(name.clone(), epoch)
             };
+            let answer = Demand::State(state.trust.clone());
+            state.demand_leases -= 1;
+            drop(state);
             self.shared
                 .jobs
                 .send(job)
                 .map_err(|_| HostError::WorkerStopped)?;
+            return Ok(answer);
         }
         let answer = Demand::State(state.trust.clone());
         state.demand_leases -= 1;
@@ -246,6 +250,7 @@ impl<O: EntryOps> Host<O> {
             state.runnable = true;
             state.epoch += 1;
             let epoch = state.epoch;
+            drop(state);
             self.shared
                 .jobs
                 .send(Job::Reconcile(name.clone(), epoch))
@@ -267,6 +272,7 @@ impl<O: EntryOps> Host<O> {
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {
+        let mut jobs = Vec::new();
         for (name, entry) in &self.shared.entries {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.attachment.is_some()
@@ -278,11 +284,14 @@ impl<O: EntryOps> Host<O> {
                 state.runnable = true;
                 state.epoch += 1;
                 let epoch = state.epoch;
-                self.shared
-                    .jobs
-                    .send(Job::Detach(name.clone(), epoch))
-                    .map_err(|_| HostError::WorkerStopped)?;
+                jobs.push(Job::Detach(name.clone(), epoch));
             }
+        }
+        for job in jobs {
+            self.shared
+                .jobs
+                .send(job)
+                .map_err(|_| HostError::WorkerStopped)?;
         }
         Ok(())
     }
@@ -314,7 +323,15 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok(attachment) => {
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
-                    state.trust = TrustState::Ready;
+                    if state.pending.is_empty() {
+                        state.trust = TrustState::Ready;
+                    } else {
+                        state.epoch += 1;
+                        let epoch = state.epoch;
+                        state.runnable = true;
+                        drop(state);
+                        let _ = shared.jobs.send(Job::Reconcile(name, epoch));
+                    }
                 }
                 Err(JobFailure::MaintainerContended(_)) => state.trust = TrustState::Unattached,
                 Err(JobFailure::LostMaintainership) => {
