@@ -210,6 +210,14 @@ impl Job {
     }
 }
 
+fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
+    if pending.rescans().is_empty() {
+        TrustState::warming(0, None)
+    } else {
+        TrustState::untrusted(UntrustedReason::WatcherOverflow)
+    }
+}
+
 fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.detach_due
         && state.attachment.is_some()
@@ -1048,7 +1056,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
-                        state.trust = TrustState::warming(0, None);
+                        state.trust = trust_for_pending_reconcile(&state.pending);
                         state.epoch += 1;
                         let epoch = state.epoch;
                         state.runnable = true;
@@ -1168,7 +1176,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 let work = ReconcileWork {
                     batch: std::mem::take(&mut state.pending),
                 };
-                if !matches!(state.trust, TrustState::Warming { .. }) {
+                if !matches!(
+                    state.trust,
+                    TrustState::Warming { .. } | TrustState::Untrusted { .. }
+                ) {
                     state.trust = TrustState::warming(0, None);
                 }
                 (attachment, work)
@@ -1199,6 +1210,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok(()) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
+                    if handoff_saturated || !state.pending.is_empty() {
+                        state.trust = trust_for_pending_reconcile(&state.pending);
+                    }
                     if state.detach_due {
                         state.runnable = false;
                         let next = schedule_due_detach(&mut state, &name);
@@ -1208,7 +1222,6 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         }
                         break;
                     } else if handoff_saturated {
-                        state.trust = TrustState::warming(0, None);
                         state.epoch += 1;
                         let next = Job::Reconcile(name.clone(), state.epoch);
                         drop(state);
@@ -1276,9 +1289,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             };
             let mut result = shared.ops.maintain(&name, &mut attachment);
             let mut observed = Batch::default();
+            let mut handoff_saturated = false;
             if result.is_ok() {
                 match drain_observed(&shared.ops, &name, &mut attachment) {
-                    Ok((batch, _)) => observed = batch,
+                    Ok((batch, saturated)) => {
+                        observed = batch;
+                        handoff_saturated = saturated;
+                    }
                     Err(error) => result = Err(error),
                 }
             }
@@ -1297,12 +1314,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.runnable = false;
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
-                    } else if !state.pending.is_empty() {
-                        state.trust = if state.pending.rescans().is_empty() {
-                            TrustState::warming(0, None)
-                        } else {
-                            TrustState::untrusted(UntrustedReason::WatcherOverflow)
-                        };
+                    } else if handoff_saturated || !state.pending.is_empty() {
+                        state.trust = trust_for_pending_reconcile(&state.pending);
                         state.runnable = true;
                         state.epoch += 1;
                         next = Some(Job::Reconcile(name.clone(), state.epoch));
@@ -1458,6 +1471,7 @@ mod tests {
         detach_started: std::sync::atomic::AtomicBool,
         detach_release: std::sync::atomic::AtomicBool,
         block_reconcile: std::sync::atomic::AtomicBool,
+        block_reconcile_at: AtomicUsize,
         reconcile_started: std::sync::atomic::AtomicBool,
         reconcile_release: std::sync::atomic::AtomicBool,
         block_poll: std::sync::atomic::AtomicBool,
@@ -1470,6 +1484,7 @@ mod tests {
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
         empty_poll_batches: AtomicUsize,
+        rescan_poll_batch: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -1492,8 +1507,10 @@ mod tests {
             _: ReconcileWork,
             _: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
-            self.reconciles.fetch_add(1, Ordering::SeqCst);
-            if self.block_reconcile.load(Ordering::SeqCst) {
+            let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.block_reconcile.load(Ordering::SeqCst)
+                || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
+            {
                 self.reconcile_started.store(true, Ordering::SeqCst);
                 spin_until("reconcile_release", &self.reconcile_release);
             }
@@ -1533,6 +1550,9 @@ mod tests {
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
                 spin_until("poll_release", &self.poll_release);
+            }
+            if self.rescan_poll_batch.swap(false, Ordering::SeqCst) {
+                return Ok(Some(Batch::rescan(RescanScope::Vault)));
             }
             if self
                 .empty_poll_batches
@@ -1813,6 +1833,25 @@ mod tests {
     }
 
     #[test]
+    fn attach_handoff_preserves_observed_rescan_as_untrusted() {
+        let ops = Arc::new(FakeOps::default());
+        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+
+        let lease = host.demand(&name).unwrap();
+        spin_until("reconcile_started", &ops.reconcile_started);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    #[test]
     fn reconcile_handoff_saturation_requires_an_additional_reconcile_before_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
@@ -1826,6 +1865,36 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
+        drop(lease);
+    }
+
+    #[test]
+    fn reconcile_handoff_saturation_preserves_observed_rescan_as_untrusted() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.empty_poll_batches
+            .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
+        ops.block_reconcile_at.store(2, Ordering::SeqCst);
+        host.accept_batch(&name, Batch::default()).unwrap();
+
+        for _ in 0..200 {
+            if ops.reconciles.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
     }
 
@@ -2694,6 +2763,59 @@ mod tests {
         }
         assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
         assert_eq!(host.state(&name), Some(TrustState::Ready));
+        drop(lease);
+    }
+
+    #[test]
+    fn maintenance_handoff_saturation_stays_warming_until_a_followup_drain() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_maintenance.store(true, Ordering::SeqCst);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        spin_until("maintenance_started", &ops.maintenance_started);
+        ops.empty_poll_batches
+            .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+
+        spin_until("reconcile_started", &ops.reconcile_started);
+        assert!(matches!(
+            host.state(&name),
+            Some(TrustState::Warming { .. })
+        ));
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    #[test]
+    fn maintenance_handoff_saturation_preserves_untrusted_rescan_state() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_maintenance.store(true, Ordering::SeqCst);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        spin_until("maintenance_started", &ops.maintenance_started);
+        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.empty_poll_batches
+            .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+
+        spin_until("reconcile_started", &ops.reconcile_started);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
     }
 

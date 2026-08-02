@@ -259,10 +259,10 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
-        attachment
-            ._shadows
-            .sweep(norn_fs::SHADOW_AGE_THRESHOLD)
-            .map_err(effect)?;
+        // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
+        // that cleanup opportunity must not withdraw an otherwise healthy
+        // attachment or force a full heal; try again at the next normal cadence.
+        let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
         attachment.last_shadow_sweep = Instant::now();
         Ok(())
     }
@@ -1641,6 +1641,28 @@ mod tests {
         ops.maintain(&name, &mut attachment).unwrap();
         assert!(!residue.exists());
         assert!(!ops.maintenance_due(&name, &attachment));
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn failed_scheduled_shadow_sweep_keeps_the_attachment_available_until_the_next_cadence() {
+        let f = Fixture::new("failed-scheduled-shadow-sweep");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let shadow_home = attachment._shadows.directory().to_owned();
+        let displaced = shadow_home.with_extension("displaced");
+        fs::rename(&shadow_home, &displaced).unwrap();
+        fs::write(&shadow_home, "not a directory").unwrap();
+        attachment.last_shadow_sweep =
+            Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
+
+        assert!(ops.maintenance_due(&name, &attachment));
+        ops.maintain(&name, &mut attachment)
+            .expect("cleanup availability must not withdraw serving availability");
+        assert!(attachment.maintainership.still_current());
+        assert!(!ops.maintenance_due(&name, &attachment));
+
         ops.detach(&name, attachment);
     }
 
