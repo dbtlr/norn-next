@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+induced-failure = ["norn-store/induced-failure"]
+
 [dependencies]
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }
