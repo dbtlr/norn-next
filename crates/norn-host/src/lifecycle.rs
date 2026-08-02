@@ -1037,7 +1037,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             state.runnable = false;
             match result {
-                Ok((attachment, observed, _)) => {
+                Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     state.recovery_required = false;
@@ -1045,9 +1045,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.identity_refused = false;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
-                    if state.pending.is_empty() {
+                    if state.pending.is_empty() && !handoff_saturated {
                         state.trust = TrustState::Ready;
                     } else {
+                        state.trust = TrustState::warming(0, None);
                         state.epoch += 1;
                         let epoch = state.epoch;
                         state.runnable = true;
@@ -1206,15 +1207,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                             dispatch_followup(shared, job);
                         }
                         break;
+                    } else if handoff_saturated {
+                        state.trust = TrustState::warming(0, None);
+                        state.epoch += 1;
+                        let next = Job::Reconcile(name.clone(), state.epoch);
+                        drop(state);
+                        dispatch_followup(shared, next);
+                        break;
                     } else if state.pending.is_empty() {
                         state.runnable = false;
                         if !state.recovery_required {
                             state.trust = TrustState::Ready;
                         }
-                        break;
-                    } else if handoff_saturated {
-                        state.runnable = false;
-                        state.trust = TrustState::warming(0, None);
                         break;
                     }
                 }
@@ -1465,6 +1469,7 @@ mod tests {
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
+        empty_poll_batches: AtomicUsize,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -1528,6 +1533,15 @@ mod tests {
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
                 spin_until("poll_release", &self.poll_release);
+            }
+            if self
+                .empty_poll_batches
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(Some(Batch::default()));
             }
             Ok(None)
         }
@@ -1775,6 +1789,43 @@ mod tests {
             .unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    #[test]
+    fn attach_handoff_saturation_stays_warming_until_a_followup_drain() {
+        let ops = Arc::new(FakeOps::default());
+        ops.empty_poll_batches
+            .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+
+        let lease = host.demand(&name).unwrap();
+        spin_until("reconcile_started", &ops.reconcile_started);
+        assert!(matches!(
+            host.state(&name),
+            Some(TrustState::Warming { .. })
+        ));
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    #[test]
+    fn reconcile_handoff_saturation_requires_an_additional_reconcile_before_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.empty_poll_batches
+            .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
         drop(lease);
     }
 
@@ -2477,6 +2528,75 @@ mod tests {
             ))
         );
         drop((demand, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_refusal_does_not_poison_demand_for_an_unrelated_live_entry() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-identity-refusal-isolation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let healthy_root = base.join("healthy");
+        let refused_root = base.join("refused");
+        std::fs::create_dir_all(&healthy_root).unwrap();
+        std::fs::create_dir_all(&refused_root).unwrap();
+        let ops = Arc::new(FakeOps::default());
+        let healthy = VaultName::new("healthy").unwrap();
+        let refused = VaultName::new("refused").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
+            RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let healthy_lease = host.demand(&healthy).unwrap();
+        let refused_lease = host.demand(&refused).unwrap();
+        wait_for_state(&host, &healthy, TrustState::Ready);
+        wait_for_state(&host, &refused, TrustState::Ready);
+        std::fs::remove_dir(&refused_root).unwrap();
+        symlink("refused", &refused_root).unwrap();
+
+        let renewed_healthy = host.demand(&healthy).unwrap();
+        assert_eq!(
+            renewed_healthy.completion(),
+            Demand::State(TrustState::Ready)
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        let refused_again = host.demand(&refused).unwrap();
+        assert_eq!(
+            refused_again.completion(),
+            Demand::State(TrustState::untrusted(
+                UntrustedReason::environmental_refusal()
+            ))
+        );
+        assert_eq!(host.state(&healthy), Some(TrustState::Ready));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+
+        drop((
+            refused_again,
+            renewed_healthy,
+            refused_lease,
+            healthy_lease,
+            host,
+        ));
         let _ = std::fs::remove_dir_all(base);
     }
 

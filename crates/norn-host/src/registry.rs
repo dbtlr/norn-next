@@ -30,7 +30,7 @@ impl ServingRegistry {
             .into_iter()
             .map(|entry| (entry.name.clone(), entry))
             .collect::<BTreeMap<_, _>>();
-        let conflicts = classify(&entries)?;
+        let conflicts = classify(&entries);
         Ok(Self { entries, conflicts })
     }
 
@@ -48,7 +48,7 @@ impl ServingRegistry {
         if !self.entries.contains_key(name) {
             return Ok(None);
         }
-        Ok(classify(&self.entries)?.remove(name))
+        Ok(classify_for(&self.entries, name)?.remove(name))
     }
 
     /// Resolve one registered root for an attach-time acquisition claim.
@@ -65,12 +65,33 @@ impl ServingRegistry {
     }
 }
 
-fn classify(
+fn classify_for(
     entries: &BTreeMap<VaultName, Entry>,
+    requested: &VaultName,
 ) -> Result<BTreeMap<VaultName, AliasConflict>, Refusal> {
     let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
     for entry in entries.values() {
-        if let Some(identity) = path_identity(entry.root.as_path())? {
+        match path_identity(entry.root.as_path()) {
+            Ok(Some(identity)) => {
+                identities
+                    .entry(identity)
+                    .or_default()
+                    .insert(entry.name.clone());
+            }
+            Ok(None) => {}
+            Err(refusal) if &entry.name == requested => return Err(refusal),
+            Err(_) => {}
+        }
+    }
+    Ok(conflicts_from_identities(identities))
+}
+
+fn classify(entries: &BTreeMap<VaultName, Entry>) -> BTreeMap<VaultName, AliasConflict> {
+    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
+    for entry in entries.values() {
+        // An environmental refusal belongs to this entry, not to the registry
+        // as a whole. Demand rechecks it and reports the refusal for that name.
+        if let Ok(Some(identity)) = path_identity(entry.root.as_path()) {
             identities
                 .entry(identity)
                 .or_default()
@@ -78,6 +99,12 @@ fn classify(
         }
     }
 
+    conflicts_from_identities(identities)
+}
+
+fn conflicts_from_identities(
+    identities: BTreeMap<Identity, BTreeSet<VaultName>>,
+) -> BTreeMap<VaultName, AliasConflict> {
     let mut conflicts = BTreeMap::new();
     for aliases in identities.into_values().filter(|names| names.len() > 1) {
         let aliases = aliases.into_iter().collect::<Vec<_>>();
@@ -88,10 +115,11 @@ fn classify(
             conflicts.insert(alias, conflict.clone());
         }
     }
-    Ok(conflicts)
+    conflicts
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures impersonate external filesystem retargets.
 mod tests {
     use super::*;
     use norn_config::registry::VaultRoot;
@@ -125,5 +153,130 @@ mod tests {
                 .conflict(&VaultName::new("later").unwrap())
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recheck_of_a_healthy_entry_ignores_an_unrelated_identity_refusal() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-registry-refusal-isolation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let healthy = base.join("healthy");
+        let refused = base.join("refused");
+        std::fs::create_dir_all(&healthy).unwrap();
+        std::fs::create_dir_all(&refused).unwrap();
+        let registry = ServingRegistry::from_entries([
+            Entry::new(
+                VaultName::new("healthy").unwrap(),
+                VaultRoot::new(&healthy).unwrap(),
+            ),
+            Entry::new(
+                VaultName::new("refused").unwrap(),
+                VaultRoot::new(&refused).unwrap(),
+            ),
+        ])
+        .unwrap();
+        std::fs::remove_dir(&refused).unwrap();
+        symlink("refused", &refused).unwrap();
+
+        assert_eq!(
+            registry.recheck(&VaultName::new("healthy").unwrap()),
+            Ok(None)
+        );
+        assert!(
+            registry
+                .recheck(&VaultName::new("refused").unwrap())
+                .is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_keeps_healthy_entries_serviceable_when_another_identity_refuses() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-registry-startup-refusal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let healthy = base.join("healthy");
+        let healthy_alias = healthy.join(".");
+        let refused = base.join("refused");
+        std::fs::create_dir_all(&healthy).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        symlink("refused", &refused).unwrap();
+        let healthy_name = VaultName::new("healthy").unwrap();
+        let alias_name = VaultName::new("healthy-alias").unwrap();
+        let refused_name = VaultName::new("refused").unwrap();
+
+        let registry = ServingRegistry::from_entries([
+            Entry::new(healthy_name.clone(), VaultRoot::new(&healthy).unwrap()),
+            Entry::new(alias_name.clone(), VaultRoot::new(&healthy_alias).unwrap()),
+            Entry::new(refused_name.clone(), VaultRoot::new(&refused).unwrap()),
+        ])
+        .expect("an unrelated refusal must not abort the serving registry");
+        assert_eq!(
+            registry.recheck(&healthy_name).unwrap().unwrap().aliases,
+            vec![healthy_name, alias_name]
+        );
+        assert!(registry.recheck(&refused_name).is_err());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recheck_keeps_global_duplicate_classification_while_isolating_a_refusal() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-registry-global-aliases-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let shared = base.join("shared");
+        let alias = base.join("alias");
+        let refused = base.join("refused");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::create_dir_all(&refused).unwrap();
+        let alpha = VaultName::new("alpha").unwrap();
+        let beta = VaultName::new("beta").unwrap();
+        let registry = ServingRegistry::from_entries([
+            Entry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
+            Entry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
+            Entry::new(
+                VaultName::new("refused").unwrap(),
+                VaultRoot::new(&refused).unwrap(),
+            ),
+        ])
+        .unwrap();
+        std::fs::remove_dir(&alias).unwrap();
+        symlink(&shared, &alias).unwrap();
+        std::fs::remove_dir(&refused).unwrap();
+        symlink("refused", &refused).unwrap();
+
+        assert_eq!(
+            registry.recheck(&alpha).unwrap().unwrap().aliases,
+            vec![alpha, beta]
+        );
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

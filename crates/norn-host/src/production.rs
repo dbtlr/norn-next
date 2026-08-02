@@ -327,7 +327,7 @@ fn heal_documents(
             exhausted = stored.is_empty();
         }
         let fs_path = match files.peek() {
-            Some(Ok(file)) => Some(file.path().as_path().to_string_lossy().into_owned()),
+            Some(Ok(file)) => Some(utf8_path(file.path().as_path())?.to_owned()),
             Some(Err(error)) => return Err(effect(error)),
             None => None,
         };
@@ -392,6 +392,9 @@ fn scoped_increment(
     progress: &ProgressReporter<ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
+    let sensitivity = norn_fs::PathNormalizer::detect(root)
+        .map_err(effect)?
+        .case_sensitivity();
     let mut changes = Vec::with_capacity(policy.changeset_size);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
@@ -406,27 +409,22 @@ fn scoped_increment(
             }
             norn_fs::PathKind::Missing => {
                 commit(store, &mut changes)?;
-                prune_subtree(store, path, policy, progress)?;
+                prune_subtree_ordered(store, path, policy, progress, store_order(sensitivity))?;
                 continue;
             }
             norn_fs::PathKind::Other => {
-                if is_markdown(path) {
-                    changes.push(Change::Death {
-                        path: DocumentPath::new(&path.to_string_lossy()).map_err(effect)?,
-                        provenance: Provenance::WatcherRemoval,
-                    });
-                    if changes.len() == policy.changeset_size {
-                        commit(store, &mut changes)?;
-                    }
-                }
+                commit(store, &mut changes)?;
+                prune_subtree_ordered(store, path, policy, progress, store_order(sensitivity))?;
                 continue;
             }
             norn_fs::PathKind::RegularFile => {}
         }
+        commit(store, &mut changes)?;
+        prune_descendants_and_aliases(store, path, policy, progress, sensitivity)?;
         if !is_markdown(path) {
             continue;
         }
-        let document_path = DocumentPath::new(&path.to_string_lossy()).map_err(effect)?;
+        let document_path = DocumentPath::new(utf8_path(path)?).map_err(effect)?;
         match norn_fs::read_optional_and_hash(&root.join(path)).map_err(effect)? {
             Some(observed) => {
                 let hash = observed.content_hash().to_string();
@@ -463,8 +461,8 @@ fn heal_subtree(
     progress: &ProgressReporter<ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let subtree = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
-    let prefix = relative_root.to_string_lossy();
+    let prefix = utf8_path(relative_root)?;
+    let subtree = DocumentPath::new(prefix).map_err(effect)?;
     let scoped_exclusions = exclusions
         .iter()
         .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
@@ -504,10 +502,7 @@ fn heal_subtree(
             exhausted = stored.is_empty();
         }
         let fs_path = match files.peek() {
-            Some(Ok(file)) => Some(format!(
-                "{prefix}/{}",
-                file.path().as_path().to_string_lossy()
-            )),
+            Some(Ok(file)) => Some(format!("{prefix}/{}", utf8_path(file.path().as_path())?)),
             Some(Err(error)) => return Err(effect(error)),
             None => None,
         };
@@ -576,19 +571,41 @@ fn heal_subtree(
     commit(store, &mut changes)
 }
 
+#[cfg(test)]
 fn prune_subtree(
     store: &mut Store,
     relative_root: &Path,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
-    let root = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
+    prune_subtree_ordered(
+        store,
+        relative_root,
+        policy,
+        progress,
+        StoredPathOrder::Sensitive,
+    )
+}
+
+fn prune_subtree_ordered(
+    store: &mut Store,
+    relative_root: &Path,
+    policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
+    order: StoredPathOrder,
+) -> Result<(), JobFailure> {
+    let root = DocumentPath::new(utf8_path(relative_root)?).map_err(effect)?;
     let mut after = None;
     let mut healed = 0;
     loop {
         let page = store
             .begin_request()
-            .stored_documents_in_subtree_after(&root, after.as_ref(), policy.store_page_size)
+            .stored_documents_in_subtree_after_ordered(
+                &root,
+                after.as_ref(),
+                policy.store_page_size,
+                order,
+            )
             .map_err(effect)?;
         if page.is_empty() {
             break;
@@ -609,6 +626,59 @@ fn prune_subtree(
         progress.report(healed, None);
     }
     Ok(())
+}
+
+fn prune_descendants_and_aliases(
+    store: &mut Store,
+    relative_root: &Path,
+    policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
+    sensitivity: norn_fs::CaseSensitivity,
+) -> Result<(), JobFailure> {
+    let root = DocumentPath::new(utf8_path(relative_root)?).map_err(effect)?;
+    let mut after = None;
+    let mut pruned = 0;
+    loop {
+        let page = store
+            .begin_request()
+            .stored_documents_in_subtree_after_ordered(
+                &root,
+                after.as_ref(),
+                policy.store_page_size,
+                store_order(sensitivity),
+            )
+            .map_err(effect)?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|row| row.path.clone());
+        let mut changes = Vec::with_capacity(policy.changeset_size);
+        for row in page {
+            if row.path == root {
+                continue;
+            }
+            changes.push(Change::Death {
+                path: row.path,
+                provenance: Provenance::WatcherRemoval,
+            });
+            pruned += 1;
+            if changes.len() == policy.changeset_size {
+                commit(store, &mut changes)?;
+            }
+        }
+        commit(store, &mut changes)?;
+        progress.report(pruned, None);
+    }
+    Ok(())
+}
+
+fn utf8_path(path: &Path) -> Result<&str, JobFailure> {
+    path.to_str().ok_or_else(|| {
+        environmental(format!(
+            "vault-relative path {} is not valid UTF-8 and has no document identity",
+            path.display()
+        ))
+    })
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -1014,6 +1084,152 @@ mod tests {
                 .stored_document(&DocumentPath::new("note.md").unwrap())
                 .unwrap()
                 .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn scoped_file_replacing_a_directory_prunes_former_descendants() {
+        let f = Fixture::new("directory-to-file");
+        fs::create_dir_all(f.vault().join("archive.md")).unwrap();
+        fs::write(f.vault().join("archive.md/child.md"), "child").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
+        fs::write(f.vault().join("archive.md"), "replacement").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "archive.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        let request = attachment.store.begin_request();
+        assert!(
+            request
+                .stored_document(&DocumentPath::new("archive.md/child.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            request
+                .stored_document(&DocumentPath::new("archive.md").unwrap())
+                .unwrap()
+                .is_some()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heal_refuses_a_non_utf8_document_name_instead_of_aliasing_it_lossily() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let f = Fixture::new("non-utf8-name");
+        let name = std::ffi::OsString::from_vec(b"bad-\xff.md".to_vec());
+        fs::write(f.vault().join(name), "body").unwrap();
+        let (ops, vault_name) = f.ops(2);
+        let error = match ops.attach(&vault_name, &ProgressReporter::disconnected()) {
+            Ok(_) => panic!("non-UTF-8 document identity must be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            JobFailure::Environmental(message) if message.contains("not valid UTF-8")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_identity_boundary_refuses_non_utf8_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"bad-\xff.md"));
+        assert!(matches!(
+            utf8_path(path),
+            Err(JobFailure::Environmental(message))
+                if message.contains("not valid UTF-8")
+        ));
+    }
+
+    #[test]
+    fn scoped_case_only_file_rename_replaces_the_stored_spelling() {
+        let f = Fixture::new("case-only-file-rename");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::rename(f.vault().join("note.md"), f.vault().join("NOTE.md")).unwrap();
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "NOTE.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        let rows = attachment
+            .store
+            .begin_request()
+            .stored_documents_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            ["NOTE.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn scoped_case_only_directory_rename_replaces_descendant_spellings() {
+        let f = Fixture::new("case-only-directory-rename");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        fs::create_dir(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "FOLDER"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        let rows = attachment
+            .store
+            .begin_request()
+            .stored_documents_after(None, 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            ["FOLDER/note.md"]
         );
         ops.detach(&name, attachment);
     }
