@@ -85,16 +85,18 @@ pub mod write;
 mod faults;
 mod hash;
 mod identity;
+mod read;
 mod refusal;
 #[cfg(test)]
 mod scratch;
 
 pub use hash::{ContentHash, hashed_from};
-pub use identity::{Identity, PostState};
+pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
+pub use read::{PathKind, ReadAndHash, path_kind, read_and_hash, read_optional_and_hash};
 pub use refusal::Refusal;
-pub use shadow::{Placement, ShadowHome, Swept, is_shadow_name};
+pub use shadow::{Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept, is_shadow_name};
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
     WalkFact, walk,

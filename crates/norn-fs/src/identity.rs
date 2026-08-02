@@ -111,6 +111,15 @@ pub(crate) fn name_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
     }
 }
 
+/// The filesystem identity currently named by `path`, when it exists.
+///
+/// Registry aliases are a filesystem question: distinct recorded paths may
+/// resolve to the same directory. The host asks through this seam rather than
+/// reaching around `norn-fs` to stat a vault root itself.
+pub fn path_identity(path: &Path) -> Result<Option<Identity>, Refusal> {
+    name_identity(path)
+}
+
 /// The post-state identity of a file whose content hashed to `content_hash`.
 ///
 /// The length comes from the hashing rather than from the metadata: hashing is

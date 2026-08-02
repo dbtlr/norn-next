@@ -59,6 +59,14 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// One widened invalidation, useful when a host learns uncertainty outside
+    /// the platform backend itself.
+    pub fn rescan(scope: RescanScope) -> Self {
+        Self {
+            rescans: BTreeSet::from([scope]),
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
@@ -70,6 +78,22 @@ impl Batch {
     /// Coverage partitions whose precise dirty set was lost.
     pub fn rescans(&self) -> &BTreeSet<RescanScope> {
         &self.rescans
+    }
+
+    /// Merge another settled batch without losing any uncertainty.
+    pub fn merge(&mut self, other: Batch) {
+        self.vault_roots.extend(other.vault_roots);
+        self.schema_dirty |= other.schema_dirty;
+        self.rescans.extend(other.rescans);
+        if self.vault_roots.len() > DIRTY_ROOT_CAP {
+            self.vault_roots.clear();
+            self.rescans.insert(RescanScope::Vault);
+        }
+    }
+
+    /// Whether this envelope carries no invalidation fact.
+    pub fn is_empty(&self) -> bool {
+        self.vault_roots.is_empty() && !self.schema_dirty && self.rescans.is_empty()
     }
 }
 
@@ -104,6 +128,23 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// Receive one already-settled batch without waiting.
+    pub fn try_recv(&self) -> Result<Option<Batch>, WatchError> {
+        match self
+            .batches
+            .as_ref()
+            .expect("subscription receiver present")
+            .try_recv()
+        {
+            Ok(Ok(batch)) => Ok(Some(batch)),
+            Ok(Err(error)) => Err(error),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(WatchError::Backend("watcher stopped".into()))
+            }
+        }
+    }
+
     /// Blocks until a settled batch or terminal error is available.
     pub fn recv(&self) -> Result<Batch, WatchError> {
         self.batches
@@ -666,6 +707,28 @@ mod tests {
             SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
         )))
+    }
+
+    #[test]
+    fn host_side_merge_unions_every_kind_of_uncertainty() {
+        let normalizer = normalizer();
+        let mut pending = Batch::default();
+        pending
+            .vault_roots
+            .insert(normalizer.normalize(Path::new("one.md")).unwrap());
+        let mut next = Batch::default();
+        next.vault_roots
+            .insert(normalizer.normalize(Path::new("two.md")).unwrap());
+        next.schema_dirty = true;
+        next.rescans.insert(RescanScope::Schema);
+
+        pending.merge(next);
+
+        assert_eq!(pending.vault_roots.len(), 2);
+        assert!(pending.schema_dirty);
+        assert_eq!(pending.rescans, BTreeSet::from([RescanScope::Schema]));
+        assert!(!pending.is_empty());
+        assert!(Batch::default().is_empty());
     }
 
     fn own_write_harness(label: &str) -> (Scratch, Arc<Mutex<Ledger>>, OwnWrites) {

@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
@@ -27,7 +27,7 @@ use std::time::SystemTime;
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, readlinkat, statat};
 
-use crate::hash::ContentHash;
+use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::Identity;
 use crate::path::{NormalizedPath, NormalizerError, PathError, PathNormalizer};
 use crate::shadow::{FALLBACK, is_shadow_name};
@@ -148,6 +148,13 @@ impl Iterator for Walk {
     }
 }
 
+impl Walk {
+    /// The path ordering proven for this walk's root.
+    pub fn case_sensitivity(&self) -> crate::CaseSensitivity {
+        self.normalizer.case_sensitivity()
+    }
+}
+
 /// One filesystem fact from a walk.
 #[derive(Debug)]
 pub enum WalkFact {
@@ -212,8 +219,8 @@ impl FileFact {
                 ),
             ));
         }
-        let (bytes, content_hash) =
-            read_and_hash(&mut file).map_err(|source| environment("reading", &access, source))?;
+        let (bytes, content_hash) = read_bytes_and_hash(&mut file)
+            .map_err(|source| environment("reading", &access, source))?;
         Ok(ReadFile {
             path: self.path,
             stat: stat(&metadata),
@@ -706,14 +713,6 @@ fn inspect_link_target(
     Ok(LinkKind::InVaultDirectory)
 }
 
-/// One forward pass over `reader`; parsers receive the same bytes the hash saw.
-fn read_and_hash(reader: &mut impl Read) -> io::Result<(Vec<u8>, ContentHash)> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let hash = ContentHash::of(&bytes);
-    Ok((bytes, hash))
-}
-
 fn stat(metadata: &fs::Metadata) -> FileStat {
     FileStat {
         len: metadata.len(),
@@ -763,7 +762,7 @@ fn environment(operation: &'static str, path: &Path, source: io::Error) -> WalkE
 mod tests {
     use super::*;
     use crate::scratch::Scratch;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
 
     fn paths(walk: Walk) -> Vec<(PathBuf, Option<SkipReason>)> {
         walk.map(|fact| match fact.expect("walk fact") {
@@ -859,7 +858,7 @@ mod tests {
             inner: Cursor::new(b"one pass only".to_vec()),
             bytes: 0,
         };
-        let (bytes, hash) = read_and_hash(&mut reader).expect("one reading");
+        let (bytes, hash) = read_bytes_and_hash(&mut reader).expect("one reading");
         assert_eq!(reader.bytes, bytes.len());
         assert_eq!(hash, ContentHash::of(&bytes));
     }

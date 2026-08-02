@@ -197,6 +197,21 @@ impl DocumentPath {
         self.depth
     }
 
+    /// The indexed bounds containing this path's segment-aligned descendants.
+    ///
+    /// The path itself is not inside these bounds; a subtree query includes it
+    /// separately. The separator is load-bearing: `a/ <= path < a0` contains
+    /// `a/child.md`, but not `ab/child.md`.
+    pub(crate) fn descendant_bounds(&self) -> (String, String) {
+        let mut lower = String::with_capacity(self.path.len() + 1);
+        lower.push_str(&self.path);
+        lower.push(SEPARATOR);
+        let mut upper = lower.clone();
+        upper.pop();
+        upper.push(PAST_SEPARATOR);
+        (lower, upper)
+    }
+
     /// The key of the ambiguity class this document belongs to: its stem, with
     /// the separator that makes the match segment-aligned.
     ///

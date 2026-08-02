@@ -72,12 +72,13 @@ pub use error::StoreError;
 pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
     Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
-    StoredFacts, StoredFinding, StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource,
+    VaultSchemaPin, VectorFacts,
 };
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use path::{ClassKey, DocumentPath, SuffixProbe, class_probe, suffix_probe};
-pub use request::{EmittedPlan, ExplainedStatement, PlanStep, Request};
+pub use request::{EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
 pub use store::{OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode};

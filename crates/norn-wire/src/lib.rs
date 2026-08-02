@@ -10,7 +10,9 @@
 //!
 //! What is defined here today is where a vault entry stands — [`TrustState`]
 //! and the [`UntrustedReason`] it carries — and the one shape a refusal takes:
-//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`].
+//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]. Maintainer
+//! contention carries the diagnostic [`MaintainerIdentity`] reported by the
+//! lock without changing an entry's trust state.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -79,13 +81,12 @@
 //!
 //! # Minting a reason code
 //!
-//! [`ReasonCode`] holds one code today, `host/entry-untrusted`, and each code
-//! pairs with exactly one [`ErrorDetail`] variant: the detail's wire tag *is*
-//! the code string, and [`ErrorDetail::code`] hands back the code the detail
-//! belongs to.
+//! Each [`ReasonCode`] pairs with exactly one [`ErrorDetail`] variant: the
+//! detail's wire tag *is* the code string, and [`ErrorDetail::code`] hands back
+//! the code the detail belongs to.
 
 mod error;
 mod trust;
 
-pub use error::{ErrorDetail, ErrorEnvelope, ReasonCode};
+pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use trust::{TrustState, UntrustedReason};

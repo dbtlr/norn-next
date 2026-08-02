@@ -1,0 +1,23 @@
+[package]
+name = "norn-host"
+description = "The protocol-blind orchestrator — registry semantics, lazy vault attachment, and bounded lifecycle scheduling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+induced-failure = ["norn-store/induced-failure"]
+
+[dependencies]
+norn-config = { path = "../norn-config" }
+norn-embed = { path = "../norn-embed" }
+norn-fs = { path = "../norn-fs" }
+norn-store = { path = "../norn-store" }
+norn-text = { path = "../norn-text" }
+norn-wire = { path = "../norn-wire" }
+
+[dev-dependencies]
+norn-store = { path = "../norn-store", features = ["induced-failure"] }
+norn-testkit = { path = "../norn-testkit" }

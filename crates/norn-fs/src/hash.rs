@@ -6,16 +6,16 @@
 //! false "changed" costs a re-derivation.
 //!
 //! Reading and hashing a file is **one act against one file descriptor**, so
-//! the bytes hashed are provably the bytes read. [`hashed_from`] is that act: it
-//! takes a handle rather than a path, which is what makes the guarantee
-//! structural instead of a convention each call site keeps, and it is what every
-//! consumer that needs a file's hash asks.
+//! the bytes hashed are provably the bytes read. [`hashed_from`] is the
+//! streaming form for a caller holding a handle. [`crate::read_and_hash`] is
+//! the configured-path form which returns both the bytes and their hash from
+//! one opening.
 //!
 //! [`ContentHash::of`] is the same guarantee arrived at from the other side — a
 //! caller that already holds the bytes hashes those bytes, and the write kernel's
 //! source-reading leg uses it over a buffer it read through one handle in one
-//! act. What has no spelling anywhere is *open a path and hash whatever it turns
-//! out to be*, because that is the act whose two halves can be about two files.
+//! act. What has no spelling anywhere is *open once to hash, then again to
+//! read*, because those two halves can be about two files.
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
@@ -28,6 +28,16 @@ use sha2::{Digest, Sha256};
 /// whole file, because peak memory is a function of the working set and not of
 /// what a document happens to weigh.
 const CHUNK: usize = 64 * 1024;
+
+/// One forward pass over `reader`; consumers receive the same bytes the hash saw.
+pub(crate) fn read_bytes_and_hash(
+    reader: &mut impl Read,
+) -> std::io::Result<(Vec<u8>, ContentHash)> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let hash = ContentHash::of(&bytes);
+    Ok((bytes, hash))
+}
 
 /// The SHA-256 of a document's bytes.
 ///

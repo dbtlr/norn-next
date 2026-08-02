@@ -26,6 +26,41 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::trust::UntrustedReason;
 
+/// Who holds a contended maintainer lock, as far as its diagnostic says.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MaintainerIdentity {
+    /// The lock diagnostic identified its holder.
+    #[non_exhaustive]
+    Named {
+        /// The process id reported by the holder.
+        pid: u32,
+        /// The Norn version reported by the holder.
+        version: String,
+        /// Whole seconds since the Unix epoch when the holder took the lock.
+        started_unix_seconds: u64,
+    },
+    /// The lock is held, but its diagnostic could not identify the holder.
+    Unknown {},
+}
+
+impl MaintainerIdentity {
+    /// An identified maintainer.
+    pub fn named(pid: u32, version: impl Into<String>, started_unix_seconds: u64) -> Self {
+        Self::Named {
+            pid,
+            version: version.into(),
+            started_unix_seconds,
+        }
+    }
+
+    /// A maintainer whose diagnostic identity is unavailable.
+    pub const fn unknown() -> Self {
+        Self::Unknown {}
+    }
+}
+
 /// The code a refusal is filed under.
 ///
 /// A code is a flat namespaced string — `namespace/what-happened` — and the
@@ -38,6 +73,10 @@ pub enum ReasonCode {
     /// the reason the state is untrusted.
     #[serde(rename = "host/entry-untrusted")]
     HostEntryUntrusted,
+    /// `host/maintainer-contended` — another process currently maintains this
+    /// vault's derived state.
+    #[serde(rename = "host/maintainer-contended")]
+    HostMaintainerContended,
 }
 
 /// The typed payload one reason code carries.
@@ -59,6 +98,14 @@ pub enum ErrorDetail {
         /// Why the entry's derived state cannot be trusted.
         reason: UntrustedReason,
     },
+    /// The detail of `host/maintainer-contended`: who holds maintainership, as
+    /// far as the lock diagnostic can say.
+    #[serde(rename = "host/maintainer-contended")]
+    #[non_exhaustive]
+    MaintainerContended {
+        /// The incumbent maintainer's diagnostic identity.
+        incumbent: MaintainerIdentity,
+    },
 }
 
 impl ErrorDetail {
@@ -67,10 +114,16 @@ impl ErrorDetail {
         ErrorDetail::EntryUntrusted { reason }
     }
 
+    /// The detail of `host/maintainer-contended`, for `incumbent`.
+    pub const fn maintainer_contended(incumbent: MaintainerIdentity) -> Self {
+        Self::MaintainerContended { incumbent }
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
             ErrorDetail::EntryUntrusted { .. } => ReasonCode::HostEntryUntrusted,
+            ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
         }
     }
 }
@@ -182,6 +235,7 @@ mod tests {
     fn wire_string(code: &ReasonCode) -> &'static str {
         match code {
             ReasonCode::HostEntryUntrusted => "host/entry-untrusted",
+            ReasonCode::HostMaintainerContended => "host/maintainer-contended",
         }
     }
 
@@ -193,6 +247,9 @@ mod tests {
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::TornIncrement)
             }
+            ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
+                MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
+            ),
         }
     }
 
