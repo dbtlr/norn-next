@@ -250,6 +250,61 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
     }
 }
 
+fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
+    let entries = conflict
+        .aliases
+        .iter()
+        .filter_map(|name| shared.entries.get(name).map(|entry| (name, entry)))
+        .collect::<Vec<_>>();
+    let mut states = entries
+        .iter()
+        .map(|(_, entry)| entry.gate.lock().expect("entry gate poisoned"))
+        .collect::<Vec<_>>();
+    let mut attachments = Vec::new();
+    for ((name, _), state) in entries.iter().zip(&mut states) {
+        state.epoch += 1;
+        state.queued = false;
+        state.pending_dispatch = None;
+        state.pending = Batch::default();
+        state.recovery_required = false;
+        state.duplicate_root = Some(conflict.clone());
+        state.trust = TrustState::Unattached;
+        if state.active_epoch.is_none() && !state.detach_in_flight {
+            state.runnable = false;
+            if let Some(attachment) = state.attachment.take() {
+                attachments.push(((*name).clone(), attachment));
+            }
+        }
+    }
+    drop(states);
+    for (name, attachment) in attachments {
+        shared.ops.detach(&name, attachment);
+    }
+}
+
+fn recheck_and_refuse<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    name: &VaultName,
+) -> Result<Option<AliasConflict>, HostError> {
+    if shared
+        .registry
+        .recheck(name)
+        .map_err(|_| HostError::WorkerStopped)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
+    let conflict = shared
+        .registry
+        .recheck(name)
+        .map_err(|_| HostError::WorkerStopped)?;
+    if let Some(conflict) = &conflict {
+        refuse_conflict(shared, conflict);
+    }
+    Ok(conflict)
+}
+
 struct Shared<O: EntryOps> {
     registry: ServingRegistry,
     entries: BTreeMap<VaultName, Arc<Entry<O::Attachment>>>,
@@ -472,12 +527,7 @@ impl<O: EntryOps> Host<O> {
                 held: None,
             });
         };
-        if let Some(conflict) = self
-            .shared
-            .registry
-            .recheck(name)
-            .map_err(|_| HostError::WorkerStopped)?
-        {
+        if let Some(conflict) = recheck_and_refuse(&self.shared, name)? {
             return Ok(DemandLease {
                 outcome: Demand::DuplicateRoot(conflict),
                 held: None,
@@ -705,7 +755,11 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 state.active_epoch = None;
                 state.runnable = false;
             }
-            if state.demand_leases > 0 && state.attachment.is_none() && !state.runnable {
+            if state.demand_leases > 0
+                && state.attachment.is_none()
+                && !state.runnable
+                && state.duplicate_root.is_none()
+            {
                 state.trust = TrustState::warming(0, None);
                 state.epoch += 1;
                 state.runnable = true;
@@ -773,6 +827,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
             match shared.registry.recheck(&name) {
                 Ok(Some(conflict)) => {
+                    refuse_conflict(shared, &conflict);
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.epoch == epoch {
                         state.runnable = false;
@@ -821,6 +876,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 if let Ok((attachment, _, _)) = result {
                     shared.ops.detach(&name, attachment);
                 }
+                refuse_conflict(shared, &conflict);
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if state.epoch == epoch {
                     state.runnable = false;
@@ -1077,7 +1133,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             state.detach_due = false;
             state.detach_scheduled = false;
             state.trust = TrustState::Unattached;
-            if state.demand_leases > 0 {
+            if state.demand_leases > 0 && state.duplicate_root.is_none() {
                 state.runnable = true;
                 state.trust = TrustState::warming(0, None);
                 state.epoch += 1;
@@ -1786,6 +1842,72 @@ mod tests {
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         drop((a_lease, b_lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_retarget_refuses_and_detaches_every_attached_alias_during_poll() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-live-retarget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        std::fs::create_dir_all(&a_root).unwrap();
+        std::fs::create_dir_all(&b_root).unwrap();
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
+            RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let a_lease = host.demand(&a).unwrap();
+        let b_lease = host.demand(&b).unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        while !ops.poll_started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        let refused = host.demand(&b).unwrap();
+        assert!(matches!(refused.outcome(), Demand::DuplicateRoot(_)));
+        assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
+        assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        for _ in 0..200 {
+            if ops.detaches.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+        assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
+        assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
+        drop((refused, a_lease, b_lease, host));
         let _ = std::fs::remove_dir_all(base);
     }
 
