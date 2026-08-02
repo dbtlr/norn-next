@@ -108,7 +108,7 @@ fn attach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
 }
 
 fn detach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    host.reap_idle(Instant::now())
+    host.reap_idle(Instant::now() + Duration::from_secs(2))
         .expect("schedule idle detach");
     wait_for_state(host, name, TrustState::Unattached);
 }
@@ -182,7 +182,7 @@ impl Fixture {
             registry,
             ops,
             LifecyclePolicy {
-                idle_after: Duration::ZERO,
+                idle_after: Duration::from_secs(1),
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(5),
             },

@@ -559,6 +559,7 @@ impl<O: EntryOps> Host<O> {
                 let Some(shared) = dispatcher_shared.upgrade() else {
                     break;
                 };
+                let _ = reap_idle_shared(&shared, Instant::now());
                 poll_watchers(&shared);
                 retry_pending_dispatches(&shared);
             }
@@ -664,6 +665,9 @@ impl<O: EntryOps> Host<O> {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         let rescan = !batch.rescans().is_empty();
         state.pending.merge(batch);
+        if state.attachment.is_none() && !state.runnable {
+            return Ok(());
+        }
         if rescan {
             state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
         } else if matches!(state.trust, TrustState::Ready) {
@@ -701,24 +705,27 @@ impl<O: EntryOps> Host<O> {
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {
-        let mut entries = Vec::new();
-        for (name, entry) in &self.shared.entries {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if (state.attachment.is_some() || state.safety_pins > 0)
-                && now.saturating_duration_since(state.last_demand) >= self.shared.idle_after
-            {
-                state.detach_due = true;
-                if let Some(job) = schedule_due_detach(&mut state, name) {
-                    let _ = job;
-                    entries.push(Arc::clone(entry));
-                }
+        reap_idle_shared(&self.shared, now)
+    }
+}
+
+fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Result<(), HostError> {
+    let mut entries = Vec::new();
+    for (name, entry) in &shared.entries {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if (state.attachment.is_some() || state.safety_pins > 0)
+            && now.saturating_duration_since(state.last_demand) >= shared.idle_after
+        {
+            state.detach_due = true;
+            if schedule_due_detach(&mut state, name).is_some() {
+                entries.push(Arc::clone(entry));
             }
         }
-        for entry in entries {
-            dispatch_pending(&self.shared, &entry)?;
-        }
-        Ok(())
     }
+    for entry in entries {
+        dispatch_pending(shared, &entry)?;
+    }
+    Ok(())
 }
 
 /// Scan every attached entry once. The dispatcher is the only caller, and the
@@ -1433,8 +1440,9 @@ mod tests {
     fn demand_during_in_flight_detach_never_observes_ready_without_attachment() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name).unwrap());
+        let initial = host.demand(&name).unwrap();
         wait_for(&host, &name, TrustState::Ready);
+        drop(initial);
         ops.block_detach.store(true, Ordering::SeqCst);
         host.reap_idle(Instant::now()).unwrap();
         for _ in 0..200 {
@@ -1470,20 +1478,37 @@ mod tests {
     fn idle_reap_releases_the_attachment_and_returns_to_unattached() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        let _ = host.demand(&name).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for(&host, &name, TrustState::Ready);
+        drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
     #[test]
+    fn dispatcher_reaps_idle_attachment_despite_watcher_churn() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
+        let lease = host.demand(&name).unwrap();
+        wait_for(&host, &name, TrustState::Ready);
+        drop(lease);
+        for _ in 0..3 {
+            host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+                .unwrap();
+            thread::sleep(Duration::from_millis(4));
+        }
+        wait_for(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert!(ops.reconciles.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
     fn demand_lease_cancels_queued_detach_until_client_work_ends() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name).unwrap());
-        wait_for(&host, &name, TrustState::Ready);
         let lease = host.demand(&name).unwrap();
+        wait_for(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now()).unwrap();
         thread::sleep(Duration::from_millis(10));
         assert_eq!(host.state(&name), Some(TrustState::Ready));
@@ -2156,7 +2181,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name).unwrap());
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.emit.store(true, Ordering::SeqCst);
         let mut warming = false;
@@ -2168,6 +2193,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(warming);
+        drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
     }
