@@ -564,6 +564,50 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page rooted at `root`, in normalized path order.
+    ///
+    /// The subtree contains the exact root and its segment-aligned descendants.
+    /// `after` is exclusive. Both the subtree bounds and cursor are expressed
+    /// in [`DocumentPath`] terms, so this never relies on wildcard matching or
+    /// admits a textual neighbor such as `ab` while reconciling `a`.
+    pub fn stored_documents_in_subtree_after(
+        &self,
+        root: &DocumentPath,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
+        const MAX_PAGE: usize = 1024;
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a stored-document subtree page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        let limit = i64::try_from(limit).expect("the page bound fits i64");
+        let (descendant_lower, descendant_upper) = root.descendant_bounds();
+        let after = after.map(DocumentPath::as_str);
+        Self::read_all(
+            &self.store.connection,
+            "SELECT path, content_hash, byte_length, body_offset, frontmatter,
+                    frontmatter_diagnostic_count, generation, derived_at
+             FROM documents
+             WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
+               AND (?4 IS NULL OR path > ?4)
+             ORDER BY path
+             LIMIT ?5",
+            params![
+                root.as_str(),
+                descendant_lower,
+                descendant_upper,
+                after,
+                limit
+            ],
+            |row| stored_document(row, 0),
+            "reading the stored-document subtree page",
+        )
+    }
+
     /// One document's row, its body, and every fact row derived from it, in
     /// ordinal order.
     ///

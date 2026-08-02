@@ -71,6 +71,57 @@ fn stored_document_pages_are_bounded_ordered_and_exclusive() {
     ));
 }
 
+#[test]
+fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
+    let scratch = Scratch::new("document-subtree-pages");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("ab/neighbor.md", "hash-ab", "neighbor\n"),
+            document("a/nested/deep.md", "hash-deep", "deep\n"),
+            document("a", "hash-root", "root\n"),
+            document("a/one.md", "hash-one", "one\n"),
+            document("a/two.md", "hash-two", "two\n"),
+            document("a-b/neighbor.md", "hash-a-b", "neighbor\n"),
+        ],
+    );
+
+    let root = path("a");
+    let first = request
+        .stored_documents_in_subtree_after(&root, None, 2)
+        .expect("the first subtree page");
+    assert_eq!(
+        first
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "a/nested/deep.md"]
+    );
+
+    let second = request
+        .stored_documents_in_subtree_after(&root, Some(&first[1].path), 2)
+        .expect("the second subtree page");
+    assert_eq!(
+        second
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a/one.md", "a/two.md"]
+    );
+    assert!(
+        request
+            .stored_documents_in_subtree_after(&root, Some(&second[1].path), 2)
+            .expect("the exhausted subtree page")
+            .is_empty()
+    );
+    assert!(matches!(
+        request.stored_documents_in_subtree_after(&root, None, 1025),
+        Err(StoreError::Bound { .. })
+    ));
+}
+
 /// **One generation stamps every row a changeset wrote.** Generations order
 /// writes in the store, and a changeset is one write however many documents it
 /// names — so a reader comparing generations sees it arrive at an instant rather
