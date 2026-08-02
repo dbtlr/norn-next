@@ -420,6 +420,7 @@ impl<O: EntryOps> Drop for DemandLease<O> {
             state.demand_leases = state.demand_leases.saturating_sub(1);
             if state.demand_leases == 0 {
                 state.last_demand = Instant::now();
+                state.detach_due = false;
             }
             schedule_due_detach(&mut state, &name)
         };
@@ -713,7 +714,8 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
     let mut entries = Vec::new();
     for (name, entry) in &shared.entries {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if (state.attachment.is_some() || state.safety_pins > 0)
+        if state.demand_leases == 0
+            && (state.attachment.is_some() || state.safety_pins > 0)
             && now.saturating_duration_since(state.last_demand) >= shared.idle_after
         {
             state.detach_due = true;
@@ -1472,6 +1474,32 @@ mod tests {
         thread::sleep(Duration::from_millis(25));
         host.reap_idle(Instant::now()).unwrap();
         wait_for(&host, &name, TrustState::Unattached);
+    }
+
+    #[test]
+    fn long_held_lease_gets_a_fresh_idle_interval_after_release() {
+        let ops = Arc::new(FakeOps::default());
+        let idle_after = Duration::from_millis(200);
+        let (host, name) = fixture(Arc::clone(&ops), idle_after);
+        let lease = host.demand(&name).unwrap();
+        wait_for(&host, &name, TrustState::Ready);
+        thread::sleep(idle_after + Duration::from_millis(50));
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        let released = Instant::now();
+        drop(lease);
+        host.reap_idle(released + idle_after / 2).unwrap();
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        for _ in 0..500 {
+            if host.state(&name) == Some(TrustState::Unattached) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
     #[test]
