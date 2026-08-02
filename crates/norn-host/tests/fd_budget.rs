@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
-use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
+use norn_host::{
+    DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
+};
 use norn_wire::TrustState;
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
@@ -49,7 +51,7 @@ fn run_probe() {
     let baseline = open_fd_count();
 
     let host = fixture.host();
-    attach_and_wait(&host, &fixture.name);
+    let lease = attach_and_wait(&host, &fixture.name);
     let one_document = open_fd_count();
     let one_document_delta = one_document.checked_sub(baseline).unwrap_or_else(|| {
         panic!("ready descriptor count {one_document} fell below baseline {baseline}")
@@ -58,6 +60,7 @@ fn run_probe() {
         one_document_delta <= FD_BUDGET,
         "one-document attachment used {one_document_delta} descriptors; budget is {FD_BUDGET}"
     );
+    drop(lease);
     detach_and_wait(&host, &fixture.name);
     assert_eq!(
         open_fd_count(),
@@ -66,7 +69,7 @@ fn run_probe() {
     );
 
     fixture.write_documents(LARGE_VAULT_DOCUMENTS);
-    attach_and_wait(&host, &fixture.name);
+    let lease = attach_and_wait(&host, &fixture.name);
     let large_vault = open_fd_count();
     let large_vault_delta = large_vault.checked_sub(baseline).unwrap_or_else(|| {
         panic!("ready descriptor count {large_vault} fell below baseline {baseline}")
@@ -79,6 +82,7 @@ fn run_probe() {
         large_vault_delta, one_document_delta,
         "descriptor cost changed with vault size"
     );
+    drop(lease);
     detach_and_wait(&host, &fixture.name);
     assert_eq!(
         open_fd_count(),
@@ -88,12 +92,13 @@ fn run_probe() {
 
     // Exercise reattachment once more so a one-shot cleanup path cannot make
     // the two principal measurements pass accidentally.
-    attach_and_wait(&host, &fixture.name);
+    let lease = attach_and_wait(&host, &fixture.name);
     assert_eq!(
         open_fd_count().saturating_sub(baseline),
         large_vault_delta,
         "descriptor cost changed across attach cycles"
     );
+    drop(lease);
     detach_and_wait(&host, &fixture.name);
     assert_eq!(
         open_fd_count(),
@@ -102,9 +107,14 @@ fn run_probe() {
     );
 }
 
-fn attach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    host.demand(name).expect("request attachment");
+#[must_use]
+fn attach_and_wait(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+) -> DemandLease<ProductionEntryOps> {
+    let lease = host.demand(name).expect("request attachment");
     wait_for_state(host, name, TrustState::Ready);
+    lease
 }
 
 fn detach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {

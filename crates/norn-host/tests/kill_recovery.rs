@@ -198,6 +198,8 @@ impl Fixture {
             .expect("config directories");
         Host::new(
             registry,
+            // Eight exceeds this fixture's three documents, so healing uses
+            // one increment and the generation assertion remains exact.
             ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 8).unwrap()),
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),

@@ -456,7 +456,12 @@ fn heal_subtree(
 ) -> Result<(), JobFailure> {
     let subtree = DocumentPath::new(&relative_root.to_string_lossy()).map_err(effect)?;
     let prefix = relative_root.to_string_lossy();
-    let walk = walk(&vault_root.join(relative_root), &[]).map_err(effect)?;
+    let scoped_exclusions = exclusions
+        .iter()
+        .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
+        .map(Path::to_owned)
+        .collect::<Vec<_>>();
+    let walk = walk(&vault_root.join(relative_root), &scoped_exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
     let order = store_order(sensitivity);
     let mut files = walk
@@ -536,7 +541,7 @@ fn heal_subtree(
                 index += 1;
                 changes.push(Change::Death {
                     path,
-                    provenance: Provenance::WatcherRemoval,
+                    provenance: Provenance::HealPrune,
                 });
             }
             (Some(fp), None) => {
@@ -580,25 +585,26 @@ fn prune_subtree(
             break;
         }
         after = page.last().map(|row| row.path.clone());
-        let changes = page
-            .into_iter()
-            .map(|row| Change::Death {
+        let mut changes = Vec::with_capacity(policy.changeset_size);
+        for row in page {
+            changes.push(Change::Death {
                 path: row.path,
                 provenance: Provenance::WatcherRemoval,
-            })
-            .collect::<Vec<_>>();
-        healed += changes.len() as u64;
-        store
-            .begin_request()
-            .apply_increment(IncrementProvenance::Derived, changes)
-            .map_err(effect)?;
+            });
+            healed += 1;
+            if changes.len() == policy.changeset_size {
+                commit(store, &mut changes)?;
+            }
+        }
+        commit(store, &mut changes)?;
         progress.report(healed, None);
     }
     Ok(())
 }
 
 fn is_markdown(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| extension == "md")
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
 fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
@@ -940,6 +946,36 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    #[test]
+    fn scoped_missing_markdown_file_prunes_its_stored_document() {
+        let f = Fixture::new("missing-markdown-file");
+        fs::write(f.vault().join("note.md"), "before").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::remove_file(f.vault().join("note.md")).unwrap();
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[cfg(unix)]
     #[test]
     fn scoped_nonregular_markdown_path_tombstones_the_stored_document() {
@@ -977,6 +1013,8 @@ mod tests {
     fn attach_indexes_only_markdown_and_ignores_binary_clutter() {
         let f = Fixture::new("markdown-only");
         fs::write(f.vault().join("note.md"), "a note").unwrap();
+        fs::write(f.vault().join("UPPER.MD"), "another note").unwrap();
+        fs::write(f.vault().join("Mixed.Md"), "mixed-case note").unwrap();
         fs::write(f.vault().join("readme.txt"), "text clutter").unwrap();
         fs::write(f.vault().join("image.bin"), [0xff, 0x00, 0xfe]).unwrap();
         let (ops, name) = f.ops(2);
@@ -989,7 +1027,87 @@ mod tests {
             .unwrap();
         assert_eq!(
             rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
-            ["note.md"]
+            ["Mixed.Md", "UPPER.MD", "note.md"]
+        );
+
+        fs::remove_file(f.vault().join("UPPER.MD")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "UPPER.MD"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("UPPER.MD").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn subtree_prune_partitions_store_pages_by_changeset_bound() {
+        let f = Fixture::new("bounded-subtree-prune");
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        for index in 0..5 {
+            fs::write(f.vault().join(format!("folder/{index}.md")), "body").unwrap();
+        }
+        let (ops, name) = f.ops(8);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::write(f.vault().join("before.md"), "before").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "before.md"),
+            ProductionPolicy::new(8, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+        let generation_before_prune = attachment
+            .store
+            .begin_request()
+            .stored_document(&DocumentPath::new("before.md").unwrap())
+            .unwrap()
+            .unwrap()
+            .generation;
+
+        fs::remove_dir_all(f.vault().join("folder")).unwrap();
+        prune_subtree(
+            &mut attachment.store,
+            Path::new("folder"),
+            ProductionPolicy::new(8, 2).unwrap(),
+            &progress,
+        )
+        .unwrap();
+        fs::write(f.vault().join("after.md"), "after").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "after.md"),
+            ProductionPolicy::new(8, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        let after = attachment
+            .store
+            .begin_request()
+            .stored_document(&DocumentPath::new("after.md").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.generation,
+            generation_before_prune + 4,
+            "five deaths must use three bounded increments before the upsert"
         );
         ops.detach(&name, attachment);
     }
@@ -1443,64 +1561,13 @@ mod tests {
         assert_eq!(facts.tags.len(), 2);
     }
 
-    const TEAR_ROOT: &str = "NORN_HOST_TEAR_ROOT";
-
-    #[test]
-    fn kill_mid_increment_child() {
-        let Some(root) = std::env::var_os(TEAR_ROOT) else {
-            return;
-        };
-        let root = PathBuf::from(root);
-        let name = VaultName::new("notes").unwrap();
-        let entry = Entry::new(name.clone(), VaultRoot::new(root.join("vault")).unwrap());
-        let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 10).unwrap());
-        norn_store::induced_failure::abort_after_changeset_entries(1);
-        let _never_returns = ops.attach(&name, &ProgressReporter::disconnected());
-        panic!("induced process tear did not abort");
-    }
-
-    #[test]
-    fn attach_recovers_after_process_dies_mid_increment() {
-        let f = Fixture::new("tear-recovery");
-        fs::write(f.vault().join("a.md"), "old-a").unwrap();
-        fs::write(f.vault().join("b.md"), "old-b").unwrap();
-        let (ops, name) = f.ops(2);
-        let attachment = ops
-            .attach(&name, &ProgressReporter::disconnected())
-            .unwrap();
-        ops.detach(&name, attachment);
-        fs::write(f.vault().join("a.md"), "new-a").unwrap();
-        fs::write(f.vault().join("b.md"), "new-b").unwrap();
-
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "production::tests::kill_mid_increment_child",
-                "--nocapture",
-            ])
-            .env(TEAR_ROOT, &f.root)
-            .status()
-            .unwrap();
-        assert!(!status.success(), "tear child unexpectedly survived");
-
-        let (ops, name) = f.ops(2);
-        let mut attachment = ops
-            .attach(&name, &ProgressReporter::disconnected())
-            .unwrap();
-        for (path, expected) in [("a.md", b"new-a".as_slice()), ("b.md", b"new-b".as_slice())] {
-            let row = attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new(path).unwrap())
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                row.content_hash,
-                norn_fs::ContentHash::of(expected).to_string()
-            );
-        }
-        attachment.store.verify_integrity().unwrap();
-        ops.detach(&name, attachment);
+    fn dirty_path(
+        root: &Path,
+        relative: &str,
+    ) -> std::collections::BTreeSet<norn_fs::NormalizedPath> {
+        let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
+        [normalizer.normalize(Path::new(relative)).unwrap()]
+            .into_iter()
+            .collect()
     }
 }

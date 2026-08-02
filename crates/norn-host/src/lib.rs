@@ -19,12 +19,7 @@ pub use production::{
 };
 pub use registry::{AliasConflict, ServingRegistry};
 
-// These imports are boundary witnesses. The concrete substrate adapter lands
-// beside the lifecycle kernel; declaring all six edges now is required by the
-// architecture allowlist when this crate becomes present.
+// `norn-embed` is a declared architecture edge that no module consumes yet.
+// The witness keeps the dependency allowlist and manifest in agreement.
 #[allow(unused_imports)]
 use norn_embed as _;
-#[allow(unused_imports)]
-use norn_store as _;
-#[allow(unused_imports)]
-use norn_text as _;
