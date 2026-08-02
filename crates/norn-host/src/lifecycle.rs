@@ -172,6 +172,7 @@ struct EntryState<A> {
     attachment: Option<A>,
     pending: Batch,
     recovery_required: bool,
+    recovery_demanded: bool,
     identity_refused: bool,
     runnable: bool,
     queued: bool,
@@ -283,6 +284,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.pending_dispatch = None;
         state.pending = Batch::default();
         state.recovery_required = false;
+        state.recovery_demanded = false;
         state.identity_refused = false;
         state.duplicate_root = Some(conflict.clone());
         state.trust = TrustState::Unattached;
@@ -310,6 +312,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName)
         state.pending_dispatch = None;
         state.pending.merge(Batch::rescan(RescanScope::Vault));
         state.recovery_required = true;
+        state.recovery_demanded = false;
         state.identity_refused = true;
         state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
         if state.active_epoch.is_none() && !state.detach_in_flight {
@@ -499,6 +502,7 @@ impl<O: EntryOps> Host<O> {
                             attachment: None,
                             pending: Batch::default(),
                             recovery_required: false,
+                            recovery_demanded: false,
                             identity_refused: false,
                             runnable: false,
                             queued: false,
@@ -600,6 +604,9 @@ impl<O: EntryOps> Host<O> {
         }
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.demand_leases += 1;
+        if state.recovery_required {
+            state.recovery_demanded = true;
+        }
         state.detach_due = false;
         if state.detach_scheduled && !state.detach_in_flight {
             state.epoch += 1;
@@ -689,6 +696,7 @@ impl<O: EntryOps> Host<O> {
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.recovery_required = true;
+            state.recovery_demanded = false;
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.epoch += 1;
             if state.active_epoch.is_none() {
@@ -808,6 +816,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
+                        state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
                         state.attachment = Some(attachment);
@@ -816,6 +825,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
+                        state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
                             TrustState::untrusted(UntrustedReason::environmental_refusal());
@@ -837,6 +847,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             if state.demand_leases > 0
                 && state.attachment.is_none()
                 && !state.runnable
+                && (!state.recovery_required || state.recovery_demanded)
                 && state.duplicate_root.is_none()
                 && !state.identity_refused
             {
@@ -1030,6 +1041,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     state.recovery_required = false;
+                    state.recovery_demanded = false;
                     state.identity_refused = false;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
@@ -1100,6 +1112,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
                     state.recovery_required = false;
+                    state.recovery_demanded = false;
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.pending.is_empty() && !handoff_saturated {
@@ -1119,6 +1132,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 Err(JobFailure::WatcherTerminal(_)) => {
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
                     state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
@@ -1126,6 +1140,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 Err(_) => {
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
                     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
@@ -1215,6 +1230,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
                     let next = schedule_due_detach(&mut state, &name);
@@ -1228,6 +1244,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
                     let next = schedule_due_detach(&mut state, &name);
@@ -1299,6 +1316,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
                     next = schedule_due_detach(&mut state, &name);
@@ -1307,6 +1325,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
+                    state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
                     next = schedule_due_detach(&mut state, &name);
@@ -1335,14 +1354,19 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 shared.ops.detach(&name, attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let reattach_requested = !state.recovery_required || state.recovery_demanded;
             state.detach_in_flight = false;
             state.pending = Batch::default();
             state.recovery_required = false;
+            state.recovery_demanded = false;
             state.runnable = false;
             state.detach_due = false;
             state.detach_scheduled = false;
             state.trust = TrustState::Unattached;
-            if state.demand_leases > 0 && state.duplicate_root.is_none() && !state.identity_refused
+            if state.demand_leases > 0
+                && reattach_requested
+                && state.duplicate_root.is_none()
+                && !state.identity_refused
             {
                 state.runnable = true;
                 state.trust = TrustState::warming(0, None);
@@ -1937,6 +1961,38 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(demand);
+    }
+
+    #[test]
+    fn held_lease_does_not_autonomously_recover_a_terminal_poll_failure() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let held = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_poll.store(true, Ordering::SeqCst);
+        spin_until("poll_started", &ops.poll_started);
+
+        host.watcher_failed(&name, WatchError::Backend("lost".into()));
+        ops.poll_release.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ops.detaches.load(Ordering::SeqCst) != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for stale poll teardown"
+            );
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+
+        let retry = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop((held, retry));
     }
 
     #[derive(Default)]
