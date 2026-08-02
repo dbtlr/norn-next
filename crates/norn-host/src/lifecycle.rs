@@ -34,7 +34,11 @@ pub trait EntryOps: Send + Sync + 'static {
     /// Acquire maintainership, establish watcher coverage, and only then run
     /// the full hash-authoritative heal. An implementation must drain facts
     /// observed during healing before returning the Ready-capable attachment.
-    fn attach(&self, name: &VaultName) -> Result<Self::Attachment, JobFailure>;
+    fn attach(
+        &self,
+        name: &VaultName,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure>;
     /// Apply one coalesced envelope. Schema dirtiness dominates document roots;
     /// a rescan widens rather than discarding uncertainty.
     fn reconcile(
@@ -42,6 +46,7 @@ pub trait EntryOps: Send + Sync + 'static {
         name: &VaultName,
         attachment: &mut Self::Attachment,
         work: ReconcileWork,
+        progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
     /// Re-establish trust using resources retained after an environmental or
     /// watcher refusal. Implementations restart watcher coverage before the
@@ -50,6 +55,7 @@ pub trait EntryOps: Send + Sync + 'static {
         &self,
         name: &VaultName,
         attachment: &mut Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
     /// Nonblocking read of at most one settled watcher batch.
     fn poll(
@@ -58,6 +64,54 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
     ) -> Result<Option<Batch>, JobFailure>;
     fn detach(&self, name: &VaultName, attachment: Self::Attachment);
+}
+
+/// Epoch-bound, monotonic publication of one lifecycle job's warming progress.
+pub struct ProgressReporter<A> {
+    entry: std::sync::Weak<Entry<A>>,
+    epoch: u64,
+}
+
+impl<A> ProgressReporter<A> {
+    #[cfg(test)]
+    pub(crate) fn disconnected() -> Self {
+        Self {
+            entry: std::sync::Weak::new(),
+            epoch: 0,
+        }
+    }
+    pub fn report(&self, healed: u64, total_estimate: Option<u64>) {
+        let Some(entry) = self.entry.upgrade() else {
+            return;
+        };
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.epoch != self.epoch {
+            return;
+        }
+        let TrustState::Warming {
+            healed: prior,
+            total_estimate: prior_total,
+            ..
+        } = &state.trust
+        else {
+            return;
+        };
+        let healed = healed.max(*prior);
+        let total = match (*prior_total, total_estimate) {
+            (Some(left), Some(right)) => Some(left.max(right).max(healed)),
+            (Some(left), None) => Some(left.max(healed)),
+            (None, Some(right)) => Some(right.max(healed)),
+            (None, None) => None,
+        };
+        state.trust = TrustState::warming(healed, total);
+    }
+}
+
+fn reporter<A>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressReporter<A> {
+    ProgressReporter {
+        entry: Arc::downgrade(entry),
+        epoch,
+    }
 }
 
 /// A lifecycle job's semantic failure class.
@@ -561,7 +615,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     };
     match job {
         Job::Attach(name, epoch) => {
-            let result = shared.ops.attach(&name);
+            let result = shared.ops.attach(&name, &reporter(entry, epoch));
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.epoch != epoch {
                 if let Ok(attachment) = result {
@@ -614,7 +668,9 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 };
                 attachment
             };
-            let result = shared.ops.recover(&name, &mut attachment);
+            let result = shared
+                .ops
+                .recover(&name, &mut attachment, &reporter(entry, epoch));
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins -= 1;
             if state.epoch != epoch {
@@ -677,10 +733,15 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 let work = ReconcileWork {
                     batch: std::mem::take(&mut state.pending),
                 };
-                state.trust = TrustState::warming(0, None);
+                if !matches!(state.trust, TrustState::Warming { .. }) {
+                    state.trust = TrustState::warming(0, None);
+                }
                 (attachment, work)
             };
-            let result = shared.ops.reconcile(&name, &mut attachment, work);
+            let result =
+                shared
+                    .ops
+                    .reconcile(&name, &mut attachment, work, &reporter(entry, epoch));
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins -= 1;
             if state.epoch != epoch {
@@ -787,7 +848,7 @@ mod tests {
     impl EntryOps for Arc<FakeOps> {
         type Attachment = ();
 
-        fn attach(&self, _: &VaultName) -> Result<(), JobFailure> {
+        fn attach(&self, _: &VaultName, _: &ProgressReporter<()>) -> Result<(), JobFailure> {
             self.attaches.fetch_add(1, Ordering::SeqCst);
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -797,7 +858,13 @@ mod tests {
             Ok(())
         }
 
-        fn reconcile(&self, _: &VaultName, _: &mut (), _: ReconcileWork) -> Result<(), JobFailure> {
+        fn reconcile(
+            &self,
+            _: &VaultName,
+            _: &mut (),
+            _: ReconcileWork,
+            _: &ProgressReporter<()>,
+        ) -> Result<(), JobFailure> {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal("lost".into()));
@@ -805,7 +872,12 @@ mod tests {
             Ok(())
         }
 
-        fn recover(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+        fn recover(
+            &self,
+            _: &VaultName,
+            _: &mut (),
+            _: &ProgressReporter<()>,
+        ) -> Result<(), JobFailure> {
             self.recovers.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(20));
             if self.terminal_recover.swap(false, Ordering::SeqCst) {
@@ -982,14 +1054,27 @@ mod tests {
 
     impl EntryOps for Arc<PollingOps> {
         type Attachment = ();
-        fn attach(&self, _: &VaultName) -> Result<(), JobFailure> {
+        fn attach(&self, _: &VaultName, _: &ProgressReporter<()>) -> Result<(), JobFailure> {
             Ok(())
         }
-        fn reconcile(&self, _: &VaultName, _: &mut (), _: ReconcileWork) -> Result<(), JobFailure> {
+        fn reconcile(
+            &self,
+            _: &VaultName,
+            _: &mut (),
+            _: ReconcileWork,
+            progress: &ProgressReporter<()>,
+        ) -> Result<(), JobFailure> {
+            progress.report(1, Some(2));
             thread::sleep(Duration::from_millis(30));
+            progress.report(2, Some(2));
             Ok(())
         }
-        fn recover(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+        fn recover(
+            &self,
+            _: &VaultName,
+            _: &mut (),
+            _: &ProgressReporter<()>,
+        ) -> Result<(), JobFailure> {
             Ok(())
         }
         fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
@@ -1021,14 +1106,22 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         ops.emit.store(true, Ordering::SeqCst);
         let mut saw_warming = false;
+        let mut saw_progress = false;
         for _ in 0..100 {
-            if matches!(host.state(&name), Some(TrustState::Warming { .. })) {
+            if let Some(TrustState::Warming { healed, .. }) = host.state(&name) {
                 saw_warming = true;
-                break;
+                saw_progress |= healed > 0;
+                if saw_progress {
+                    break;
+                }
             }
             thread::sleep(Duration::from_millis(1));
         }
         assert!(saw_warming, "polled dirtiness never closed Ready");
+        assert!(
+            saw_progress,
+            "warming progress did not advance before Ready"
+        );
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -1054,7 +1147,15 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.emit.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::warming(0, None));
+        let mut warming = false;
+        for _ in 0..200 {
+            if matches!(host.state(&name), Some(TrustState::Warming { .. })) {
+                warming = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(warming);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
     }

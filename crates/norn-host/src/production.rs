@@ -14,7 +14,7 @@ use norn_store::{
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::MaintainerIdentity;
 
-use crate::{EntryOps, JobFailure, ReconcileWork};
+use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
 
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
@@ -95,7 +95,11 @@ impl ProductionEntryOps {
         Ok(())
     }
 
-    fn heal(&self, attachment: &mut ProductionAttachment) -> Result<(), JobFailure> {
+    fn heal(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
@@ -107,6 +111,7 @@ impl ProductionEntryOps {
                 attachment.entry.root.as_path(),
                 &exclusions,
                 self.policy,
+                progress,
             )?;
             // Coverage was established before the first walk. Repeat until a
             // complete pass has no fact queued behind it; no racing edit is
@@ -137,7 +142,11 @@ fn exclusions(entry: &Entry, shadows: &ShadowHome) -> Vec<PathBuf> {
 impl EntryOps for ProductionEntryOps {
     type Attachment = ProductionAttachment;
 
-    fn attach(&self, name: &VaultName) -> Result<Self::Attachment, JobFailure> {
+    fn attach(
+        &self,
+        name: &VaultName,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
         let entry = self.entry(name)?;
         let derived = self.derived(name);
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
@@ -160,7 +169,7 @@ impl EntryOps for ProductionEntryOps {
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
         };
-        self.heal(&mut attachment)?;
+        self.heal(&mut attachment, progress)?;
         Ok(attachment)
     }
 
@@ -169,6 +178,7 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
         work: ReconcileWork,
+        progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
@@ -179,24 +189,30 @@ impl EntryOps for ProductionEntryOps {
             Self::pin_schema(&mut attachment.store, &attachment.entry)?;
         }
         if work.batch.rescans().contains(&RescanScope::Vault) {
-            return self.heal(attachment);
+            return self.heal(attachment, progress);
         }
         scoped_increment(
             &mut attachment.store,
             attachment.entry.root.as_path(),
             work.batch.vault_roots(),
             self.policy,
+            progress,
         )
     }
 
-    fn recover(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
+    fn recover(
+        &self,
+        _: &VaultName,
+        attachment: &mut Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<(), JobFailure> {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
         let schema = Self::schema_path(&attachment.entry);
         let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
-        self.heal(attachment)
+        self.heal(attachment, progress)
     }
 
     fn poll(
@@ -243,6 +259,7 @@ fn heal_documents(
     root: &Path,
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
     let mut files = walk(root, exclusions)
         .map_err(effect)?
@@ -260,6 +277,7 @@ fn heal_documents(
     let mut index = 0usize;
     let mut exhausted = false;
     let mut changes = Vec::with_capacity(policy.changeset_size);
+    let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
             stored = store
@@ -321,6 +339,8 @@ fn heal_documents(
         if changes.len() == policy.changeset_size {
             commit(store, &mut changes)?;
         }
+        healed += 1;
+        progress.report(healed, None);
     }
     commit(store, &mut changes)
 }
@@ -330,9 +350,10 @@ fn scoped_increment(
     root: &Path,
     dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
     policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
     let mut changes = Vec::with_capacity(policy.changeset_size);
-    for relative in dirty {
+    for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         if !is_markdown(path) {
             continue;
@@ -361,6 +382,7 @@ fn scoped_increment(
         if changes.len() == policy.changeset_size {
             commit(store, &mut changes)?;
         }
+        progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
     commit(store, &mut changes)
 }
@@ -555,7 +577,8 @@ mod tests {
             fs::write(f.vault().join(path), body).unwrap();
         }
         let (ops, name) = f.ops(2);
-        let mut attachment = ops.attach(&name).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::remove_file(f.vault().join("a.md")).unwrap();
         fs::remove_file(f.vault().join("e.md")).unwrap();
         fs::write(f.vault().join("b.md"), "b").unwrap();
@@ -567,6 +590,7 @@ mod tests {
             ReconcileWork {
                 batch: norn_fs::Batch::rescan(RescanScope::Vault),
             },
+            &progress,
         )
         .unwrap();
         let rows = attachment
@@ -597,7 +621,8 @@ mod tests {
         fs::write(f.vault().join("note.md"), "before").unwrap();
         fs::write(f.vault().join("unrelated.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
-        let mut attachment = ops.attach(&name).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
         let unrelated = DocumentPath::new("unrelated.md").unwrap();
         let generation = attachment
             .store
@@ -614,7 +639,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .expect("watch batch");
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch })
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         let row = attachment
             .store
@@ -647,7 +672,8 @@ mod tests {
         fs::write(f.vault().join("readme.txt"), "text clutter").unwrap();
         fs::write(f.vault().join("image.bin"), [0xff, 0x00, 0xfe]).unwrap();
         let (ops, name) = f.ops(2);
-        let mut attachment = ops.attach(&name).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
         let rows = attachment
             .store
             .begin_request()
@@ -663,24 +689,30 @@ mod tests {
     struct SlowProduction(ProductionEntryOps);
     impl EntryOps for SlowProduction {
         type Attachment = ProductionAttachment;
-        fn attach(&self, name: &VaultName) -> Result<Self::Attachment, JobFailure> {
-            self.0.attach(name)
+        fn attach(
+            &self,
+            name: &VaultName,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.0.attach(name, progress)
         }
         fn reconcile(
             &self,
             name: &VaultName,
             attachment: &mut Self::Attachment,
             work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
             thread::sleep(Duration::from_millis(30));
-            self.0.reconcile(name, attachment, work)
+            self.0.reconcile(name, attachment, work, progress)
         }
         fn recover(
             &self,
             name: &VaultName,
             attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            self.0.recover(name, attachment)
+            self.0.recover(name, attachment, progress)
         }
         fn poll(
             &self,
@@ -792,7 +824,7 @@ mod tests {
         let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();
         let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 10));
         norn_store::induced_failure::abort_after_changeset_entries(1);
-        let _never_returns = ops.attach(&name);
+        let _never_returns = ops.attach(&name, &ProgressReporter::disconnected());
         panic!("induced process tear did not abort");
     }
 
@@ -802,7 +834,9 @@ mod tests {
         fs::write(f.vault().join("a.md"), "old-a").unwrap();
         fs::write(f.vault().join("b.md"), "old-b").unwrap();
         let (ops, name) = f.ops(2);
-        let attachment = ops.attach(&name).unwrap();
+        let attachment = ops
+            .attach(&name, &ProgressReporter::disconnected())
+            .unwrap();
         ops.detach(&name, attachment);
         fs::write(f.vault().join("a.md"), "new-a").unwrap();
         fs::write(f.vault().join("b.md"), "new-b").unwrap();
@@ -819,7 +853,9 @@ mod tests {
         assert!(!status.success(), "tear child unexpectedly survived");
 
         let (ops, name) = f.ops(2);
-        let mut attachment = ops.attach(&name).unwrap();
+        let mut attachment = ops
+            .attach(&name, &ProgressReporter::disconnected())
+            .unwrap();
         for (path, expected) in [("a.md", b"new-a".as_slice()), ("b.md", b"new-b".as_slice())] {
             let row = attachment
                 .store
