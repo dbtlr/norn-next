@@ -65,6 +65,14 @@ pub trait EntryOps: Send + Sync + 'static {
         name: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<Batch>, JobFailure>;
+    /// Cheap, nonblocking check for whether worker-scheduled maintenance is due.
+    fn maintenance_due(&self, _: &VaultName, _: &Self::Attachment) -> bool {
+        false
+    }
+    /// Run blocking maintenance on the bounded lifecycle worker pool.
+    fn maintain(&self, _: &VaultName, _: &mut Self::Attachment) -> Result<(), JobFailure> {
+        Ok(())
+    }
     fn detach(&self, name: &VaultName, attachment: Self::Attachment);
 }
 
@@ -185,6 +193,7 @@ enum Job {
     Attach(VaultName, u64),
     Recover(VaultName, u64),
     Reconcile(VaultName, u64),
+    Maintenance(VaultName, u64),
     Detach(VaultName, u64),
 }
 
@@ -194,6 +203,7 @@ impl Job {
             Self::Attach(_, epoch)
             | Self::Recover(_, epoch)
             | Self::Reconcile(_, epoch)
+            | Self::Maintenance(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -745,6 +755,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             (attachment, state.epoch)
         };
         let result = shared.ops.poll(name, &mut attachment);
+        let maintenance_due = result.is_ok() && shared.ops.maintenance_due(name, &attachment);
         let mut schedule = None;
         let mut detach = None;
         {
@@ -758,6 +769,13 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.attachment = Some(attachment);
+                        if maintenance_due && !state.recovery_required {
+                            state.runnable = true;
+                            state.epoch += 1;
+                            let job = Job::Maintenance(name.clone(), state.epoch);
+                            state.pending_dispatch = Some(job.clone());
+                            schedule = Some(job);
+                        }
                     }
                     Ok(Some(batch)) => {
                         state.active_epoch = None;
@@ -842,6 +860,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         Job::Attach(name, _)
         | Job::Recover(name, _)
         | Job::Reconcile(name, _)
+        | Job::Maintenance(name, _)
         | Job::Detach(name, _) => name,
     };
     let Some(entry) = shared.entries.get(name) else {
@@ -876,6 +895,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         Job::Attach(name, _)
         | Job::Recover(name, _)
         | Job::Reconcile(name, _)
+        | Job::Maintenance(name, _)
         | Job::Detach(name, _) => name,
     };
     let Some(entry) = shared.entries.get(name) else {
@@ -1219,6 +1239,84 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
             }
         },
+        Job::Maintenance(name, epoch) => {
+            let mut attachment = {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if state.epoch != epoch {
+                    return;
+                }
+                state.safety_pins += 1;
+                let Some(attachment) = state.attachment.take() else {
+                    state.safety_pins -= 1;
+                    state.runnable = false;
+                    return;
+                };
+                attachment
+            };
+            let mut result = shared.ops.maintain(&name, &mut attachment);
+            let mut observed = Batch::default();
+            if result.is_ok() {
+                match drain_observed(&shared.ops, &name, &mut attachment) {
+                    Ok((batch, _)) => observed = batch,
+                    Err(error) => result = Err(error),
+                }
+            }
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.safety_pins -= 1;
+            if state.epoch != epoch {
+                drop(state);
+                shared.ops.detach(&name, attachment);
+                return;
+            }
+            let mut next = None;
+            match result {
+                Ok(()) => {
+                    state.pending.merge(observed);
+                    state.attachment = Some(attachment);
+                    state.runnable = false;
+                    if state.detach_due {
+                        next = schedule_due_detach(&mut state, &name);
+                    } else if !state.pending.is_empty() {
+                        state.trust = if state.pending.rescans().is_empty() {
+                            TrustState::warming(0, None)
+                        } else {
+                            TrustState::untrusted(UntrustedReason::WatcherOverflow)
+                        };
+                        state.runnable = true;
+                        state.epoch += 1;
+                        next = Some(Job::Reconcile(name.clone(), state.epoch));
+                    }
+                }
+                Err(JobFailure::LostMaintainership) => {
+                    state.pending = Batch::default();
+                    state.runnable = false;
+                    state.trust = TrustState::Unattached;
+                    drop(state);
+                    shared.ops.detach(&name, attachment);
+                    return;
+                }
+                Err(JobFailure::WatcherTerminal(_)) => {
+                    state.attachment = Some(attachment);
+                    state.runnable = false;
+                    state.recovery_required = true;
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                    next = schedule_due_detach(&mut state, &name);
+                }
+                Err(_) => {
+                    state.attachment = Some(attachment);
+                    state.runnable = false;
+                    state.recovery_required = true;
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    next = schedule_due_detach(&mut state, &name);
+                }
+            }
+            drop(state);
+            if let Some(job) = next {
+                dispatch_followup(shared, job);
+            }
+        }
         Job::Detach(name, epoch) => {
             let attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1295,6 +1393,7 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Job::Attach(name, _)
                 | Job::Recover(name, _)
                 | Job::Reconcile(name, _)
+                | Job::Maintenance(name, _)
                 | Job::Detach(name, _) => name,
             };
             if let Some(entry) = shared.entries.get(name) {
@@ -1336,6 +1435,12 @@ mod tests {
         block_poll: std::sync::atomic::AtomicBool,
         poll_started: std::sync::atomic::AtomicBool,
         poll_release: std::sync::atomic::AtomicBool,
+        maintenance_due: std::sync::atomic::AtomicBool,
+        maintenances: AtomicUsize,
+        block_maintenance: std::sync::atomic::AtomicBool,
+        maintenance_started: std::sync::atomic::AtomicBool,
+        maintenance_release: std::sync::atomic::AtomicBool,
+        polls: Mutex<BTreeMap<VaultName, usize>>,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -1389,12 +1494,31 @@ mod tests {
             Ok(())
         }
 
-        fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+        fn poll(&self, name: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+            *self
+                .polls
+                .lock()
+                .expect("poll counts poisoned")
+                .entry(name.clone())
+                .or_default() += 1;
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
                 spin_until("poll_release", &self.poll_release);
             }
             Ok(None)
+        }
+
+        fn maintenance_due(&self, _: &VaultName, _: &()) -> bool {
+            self.maintenance_due.swap(false, Ordering::SeqCst)
+        }
+
+        fn maintain(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+            self.maintenances.fetch_add(1, Ordering::SeqCst);
+            if self.block_maintenance.load(Ordering::SeqCst) {
+                self.maintenance_started.store(true, Ordering::SeqCst);
+                spin_until("maintenance_release", &self.maintenance_release);
+            }
+            Ok(())
         }
 
         fn detach(&self, _: &VaultName, _: ()) {
@@ -2376,5 +2500,76 @@ mod tests {
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
+    }
+
+    #[test]
+    fn quiet_attached_entry_eventually_runs_scheduled_maintenance() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        for _ in 0..200 {
+            if ops.maintenances.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        drop(lease);
+    }
+
+    #[test]
+    fn blocked_maintenance_does_not_stall_other_vault_polling_or_reaping() {
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-maint-a").unwrap()),
+            RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-maint-b").unwrap()),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        let lease_a = host.demand(&a).unwrap();
+        let lease_b = host.demand(&b).unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        ops.block_maintenance.store(true, Ordering::SeqCst);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        spin_until("maintenance_started", &ops.maintenance_started);
+        let polls_before = *ops
+            .polls
+            .lock()
+            .unwrap()
+            .get(&b)
+            .expect("vault b was polled");
+        for _ in 0..200 {
+            if ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0) > polls_before {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0) > polls_before);
+
+        drop(lease_b);
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        wait_for_state(&host, &b, TrustState::Unattached);
+
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &a, TrustState::Ready);
+        drop(lease_a);
     }
 }

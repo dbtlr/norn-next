@@ -248,14 +248,23 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
-        if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
-            attachment
-                ._shadows
-                .sweep(norn_fs::SHADOW_AGE_THRESHOLD)
-                .map_err(effect)?;
-            attachment.last_shadow_sweep = Instant::now();
-        }
         poll_subscription(attachment)
+    }
+
+    fn maintenance_due(&self, _: &VaultName, attachment: &Self::Attachment) -> bool {
+        attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD
+    }
+
+    fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
+        if !attachment.maintainership.still_current() {
+            return Err(JobFailure::LostMaintainership);
+        }
+        attachment
+            ._shadows
+            .sweep(norn_fs::SHADOW_AGE_THRESHOLD)
+            .map_err(effect)?;
+        attachment.last_shadow_sweep = Instant::now();
+        Ok(())
     }
 
     fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
@@ -1392,6 +1401,31 @@ mod tests {
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, "replacement").unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Unattached);
+    }
+
+    #[test]
+    fn scheduled_maintenance_sweeps_aged_shadow_residue() {
+        let f = Fixture::new("scheduled-shadow-sweep");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let residue = attachment._shadows.directory().join("norn-shadow-77-3");
+        fs::write(&residue, "residue").unwrap();
+        let aged =
+            std::time::SystemTime::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        fs::File::open(&residue)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(aged))
+            .unwrap();
+        attachment.last_shadow_sweep =
+            Instant::now() - norn_fs::SHADOW_AGE_THRESHOLD - Duration::from_secs(1);
+
+        assert!(ops.maintenance_due(&name, &attachment));
+        ops.maintain(&name, &mut attachment).unwrap();
+        assert!(!residue.exists());
+        assert!(!ops.maintenance_due(&name, &attachment));
+        ops.detach(&name, attachment);
     }
 
     struct BlockedRecovery {
