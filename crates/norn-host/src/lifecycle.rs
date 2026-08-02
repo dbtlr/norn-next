@@ -169,6 +169,7 @@ struct EntryState<A> {
     safety_pins: usize,
     detach_due: bool,
     detach_scheduled: bool,
+    detach_in_flight: bool,
     epoch: u64,
 }
 
@@ -228,6 +229,24 @@ impl<O: EntryOps> DemandLease<O> {
     pub fn outcome(&self) -> &Demand {
         &self.outcome
     }
+
+    /// The current completion of the asynchronous demand that created this
+    /// lease. In particular, maintainer contention becomes observable here on
+    /// the same lease whose first answer was `Warming`.
+    pub fn completion(&self) -> Demand {
+        let Some((shared, name)) = &self.held else {
+            return self.outcome.clone();
+        };
+        let Some(entry) = shared.entries.get(name) else {
+            return Demand::UnknownVault;
+        };
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        state
+            .maintainer_contended
+            .clone()
+            .map(Demand::MaintainerContended)
+            .unwrap_or_else(|| Demand::State(state.trust.clone()))
+    }
 }
 
 impl<O: EntryOps> Drop for DemandLease<O> {
@@ -241,6 +260,9 @@ impl<O: EntryOps> Drop for DemandLease<O> {
         let schedule = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.demand_leases = state.demand_leases.saturating_sub(1);
+            if state.demand_leases == 0 {
+                state.last_demand = Instant::now();
+            }
             schedule_due_detach(&mut state, &name)
         };
         if let Some(job) = schedule {
@@ -306,6 +328,7 @@ impl<O: EntryOps> Host<O> {
                             safety_pins: 0,
                             detach_due: false,
                             detach_scheduled: false,
+                            detach_in_flight: false,
                             epoch: 0,
                         }),
                     }),
@@ -394,15 +417,14 @@ impl<O: EntryOps> Host<O> {
             });
         }
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        state.last_demand = Instant::now();
         state.demand_leases += 1;
         state.detach_due = false;
-        if state.detach_scheduled {
+        if state.detach_scheduled && !state.detach_in_flight {
             state.epoch += 1;
             state.runnable = false;
             state.detach_scheduled = false;
         }
-        if let Some(incumbent) = state.maintainer_contended.take() {
+        if let Some(incumbent) = state.maintainer_contended.clone() {
             drop(state);
             return Ok(DemandLease {
                 outcome: Demand::MaintainerContended(incumbent),
@@ -440,6 +462,18 @@ impl<O: EntryOps> Host<O> {
             outcome: answer,
             held: Some((Arc::clone(&self.shared), name.clone())),
         })
+    }
+
+    /// Explicitly retry a demand whose prior completion reported contention.
+    pub fn retry(&self, name: &VaultName) -> Result<DemandLease<O>, HostError> {
+        if let Some(entry) = self.shared.entries.get(name) {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .maintainer_contended = None;
+        }
+        self.demand(name)
     }
 
     /// Merge watcher facts and schedule at most one runnable job for the entry.
@@ -615,10 +649,22 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     };
     match job {
         Job::Attach(name, epoch) => {
-            let result = shared.ops.attach(&name, &reporter(entry, epoch));
+            let result =
+                shared
+                    .ops
+                    .attach(&name, &reporter(entry, epoch))
+                    .and_then(
+                        |mut attachment| match shared.ops.poll(&name, &mut attachment) {
+                            Ok(pending) => Ok((attachment, pending)),
+                            Err(error) => {
+                                shared.ops.detach(&name, attachment);
+                                Err(error)
+                            }
+                        },
+                    );
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.epoch != epoch {
-                if let Ok(attachment) = result {
+                if let Ok((attachment, _)) = result {
                     drop(state);
                     shared.ops.detach(&name, attachment);
                 }
@@ -626,7 +672,10 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             state.runnable = false;
             match result {
-                Ok(attachment) => {
+                Ok((attachment, observed)) => {
+                    if let Some(batch) = observed {
+                        state.pending.merge(batch);
+                    }
                     state.attachment = Some(attachment);
                     state.terminal_watcher = false;
                     state.maintainer_contended = None;
@@ -805,20 +854,29 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 if state.epoch != epoch {
                     return;
                 }
-                state.attachment.take()
+                let attachment = state.attachment.take();
+                state.detach_in_flight = attachment.is_some();
+                state.trust = TrustState::Unattached;
+                attachment
             };
             if let Some(attachment) = attachment {
                 shared.ops.detach(&name, attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if state.epoch != epoch {
-                return;
-            }
+            state.detach_in_flight = false;
             state.pending = Batch::default();
             state.runnable = false;
             state.detach_due = false;
             state.detach_scheduled = false;
             state.trust = TrustState::Unattached;
+            if state.demand_leases > 0 {
+                state.runnable = true;
+                state.trust = TrustState::warming(0, None);
+                state.epoch += 1;
+                let next = Job::Attach(name.clone(), state.epoch);
+                drop(state);
+                let _ = shared.jobs.send(next);
+            }
         }
     }
 }
@@ -843,6 +901,9 @@ mod tests {
         terminal_recover: std::sync::atomic::AtomicBool,
         terminal_reconcile: std::sync::atomic::AtomicBool,
         contend_attach: std::sync::atomic::AtomicBool,
+        block_detach: std::sync::atomic::AtomicBool,
+        detach_started: std::sync::atomic::AtomicBool,
+        detach_release: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -891,6 +952,12 @@ mod tests {
         }
 
         fn detach(&self, _: &VaultName, _: ()) {
+            if self.block_detach.load(Ordering::SeqCst) {
+                self.detach_started.store(true, Ordering::SeqCst);
+                while !self.detach_release.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+            }
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -941,7 +1008,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         ops.contend_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name).unwrap());
+        let initial = host.demand(&name).unwrap();
         for _ in 0..200 {
             if ops.attaches.load(Ordering::SeqCst) == 1
                 && host.state(&name) == Some(TrustState::Unattached)
@@ -950,14 +1017,56 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(1));
         }
+        assert!(matches!(
+            initial.completion(),
+            Demand::MaintainerContended(_)
+        ));
         let lease = host.demand(&name).unwrap();
-        assert!(matches!(*lease, Demand::MaintainerContended(_)));
+        assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
         thread::sleep(Duration::from_millis(10));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         drop(lease);
-        drop(host.demand(&name).unwrap());
+        drop(initial);
+        drop(host.retry(&name).unwrap());
         wait_for(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn demand_during_in_flight_detach_never_observes_ready_without_attachment() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name).unwrap());
+        wait_for(&host, &name, TrustState::Ready);
+        ops.block_detach.store(true, Ordering::SeqCst);
+        host.reap_idle(Instant::now()).unwrap();
+        for _ in 0..200 {
+            if ops.detach_started.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ops.detach_started.load(Ordering::SeqCst));
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(lease.completion(), Demand::State(TrustState::Unattached));
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    #[test]
+    fn idle_deadline_begins_when_the_final_demand_lease_ends() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
+        let lease = host.demand(&name).unwrap();
+        wait_for(&host, &name, TrustState::Ready);
+        thread::sleep(Duration::from_millis(30));
+        drop(lease);
+        host.reap_idle(Instant::now()).unwrap();
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        thread::sleep(Duration::from_millis(25));
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for(&host, &name, TrustState::Unattached);
     }
 
     #[test]

@@ -104,26 +104,14 @@ impl ProductionEntryOps {
             return Err(JobFailure::LostMaintainership);
         }
         let exclusions = exclusions(&attachment.entry, &attachment._shadows);
-        loop {
-            Self::pin_schema(&mut attachment.store, &attachment.entry)?;
-            heal_documents(
-                &mut attachment.store,
-                attachment.entry.root.as_path(),
-                &exclusions,
-                self.policy,
-                progress,
-            )?;
-            // Coverage was established before the first walk. Repeat until a
-            // complete pass has no fact queued behind it; no racing edit is
-            // hidden by the heal that happened to overlap it.
-            let mut raced = false;
-            while poll_subscription(attachment)?.is_some() {
-                raced = true;
-            }
-            if !raced {
-                return Ok(());
-            }
-        }
+        Self::pin_schema(&mut attachment.store, &attachment.entry)?;
+        heal_documents(
+            &mut attachment.store,
+            attachment.entry.root.as_path(),
+            &exclusions,
+            self.policy,
+            progress,
+        )
     }
 }
 
@@ -361,13 +349,13 @@ fn scoped_increment(
                 heal_subtree(store, root, path, policy, progress)?;
                 continue;
             }
-            norn_fs::PathKind::Missing if !is_markdown(path) => {
+            norn_fs::PathKind::Missing => {
                 commit(store, &mut changes)?;
                 prune_subtree(store, path, policy, progress)?;
                 continue;
             }
             norn_fs::PathKind::Other => continue,
-            norn_fs::PathKind::RegularFile | norn_fs::PathKind::Missing => {}
+            norn_fs::PathKind::RegularFile => {}
         }
         if !is_markdown(path) {
             continue;
@@ -926,6 +914,60 @@ mod tests {
                 .generation,
             generation
         );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn missing_markdown_suffixed_root_prunes_its_former_descendants() {
+        let f = Fixture::new("markdown-directory");
+        fs::create_dir_all(f.vault().join("archive.md")).unwrap();
+        fs::write(f.vault().join("archive.md/child.md"), "child").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
+        let batch = attachment
+            .subscription
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
+            .unwrap();
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_document(&DocumentPath::new("archive.md/child.md").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn one_pass_attach_completes_while_watcher_events_continue() {
+        let f = Fixture::new("continuous-attach");
+        for index in 0..200 {
+            fs::write(f.vault().join(format!("note-{index:03}.md")), "body").unwrap();
+        }
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let writer_running = std::sync::Arc::clone(&running);
+        let hot = f.vault().join("hot.md");
+        let writer = thread::spawn(move || {
+            let mut generation = 0;
+            while writer_running.load(std::sync::atomic::Ordering::SeqCst) {
+                fs::write(&hot, generation.to_string()).unwrap();
+                generation += 1;
+            }
+        });
+        let (ops, name) = f.ops(2);
+        let attachment = ops
+            .attach(&name, &ProgressReporter::disconnected())
+            .unwrap();
+        running.store(false, std::sync::atomic::Ordering::SeqCst);
+        writer.join().unwrap();
         ops.detach(&name, attachment);
     }
 
