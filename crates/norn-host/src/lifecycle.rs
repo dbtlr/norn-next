@@ -470,6 +470,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             let Some(attachment) = state.attachment.take() else {
                 continue;
             };
+            state.safety_pins += 1;
             (attachment, state.epoch)
         };
         let result = shared.ops.poll(name, &mut attachment);
@@ -477,6 +478,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         let mut detach = None;
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.safety_pins = state.safety_pins.saturating_sub(1);
             if state.epoch != epoch {
                 detach = Some(attachment);
             } else {
@@ -511,6 +513,9 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             TrustState::untrusted(UntrustedReason::environmental_refusal());
                         state.attachment = Some(attachment);
                     }
+                }
+                if schedule.is_none() {
+                    schedule = schedule_due_detach(&mut state, name);
                 }
             }
         }

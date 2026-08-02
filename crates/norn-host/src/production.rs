@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use norn_config::registry::Entry;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
@@ -49,6 +49,7 @@ pub struct ProductionAttachment {
     store: Store,
     subscription: Option<Subscription>,
     _shadows: ShadowHome,
+    last_shadow_sweep: Instant,
 }
 
 impl ProductionEntryOps {
@@ -157,6 +158,7 @@ impl EntryOps for ProductionEntryOps {
             store,
             subscription: Some(subscription),
             _shadows: shadows,
+            last_shadow_sweep: Instant::now(),
         };
         self.heal(&mut attachment)?;
         Ok(attachment)
@@ -202,6 +204,13 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
+            attachment
+                ._shadows
+                .sweep(norn_fs::SHADOW_AGE_THRESHOLD)
+                .map_err(effect)?;
+            attachment.last_shadow_sweep = Instant::now();
+        }
         poll_subscription(attachment)
     }
 

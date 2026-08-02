@@ -96,7 +96,7 @@ pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
 pub use read::{ReadAndHash, read_and_hash, read_optional_and_hash};
 pub use refusal::Refusal;
-pub use shadow::{Placement, ShadowHome, Swept, is_shadow_name};
+pub use shadow::{Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept, is_shadow_name};
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
     WalkFact, walk,
