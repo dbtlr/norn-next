@@ -510,6 +510,34 @@ fn a_death_learned_for_an_underived_path_is_still_recorded() {
     assert_eq!(request.counters().get("tombstones_recorded"), Some(1));
 }
 
+/// A quarantine is a death of the derived row and not of the file, so it is its
+/// own provenance: reading it back as a prune or a removal would say the path
+/// left the vault.
+#[test]
+fn a_quarantine_death_is_recorded_under_its_own_provenance() {
+    let scratch = Scratch::new("quarantine-provenance");
+    let mut store = scratch.open();
+    let subject = path("undecodable.md");
+
+    let mut request = store.begin_request();
+    write_document(&mut request, &document(subject.as_str(), "hash-1", "one\n"));
+    record_death(&mut request, &subject, Provenance::Quarantine);
+
+    let tombstone = request
+        .stored_tombstone(&subject)
+        .expect("reading a tombstone")
+        .expect("a tombstone");
+    assert_eq!(tombstone.provenance, Provenance::Quarantine);
+    assert_eq!(tombstone.last_content_hash.as_deref(), Some("hash-1"));
+
+    request.finish();
+    // The closed vocabulary is checked rather than trusted, so a provenance the
+    // store writes has to be one the integrity check admits.
+    store
+        .verify_integrity()
+        .expect("a store after a quarantine");
+}
+
 /// One row per path, holding the most recent death — and a tombstone is a record
 /// of a death, never a claim about the present, so a recreated path has both.
 #[test]

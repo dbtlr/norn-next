@@ -103,6 +103,7 @@ following:
 | Process killed mid-increment | **Handled at rung 2.** Nothing partial is ever at rest: the increment is one transaction, so a process that dies inside one leaves the previous generation whole and there is nothing to detect. The work the tear lost returns through the attach heal's ordinary content-hash comparison. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
+| A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
 | Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
@@ -112,6 +113,45 @@ permission was revoked, refusing and leaving the entry untrusted *is* the lower 
 resolving the situation correctly: the environment is broken, the stored state is not, and
 discarding a sound database would destroy work to fix nothing. **Rung 3 is for damaged
 state, never for a hostile environment.**
+
+**Quarantine is per document; refusal is per vault.** See
+[ADR 0013](decisions/0013-quarantine-is-per-document.md). A document norn cannot decode —
+path bytes that are not UTF-8, a path spelling the document-path grammar refuses, or a body
+that is not UTF-8 — is a fact about one document rather than about the vault, so it never
+withdraws the vault. The rung-2 heal skips its facts, records a finding naming the path and
+the cause class — withheld while a rendering collision stands, as below — and keeps going;
+the entry reaches `Ready` and serves every other document.
+Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
+subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
+grammar refuses splits by what it still addresses, because naming no document and holding no
+document are different things. A spelling refused only for the stem its leaf reduces to —
+`..md` — names no document and is where ordinary documents such as `..md/note.md` are
+stored, so it addresses every row beneath it as a segment-aligned prefix range: the warm path
+merges its walk against that range and derives, quarantines and **prunes** there, converging
+a deletion under it without a vault-wide heal. A spelling refused for anything else — a
+backslash, a control byte, bytes that are not UTF-8 — spoils every path beneath it too, so no
+document under it is storable and there is no row to prune; the warm path reads what is under
+it and quarantines what it finds.
+
+The store holds only representable truth, so a document that stops decoding **loses its
+store row**, and the finding is where its absence is stated. The row's death is recorded
+with the quarantine provenance, which says the derived row died and the file did not; a
+prune or a removal would say the path left the vault. A quarantined path is filed under the
+path the vault spells it, and under a rendering of that spelling where the grammar admits no
+such path. **A rendering names a place, never an identity**: no document is *derived* under
+one, though the vault may genuinely hold a document whose own name is that place. That
+collision is one key holding one row, and the **document wins**: while it stands there, the
+quarantined document's finding is withheld rather than filed over a readable document, so
+for as long as the collision lasts nothing records that the quarantined document cannot be
+read. The trade is deliberate — a finding at that place would call a document that derived
+unreadable — and it clears when the colliding document leaves. Recovery needs no second
+mechanism: a document that reads again is an ordinary derivation, and the increment's own
+findings discard takes the finding with it.
+
+Refusal stays for failures of the environment rather than of one document — a schema that
+will not read, a store that will not open, a walk that cannot list a directory, a path whose
+permissions were revoked. Widening quarantine past the undecodable-document class would turn
+a broken environment into silent data loss, which is the hazard refusal exists to prevent.
 
 **Cold is a state of a vault entry, not a code path.** There is exactly one attach seam and
 both host lifecycles use it, so "cold" names rung 2 running on first touch — not a separate

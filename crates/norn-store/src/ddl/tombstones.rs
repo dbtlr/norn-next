@@ -17,11 +17,14 @@
 //! without racing anything.
 //!
 //! **Reasoning, for heal and doctor.** `provenance` says how the death was
-//! learned, and it is a closed vocabulary of three: a full tree heal that found
-//! the file absent, a watcher removal, or an applied plan that deleted it. A
-//! vault losing documents to the wrong provenance is the shape of a defect that
-//! is otherwise invisible, which is why the column is checked against that
-//! vocabulary by [`crate::Store::verify_integrity`] rather than trusted.
+//! learned, and it is a closed vocabulary of four: a full tree heal that found
+//! the file absent, a watcher removal, an applied plan that deleted it, or a
+//! quarantine — a file that is **present** and yields no facts the store can
+//! represent. A vault losing documents to the wrong provenance is the shape of a
+//! defect that is otherwise invisible, which is why the column is checked
+//! against that vocabulary by [`crate::Store::verify_integrity`] rather than
+//! trusted, and why a quarantine is not spelled as one of the deaths that mean
+//! the path is gone.
 //!
 //! # One row per path, holding the most recent death
 //!

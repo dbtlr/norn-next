@@ -6,7 +6,9 @@
 //! range itself is exercised against real rows in `store/pillars.rs`; here the
 //! question is whether the keys say what they are supposed to say.
 
-use norn_store::{ClassKey, DocumentPath, StoreError, class_probe, suffix_probe};
+use std::path::Path;
+
+use norn_store::{ClassKey, DirectoryPrefix, DocumentPath, StoreError, class_probe, suffix_probe};
 
 /// The one range a single-reduction probe opens.
 fn only_range(target: &str) -> (String, String) {
@@ -73,26 +75,34 @@ fn a_leading_dot_is_part_of_the_name() {
     assert_eq!(read.suffix_key(), ".gitignore/docs/");
 }
 
+/// Every spelling the document-path grammar refuses, beside the word its refusal
+/// has to name.
+///
+/// One corpus, read twice: once to check that each refusal says what it is, and
+/// once to check that [`DocumentPath::rendered`] answers every one of them. A
+/// refusal added to the grammar without a rendering fails the second read.
+const UNNORMALIZED: &[(&str, &str)] = &[
+    ("", "empty"),
+    ("/docs/glossary.md", "absolute"),
+    ("docs\\glossary.md", "backslash"),
+    ("docs//glossary.md", "empty segment"),
+    ("docs/glossary.md/", "empty segment"),
+    ("docs/./glossary.md", "`.` or `..`"),
+    ("../glossary.md", "`.` or `..`"),
+    // A leaf whose extension-stripped stem is `.` or `..` would mint a class
+    // key out of a segment the same reader refuses as a segment.
+    ("..alpha", "`.` or `..` stem"),
+    ("docs/..alpha", "`.` or `..` stem"),
+    ("...md", "`.` or `..` stem"),
+    ("docs/glossary\0.md", "NUL"),
+    ("docs/gloss\u{7}ary.md", "control"),
+];
+
 /// The spellings a normalized path does not have. Each of them would produce a
 /// key that addresses the wrong documents, or bytes no reader can print back.
 #[test]
 fn an_unnormalized_path_is_refused_with_the_reason() {
-    for (path, needle) in [
-        ("", "empty"),
-        ("/docs/glossary.md", "absolute"),
-        ("docs\\glossary.md", "backslash"),
-        ("docs//glossary.md", "empty segment"),
-        ("docs/glossary.md/", "empty segment"),
-        ("docs/./glossary.md", "`.` or `..`"),
-        ("../glossary.md", "`.` or `..`"),
-        // A leaf whose extension-stripped stem is `.` or `..` would mint a class
-        // key out of a segment the same reader refuses as a segment.
-        ("..alpha", "`.` or `..` stem"),
-        ("docs/..alpha", "`.` or `..` stem"),
-        ("...md", "`.` or `..` stem"),
-        ("docs/glossary\0.md", "NUL"),
-        ("docs/gloss\u{7}ary.md", "control"),
-    ] {
+    for (path, needle) in UNNORMALIZED.iter().copied() {
         let error = DocumentPath::new(path).expect_err("an unnormalized path");
         let StoreError::Path { problem, .. } = &error else {
             panic!("`{path}` was refused as {error:?} rather than as a path");
@@ -102,6 +112,113 @@ fn an_unnormalized_path_is_refused_with_the_reason() {
             "`{path}` was refused for `{problem}`, which does not name {needle}"
         );
     }
+}
+
+/// Rendering answers every refusal the grammar states, which is what makes it
+/// total: a caller with something to say about a path always has a path to say
+/// it about.
+///
+/// **The place has to be the one the spelling occupies, not a shared last
+/// resort.** A refusal with no rendering behind it would otherwise be answered
+/// by collapsing every path that carries it onto one subject, where the
+/// findings about them pile up indistinguishably. So the rendering is read for
+/// the shape it keeps: it names as many segments as the spelling did, which
+/// nothing standing in for the whole path can do.
+#[test]
+fn every_refused_spelling_still_renders_to_a_place() {
+    for (path, _) in UNNORMALIZED.iter().copied() {
+        let rendered = DocumentPath::rendered(Path::new(path));
+        assert!(
+            DocumentPath::new(rendered.as_str()).is_ok(),
+            "`{path}` rendered to `{}`, which the grammar refuses",
+            rendered.as_str()
+        );
+        assert_eq!(
+            rendered.depth(),
+            path.split('/').count(),
+            "`{path}` rendered to `{}`, which names a different number of segments",
+            rendered.as_str()
+        );
+    }
+}
+
+/// **A directory prefix stops one refusal short of a document path**, because a
+/// stem is a document's property and a directory has none. `..md` names no
+/// document and is still where `..md/note.md` lives; everything else a document
+/// path refuses poisons every path beneath it too, so a prefix refuses it as
+/// well rather than opening a range over nothing.
+#[test]
+fn a_directory_prefix_admits_what_only_a_leaf_stem_refuses() {
+    for path in ["..md", "docs/..alpha", "docs", "...md", ".env"] {
+        assert_eq!(
+            DirectoryPrefix::new(path)
+                .expect("a directory prefix")
+                .as_str(),
+            path
+        );
+    }
+    for (path, needle) in UNNORMALIZED.iter().copied() {
+        let Err(error) = DirectoryPrefix::new(path) else {
+            // The leaf-stem refusals are exactly the ones a directory does not
+            // share, and each of them is a directory documents are stored under.
+            assert!(
+                needle.contains("stem"),
+                "`{path}` is a directory prefix, and it is refused as a path for {needle}"
+            );
+            continue;
+        };
+        let StoreError::Path { problem, .. } = &error else {
+            panic!("`{path}` was refused as {error:?} rather than as a path");
+        };
+        assert!(
+            problem.contains(needle),
+            "`{path}` was refused for `{problem}`, which does not name {needle}"
+        );
+    }
+}
+
+/// A spelling the grammar admits renders to itself. The rendering is a fallback,
+/// never a normalization, so nothing a caller could have parsed is rewritten.
+#[test]
+fn a_spelling_the_grammar_admits_renders_to_itself() {
+    for path in ["glossary.md", "docs/norn/glossary.md", ".gitignore"] {
+        assert_eq!(DocumentPath::rendered(Path::new(path)).as_str(), path);
+    }
+}
+
+/// What each refused class renders to. The marker stands in for the characters
+/// the grammar refuses, and ahead of a segment it refuses whole.
+#[test]
+fn a_refused_spelling_renders_the_bytes_the_grammar_refuses() {
+    for (path, expected) in [
+        ("docs\\glossary.md", "docs\u{fffd}glossary.md"),
+        ("docs/gloss\u{7}ary.md", "docs/gloss\u{fffd}ary.md"),
+        ("docs/glossary\0.md", "docs/glossary\u{fffd}.md"),
+        ("docs//glossary.md", "docs/\u{fffd}/glossary.md"),
+        ("/docs/glossary.md", "\u{fffd}/docs/glossary.md"),
+        ("docs/./glossary.md", "docs/\u{fffd}./glossary.md"),
+        ("../glossary.md", "\u{fffd}../glossary.md"),
+        ("..alpha", "\u{fffd}..alpha"),
+        ("docs/..alpha", "docs/\u{fffd}..alpha"),
+        ("", "\u{fffd}"),
+    ] {
+        assert_eq!(DocumentPath::rendered(Path::new(path)).as_str(), expected);
+    }
+}
+
+/// Path bytes that are not UTF-8 render through the same marker as a character
+/// the grammar refuses, because a reader has one question about both.
+#[cfg(unix)]
+#[test]
+fn path_bytes_that_are_not_utf8_render_through_the_marker() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = Path::new(OsStr::from_bytes(b"docs/bad-\xff.md"));
+    assert_eq!(
+        DocumentPath::rendered(path).as_str(),
+        "docs/bad-\u{fffd}.md"
+    );
 }
 
 /// The probe a target with no dot in its leaf reduces to, and the pairs that are

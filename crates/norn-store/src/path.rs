@@ -75,11 +75,21 @@
 //! finding recorded from one belongs to every class in that set.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use crate::error::StoreError;
 
 /// The separator between segments, in a path and in a reversed key alike.
 const SEPARATOR: char = '/';
+
+/// What [`DocumentPath::rendered`] puts in place of anything the grammar
+/// refuses.
+///
+/// The Unicode replacement character, which is already what lossy UTF-8 decoding
+/// produces — so one marker covers undecodable bytes and refused characters
+/// alike, and a reader sees one symbol for "the vault's spelling is not
+/// printable here".
+pub const RENDERED_MARKER: char = '\u{FFFD}';
 
 /// The code point immediately after [`SEPARATOR`], which is what an exclusive
 /// upper bound over a separator-terminated prefix ends with.
@@ -113,13 +123,12 @@ pub struct DocumentPath {
 impl DocumentPath {
     /// Read `path` as a vault-root-relative document path.
     ///
-    /// The refusals are the spellings a normalized path does not have: an empty
-    /// path, an absolute one, a Windows separator, an empty segment (which is a
-    /// doubled or trailing separator), a `.` or `..` segment, a leaf whose
-    /// extension-stripped stem is `.` or `..`, and a NUL or control byte. Each
-    /// of them would produce a suffix key that addresses the wrong documents —
-    /// or, for a control byte, a key whose bytes no reader can print back — so
-    /// refusing is what keeps the index honest about what it holds.
+    /// The refusals are [`segment_problem`]'s, plus the one a document has that
+    /// a bare directory does not: a leaf whose extension-stripped stem is `.` or
+    /// `..`, which names no ambiguity class. Each of them would produce a suffix
+    /// key that addresses the wrong documents — or, for a control byte, a key
+    /// whose bytes no reader can print back — so refusing is what keeps the
+    /// index honest about what it holds.
     pub fn new(path: &str) -> Result<Self, StoreError> {
         let refuse = |problem| {
             Err(StoreError::Path {
@@ -127,26 +136,10 @@ impl DocumentPath {
                 problem,
             })
         };
-        if path.is_empty() {
-            return refuse("it is empty");
-        }
-        if path.starts_with(SEPARATOR) {
-            return refuse("it is absolute, and a document path is vault-root-relative");
-        }
-        if path.contains('\\') {
-            return refuse("it carries a backslash; segments are separated by `/`");
-        }
-        if let Some(problem) = control_byte_problem(path) {
+        if let Some(problem) = segment_problem(path) {
             return refuse(problem);
         }
         let segments: Vec<&str> = path.split(SEPARATOR).collect();
-        for segment in &segments {
-            match *segment {
-                "" => return refuse("it carries an empty segment"),
-                "." | ".." => return refuse("it carries a `.` or `..` segment"),
-                _ => {}
-            }
-        }
 
         let (leaf, ancestors) = segments
             .split_last()
@@ -171,6 +164,62 @@ impl DocumentPath {
             stem,
             depth: segments.len(),
         })
+    }
+
+    /// A document path naming the place a spelling occupies, whether or not the
+    /// grammar admits that spelling.
+    ///
+    /// **Total**, which is what makes it usable where something has to be said
+    /// *about* a path no document can be stored under: a caller that cannot be
+    /// handed a path has nowhere to file what it knows, and silence is the
+    /// outcome that has to be impossible. It is built by rendering rather than
+    /// by parsing — bytes that are not UTF-8 and every character
+    /// [`DocumentPath::new`] refuses become [`RENDERED_MARKER`], a segment the
+    /// grammar refuses whole carries the marker ahead of it, and a leaf whose
+    /// stem the grammar refuses carries it ahead of the leaf. The renderings sit
+    /// beside the refusals they answer, so the two move together; a caller
+    /// spelling the refusal set itself would drift the moment the grammar did.
+    ///
+    /// **Totality rests on the two candidates below answering every refusal.**
+    /// Per-segment rendering answers all of them but the leaf's stem, and
+    /// marking ahead of the leaf answers that one — so a refusal added to the
+    /// grammar without a rendering leaves neither candidate standing and this
+    /// panics rather than collapsing every such path onto one subject. The
+    /// corpus in `tests/paths.rs` is what holds the two sets together.
+    ///
+    /// **A rendering names a place, never an identity.** Nothing derives a
+    /// document under one. A real document whose own name carries the marker
+    /// occupies the same key as a rendering of some other path, and that
+    /// collision is visible — one key, one row — rather than silent.
+    pub fn rendered(path: &Path) -> Self {
+        if let Some(spelling) = path.to_str()
+            && let Ok(document) = DocumentPath::new(spelling)
+        {
+            return document;
+        }
+        let separator = SEPARATOR.to_string();
+        let rendered = path
+            .to_string_lossy()
+            .split(SEPARATOR)
+            .map(rendered_segment)
+            .collect::<Vec<String>>()
+            .join(&separator);
+        // The leaf is the one segment whose *stem* the grammar reads, so a leaf
+        // that survives its own rendering can still reduce to a name that opens
+        // no ambiguity class. Marking ahead of the leaf is the shortest
+        // rendering that leaves the rest of the name readable.
+        let (ancestors, leaf) = rendered
+            .rsplit_once(SEPARATOR)
+            .unwrap_or(("", rendered.as_str()));
+        let marked = if ancestors.is_empty() {
+            format!("{RENDERED_MARKER}{leaf}")
+        } else {
+            format!("{ancestors}{separator}{RENDERED_MARKER}{leaf}")
+        };
+        [rendered, marked]
+            .into_iter()
+            .find_map(|candidate| DocumentPath::new(&candidate).ok())
+            .expect("every refusal the grammar states has a rendering that answers it")
     }
 
     /// The path as written, which is the document's name and unique key.
@@ -203,13 +252,7 @@ impl DocumentPath {
     /// separately. The separator is load-bearing: `a/ <= path < a0` contains
     /// `a/child.md`, but not `ab/child.md`.
     pub(crate) fn descendant_bounds(&self) -> (String, String) {
-        let mut lower = String::with_capacity(self.path.len() + 1);
-        lower.push_str(&self.path);
-        lower.push(SEPARATOR);
-        let mut upper = lower.clone();
-        upper.pop();
-        upper.push(PAST_SEPARATOR);
-        (lower, upper)
+        descendant_bounds(&self.path)
     }
 
     /// The key of the ambiguity class this document belongs to: its stem, with
@@ -226,6 +269,51 @@ impl DocumentPath {
         // segment carries no separator by construction.
         let probe = class_probe(&self.stem).expect("a document's own stem is a valid class probe");
         ClassKey::of_prefix(&probe.ranges[0].lower)
+    }
+}
+
+/// A vault-root-relative directory, as the range of stored paths beneath it.
+///
+/// **A directory that names no document still holds documents.** `..md` reduces
+/// to a `.` stem and is refused as a document path, while `..md/note.md` is an
+/// ordinary path the store keeps a row for — so the rows under such a directory
+/// need an address its own spelling cannot give them. This is that address: the
+/// same segment-aligned prefix range [`DocumentPath::descendant_bounds`] opens,
+/// taken from a spelling that is a directory and nothing more.
+///
+/// The refusals are [`segment_problem`]'s and stop there, because a stem is a
+/// document's property and a directory has none. A spelling those refusals
+/// reject poisons every path beneath it — no descendant of a segment carrying a
+/// backslash or a control byte is storable either — so refusing here is
+/// refusing an address that would range over nothing.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DirectoryPrefix {
+    path: String,
+}
+
+impl DirectoryPrefix {
+    /// Read `path` as a vault-root-relative directory.
+    pub fn new(path: &str) -> Result<Self, StoreError> {
+        match segment_problem(path) {
+            Some(problem) => Err(StoreError::Path {
+                path: path.to_string(),
+                problem,
+            }),
+            None => Ok(DirectoryPrefix {
+                path: path.to_string(),
+            }),
+        }
+    }
+
+    /// The directory as written.
+    pub fn as_str(&self) -> &str {
+        &self.path
+    }
+
+    /// The indexed bounds containing this directory's segment-aligned
+    /// descendants. The directory itself is never a row inside them.
+    pub(crate) fn descendant_bounds(&self) -> (String, String) {
+        descendant_bounds(&self.path)
     }
 }
 
@@ -476,6 +564,47 @@ fn bounded(lower: String) -> Range {
     Range { lower, upper }
 }
 
+/// The bounds containing everything segment-aligned beneath `path`.
+///
+/// The separator is load-bearing: `a/ <= key < a0` holds `a/child.md` and not
+/// `ab/child.md`, and the upper bound is that separator stepped by one byte, so
+/// the range is exact rather than a search for a successor key.
+fn descendant_bounds(path: &str) -> (String, String) {
+    let mut lower = String::with_capacity(path.len() + 1);
+    lower.push_str(path);
+    lower.push(SEPARATOR);
+    let mut upper = lower.clone();
+    upper.pop();
+    upper.push(PAST_SEPARATOR);
+    (lower, upper)
+}
+
+/// The refusals every vault-root-relative path shares, whatever its leaf names.
+///
+/// An empty path, an absolute one, a Windows separator, an empty segment (which
+/// is a doubled or trailing separator), a `.` or `..` segment, and a NUL or
+/// control byte. A document path adds its leaf's reduction to these; a
+/// directory prefix has no leaf to reduce, so these are all of them.
+fn segment_problem(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("it is empty");
+    }
+    if path.starts_with(SEPARATOR) {
+        return Some("it is absolute, and a vault path is vault-root-relative");
+    }
+    if path.contains('\\') {
+        return Some("it carries a backslash; segments are separated by `/`");
+    }
+    if let Some(problem) = control_byte_problem(path) {
+        return Some(problem);
+    }
+    path.split(SEPARATOR).find_map(|segment| match segment {
+        "" => Some("it carries an empty segment"),
+        "." | ".." => Some("it carries a `.` or `..` segment"),
+        _ => None,
+    })
+}
+
 /// A leaf segment with its final extension removed.
 ///
 /// The dot has to be inside the name for the extension to be one: `.gitignore`
@@ -486,6 +615,30 @@ fn leaf_stem(leaf: &str) -> &str {
         Some(dot) if dot > 0 => &leaf[..dot],
         _ => leaf,
     }
+}
+
+/// One segment as a document-path segment: every character the grammar refuses
+/// replaced, and a segment the grammar refuses whole marked ahead of.
+///
+/// This is the rendering half of [`DocumentPath::new`]'s refusals, and it
+/// answers them one for one — the backslash and control-byte refusals by
+/// replacement, and the empty, `.` and `..` segment refusals by the marker. The
+/// pair is what makes [`DocumentPath::rendered`] total.
+fn rendered_segment(segment: &str) -> String {
+    let mut rendered: String = segment
+        .chars()
+        .map(|character| {
+            if character == '\\' || character.is_control() {
+                RENDERED_MARKER
+            } else {
+                character
+            }
+        })
+        .collect();
+    if rendered.is_empty() || rendered == "." || rendered == ".." {
+        rendered.insert(0, RENDERED_MARKER);
+    }
+    rendered
 }
 
 /// The refusal for a NUL or other control byte, which no printable key holds and
