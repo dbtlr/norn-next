@@ -123,13 +123,12 @@ pub struct DocumentPath {
 impl DocumentPath {
     /// Read `path` as a vault-root-relative document path.
     ///
-    /// The refusals are the spellings a normalized path does not have: an empty
-    /// path, an absolute one, a Windows separator, an empty segment (which is a
-    /// doubled or trailing separator), a `.` or `..` segment, a leaf whose
-    /// extension-stripped stem is `.` or `..`, and a NUL or control byte. Each
-    /// of them would produce a suffix key that addresses the wrong documents —
-    /// or, for a control byte, a key whose bytes no reader can print back — so
-    /// refusing is what keeps the index honest about what it holds.
+    /// The refusals are [`segment_problem`]'s, plus the one a document has that
+    /// a bare directory does not: a leaf whose extension-stripped stem is `.` or
+    /// `..`, which names no ambiguity class. Each of them would produce a suffix
+    /// key that addresses the wrong documents — or, for a control byte, a key
+    /// whose bytes no reader can print back — so refusing is what keeps the
+    /// index honest about what it holds.
     pub fn new(path: &str) -> Result<Self, StoreError> {
         let refuse = |problem| {
             Err(StoreError::Path {
@@ -137,26 +136,10 @@ impl DocumentPath {
                 problem,
             })
         };
-        if path.is_empty() {
-            return refuse("it is empty");
-        }
-        if path.starts_with(SEPARATOR) {
-            return refuse("it is absolute, and a document path is vault-root-relative");
-        }
-        if path.contains('\\') {
-            return refuse("it carries a backslash; segments are separated by `/`");
-        }
-        if let Some(problem) = control_byte_problem(path) {
+        if let Some(problem) = segment_problem(path) {
             return refuse(problem);
         }
         let segments: Vec<&str> = path.split(SEPARATOR).collect();
-        for segment in &segments {
-            match *segment {
-                "" => return refuse("it carries an empty segment"),
-                "." | ".." => return refuse("it carries a `.` or `..` segment"),
-                _ => {}
-            }
-        }
 
         let (leaf, ancestors) = segments
             .split_last()
@@ -269,13 +252,7 @@ impl DocumentPath {
     /// separately. The separator is load-bearing: `a/ <= path < a0` contains
     /// `a/child.md`, but not `ab/child.md`.
     pub(crate) fn descendant_bounds(&self) -> (String, String) {
-        let mut lower = String::with_capacity(self.path.len() + 1);
-        lower.push_str(&self.path);
-        lower.push(SEPARATOR);
-        let mut upper = lower.clone();
-        upper.pop();
-        upper.push(PAST_SEPARATOR);
-        (lower, upper)
+        descendant_bounds(&self.path)
     }
 
     /// The key of the ambiguity class this document belongs to: its stem, with
@@ -292,6 +269,51 @@ impl DocumentPath {
         // segment carries no separator by construction.
         let probe = class_probe(&self.stem).expect("a document's own stem is a valid class probe");
         ClassKey::of_prefix(&probe.ranges[0].lower)
+    }
+}
+
+/// A vault-root-relative directory, as the range of stored paths beneath it.
+///
+/// **A directory that names no document still holds documents.** `..md` reduces
+/// to a `.` stem and is refused as a document path, while `..md/note.md` is an
+/// ordinary path the store keeps a row for — so the rows under such a directory
+/// need an address its own spelling cannot give them. This is that address: the
+/// same segment-aligned prefix range [`DocumentPath::descendant_bounds`] opens,
+/// taken from a spelling that is a directory and nothing more.
+///
+/// The refusals are [`segment_problem`]'s and stop there, because a stem is a
+/// document's property and a directory has none. A spelling those refusals
+/// reject poisons every path beneath it — no descendant of a segment carrying a
+/// backslash or a control byte is storable either — so refusing here is
+/// refusing an address that would range over nothing.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DirectoryPrefix {
+    path: String,
+}
+
+impl DirectoryPrefix {
+    /// Read `path` as a vault-root-relative directory.
+    pub fn new(path: &str) -> Result<Self, StoreError> {
+        match segment_problem(path) {
+            Some(problem) => Err(StoreError::Path {
+                path: path.to_string(),
+                problem,
+            }),
+            None => Ok(DirectoryPrefix {
+                path: path.to_string(),
+            }),
+        }
+    }
+
+    /// The directory as written.
+    pub fn as_str(&self) -> &str {
+        &self.path
+    }
+
+    /// The indexed bounds containing this directory's segment-aligned
+    /// descendants. The directory itself is never a row inside them.
+    pub(crate) fn descendant_bounds(&self) -> (String, String) {
+        descendant_bounds(&self.path)
     }
 }
 
@@ -540,6 +562,47 @@ fn bounded(lower: String) -> Range {
     upper.pop();
     upper.push(PAST_SEPARATOR);
     Range { lower, upper }
+}
+
+/// The bounds containing everything segment-aligned beneath `path`.
+///
+/// The separator is load-bearing: `a/ <= key < a0` holds `a/child.md` and not
+/// `ab/child.md`, and the upper bound is that separator stepped by one byte, so
+/// the range is exact rather than a search for a successor key.
+fn descendant_bounds(path: &str) -> (String, String) {
+    let mut lower = String::with_capacity(path.len() + 1);
+    lower.push_str(path);
+    lower.push(SEPARATOR);
+    let mut upper = lower.clone();
+    upper.pop();
+    upper.push(PAST_SEPARATOR);
+    (lower, upper)
+}
+
+/// The refusals every vault-root-relative path shares, whatever its leaf names.
+///
+/// An empty path, an absolute one, a Windows separator, an empty segment (which
+/// is a doubled or trailing separator), a `.` or `..` segment, and a NUL or
+/// control byte. A document path adds its leaf's reduction to these; a
+/// directory prefix has no leaf to reduce, so these are all of them.
+fn segment_problem(path: &str) -> Option<&'static str> {
+    if path.is_empty() {
+        return Some("it is empty");
+    }
+    if path.starts_with(SEPARATOR) {
+        return Some("it is absolute, and a vault path is vault-root-relative");
+    }
+    if path.contains('\\') {
+        return Some("it carries a backslash; segments are separated by `/`");
+    }
+    if let Some(problem) = control_byte_problem(path) {
+        return Some(problem);
+    }
+    path.split(SEPARATOR).find_map(|segment| match segment {
+        "" => Some("it carries an empty segment"),
+        "." | ".." => Some("it carries a `.` or `..` segment"),
+        _ => None,
+    })
 }
 
 /// A leaf segment with its final extension removed.

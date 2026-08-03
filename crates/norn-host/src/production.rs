@@ -10,9 +10,9 @@ use norn_fs::{
     Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, try_acquire, walk, watch,
 };
 use norn_store::{
-    BlockFact, Change, DocumentFacts, DocumentPath, FindingFacts, FrontmatterValue, HeadingFact,
-    IncrementProvenance, LinkFact, LinkFamily, Provenance, Span, Store, StoredPathOrder, TagFact,
-    TagSource,
+    BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
+    FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance, Span,
+    Store, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::MaintainerIdentity;
@@ -418,14 +418,25 @@ fn scoped_increment(
                 }
                 continue;
             }
-            // A path that is not there has no document to quarantine, and one
-            // that names no document has no rows to prune.
+            // A path that is not there has no document to quarantine. It still
+            // has rows to prune wherever it addresses any: a directory whose own
+            // leaf reduces to a refused stem names no document and is where the
+            // documents under it are stored, so the prune ranges over the prefix
+            // when the root itself is not a path. A spelling no prefix admits
+            // poisons every path beneath it, so there the range would be empty
+            // and none is opened.
             norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
                 pending.flush()?;
-                if let Ok(root) = &identity {
+                let prefix = path.to_str().and_then(|s| DirectoryPrefix::new(s).ok());
+                let scope = match (&identity, &prefix) {
+                    (Ok(root), _) => Some(PruneScope::Subtree(root)),
+                    (Err(_), Some(prefix)) => Some(PruneScope::Prefix(prefix)),
+                    (Err(_), None) => None,
+                };
+                if let Some(scope) = scope {
                     prune_subtree_ordered(
                         pending.store,
-                        root,
+                        scope,
                         policy,
                         progress,
                         store_order(sensitivity),
@@ -496,9 +507,9 @@ fn scoped_increment(
 ///
 /// Every document beneath it is read as the full heal reads one: derived where
 /// its path and bytes yield facts, quarantined where they do not. There is no
-/// prune pass, because pruning is a range over a subtree the store can address
-/// and this root is not one — the vault-wide heal's merge is what reaches a
-/// stale row under such a directory.
+/// prune pass, because this walk reads what the vault holds rather than merging
+/// it against what the store holds — the vault-wide heal's merge is what reaches
+/// a stale row under such a directory.
 fn quarantine_subtree(
     store: &mut Store,
     vault_root: &Path,
@@ -659,6 +670,17 @@ fn heal_subtree(
     pending.flush()
 }
 
+/// What a prune ranges over.
+///
+/// A root the grammar admits carries its own row and its descendants; a
+/// directory that names no document carries only descendants, and reaching them
+/// is the whole reason the second variant exists.
+#[derive(Clone, Copy)]
+enum PruneScope<'a> {
+    Subtree(&'a DocumentPath),
+    Prefix(&'a DirectoryPrefix),
+}
+
 #[cfg(test)]
 fn prune_subtree(
     store: &mut Store,
@@ -666,12 +688,18 @@ fn prune_subtree(
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
-    prune_subtree_ordered(store, root, policy, progress, StoredPathOrder::Sensitive)
+    prune_subtree_ordered(
+        store,
+        PruneScope::Subtree(root),
+        policy,
+        progress,
+        StoredPathOrder::Sensitive,
+    )
 }
 
 fn prune_subtree_ordered(
     store: &mut Store,
-    root: &DocumentPath,
+    scope: PruneScope<'_>,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     order: StoredPathOrder,
@@ -680,16 +708,22 @@ fn prune_subtree_ordered(
     let mut healed = 0;
     let mut pending = Pending::new(store, policy.changeset_size);
     loop {
-        let page = pending
-            .store
-            .begin_request()
-            .stored_documents_in_subtree_after_ordered(
+        let request = pending.store.begin_request();
+        let page = match scope {
+            PruneScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
                 root,
                 after.as_ref(),
                 policy.store_page_size,
                 order,
-            )
-            .map_err(effect)?;
+            ),
+            PruneScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
+                prefix,
+                after.as_ref(),
+                policy.store_page_size,
+                order,
+            ),
+        }
+        .map_err(effect)?;
         if page.is_empty() {
             break;
         }
@@ -2076,6 +2110,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["document/body-bytes-not-utf8"]
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A directory that names no document is still where documents live, so
+    /// its deletion has rows to take.** `..md` reduces to a refused stem while
+    /// `..md/note.md` is an ordinary stored path, and leaving those rows behind
+    /// would serve a deleted document until the next vault-wide heal. The warm
+    /// path prunes them through the prefix instead.
+    #[test]
+    fn a_scoped_increment_prunes_a_deleted_directory_with_a_refused_stem() {
+        let f = Fixture::new("quarantine-refused-stem-deletion");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md/note.md"), "body").unwrap();
+        fs::write(f.vault().join("keep.md"), "keep").unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["..md/note.md", "keep.md"]
+        );
+
+        fs::remove_dir_all(f.vault().join("..md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["keep.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
     }
 

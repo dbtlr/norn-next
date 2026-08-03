@@ -17,7 +17,8 @@ use crate::common::{
     write_document, write_documents,
 };
 use norn_store::{
-    Change, IncrementProvenance, OpenOutcome, Provenance, Store, StoreError, StoredPathOrder,
+    Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Store,
+    StoreError, StoredPathOrder,
 };
 
 /// One upsert entry, from a document and a hash.
@@ -197,6 +198,76 @@ fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
     );
     assert!(matches!(
         request.stored_documents_in_subtree_after(&root, None, 1025),
+        Err(StoreError::Bound { .. })
+    ));
+}
+
+/// **A directory that names no document still addresses the rows beneath it.**
+/// `..md` reduces to a `.` stem and is refused as a document path, while
+/// `..md/note.md` is stored — so a caller converging that directory reaches its
+/// rows through the prefix, segment-aligned and bounded exactly as a subtree
+/// page is.
+#[test]
+fn stored_document_prefix_pages_reach_a_directory_that_names_no_document() {
+    let scratch = Scratch::new("document-prefix-pages");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("..md/note.md", "hash-note", "note\n"),
+            document("..md/nested/deep.md", "hash-deep", "deep\n"),
+            document("..mdx/neighbor.md", "hash-neighbor", "neighbor\n"),
+            document("keep.md", "hash-keep", "keep\n"),
+        ],
+    );
+
+    assert!(DocumentPath::new("..md").is_err());
+    let prefix = DirectoryPrefix::new("..md").expect("a directory prefix");
+    let first = request
+        .stored_documents_under_after_ordered(&prefix, None, 1, StoredPathOrder::Sensitive)
+        .expect("the first prefix page");
+    assert_eq!(
+        first
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["..md/nested/deep.md"]
+    );
+
+    let second = request
+        .stored_documents_under_after_ordered(
+            &prefix,
+            Some(&first[0].path),
+            10,
+            StoredPathOrder::Sensitive,
+        )
+        .expect("the second prefix page");
+    assert_eq!(
+        second
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<Vec<_>>(),
+        ["..md/note.md"]
+    );
+    assert!(
+        request
+            .stored_documents_under_after_ordered(
+                &prefix,
+                Some(&second[0].path),
+                10,
+                StoredPathOrder::Sensitive
+            )
+            .expect("the exhausted prefix page")
+            .is_empty()
+    );
+    assert!(matches!(
+        request.stored_documents_under_after_ordered(
+            &prefix,
+            None,
+            1025,
+            StoredPathOrder::Sensitive
+        ),
         Err(StoreError::Bound { .. })
     ));
 }

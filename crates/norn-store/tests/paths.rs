@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use norn_store::{ClassKey, DocumentPath, StoreError, class_probe, suffix_probe};
+use norn_store::{ClassKey, DirectoryPrefix, DocumentPath, StoreError, class_probe, suffix_probe};
 
 /// The one range a single-reduction probe opens.
 fn only_range(target: &str) -> (String, String) {
@@ -138,6 +138,41 @@ fn every_refused_spelling_still_renders_to_a_place() {
             path.split('/').count(),
             "`{path}` rendered to `{}`, which names a different number of segments",
             rendered.as_str()
+        );
+    }
+}
+
+/// **A directory prefix stops one refusal short of a document path**, because a
+/// stem is a document's property and a directory has none. `..md` names no
+/// document and is still where `..md/note.md` lives; everything else a document
+/// path refuses poisons every path beneath it too, so a prefix refuses it as
+/// well rather than opening a range over nothing.
+#[test]
+fn a_directory_prefix_admits_what_only_a_leaf_stem_refuses() {
+    for path in ["..md", "docs/..alpha", "docs", "...md", ".env"] {
+        assert_eq!(
+            DirectoryPrefix::new(path)
+                .expect("a directory prefix")
+                .as_str(),
+            path
+        );
+    }
+    for (path, needle) in UNNORMALIZED.iter().copied() {
+        let Err(error) = DirectoryPrefix::new(path) else {
+            // The leaf-stem refusals are exactly the ones a directory does not
+            // share, and each of them is a directory documents are stored under.
+            assert!(
+                needle.contains("stem"),
+                "`{path}` is a directory prefix, and it is refused as a path for {needle}"
+            );
+            continue;
+        };
+        let StoreError::Path { problem, .. } = &error else {
+            panic!("`{path}` was refused as {error:?} rather than as a path");
+        };
+        assert!(
+            problem.contains(needle),
+            "`{path}` was refused for `{problem}`, which does not name {needle}"
         );
     }
 }

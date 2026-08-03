@@ -67,7 +67,7 @@ use crate::facts::{
     VectorFacts,
 };
 use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
-use crate::path::{ClassKey, DocumentPath, SuffixProbe};
+use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
 /// Maximum row count accepted by ordered stored-document page readers.
@@ -652,6 +652,53 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
+        self.stored_documents_in_range_after_ordered(
+            Some(root.as_str()),
+            root.descendant_bounds(),
+            after,
+            limit,
+            order,
+        )
+    }
+
+    /// The next bounded page of documents stored beneath `prefix`, in normalized
+    /// path order.
+    ///
+    /// A directory whose own spelling names no document still holds documents
+    /// the store keeps rows for, and this is how those rows are reached: the
+    /// segment-aligned descendants of the prefix, and no exact row, because the
+    /// prefix is a directory rather than a path a document is stored under.
+    /// `after` is exclusive.
+    pub fn stored_documents_under_after_ordered(
+        &self,
+        prefix: &DirectoryPrefix,
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
+        self.stored_documents_in_range_after_ordered(
+            None,
+            prefix.descendant_bounds(),
+            after,
+            limit,
+            order,
+        )
+    }
+
+    /// One bounded page of the rows an exact path and a descendant range hold.
+    ///
+    /// Both bounds and cursor are expressed as whole paths, so this never relies
+    /// on wildcard matching or admits a textual neighbor such as `ab` while
+    /// reconciling `a`. `exact` is the root's own row where the root is a path a
+    /// document can be stored under, and `None` where it is a directory only.
+    fn stored_documents_in_range_after_ordered(
+        &self,
+        exact: Option<&str>,
+        bounds: (String, String),
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredDocument>, StoreError> {
         if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document subtree page",
@@ -660,7 +707,7 @@ impl<'a> Request<'a> {
             });
         }
         let limit = i64::try_from(limit).expect("the page bound fits i64");
-        let (descendant_lower, descendant_upper) = root.descendant_bounds();
+        let (descendant_lower, descendant_upper) = bounds;
         let after = after.map(DocumentPath::as_str);
         let sql = match order {
             StoredPathOrder::Sensitive => {
@@ -688,13 +735,7 @@ impl<'a> Request<'a> {
         Self::read_all(
             &self.store.connection,
             sql,
-            params![
-                root.as_str(),
-                descendant_lower,
-                descendant_upper,
-                after,
-                limit
-            ],
+            params![exact, descendant_lower, descendant_upper, after, limit],
             |row| stored_document(row, 0),
             "reading the stored-document subtree page",
         )
