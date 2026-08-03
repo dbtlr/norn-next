@@ -1863,6 +1863,185 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// The subtree heal reads paths through the same seam the vault heal does,
+    /// so a spelling the grammar refuses inside a scope is quarantined there
+    /// too.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_subtree_heal_quarantines_a_path_spelling_the_grammar_refuses() {
+        let f = Fixture::new("quarantine-subtree-spelling");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/ok.md"), "ok").unwrap();
+        if !write_or_report(&f.vault().join("folder/bad\\name.md"), b"body") {
+            return;
+        }
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "folder"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["folder/ok.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "folder/bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// The warm path reads a dirty file's identity through the same seam, and a
+    /// file that is on disk under a spelling the grammar refuses is a document
+    /// to quarantine.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_increment_quarantines_a_path_spelling_the_grammar_refuses() {
+        let f = Fixture::new("quarantine-scoped-spelling");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// A finding is about a document, and a path that is not on disk is not
+    /// one: a created-then-deleted spelling the grammar refuses leaves nothing
+    /// behind for somebody to go looking for.
+    #[test]
+    fn a_watcher_event_for_a_refused_spelling_that_is_gone_files_no_finding() {
+        let f = Fixture::new("quarantine-ghost");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
+    /// A directory the grammar refuses addresses no subtree the store can
+    /// range, so the warm path converges it by reading what is under it: every
+    /// document beneath is derived or quarantined, exactly as the vault heal
+    /// reaches the same files.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_increment_converges_a_directory_the_grammar_refuses() {
+        let f = Fixture::new("quarantine-refused-directory");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        if fs::create_dir_all(f.vault().join("bad\\dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create a directory named `bad\\dir`");
+            return;
+        }
+        fs::write(f.vault().join("bad\\dir/note.md"), "body").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\dir"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(stored_paths(&mut attachment.store).is_empty());
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}dir/note.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"]
+        );
+
+        // And the vault heal reaches the same document with the same finding,
+        // which is the parity a scope is supposed to hold.
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}dir/note.md").len(),
+            1
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// A directory whose own leaf reduces to a stem the grammar refuses still
+    /// holds documents the grammar admits, and the warm path derives them.
+    #[test]
+    fn a_scoped_increment_derives_documents_under_a_directory_with_a_refused_stem() {
+        let f = Fixture::new("quarantine-refused-stem-directory");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md/note.md"), "body").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["..md/note.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
     struct CountedAttach {
         inner: ProductionEntryOps,
         attaches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
