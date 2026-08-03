@@ -122,10 +122,15 @@ withdraws the vault. The rung-2 heal skips its facts, records a finding naming t
 the cause class, and keeps going; the entry reaches `Ready` and serves every other document.
 Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
 subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
-grammar refuses addresses no subtree the store can range, so the warm path converges it by
-reading what is under it — each document derived or quarantined, nothing pruned — and a
-stale row beneath such a directory is reached by the vault-wide heal's merge rather than
-there.
+grammar refuses splits by what it still addresses, because naming no document and holding no
+document are different things. A spelling refused only for the stem its leaf reduces to —
+`..md` — names no document and is where ordinary documents such as `..md/note.md` are
+stored, so it addresses every row beneath it as a segment-aligned prefix range: the warm path
+merges its walk against that range and derives, quarantines and **prunes** there, converging
+a deletion under it without a vault-wide heal. A spelling refused for anything else — a
+backslash, a control byte, bytes that are not UTF-8 — spoils every path beneath it too, so no
+document under it is storable and there is no row to prune; the warm path reads what is under
+it and quarantines what it finds.
 
 The store holds only representable truth, so a document that stops decoding **loses its
 store row**, and the finding is where its absence is stated. The row's death is recorded

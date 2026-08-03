@@ -12,7 +12,7 @@ use norn_fs::{
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance, Span,
-    Store, StoredPathOrder, TagFact, TagSource,
+    Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::MaintainerIdentity;
@@ -393,19 +393,28 @@ fn scoped_increment(
         if is_excluded(path, exclusions) {
             continue;
         }
-        // A path that names no document names no subtree either, so the
-        // identity is read before anything that would range over it. What it
-        // says is acted on per kind: only the arm that has a file in hand has a
-        // document to quarantine.
+        // Both the identity and the range it addresses are read before anything
+        // that would use them, because what a spelling names and what it holds
+        // are different questions: `..md` names no document and is still where
+        // the documents under it are stored. What they say is acted on per kind:
+        // only the arm that has a file in hand has a document to quarantine.
         let identity = document_path(path);
+        let prefix = path
+            .to_str()
+            .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
+        let scope = match (&identity, &prefix) {
+            (Ok(root), _) => Some(SubtreeScope::Subtree(root)),
+            (Err(_), Some(prefix)) => Some(SubtreeScope::Prefix(prefix)),
+            (Err(_), None) => None,
+        };
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
-                match &identity {
-                    Ok(subtree) => {
-                        heal_subtree(pending.store, root, subtree, policy, progress, exclusions)?;
+                match scope {
+                    Some(scope) => {
+                        heal_subtree(pending.store, root, scope, policy, progress, exclusions)?;
                     }
-                    Err(_) => {
+                    None => {
                         quarantine_subtree(
                             pending.store,
                             root,
@@ -419,20 +428,11 @@ fn scoped_increment(
                 continue;
             }
             // A path that is not there has no document to quarantine. It still
-            // has rows to prune wherever it addresses any: a directory whose own
-            // leaf reduces to a refused stem names no document and is where the
-            // documents under it are stored, so the prune ranges over the prefix
-            // when the root itself is not a path. A spelling no prefix admits
-            // poisons every path beneath it, so there the range would be empty
-            // and none is opened.
+            // has rows to prune wherever it addresses any, which a spelling no
+            // prefix admits does not: such a spelling poisons every path beneath
+            // it, so the range would be empty and none is opened.
             norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
                 pending.flush()?;
-                let prefix = path.to_str().and_then(|s| DirectoryPrefix::new(s).ok());
-                let scope = match (&identity, &prefix) {
-                    (Ok(root), _) => Some(PruneScope::Subtree(root)),
-                    (Err(_), Some(prefix)) => Some(PruneScope::Prefix(prefix)),
-                    (Err(_), None) => None,
-                };
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
                         pending.store,
@@ -503,13 +503,15 @@ fn scoped_increment(
     pending.flush()
 }
 
-/// Converge a dirty directory whose own spelling names no document.
+/// Converge a dirty directory that addresses no stored rows at all.
 ///
-/// Every document beneath it is read as the full heal reads one: derived where
-/// its path and bytes yield facts, quarantined where they do not. There is no
-/// prune pass, because this walk reads what the vault holds rather than merging
-/// it against what the store holds — the vault-wide heal's merge is what reaches
-/// a stale row under such a directory.
+/// This is the root a backslash, a control byte or bytes that are not UTF-8
+/// spoil — and each of those spoils every path beneath it too, since a
+/// descendant's spelling carries the root's own segments. **So there is nothing
+/// here to prune**: no document under such a root is storable, and a row under
+/// it is one the store never held. What is left is to read what the vault holds,
+/// through the seam every walked file's identity is read through, so a spelling
+/// the grammar does admit is derived rather than special-cased.
 fn quarantine_subtree(
     store: &mut Store,
     vault_root: &Path,
@@ -561,15 +563,24 @@ fn quarantine_subtree(
     pending.flush()
 }
 
+/// Converge a dirty directory the store can range, by merging its walk against
+/// the rows it addresses.
+///
+/// The merge is the vault heal's, narrowed to one root: a walked file the store
+/// has no row for is derived, a row the walk no longer reaches is pruned, and a
+/// spelling the grammar refuses is quarantined as it is anywhere else. The scope
+/// is what makes the prune half reachable for a directory whose own leaf reduces
+/// to a refused stem — it names no document and still addresses every row
+/// beneath it.
 fn heal_subtree(
     store: &mut Store,
     vault_root: &Path,
-    subtree: &DocumentPath,
+    scope: SubtreeScope<'_>,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let prefix = subtree.as_str();
+    let prefix = scope.as_str();
     let relative_root = Path::new(prefix);
     let scoped_exclusions = exclusions
         .iter()
@@ -597,16 +608,7 @@ fn heal_subtree(
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
-            stored = pending
-                .store
-                .begin_request()
-                .stored_documents_in_subtree_after_ordered(
-                    subtree,
-                    after.as_ref(),
-                    policy.store_page_size,
-                    order,
-                )
-                .map_err(effect)?;
+            stored = scope.page(pending.store, after.as_ref(), policy, order)?;
             index = 0;
             exhausted = stored.is_empty();
         }
@@ -670,15 +672,54 @@ fn heal_subtree(
     pending.flush()
 }
 
-/// What a prune ranges over.
+/// The stored rows a dirty directory addresses, which is what a scoped heal
+/// merges against and what a scoped prune ranges over.
 ///
 /// A root the grammar admits carries its own row and its descendants; a
 /// directory that names no document carries only descendants, and reaching them
-/// is the whole reason the second variant exists.
+/// is the whole reason the second variant exists. A spelling neither admits
+/// addresses nothing, and is why callers take an `Option` of this.
 #[derive(Clone, Copy)]
-enum PruneScope<'a> {
+enum SubtreeScope<'a> {
     Subtree(&'a DocumentPath),
     Prefix(&'a DirectoryPrefix),
+}
+
+impl SubtreeScope<'_> {
+    /// The vault-relative spelling the walk is rooted at and the stored paths
+    /// beneath it open with.
+    fn as_str(&self) -> &str {
+        match self {
+            SubtreeScope::Subtree(root) => root.as_str(),
+            SubtreeScope::Prefix(prefix) => prefix.as_str(),
+        }
+    }
+
+    /// The next bounded page of stored rows in this scope, `after` exclusive.
+    fn page(
+        self,
+        store: &mut Store,
+        after: Option<&DocumentPath>,
+        policy: ProductionPolicy,
+        order: StoredPathOrder,
+    ) -> Result<Vec<StoredDocument>, JobFailure> {
+        let request = store.begin_request();
+        match self {
+            SubtreeScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
+                root,
+                after,
+                policy.store_page_size,
+                order,
+            ),
+            SubtreeScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
+                prefix,
+                after,
+                policy.store_page_size,
+                order,
+            ),
+        }
+        .map_err(effect)
+    }
 }
 
 #[cfg(test)]
@@ -690,7 +731,7 @@ fn prune_subtree(
 ) -> Result<(), JobFailure> {
     prune_subtree_ordered(
         store,
-        PruneScope::Subtree(root),
+        SubtreeScope::Subtree(root),
         policy,
         progress,
         StoredPathOrder::Sensitive,
@@ -699,7 +740,7 @@ fn prune_subtree(
 
 fn prune_subtree_ordered(
     store: &mut Store,
-    scope: PruneScope<'_>,
+    scope: SubtreeScope<'_>,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     order: StoredPathOrder,
@@ -708,22 +749,7 @@ fn prune_subtree_ordered(
     let mut healed = 0;
     let mut pending = Pending::new(store, policy.changeset_size);
     loop {
-        let request = pending.store.begin_request();
-        let page = match scope {
-            PruneScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
-                root,
-                after.as_ref(),
-                policy.store_page_size,
-                order,
-            ),
-            PruneScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
-                prefix,
-                after.as_ref(),
-                policy.store_page_size,
-                order,
-            ),
-        }
-        .map_err(effect)?;
+        let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
             break;
         }
@@ -2110,6 +2136,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["document/body-bytes-not-utf8"]
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A live directory that names no document converges its deletions too.**
+    /// The scoped heal of `..md` merges its walk against the rows the prefix
+    /// addresses, so a child deleted under it loses its row there rather than
+    /// waiting for a vault-wide heal — whether the dirty path is the child or
+    /// the directory that held it.
+    #[test]
+    fn a_scoped_increment_prunes_a_child_deleted_under_a_live_refused_stem_directory() {
+        let f = Fixture::new("quarantine-refused-stem-child-deletion");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("..md")).unwrap();
+        fs::write(f.vault().join("..md/note.md"), "body").unwrap();
+        fs::write(f.vault().join("..md/gone.md"), "gone").unwrap();
+        fs::write(f.vault().join("keep.md"), "keep").unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["..md/gone.md", "..md/note.md", "keep.md"]
+        );
+
+        // The directory is still there; only the child left. The dirty path the
+        // watcher reports for that is the directory that held it.
+        fs::remove_file(f.vault().join("..md/gone.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["..md/note.md", "keep.md"]
+        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
+
+        // And naming the child itself converges the same row through the scope
+        // its own spelling addresses.
+        fs::write(f.vault().join("..md/second.md"), "second").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md/second.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["..md/note.md", "..md/second.md", "keep.md"]
+        );
+
+        fs::remove_file(f.vault().join("..md/second.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md/second.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["..md/note.md", "keep.md"]
+        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
         ops.detach(&name, attachment);
     }
 
