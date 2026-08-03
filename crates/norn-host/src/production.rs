@@ -2767,65 +2767,35 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// Whether the dispatcher is inside a poll of this entry, and whether it may
-    /// enter one.
+    /// Bar the dispatcher from claiming the entry for a watcher poll, and return
+    /// once it holds no claim on it.
     ///
     /// A demand raised while any job is claimed is answered with the entry's
     /// state and schedules nothing — the caller's own lease is what follows the
     /// completion. A test that raises one and drops its lease therefore has to
     /// raise it while no job is claimed, and the dispatcher polls on a cadence
-    /// nothing else synchronizes with. [`PollGate::suspend`] closes that window:
-    /// it returns only once no poll is running, and no poll starts until it is
-    /// lifted.
-    #[derive(Default)]
-    struct PollGate {
-        state: std::sync::Mutex<(bool, bool)>,
-    }
-
-    impl PollGate {
-        /// Enter a poll unless the gate is suspended.
-        fn enter(&self) -> bool {
-            let mut state = self.state.lock().expect("poll gate poisoned");
-            if state.1 {
-                return false;
-            }
-            state.0 = true;
-            true
-        }
-
-        fn leave(&self) {
-            self.state.lock().expect("poll gate poisoned").0 = false;
-        }
-
-        /// Hold every poll off, returning once the entry is provably unclaimed
-        /// by one.
-        fn suspend(&self) {
-            wait_until(
-                "the dispatcher to be between polls",
-                lifecycle_budget(),
-                || {
-                    let mut state = self.state.lock().expect("poll gate poisoned");
-                    if state.0 {
-                        Observed::Pending("a poll is in flight".to_owned())
-                    } else {
-                        state.1 = true;
-                        Observed::Met(())
-                    }
-                },
-            )
-            .unwrap_or_else(|failure| panic!("{failure}"));
-        }
-
-        fn resume(&self) {
-            self.state.lock().expect("poll gate poisoned").1 = false;
-        }
+    /// nothing else synchronizes with. The claim is what the hold excludes and
+    /// what it reads, both under the entry gate, so there is no instant between
+    /// this returning and the release in which a poll can claim the entry.
+    fn hold_polls<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+        wait_until(
+            "the dispatcher to hold no claim on the entry",
+            lifecycle_budget(),
+            || {
+                if host.hold_polls(name) {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending("a job holds the entry".to_owned())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     struct BlockedRecovery {
         inner: ProductionEntryOps,
         started: std::sync::Arc<std::sync::atomic::AtomicBool>,
         release: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        polls: std::sync::Arc<PollGate>,
         observed: std::sync::Mutex<Option<norn_fs::Batch>>,
     }
 
@@ -2897,15 +2867,10 @@ mod tests {
             name: &VaultName,
             attachment: &mut Self::Attachment,
         ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-            if !self.polls.enter() {
-                return Ok(None);
-            }
-            let polled = match self.observed.lock().unwrap().take() {
+            match self.observed.lock().unwrap().take() {
                 Some(batch) => Ok(Some(batch)),
                 None => self.inner.poll(name, attachment),
-            };
-            self.polls.leave();
-            polled
+            }
         }
 
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
@@ -2925,14 +2890,12 @@ mod tests {
         let derived = dirs.derived_dir(&name);
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let polls = std::sync::Arc::new(PollGate::default());
         let host = crate::Host::new(
             registry,
             BlockedRecovery {
                 inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
                 started: std::sync::Arc::clone(&started),
                 release: std::sync::Arc::clone(&release),
-                polls: std::sync::Arc::clone(&polls),
                 observed: std::sync::Mutex::new(None),
             },
             crate::LifecyclePolicy {
@@ -2947,10 +2910,10 @@ mod tests {
         // The demand below has to reach an unclaimed entry: one raised against
         // a claimed one is answered with its state and schedules nothing, and
         // this test drops the lease that would otherwise follow the completion.
-        polls.suspend();
+        hold_polls(&host, &name);
         host.watcher_failed(&name, norn_fs::WatchError::Backend("test".into()));
         drop(host.demand(&name).unwrap());
-        polls.resume();
+        host.release_polls(&name);
         wait_until(
             "the recovery to reach its block",
             lifecycle_budget(),
