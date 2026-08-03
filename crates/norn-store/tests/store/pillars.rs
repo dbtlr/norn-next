@@ -1025,6 +1025,71 @@ fn a_finding_is_taken_by_maintenance_and_never_by_a_cascade() {
         .expect("a store whose findings left through maintenance");
 }
 
+/// The subject axis reached by a path rather than by a change: the door a
+/// producer whose subject no changeset can name needs in order to re-derive at
+/// all.
+#[test]
+fn re_deriving_a_subject_is_a_discard_and_a_record() {
+    let scratch = Scratch::new("subject-maintenance");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    request
+        .record_finding(&violation("one.md"))
+        .expect("recording a finding");
+    request
+        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .expect("recording a finding");
+    request
+        .record_finding(&violation("two.md"))
+        .expect("recording a finding");
+
+    // Everything about the subject goes, whichever axis put it there, and
+    // nothing about any other subject does.
+    let invalidation = request
+        .discard_findings_about(&path("one.md"))
+        .expect("discarding a subject");
+    assert_eq!(invalidation.findings_discarded, 2);
+    assert!(
+        request
+            .stored_findings(&path("one.md"))
+            .expect("reading findings")
+            .is_empty()
+    );
+    assert_eq!(
+        request
+            .stored_findings(&path("two.md"))
+            .expect("reading findings")
+            .len(),
+        1
+    );
+
+    // Recording what holds now leaves one copy, which is the whole of the
+    // idempotence story on this axis.
+    request
+        .record_finding(&violation("one.md"))
+        .expect("recording a finding");
+    assert_eq!(
+        request
+            .stored_findings(&path("one.md"))
+            .expect("reading findings")
+            .len(),
+        1
+    );
+
+    // A subject with nothing recorded about it discards nothing and refuses
+    // nothing: a producer re-deriving a place it has never spoken about is the
+    // ordinary first pass.
+    assert_eq!(
+        request
+            .discard_findings_about(&path("never/spoken.md"))
+            .expect("discarding an untouched subject")
+            .findings_discarded,
+        0
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(2));
+}
+
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
 /// the idempotence story.** Re-deriving a class empties it and records what holds
 /// now, so two derivations of one class cannot leave two copies — and every

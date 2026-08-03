@@ -75,11 +75,21 @@
 //! finding recorded from one belongs to every class in that set.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use crate::error::StoreError;
 
 /// The separator between segments, in a path and in a reversed key alike.
 const SEPARATOR: char = '/';
+
+/// What [`DocumentPath::rendered`] puts in place of anything the grammar
+/// refuses.
+///
+/// The Unicode replacement character, which is already what lossy UTF-8 decoding
+/// produces — so one marker covers undecodable bytes and refused characters
+/// alike, and a reader sees one symbol for "the vault's spelling is not
+/// printable here".
+pub const RENDERED_MARKER: char = '\u{FFFD}';
 
 /// The code point immediately after [`SEPARATOR`], which is what an exclusive
 /// upper bound over a separator-terminated prefix ends with.
@@ -171,6 +181,55 @@ impl DocumentPath {
             stem,
             depth: segments.len(),
         })
+    }
+
+    /// A document path naming the place a spelling occupies, whether or not the
+    /// grammar admits that spelling.
+    ///
+    /// **Total**, which is what makes it usable where something has to be said
+    /// *about* a path no document can be stored under: a caller that cannot be
+    /// handed a path has nowhere to file what it knows, and silence is the
+    /// outcome that has to be impossible. It is built by rendering rather than
+    /// by parsing — bytes that are not UTF-8 and every character
+    /// [`DocumentPath::new`] refuses become [`RENDERED_MARKER`], a segment the
+    /// grammar refuses whole carries the marker ahead of it, and a leaf whose
+    /// stem the grammar refuses carries it ahead of the leaf. The renderings sit
+    /// beside the refusals they answer, so the two move together; a caller
+    /// spelling the refusal set itself would drift the moment the grammar did.
+    ///
+    /// **A rendering names a place, never an identity.** Nothing derives a
+    /// document under one. A real document whose own name carries the marker
+    /// occupies the same key as a rendering of some other path, and that
+    /// collision is visible — one key, one row — rather than silent.
+    pub fn rendered(path: &Path) -> Self {
+        if let Some(spelling) = path.to_str()
+            && let Ok(document) = DocumentPath::new(spelling)
+        {
+            return document;
+        }
+        let separator = SEPARATOR.to_string();
+        let rendered = path
+            .to_string_lossy()
+            .split(SEPARATOR)
+            .map(rendered_segment)
+            .collect::<Vec<String>>()
+            .join(&separator);
+        // The leaf is the one segment whose *stem* the grammar reads, so a leaf
+        // that survives its own rendering can still reduce to a name that opens
+        // no ambiguity class. Marking ahead of the leaf is the shortest
+        // rendering that leaves the rest of the name readable.
+        let (ancestors, leaf) = rendered
+            .rsplit_once(SEPARATOR)
+            .unwrap_or(("", rendered.as_str()));
+        let marked = if ancestors.is_empty() {
+            format!("{RENDERED_MARKER}{leaf}")
+        } else {
+            format!("{ancestors}{separator}{RENDERED_MARKER}{leaf}")
+        };
+        [rendered.clone(), marked, RENDERED_MARKER.to_string()]
+            .into_iter()
+            .find_map(|candidate| DocumentPath::new(&candidate).ok())
+            .expect("the marker alone is a document path")
     }
 
     /// The path as written, which is the document's name and unique key.
@@ -486,6 +545,30 @@ fn leaf_stem(leaf: &str) -> &str {
         Some(dot) if dot > 0 => &leaf[..dot],
         _ => leaf,
     }
+}
+
+/// One segment as a document-path segment: every character the grammar refuses
+/// replaced, and a segment the grammar refuses whole marked ahead of.
+///
+/// This is the rendering half of [`DocumentPath::new`]'s refusals, and it
+/// answers them one for one — the backslash and control-byte refusals by
+/// replacement, and the empty, `.` and `..` segment refusals by the marker. The
+/// pair is what makes [`DocumentPath::rendered`] total.
+fn rendered_segment(segment: &str) -> String {
+    let mut rendered: String = segment
+        .chars()
+        .map(|character| {
+            if character == '\\' || character.is_control() {
+                RENDERED_MARKER
+            } else {
+                character
+            }
+        })
+        .collect();
+    if rendered.is_empty() || rendered == "." || rendered == ".." {
+        rendered.insert(0, RENDERED_MARKER);
+    }
+    rendered
 }
 
 /// The refusal for a NUL or other control byte, which no printable key holds and

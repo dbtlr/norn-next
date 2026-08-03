@@ -77,7 +77,7 @@ pub use facts::{
 };
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
-pub use path::{ClassKey, DocumentPath, SuffixProbe, class_probe, suffix_probe};
+pub use path::{ClassKey, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe, suffix_probe};
 pub use request::{EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;

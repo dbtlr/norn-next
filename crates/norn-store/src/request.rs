@@ -382,6 +382,38 @@ impl<'a> Request<'a> {
         })
     }
 
+    /// Discard every finding recorded **about** one path, and report what went.
+    ///
+    /// The write side of the subject axis reached **by a path rather than by a
+    /// change**, which is the mirror of [`Request::discard_findings_in_class`]
+    /// standing beside the class discard [`Request::apply_increment`] folds in.
+    /// Both axes run the same statements whichever door they are reached
+    /// through.
+    ///
+    /// It exists because a subject is not always a path a changeset can name. A
+    /// finding about a place that holds no derivable document is never the
+    /// subject of an upsert or a death, so the increment's own discard never
+    /// reaches it, and discard-then-record — the idempotence story every finding
+    /// producer is held to — has no other door for that caller.
+    ///
+    /// A finding goes **whole**, memberships included, and the count is findings
+    /// rather than rows.
+    pub fn discard_findings_about(
+        &mut self,
+        path: &DocumentPath,
+    ) -> Result<Invalidation, StoreError> {
+        let discarded = self
+            .store
+            .connection
+            .execute(SUBJECT_DISCARD_SQL, params![path.as_str()])
+            .map_err(|error| error::sql("discarding a path's findings", error))?
+            as u64;
+        self.counters.add(Counter::FindingsDiscarded, discarded);
+        Ok(Invalidation {
+            findings_discarded: discarded,
+        })
+    }
+
     /// Store one document's embedding under one model.
     ///
     /// An embedding for a `(document, model, version)` that already has one

@@ -301,6 +301,14 @@ pub enum Provenance {
     WatcherRemoval,
     /// An applied plan deleted it.
     PlanDelete,
+    /// The path is on disk and yields no facts the store can represent, so the
+    /// row went and a finding says why.
+    ///
+    /// Distinct from every other provenance because the file is **present**.
+    /// Recording such a death as a prune or a removal would say the path is
+    /// gone from the vault, which is the wrong-provenance loss this column
+    /// exists to make visible.
+    Quarantine,
 }
 
 impl Provenance {
@@ -310,6 +318,7 @@ impl Provenance {
         Provenance::HealPrune,
         Provenance::WatcherRemoval,
         Provenance::PlanDelete,
+        Provenance::Quarantine,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -317,6 +326,7 @@ impl Provenance {
             Provenance::HealPrune => "heal-prune",
             Provenance::WatcherRemoval => "watcher-removal",
             Provenance::PlanDelete => "plan-delete",
+            Provenance::Quarantine => "quarantine",
         }
     }
 
@@ -325,6 +335,7 @@ impl Provenance {
             "heal-prune" => Some(Provenance::HealPrune),
             "watcher-removal" => Some(Provenance::WatcherRemoval),
             "plan-delete" => Some(Provenance::PlanDelete),
+            "quarantine" => Some(Provenance::Quarantine),
             _ => None,
         }
     }
