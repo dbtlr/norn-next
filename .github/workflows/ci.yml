@@ -59,11 +59,19 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
+      # The workspace test above never enables `induced-failure`, so
+      # norn-host's crash-convergence proof (kill_recovery.rs) compiles to
+      # zero tests above. Scoped to the one crate the feature belongs to.
+      - name: Induced-failure recovery
+        run: cargo test --locked -p norn-host --features induced-failure
 
   # A targeted second-architecture gate. The default build already runs the
-  # full workspace on Linux x86_64; this job holds the two contracts whose
+  # full workspace on Linux x86_64; this job holds the contracts whose
   # answers can otherwise drift with architecture or filesystem behavior
-  # without paying to duplicate that entire suite. Pin the image rather than
+  # without paying to duplicate that entire suite: embedding determinism,
+  # norn-fs's filesystem contracts, and norn-host's case-insensitive-rename
+  # convergence, which only exercises on a case-insensitive filesystem —
+  # APFS's default here, and no other CI platform. Pin the image rather than
   # following macos-latest, and assert the machine architecture so a future
   # runner-label migration refuses instead of silently weakening the gate.
   platform:
@@ -81,6 +89,8 @@ jobs:
         run: cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
         run: cargo test --locked -p norn-fs
+      - name: Host filesystem contracts
+        run: cargo test --locked -p norn-host
 
   # The architecture gate: it reads `cargo metadata` once per entry in the
   # pinned feature matrix and asserts the workspace normal-dependency graph
