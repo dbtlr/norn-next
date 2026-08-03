@@ -2061,6 +2061,50 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
+    /// A demand raised while a job is claimed schedules nothing, and the lease
+    /// it returns is the caller's only handle on the completion — so a caller
+    /// that drops it has asked for nothing and gets nothing until it asks
+    /// again.
+    ///
+    /// The entry is not stuck: it is waiting, which is what lazy attachment
+    /// means. A caller that wants the work either keeps its lease or demands
+    /// again, and both reach `Ready`.
+    #[test]
+    fn a_demand_dropped_during_an_invalidated_poll_leaves_the_entry_waiting() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.block_poll.store(true, Ordering::SeqCst);
+        spin_until("poll_started", &ops.poll_started);
+
+        host.watcher_failed(&name, WatchError::Backend("lost".into()));
+        drop(host.demand(&name).unwrap());
+        ops.poll_release.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ops.detaches.load(Ordering::SeqCst) != 1 {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the stale poll to give up its attachment"
+            );
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "a demand nobody was holding restarted the entry on its own"
+        );
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+        );
+
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn demand_during_invalidated_poll_waits_for_attachment_ownership() {
         let ops = Arc::new(FakeOps::default());

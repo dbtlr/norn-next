@@ -345,7 +345,7 @@ fn heal_documents(
                         Err(quarantine) => {
                             pending.push(Change::Death {
                                 path: stored[index].path.clone(),
-                                provenance: Provenance::HealPrune,
+                                provenance: Provenance::Quarantine,
                             });
                             pending.quarantine(Path::new(&fp), quarantine);
                         }
@@ -401,44 +401,62 @@ fn scoped_increment(
             continue;
         }
         // A path that names no document names no subtree either, so the
-        // identity is taken before anything that would range over it. Only a
-        // Markdown spelling is a vault document, and a finding is about a
-        // document.
-        let document_path = match document_path(path) {
-            Ok(document) => document,
-            Err(quarantine) => {
-                if is_markdown(path) {
-                    pending.quarantine(path, quarantine);
-                }
-                continue;
-            }
-        };
+        // identity is read before anything that would range over it. What it
+        // says is acted on per kind: only the arm that has a file in hand has a
+        // document to quarantine.
+        let identity = document_path(path);
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
-                heal_subtree(
-                    pending.store,
-                    root,
-                    &document_path,
-                    policy,
-                    progress,
-                    exclusions,
-                )?;
+                match &identity {
+                    Ok(subtree) => {
+                        heal_subtree(pending.store, root, subtree, policy, progress, exclusions)?;
+                    }
+                    Err(_) => {
+                        quarantine_subtree(
+                            pending.store,
+                            root,
+                            path,
+                            policy,
+                            progress,
+                            exclusions,
+                        )?;
+                    }
+                }
                 continue;
             }
+            // A path that is not there has no document to quarantine, and one
+            // that names no document has no rows to prune.
             norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
                 pending.flush()?;
-                prune_subtree_ordered(
-                    pending.store,
-                    &document_path,
-                    policy,
-                    progress,
-                    store_order(sensitivity),
-                )?;
+                if let Ok(root) = &identity {
+                    prune_subtree_ordered(
+                        pending.store,
+                        root,
+                        policy,
+                        progress,
+                        store_order(sensitivity),
+                    )?;
+                }
                 continue;
             }
             norn_fs::PathKind::RegularFile => {}
         }
+        // The file is on disk, so a spelling the grammar refuses is a document
+        // to quarantine rather than an event about a path that is already gone.
+        let document_path = match identity {
+            Ok(document) => document,
+            Err(quarantine) => {
+                if is_markdown(path) {
+                    pending.quarantine(path, quarantine);
+                    if pending.is_full() {
+                        pending.flush()?;
+                    }
+                    progress.report((index + 1) as u64, Some(dirty.len() as u64));
+                }
+                continue;
+            }
+        };
         pending.flush()?;
         prune_descendants_and_aliases(
             pending.store,
@@ -465,7 +483,7 @@ fn scoped_increment(
                             if standing.is_some() {
                                 pending.push(Change::Death {
                                     path: document_path.clone(),
-                                    provenance: Provenance::WatcherRemoval,
+                                    provenance: Provenance::Quarantine,
                                 });
                             }
                             pending.quarantine(path, quarantine);
@@ -482,6 +500,57 @@ fn scoped_increment(
             pending.flush()?;
         }
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
+    }
+    pending.flush()
+}
+
+/// Converge a dirty directory whose own spelling names no document.
+///
+/// Every document beneath it is read as the full heal reads one: derived where
+/// its path and bytes yield facts, quarantined where they do not. There is no
+/// prune pass, because pruning is a range over a subtree the store can address
+/// and this root is not one — the vault-wide heal's merge is what reaches a
+/// stale row under such a directory.
+fn quarantine_subtree(
+    store: &mut Store,
+    vault_root: &Path,
+    relative_root: &Path,
+    policy: ProductionPolicy,
+    progress: &ProgressReporter<ProductionAttachment>,
+    exclusions: &[PathBuf],
+) -> Result<(), JobFailure> {
+    let scoped_exclusions = exclusions
+        .iter()
+        .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
+        .map(Path::to_owned)
+        .collect::<Vec<_>>();
+    let walk = walk(&vault_root.join(relative_root), &scoped_exclusions).map_err(effect)?;
+    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut healed = 0;
+    for fact in walk {
+        let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
+            continue;
+        };
+        let path = relative_root.join(file.path().as_path());
+        if !is_markdown(&path) || is_excluded(&path, exclusions) {
+            continue;
+        }
+        match document_path(&path) {
+            Ok(document) => {
+                let read = file.read().map_err(effect)?;
+                pending.derive(
+                    document.as_str(),
+                    read.bytes(),
+                    read.content_hash().to_string(),
+                );
+            }
+            Err(quarantine) => pending.quarantine(&path, quarantine),
+        }
+        healed += 1;
+        if pending.is_full() {
+            pending.flush()?;
+        }
+        progress.report(healed, None);
     }
     pending.flush()
 }
@@ -552,7 +621,7 @@ fn heal_subtree(
                         Err(quarantine) => {
                             pending.push(Change::Death {
                                 path: stored[index].path.clone(),
-                                provenance: Provenance::HealPrune,
+                                provenance: Provenance::Quarantine,
                             });
                             pending.quarantine(Path::new(&fp), quarantine);
                         }
@@ -757,10 +826,6 @@ fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
 /// norn cannot decode is a defect in the vault, not an advisory about it.
 const QUARANTINE_SEVERITY: &str = "error";
 
-/// The character a quarantine subject renders every byte the document-path
-/// grammar refuses as.
-const REPLACEMENT: char = '\u{FFFD}';
-
 /// Why a path the vault holds produces no document facts.
 ///
 /// One variant per finding kind, which is how a reader tells a name the store
@@ -799,8 +864,8 @@ impl Undecodable {
 #[derive(Clone, Debug)]
 struct Quarantine {
     cause: Undecodable,
-    /// The decoder's own account of the refusal, which the finding carries as
-    /// its detail.
+    /// The decoder's own account of the refusal, which the finding carries in
+    /// its detail beside the spelling it was read from.
     problem: String,
 }
 
@@ -816,8 +881,17 @@ struct Pending<'s> {
     store: &'s mut Store,
     changes: Vec<Change>,
     quarantined: Vec<FindingFacts>,
-    /// The bound on either list, which is what holds a scope's residency
-    /// independent of how much of the vault it covers.
+    /// The subjects this scope has already re-derived, so a second finding at
+    /// one **appends** rather than replacing the first: two spellings can render
+    /// to one place, and each of them is a document somebody has to fix.
+    ///
+    /// It holds one path per quarantined document, which is the vault's defect
+    /// count rather than its size, and it is strictly smaller than what those
+    /// same defects put in the findings table.
+    replaced: BTreeSet<DocumentPath>,
+    /// The bound on the changeset and on the findings waiting beside it, which
+    /// is what holds a scope's residency independent of how much of the vault it
+    /// covers.
     bound: usize,
 }
 
@@ -827,6 +901,7 @@ impl<'s> Pending<'s> {
             store,
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
+            replaced: BTreeSet::new(),
             bound,
         }
     }
@@ -849,14 +924,13 @@ impl<'s> Pending<'s> {
 
     /// File the finding that says why a path contributes no facts.
     ///
-    /// The subject is the path as the vault spells it where the document-path
-    /// grammar admits that spelling, and a rendering of it where the grammar
-    /// does not — see [`quarantine_subject`]. A spelling no rendering reaches
-    /// names no subject, and the document is passed over without a finding.
+    /// The subject is the place the path occupies — its own spelling where the
+    /// grammar admits one, and a rendering of it where the grammar does not.
+    /// Since a rendering is not injective, the detail carries the spelling this
+    /// finding was read from, escaped, so two paths filed at one place stay
+    /// tellable apart.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
-        let Some(subject) = quarantine_subject(path) else {
-            return;
-        };
+        let subject = DocumentPath::rendered(path);
         self.quarantined.push(FindingFacts {
             kind: quarantine.cause.kind().to_string(),
             severity: QUARANTINE_SEVERITY.to_string(),
@@ -874,16 +948,22 @@ impl<'s> Pending<'s> {
             span: None,
             candidates: Vec::new(),
             candidates_total: 0,
-            detail: Some(quarantine.problem),
+            detail: Some(format!("{path:?}: {}", quarantine.problem)),
         });
     }
 
-    /// Whether either list has reached the bound one flush may hold.
+    /// Whether the changeset or the findings beside it have reached the bound
+    /// one flush may hold.
     fn is_full(&self) -> bool {
         self.changes.len() >= self.bound || self.quarantined.len() >= self.bound
     }
 
-    /// Apply the changeset, then record what its quarantines say.
+    /// Apply the changeset, then re-derive what its quarantines say.
+    ///
+    /// Findings go after the increment because the increment's own subject
+    /// discard would otherwise take them, and because a document that derived is
+    /// then readable: a place a real document occupies is that document's, and a
+    /// finding there would call a document that just derived unreadable.
     fn flush(&mut self) -> Result<(), JobFailure> {
         if !self.changes.is_empty() {
             self.store
@@ -892,20 +972,24 @@ impl<'s> Pending<'s> {
                 .map_err(effect)?;
         }
         for finding in self.quarantined.drain(..) {
+            // The first finding this scope files at a subject replaces what
+            // stood there, which is how a cause that changed stops being
+            // reported twice; the ones after it append.
+            let replace = self.replaced.insert(finding.path.clone());
             let mut request = self.store.begin_request();
-            let standing = request.stored_findings(&finding.path).map_err(effect)?;
-            // A subject the changeset named has no findings left to duplicate.
-            // A subject it did not — a path no document row can hold — keeps the
-            // finding already at rest rather than gaining a second copy of it
-            // on every heal.
-            let already = standing.iter().any(|stood| {
-                stood.kind == finding.kind
-                    && stood.message == finding.message
-                    && stood.detail == finding.detail
-            });
-            if !already {
-                request.record_finding(&finding).map_err(effect)?;
+            if request
+                .stored_document(&finding.path)
+                .map_err(effect)?
+                .is_some()
+            {
+                continue;
             }
+            if replace {
+                request
+                    .discard_findings_about(&finding.path)
+                    .map_err(effect)?;
+            }
+            request.record_finding(&finding).map_err(effect)?;
         }
         Ok(())
     }
@@ -920,58 +1004,13 @@ fn document_path(path: &Path) -> Result<DocumentPath, Quarantine> {
     let Some(spelling) = path.to_str() else {
         return Err(Quarantine {
             cause: Undecodable::PathBytes,
-            problem: format!("`{}` is not valid UTF-8", path.display()),
+            problem: "the path bytes are not valid UTF-8".to_string(),
         });
     };
     DocumentPath::new(spelling).map_err(|problem| Quarantine {
         cause: Undecodable::PathSpelling,
         problem: problem.to_string(),
     })
-}
-
-/// The document path a quarantine finding is filed under.
-///
-/// The vault's own spelling where the document-path grammar admits it, and a
-/// rendering of that spelling where it does not: bytes that are not UTF-8 and
-/// characters the grammar refuses alike become [`REPLACEMENT`], and a leaf whose
-/// stem the grammar refuses carries the marker ahead of it. A rendering names a
-/// place a reader can print, never an identity — no document is stored under
-/// one, and a finding's subject needs no row.
-///
-/// `None` is a spelling no rendering reaches, which a vault-relative walk does
-/// not produce: an empty path, an absolute one, or one carrying a `.` or `..`
-/// segment.
-fn quarantine_subject(path: &Path) -> Option<DocumentPath> {
-    if let Some(spelling) = path.to_str()
-        && let Ok(document) = DocumentPath::new(spelling)
-    {
-        return Some(document);
-    }
-    let rendered: String = path
-        .to_string_lossy()
-        .chars()
-        .map(|character| {
-            if character == '\\' || character.is_control() {
-                REPLACEMENT
-            } else {
-                character
-            }
-        })
-        .collect();
-    if let Ok(document) = DocumentPath::new(&rendered) {
-        return Some(document);
-    }
-    // A leaf whose stem reduces to `.` or `..` names no ambiguity class, and no
-    // replacement inside the leaf changes that. The marker goes ahead of the
-    // leaf, which is the shortest rendering that leaves the rest of the name
-    // readable.
-    let (ancestors, leaf) = rendered.rsplit_once('/').unwrap_or(("", rendered.as_str()));
-    let marked = if ancestors.is_empty() {
-        format!("{REPLACEMENT}{leaf}")
-    } else {
-        format!("{ancestors}/{REPLACEMENT}{leaf}")
-    };
-    DocumentPath::new(&marked).ok()
 }
 
 fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts, Quarantine> {
@@ -1401,12 +1440,6 @@ mod tests {
         let path = Path::new(std::ffi::OsStr::from_bytes(b"bad-\xff.md"));
         let quarantine = document_path(path).expect_err("non-UTF-8 path bytes name no document");
         assert_eq!(quarantine.cause, Undecodable::PathBytes);
-        assert_eq!(
-            quarantine_subject(path)
-                .expect("a rendered subject")
-                .as_str(),
-            "bad-\u{fffd}.md"
-        );
     }
 
     #[test]
@@ -1414,28 +1447,111 @@ mod tests {
         let path = Path::new("notes/bad\\name.md");
         let quarantine = document_path(path).expect_err("a backslash names no document");
         assert_eq!(quarantine.cause, Undecodable::PathSpelling);
-        assert_eq!(
-            quarantine_subject(path)
-                .expect("a rendered subject")
-                .as_str(),
-            "notes/bad\u{fffd}name.md"
-        );
     }
 
+    /// Two spellings can render to one place, and each of them is a document
+    /// somebody has to fix — so the second finding appends and the detail is
+    /// what tells the two apart.
+    #[cfg(unix)]
     #[test]
-    fn a_quarantine_subject_marks_a_leaf_whose_stem_names_no_class() {
+    fn two_spellings_rendering_to_one_place_each_keep_a_finding() {
+        let f = Fixture::new("quarantine-collision");
+        let created = write_or_report(&f.vault().join("bad\\name.md"), b"body")
+            && write_or_report(&f.vault().join("bad\u{7}name.md"), b"body");
+        if !created {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        let findings = findings_at(&mut attachment.store, "bad\u{fffd}name.md");
+        assert_eq!(findings.len(), 2, "one spelling displaced the other");
+        let mut details = findings
+            .iter()
+            .map(|finding| finding.detail.clone().expect("a detail"))
+            .collect::<Vec<_>>();
+        details.sort();
+        assert_eq!(details.len(), 2);
+        assert_ne!(details[0], details[1], "the two findings read the same");
+
+        // And a second heal replaces both rather than doubling them.
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
         assert_eq!(
-            quarantine_subject(Path::new("notes/..md"))
-                .expect("a rendered subject")
-                .as_str(),
-            "notes/\u{fffd}..md"
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md").len(),
+            2
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// A cause that changed is re-derived rather than reported twice: the first
+    /// finding a scope files at a subject replaces what stood there.
+    #[test]
+    fn a_quarantine_whose_cause_moves_replaces_the_finding_that_stood() {
+        let f = Fixture::new("quarantine-replace");
+        fs::write(f.vault().join("bad.md"), b"ok \xff\xfe first\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let first = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(first.len(), 1);
+
+        // The same document, still undecodable, with the first bad byte
+        // somewhere else — a different detail for the same subject.
+        fs::write(
+            f.vault().join("bad.md"),
+            b"a much longer prefix \xff\xfe here\n",
+        )
+        .unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let second = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(second.len(), 1, "the stale finding outlived its cause");
+        assert_ne!(second[0].detail, first[0].detail);
+        ops.detach(&name, attachment);
+    }
+
+    /// A place a real document occupies is that document's. A rendering that
+    /// lands on one is a collision, and the document wins: a finding there would
+    /// call a document that just derived unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn a_rendering_that_collides_with_a_real_document_files_no_finding() {
+        let f = Fixture::new("quarantine-marker-collision");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
         assert_eq!(
-            quarantine_subject(Path::new("..md"))
-                .expect("a rendered subject")
-                .as_str(),
-            "\u{fffd}..md"
+            stored_paths(&mut attachment.store),
+            ["bad\u{fffd}name.md"],
+            "the real document is served"
         );
+        assert!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md").is_empty(),
+            "a document that derived was called unreadable"
+        );
+        ops.detach(&name, attachment);
     }
 
     /// Bytes no Markdown document can be read from.
@@ -1633,16 +1749,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["document/body-bytes-not-utf8"]
         );
-        // The prune is a death like any other, so the path's absence is
-        // recorded where every absence is.
-        assert!(
+        // The row died and the file did not, and the tombstone says which:
+        // reading this back as a prune or a removal would say the document left
+        // the vault.
+        assert_eq!(
             attachment
                 .store
                 .begin_request()
                 .stored_tombstone(&DocumentPath::new("note.md").unwrap())
                 .unwrap()
-                .is_some()
+                .expect("a tombstone")
+                .provenance,
+            Provenance::Quarantine
         );
+        assert!(f.vault().join("note.md").exists());
         ops.detach(&name, attachment);
     }
 
@@ -2352,10 +2472,65 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Whether the dispatcher is inside a poll of this entry, and whether it may
+    /// enter one.
+    ///
+    /// A demand raised while any job is claimed is answered with the entry's
+    /// state and schedules nothing — the caller's own lease is what follows the
+    /// completion. A test that raises one and drops its lease therefore has to
+    /// raise it while no job is claimed, and the dispatcher polls on a cadence
+    /// nothing else synchronizes with. [`PollGate::suspend`] closes that window:
+    /// it returns only once no poll is running, and no poll starts until it is
+    /// lifted.
+    #[derive(Default)]
+    struct PollGate {
+        state: std::sync::Mutex<(bool, bool)>,
+    }
+
+    impl PollGate {
+        /// Enter a poll unless the gate is suspended.
+        fn enter(&self) -> bool {
+            let mut state = self.state.lock().expect("poll gate poisoned");
+            if state.1 {
+                return false;
+            }
+            state.0 = true;
+            true
+        }
+
+        fn leave(&self) {
+            self.state.lock().expect("poll gate poisoned").0 = false;
+        }
+
+        /// Hold every poll off, returning once the entry is provably unclaimed
+        /// by one.
+        fn suspend(&self) {
+            wait_until(
+                "the dispatcher to be between polls",
+                lifecycle_budget(),
+                || {
+                    let mut state = self.state.lock().expect("poll gate poisoned");
+                    if state.0 {
+                        Observed::Pending("a poll is in flight".to_owned())
+                    } else {
+                        state.1 = true;
+                        Observed::Met(())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        }
+
+        fn resume(&self) {
+            self.state.lock().expect("poll gate poisoned").1 = false;
+        }
+    }
+
     struct BlockedRecovery {
         inner: ProductionEntryOps,
         started: std::sync::Arc<std::sync::atomic::AtomicBool>,
         release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        polls: std::sync::Arc<PollGate>,
         observed: std::sync::Mutex<Option<norn_fs::Batch>>,
     }
 
@@ -2427,10 +2602,15 @@ mod tests {
             name: &VaultName,
             attachment: &mut Self::Attachment,
         ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-            if let Some(batch) = self.observed.lock().unwrap().take() {
-                return Ok(Some(batch));
+            if !self.polls.enter() {
+                return Ok(None);
             }
-            self.inner.poll(name, attachment)
+            let polled = match self.observed.lock().unwrap().take() {
+                Some(batch) => Ok(Some(batch)),
+                None => self.inner.poll(name, attachment),
+            };
+            self.polls.leave();
+            polled
         }
 
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
@@ -2450,12 +2630,14 @@ mod tests {
         let derived = dirs.derived_dir(&name);
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let polls = std::sync::Arc::new(PollGate::default());
         let host = crate::Host::new(
             registry,
             BlockedRecovery {
                 inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
                 started: std::sync::Arc::clone(&started),
                 release: std::sync::Arc::clone(&release),
+                polls: std::sync::Arc::clone(&polls),
                 observed: std::sync::Mutex::new(None),
             },
             crate::LifecyclePolicy {
@@ -2467,8 +2649,13 @@ mod tests {
         .unwrap();
         drop(host.demand(&name).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
+        // The demand below has to reach an unclaimed entry: one raised against
+        // a claimed one is answered with its state and schedules nothing, and
+        // this test drops the lease that would otherwise follow the completion.
+        polls.suspend();
         host.watcher_failed(&name, norn_fs::WatchError::Backend("test".into()));
         drop(host.demand(&name).unwrap());
+        polls.resume();
         wait_until(
             "the recovery to reach its block",
             lifecycle_budget(),
