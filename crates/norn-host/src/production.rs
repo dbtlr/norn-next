@@ -1438,6 +1438,411 @@ mod tests {
         );
     }
 
+    /// Bytes no Markdown document can be read from.
+    const UNDECODABLE: &[u8] = b"ok \xff\xfe not utf8\n";
+
+    fn stored_paths(store: &mut Store) -> Vec<String> {
+        store
+            .begin_request()
+            .stored_documents_after(None, 50)
+            .unwrap()
+            .iter()
+            .map(|row| row.path.as_str().to_owned())
+            .collect()
+    }
+
+    fn findings_at(store: &mut Store, at: &str) -> Vec<norn_store::StoredFinding> {
+        store
+            .begin_request()
+            .stored_findings(&DocumentPath::new(at).unwrap())
+            .unwrap()
+    }
+
+    fn finding_total(store: &mut Store) -> u64 {
+        store.begin_request().pillars().unwrap().findings
+    }
+
+    /// Writes a name the vault holds and the document-path grammar refuses, or
+    /// reports that this filesystem will not hold it.
+    fn write_or_report(path: &Path, bytes: &[u8]) -> bool {
+        match fs::write(path, bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "skipped: this filesystem does not create `{}`: {error}",
+                    path.display()
+                );
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn heal_quarantines_an_undecodable_body_and_indexes_every_other_document() {
+        let f = Fixture::new("quarantine-body");
+        fs::write(f.vault().join("alpha.md"), "alpha").unwrap();
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("gamma.md"), "gamma").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["alpha.md", "gamma.md"]
+        );
+        let findings = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "document/body-bytes-not-utf8");
+        assert_eq!(findings[0].severity, "error");
+        assert!(
+            findings[0].message.contains("bad.md"),
+            "the finding does not name the document: {}",
+            findings[0].message
+        );
+        assert!(findings[0].detail.is_some());
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn a_second_heal_of_a_quarantined_document_records_one_finding() {
+        let f = Fixture::new("quarantine-idempotent");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("ok.md"), "ok").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        assert_eq!(findings_at(&mut attachment.store, "bad.md").len(), 1);
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heal_quarantines_a_path_spelling_the_document_grammar_refuses() {
+        let f = Fixture::new("quarantine-spelling");
+        fs::write(f.vault().join("ok.md"), "ok").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
+        let findings = findings_at(&mut attachment.store, "bad\u{fffd}name.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "document/path-names-no-document");
+        assert!(
+            findings[0].message.contains("bad\u{fffd}name.md"),
+            "the finding does not name the document: {}",
+            findings[0].message
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heal_quarantines_a_control_byte_in_a_document_name() {
+        let f = Fixture::new("quarantine-control-byte");
+        fs::write(f.vault().join("ok.md"), "ok").unwrap();
+        if !write_or_report(&f.vault().join("bad\nname.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heal_quarantines_a_non_utf8_document_name_instead_of_aliasing_it_lossily() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let f = Fixture::new("quarantine-non-utf8-name");
+        fs::write(f.vault().join("ok.md"), "ok").unwrap();
+        let bad = std::ffi::OsString::from_vec(b"bad-\xff.md".to_vec());
+        if !write_or_report(&f.vault().join(bad), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad-\u{fffd}.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-bytes-not-utf8"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn a_document_that_stops_decoding_loses_its_row_to_the_finding_that_replaces_it() {
+        let f = Fixture::new("quarantine-prune");
+        fs::write(f.vault().join("note.md"), "before").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"]
+        );
+
+        fs::write(f.vault().join("note.md"), UNDECODABLE).unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        assert_eq!(
+            findings_at(&mut attachment.store, "note.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/body-bytes-not-utf8"]
+        );
+        // The prune is a death like any other, so the path's absence is
+        // recorded where every absence is.
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .is_some()
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn a_quarantined_document_that_reads_again_clears_its_finding_and_lands_its_facts() {
+        let f = Fixture::new("quarantine-recovery");
+        fs::write(f.vault().join("note.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
+
+        fs::write(f.vault().join("note.md"), "# readable\n").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        assert!(findings_at(&mut attachment.store, "note.md").is_empty());
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn a_scoped_increment_quarantines_an_undecodable_document_and_derives_the_rest() {
+        let f = Fixture::new("quarantine-scoped");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("fresh.md"), "fresh").unwrap();
+        let mut dirty = dirty_path(f.vault().as_path(), "bad.md");
+        dirty.extend(dirty_path(f.vault().as_path(), "fresh.md"));
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty,
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["fresh.md", "steady.md"]
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/body-bytes-not-utf8"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn a_scoped_subtree_heal_quarantines_an_undecodable_document_and_derives_the_rest() {
+        let f = Fixture::new("quarantine-subtree");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/ok.md"), "ok").unwrap();
+        fs::write(f.vault().join("folder/bad.md"), UNDECODABLE).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "folder"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["folder/ok.md", "steady.md"]
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "folder/bad.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/body-bytes-not-utf8"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    struct CountedAttach {
+        inner: ProductionEntryOps,
+        attaches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EntryOps for CountedAttach {
+        type Attachment = ProductionAttachment;
+
+        fn attach(
+            &self,
+            name: &VaultName,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.attaches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.attach(name, progress)
+        }
+
+        fn reconcile(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            work: ReconcileWork,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.reconcile(name, attachment, work, progress)
+        }
+
+        fn recover(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<(), JobFailure> {
+            self.inner.recover(name, attachment, progress)
+        }
+
+        fn poll(
+            &self,
+            name: &VaultName,
+            attachment: &mut Self::Attachment,
+        ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            self.inner.poll(name, attachment)
+        }
+
+        fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+            self.inner.detach(name, attachment);
+        }
+    }
+
+    #[test]
+    fn a_vault_holding_undecodable_documents_reaches_ready_and_re_attaches_for_none_of_them() {
+        let f = Fixture::new("quarantine-ready");
+        for index in 0..3 {
+            fs::write(f.vault().join(format!("bad-{index}.md")), UNDECODABLE).unwrap();
+            fs::write(f.vault().join(format!("ok-{index}.md")), "ok").unwrap();
+        }
+        let name = VaultName::new("notes").unwrap();
+        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let attaches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let host = crate::Host::new(
+            registry,
+            CountedAttach {
+                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                attaches: std::sync::Arc::clone(&attaches),
+            },
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+
+        drop(host.demand(&name).unwrap());
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        // A demand against a ready entry schedules nothing, which is the whole
+        // difference from an entry left untrusted by one bad document.
+        let second = host.demand(&name).unwrap();
+        assert!(matches!(
+            second.outcome(),
+            crate::Demand::State(norn_wire::TrustState::Ready)
+        ));
+        drop(second);
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        assert_eq!(attaches.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(host);
+
+        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        assert_eq!(
+            stored_paths(&mut store),
+            ["ok-0.md", "ok-1.md", "ok-2.md"],
+            "every readable document is served"
+        );
+        assert_eq!(finding_total(&mut store), 3);
+    }
+
     #[test]
     fn scoped_case_only_file_rename_replaces_the_stored_spelling() {
         let f = Fixture::new("case-only-file-rename");
