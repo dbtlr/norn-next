@@ -2396,16 +2396,29 @@ mod tests {
             self.inner.heal(attachment, progress)?;
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
-                thread::yield_now();
-            }
-            loop {
-                if let Some(batch) = poll_subscription(attachment)? {
-                    *self.observed.lock().unwrap() = Some(batch);
-                    break;
-                }
-                thread::yield_now();
-            }
+            wait_until(
+                "the test to release the blocked recovery",
+                lifecycle_budget(),
+                || {
+                    if self.release.load(std::sync::atomic::Ordering::SeqCst) {
+                        Observed::Met(())
+                    } else {
+                        Observed::Pending("the release flag is unset".to_owned())
+                    }
+                },
+            )
+            .map_err(|failure| environmental(failure.to_string()))?;
+            let batch = wait_until(
+                "the edit made during the recovery to be reported",
+                lifecycle_budget(),
+                || match poll_subscription(attachment) {
+                    Ok(Some(batch)) => Observed::Met(Ok(batch)),
+                    Ok(None) => Observed::Pending("the subscription has no batch".to_owned()),
+                    Err(failure) => Observed::Met(Err(failure)),
+                },
+            )
+            .map_err(|failure| environmental(failure.to_string()))??;
+            *self.observed.lock().unwrap() = Some(batch);
             Ok(())
         }
 
@@ -2456,9 +2469,18 @@ mod tests {
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         host.watcher_failed(&name, norn_fs::WatchError::Backend("test".into()));
         drop(host.demand(&name).unwrap());
-        while !started.load(std::sync::atomic::Ordering::SeqCst) {
-            thread::yield_now();
-        }
+        wait_until(
+            "the recovery to reach its block",
+            lifecycle_budget(),
+            || {
+                if started.load(std::sync::atomic::Ordering::SeqCst) {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending("the recovery has not started".to_owned())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         fs::write(&note, "during recovery").unwrap();
         release.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
