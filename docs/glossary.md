@@ -39,7 +39,7 @@ _Avoid_: Error, failure (when the distinction matters)
 A structured statement that vault state violates a rule or cannot be resolved unambiguously.
 
 **Quarantined document**:
-A vault document Norn cannot decode, which therefore contributes no derived state and is recorded as a finding naming its path and the cause. Quarantine is scoped to the one document; the rest of the vault is derived and served.
+A vault document Norn cannot decode, which therefore contributes no derived state and is named by a finding carrying its path and the cause, except while a readable document occupies the same rendered place. Quarantine is scoped to the one document; the rest of the vault is derived and served.
 _Avoid_: Skipped, ignored (when the distinction matters)
 
 **Resolution target**:

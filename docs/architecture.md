@@ -103,7 +103,7 @@ following:
 | Process killed mid-increment | **Handled at rung 2.** Nothing partial is ever at rest: the increment is one transaction, so a process that dies inside one leaves the previous generation whole and there is nothing to detect. The work the tear lost returns through the attach heal's ordinary content-hash comparison. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
-| A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class, the heal keeps going, and the entry reaches `Ready` serving every other document. |
+| A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
 | Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
@@ -119,7 +119,8 @@ state, never for a hostile environment.**
 path bytes that are not UTF-8, a path spelling the document-path grammar refuses, or a body
 that is not UTF-8 — is a fact about one document rather than about the vault, so it never
 withdraws the vault. The rung-2 heal skips its facts, records a finding naming the path and
-the cause class, and keeps going; the entry reaches `Ready` and serves every other document.
+the cause class — withheld while a rendering collision stands, as below — and keeps going;
+the entry reaches `Ready` and serves every other document.
 Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
 subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
 grammar refuses splits by what it still addresses, because naming no document and holding no

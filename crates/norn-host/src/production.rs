@@ -924,7 +924,10 @@ struct Quarantine {
 /// What one heal scope has derived and not yet committed: the changeset being
 /// filled, and the findings its quarantined documents record.
 ///
-/// The two flush together and in that order. A changeset entry discards the
+/// One flush call applies the increment first and records the findings after
+/// it, each in its own transaction: a flush torn between the two leaves a
+/// quarantined row with no finding until the next heal re-derives the path and
+/// records it. The order matters because a changeset entry discards the
 /// findings recorded about the path it names, so a finding written ahead of the
 /// increment is a finding the increment takes — and a quarantined document that
 /// reads again is a plain upsert whose own discard clears the finding with no
