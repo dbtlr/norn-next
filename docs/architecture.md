@@ -133,10 +133,14 @@ with the quarantine provenance, which says the derived row died and the file did
 prune or a removal would say the path left the vault. A quarantined path is filed under the
 path the vault spells it, and under a rendering of that spelling where the grammar admits no
 such path. **A rendering names a place, never an identity**: no document is *derived* under
-one, though the vault may genuinely hold a document whose own name is that place — the
-collision is one key holding one row, which is visible rather than silent, and the document
-wins. Recovery needs no second mechanism: a document that reads again is an ordinary
-derivation, and the increment's own findings discard takes the finding with it.
+one, though the vault may genuinely hold a document whose own name is that place. That
+collision is one key holding one row, and the **document wins**: while it stands there, the
+quarantined document's finding is withheld rather than filed over a readable document, so
+for as long as the collision lasts nothing records that the quarantined document cannot be
+read. The trade is deliberate — a finding at that place would call a document that derived
+unreadable — and it clears when the colliding document leaves. Recovery needs no second
+mechanism: a document that reads again is an ordinary derivation, and the increment's own
+findings discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
