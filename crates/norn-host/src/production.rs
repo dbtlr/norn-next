@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,7 @@ use norn_fs::{
     Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, try_acquire, walk, watch,
 };
 use norn_store::{
-    BlockFact, Change, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
+    BlockFact, Change, DocumentFacts, DocumentPath, FindingFacts, FrontmatterValue, HeadingFact,
     IncrementProvenance, LinkFact, LinkFamily, Provenance, Span, Store, StoredPathOrder, TagFact,
     TagSource,
 };
@@ -315,22 +316,19 @@ fn heal_documents(
     let mut stored = Vec::new();
     let mut index = 0usize;
     let mut exhausted = false;
-    let mut changes = Vec::with_capacity(policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size);
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
-            stored = store
+            stored = pending
+                .store
                 .begin_request()
                 .stored_documents_after_ordered(after.as_ref(), policy.store_page_size, order)
                 .map_err(effect)?;
             index = 0;
             exhausted = stored.is_empty();
         }
-        let fs_path = match files.peek() {
-            Some(Ok(file)) => Some(utf8_path(file.path().as_path())?.to_owned()),
-            Some(Err(error)) => return Err(effect(error)),
-            None => None,
-        };
+        let fs_path = next_nameable(&mut files, None, &mut pending)?;
         let db_path = stored.get(index).map(|d| d.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
@@ -338,11 +336,20 @@ fn heal_documents(
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
                 if read.content_hash().to_string() != stored[index].content_hash {
-                    changes.push(Change::Upsert(map_document(
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                    )?));
+                    match map_document(&fp, read.bytes(), read.content_hash().to_string()) {
+                        Ok(facts) => pending.push(Change::Upsert(facts)),
+                        // The row the document no longer accounts for goes with
+                        // the finding that says why: the store holds
+                        // representable truth, and a quarantined path is absent
+                        // from it.
+                        Err(quarantine) => {
+                            pending.push(Change::Death {
+                                path: stored[index].path.clone(),
+                                provenance: Provenance::HealPrune,
+                            });
+                            pending.quarantine(Path::new(&fp), quarantine);
+                        }
+                    }
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
@@ -350,17 +357,13 @@ fn heal_documents(
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
-                changes.push(Change::Upsert(map_document(
-                    &fp,
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                )?));
+                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
             }
             (_, Some(_)) => {
                 let path = stored[index].path.clone();
                 after = Some(path.clone());
                 index += 1;
-                changes.push(Change::Death {
+                pending.push(Change::Death {
                     path,
                     provenance: Provenance::HealPrune,
                 });
@@ -368,20 +371,16 @@ fn heal_documents(
             (Some(fp), None) => {
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
-                changes.push(Change::Upsert(map_document(
-                    &fp,
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                )?));
+                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
             }
         }
-        if changes.len() == policy.changeset_size {
-            commit(store, &mut changes)?;
+        if pending.is_full() {
+            pending.flush()?;
         }
         healed += 1;
         progress.report(healed, None);
     }
-    commit(store, &mut changes)
+    pending.flush()
 }
 
 fn scoped_increment(
@@ -395,74 +394,108 @@ fn scoped_increment(
     let sensitivity = norn_fs::PathNormalizer::detect(root)
         .map_err(effect)?
         .case_sensitivity();
-    let mut changes = Vec::with_capacity(policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         if is_excluded(path, exclusions) {
             continue;
         }
+        // A path that names no document names no subtree either, so the
+        // identity is taken before anything that would range over it. Only a
+        // Markdown spelling is a vault document, and a finding is about a
+        // document.
+        let document_path = match document_path(path) {
+            Ok(document) => document,
+            Err(quarantine) => {
+                if is_markdown(path) {
+                    pending.quarantine(path, quarantine);
+                }
+                continue;
+            }
+        };
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
-                commit(store, &mut changes)?;
-                heal_subtree(store, root, path, policy, progress, exclusions)?;
+                pending.flush()?;
+                heal_subtree(
+                    pending.store,
+                    root,
+                    &document_path,
+                    policy,
+                    progress,
+                    exclusions,
+                )?;
                 continue;
             }
-            norn_fs::PathKind::Missing => {
-                commit(store, &mut changes)?;
-                prune_subtree_ordered(store, path, policy, progress, store_order(sensitivity))?;
-                continue;
-            }
-            norn_fs::PathKind::Other => {
-                commit(store, &mut changes)?;
-                prune_subtree_ordered(store, path, policy, progress, store_order(sensitivity))?;
+            norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
+                pending.flush()?;
+                prune_subtree_ordered(
+                    pending.store,
+                    &document_path,
+                    policy,
+                    progress,
+                    store_order(sensitivity),
+                )?;
                 continue;
             }
             norn_fs::PathKind::RegularFile => {}
         }
-        commit(store, &mut changes)?;
-        prune_descendants_and_aliases(store, path, policy, progress, sensitivity)?;
+        pending.flush()?;
+        prune_descendants_and_aliases(
+            pending.store,
+            &document_path,
+            policy,
+            progress,
+            sensitivity,
+        )?;
         if !is_markdown(path) {
             continue;
         }
-        let document_path = DocumentPath::new(utf8_path(path)?).map_err(effect)?;
         match norn_fs::read_optional_and_hash(&root.join(path)).map_err(effect)? {
             Some(observed) => {
                 let hash = observed.content_hash().to_string();
-                let standing = store
+                let standing = pending
+                    .store
                     .begin_request()
                     .stored_document(&document_path)
                     .map_err(effect)?;
                 if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
-                    changes.push(Change::Upsert(map_document(
-                        document_path.as_str(),
-                        observed.bytes(),
-                        hash,
-                    )?));
+                    match map_document(document_path.as_str(), observed.bytes(), hash) {
+                        Ok(facts) => pending.push(Change::Upsert(facts)),
+                        Err(quarantine) => {
+                            if standing.is_some() {
+                                pending.push(Change::Death {
+                                    path: document_path.clone(),
+                                    provenance: Provenance::WatcherRemoval,
+                                });
+                            }
+                            pending.quarantine(path, quarantine);
+                        }
+                    }
                 }
             }
-            None => changes.push(Change::Death {
+            None => pending.push(Change::Death {
                 path: document_path,
                 provenance: Provenance::WatcherRemoval,
             }),
         }
-        if changes.len() == policy.changeset_size {
-            commit(store, &mut changes)?;
+        if pending.is_full() {
+            pending.flush()?;
         }
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
-    commit(store, &mut changes)
+    pending.flush()
 }
 
 fn heal_subtree(
     store: &mut Store,
     vault_root: &Path,
-    relative_root: &Path,
+    subtree: &DocumentPath,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let prefix = utf8_path(relative_root)?;
-    let subtree = DocumentPath::new(prefix).map_err(effect)?;
+    let prefix = subtree.as_str();
+    let relative_root = Path::new(prefix);
     let scoped_exclusions = exclusions
         .iter()
         .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
@@ -485,14 +518,15 @@ fn heal_subtree(
     let mut stored = Vec::new();
     let mut index = 0;
     let mut exhausted = false;
-    let mut changes = Vec::with_capacity(policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size);
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
-            stored = store
+            stored = pending
+                .store
                 .begin_request()
                 .stored_documents_in_subtree_after_ordered(
-                    &subtree,
+                    subtree,
                     after.as_ref(),
                     policy.store_page_size,
                     order,
@@ -501,11 +535,7 @@ fn heal_subtree(
             index = 0;
             exhausted = stored.is_empty();
         }
-        let fs_path = match files.peek() {
-            Some(Ok(file)) => Some(format!("{prefix}/{}", utf8_path(file.path().as_path())?)),
-            Some(Err(error)) => return Err(effect(error)),
-            None => None,
-        };
+        let fs_path = next_nameable(&mut files, Some(prefix), &mut pending)?;
         let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
@@ -517,11 +547,16 @@ fn heal_subtree(
                     .read()
                     .map_err(effect)?;
                 if read.content_hash().to_string() != stored[index].content_hash {
-                    changes.push(Change::Upsert(map_document(
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                    )?));
+                    match map_document(&fp, read.bytes(), read.content_hash().to_string()) {
+                        Ok(facts) => pending.push(Change::Upsert(facts)),
+                        Err(quarantine) => {
+                            pending.push(Change::Death {
+                                path: stored[index].path.clone(),
+                                provenance: Provenance::HealPrune,
+                            });
+                            pending.quarantine(Path::new(&fp), quarantine);
+                        }
+                    }
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
@@ -533,17 +568,13 @@ fn heal_subtree(
                     .map_err(effect)?
                     .read()
                     .map_err(effect)?;
-                changes.push(Change::Upsert(map_document(
-                    &fp,
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                )?));
+                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
             }
             (_, Some(_)) => {
                 let path = stored[index].path.clone();
                 after = Some(path.clone());
                 index += 1;
-                changes.push(Change::Death {
+                pending.push(Change::Death {
                     path,
                     provenance: Provenance::HealPrune,
                 });
@@ -555,53 +586,44 @@ fn heal_subtree(
                     .map_err(effect)?
                     .read()
                     .map_err(effect)?;
-                changes.push(Change::Upsert(map_document(
-                    &fp,
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                )?));
+                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
             }
         }
-        if changes.len() == policy.changeset_size {
-            commit(store, &mut changes)?;
+        if pending.is_full() {
+            pending.flush()?;
         }
         healed += 1;
         progress.report(healed, None);
     }
-    commit(store, &mut changes)
+    pending.flush()
 }
 
 #[cfg(test)]
 fn prune_subtree(
     store: &mut Store,
-    relative_root: &Path,
+    root: &DocumentPath,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
 ) -> Result<(), JobFailure> {
-    prune_subtree_ordered(
-        store,
-        relative_root,
-        policy,
-        progress,
-        StoredPathOrder::Sensitive,
-    )
+    prune_subtree_ordered(store, root, policy, progress, StoredPathOrder::Sensitive)
 }
 
 fn prune_subtree_ordered(
     store: &mut Store,
-    relative_root: &Path,
+    root: &DocumentPath,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     order: StoredPathOrder,
 ) -> Result<(), JobFailure> {
-    let root = DocumentPath::new(utf8_path(relative_root)?).map_err(effect)?;
     let mut after = None;
     let mut healed = 0;
+    let mut pending = Pending::new(store, policy.changeset_size);
     loop {
-        let page = store
+        let page = pending
+            .store
             .begin_request()
             .stored_documents_in_subtree_after_ordered(
-                &root,
+                root,
                 after.as_ref(),
                 policy.store_page_size,
                 order,
@@ -611,18 +633,17 @@ fn prune_subtree_ordered(
             break;
         }
         after = page.last().map(|row| row.path.clone());
-        let mut changes = Vec::with_capacity(policy.changeset_size);
         for row in page {
-            changes.push(Change::Death {
+            pending.push(Change::Death {
                 path: row.path,
                 provenance: Provenance::WatcherRemoval,
             });
             healed += 1;
-            if changes.len() == policy.changeset_size {
-                commit(store, &mut changes)?;
+            if pending.is_full() {
+                pending.flush()?;
             }
         }
-        commit(store, &mut changes)?;
+        pending.flush()?;
         progress.report(healed, None);
     }
     Ok(())
@@ -630,19 +651,20 @@ fn prune_subtree_ordered(
 
 fn prune_descendants_and_aliases(
     store: &mut Store,
-    relative_root: &Path,
+    root: &DocumentPath,
     policy: ProductionPolicy,
     progress: &ProgressReporter<ProductionAttachment>,
     sensitivity: norn_fs::CaseSensitivity,
 ) -> Result<(), JobFailure> {
-    let root = DocumentPath::new(utf8_path(relative_root)?).map_err(effect)?;
     let mut after = None;
     let mut pruned = 0;
+    let mut pending = Pending::new(store, policy.changeset_size);
     loop {
-        let page = store
+        let page = pending
+            .store
             .begin_request()
             .stored_documents_in_subtree_after_ordered(
-                &root,
+                root,
                 after.as_ref(),
                 policy.store_page_size,
                 store_order(sensitivity),
@@ -652,33 +674,67 @@ fn prune_descendants_and_aliases(
             break;
         }
         after = page.last().map(|row| row.path.clone());
-        let mut changes = Vec::with_capacity(policy.changeset_size);
         for row in page {
-            if row.path == root {
+            if &row.path == root {
                 continue;
             }
-            changes.push(Change::Death {
+            pending.push(Change::Death {
                 path: row.path,
                 provenance: Provenance::WatcherRemoval,
             });
             pruned += 1;
-            if changes.len() == policy.changeset_size {
-                commit(store, &mut changes)?;
+            if pending.is_full() {
+                pending.flush()?;
             }
         }
-        commit(store, &mut changes)?;
+        pending.flush()?;
         progress.report(pruned, None);
     }
     Ok(())
 }
 
-fn utf8_path(path: &Path) -> Result<&str, JobFailure> {
-    path.to_str().ok_or_else(|| {
-        environmental(format!(
-            "vault-relative path {} is not valid UTF-8 and has no document identity",
-            path.display()
-        ))
-    })
+/// The next walked file's vault-relative spelling, with every entry whose path
+/// bytes name no document quarantined and passed over.
+///
+/// The iterator is left standing on the file whose spelling comes back, so the
+/// caller reads it after deciding what the merge does with it. `prefix` is the
+/// scope the walk is relative to, and `None` is a walk of the vault root.
+fn next_nameable<I>(
+    files: &mut Peekable<I>,
+    prefix: Option<&str>,
+    pending: &mut Pending<'_>,
+) -> Result<Option<String>, JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::FileFact, norn_fs::WalkError>>,
+{
+    loop {
+        let spelling = match files.peek() {
+            Some(Ok(file)) => file.path().as_path().to_str().map(|spelling| match prefix {
+                Some(prefix) => format!("{prefix}/{spelling}"),
+                None => spelling.to_owned(),
+            }),
+            Some(Err(error)) => return Err(effect(error)),
+            None => return Ok(None),
+        };
+        if let Some(spelling) = spelling {
+            return Ok(Some(spelling));
+        }
+        let file = files.next().expect("peeked").map_err(effect)?;
+        let path = match prefix {
+            Some(prefix) => Path::new(prefix).join(file.path().as_path()),
+            None => file.path().as_path().to_owned(),
+        };
+        pending.quarantine(
+            &path,
+            Quarantine {
+                cause: Undecodable::PathBytes,
+                problem: format!("`{}` is not valid UTF-8", path.display()),
+            },
+        );
+        if pending.is_full() {
+            pending.flush()?;
+        }
+    }
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -697,27 +753,238 @@ fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
     exclusions.iter().any(|excluded| path.starts_with(excluded))
 }
 
-fn commit(store: &mut Store, changes: &mut Vec<Change>) -> Result<(), JobFailure> {
-    if !changes.is_empty() {
-        store
-            .begin_request()
-            .apply_increment(IncrementProvenance::Derived, changes.drain(..))
-            .map_err(effect)?;
-    }
-    Ok(())
+/// The severity a quarantine finding carries. A document the vault holds and
+/// norn cannot decode is a defect in the vault, not an advisory about it.
+const QUARANTINE_SEVERITY: &str = "error";
+
+/// The character a quarantine subject renders every byte the document-path
+/// grammar refuses as.
+const REPLACEMENT: char = '\u{FFFD}';
+
+/// Why a path the vault holds produces no document facts.
+///
+/// One variant per finding kind, which is how a reader tells a name the store
+/// cannot hold from bytes the parser cannot read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Undecodable {
+    /// The path bytes are not UTF-8.
+    PathBytes,
+    /// The path is UTF-8 and is not a document path.
+    PathSpelling,
+    /// The document's bytes are not UTF-8.
+    BodyBytes,
 }
 
-fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts, JobFailure> {
-    let source = std::str::from_utf8(bytes)
-        .map_err(|e| environmental(format!("document {path} is not UTF-8: {e}")))?;
+impl Undecodable {
+    /// The finding kind, which is the cause class a reader dispatches on.
+    const fn kind(self) -> &'static str {
+        match self {
+            Undecodable::PathBytes => "document/path-bytes-not-utf8",
+            Undecodable::PathSpelling => "document/path-names-no-document",
+            Undecodable::BodyBytes => "document/body-bytes-not-utf8",
+        }
+    }
+
+    /// The cause as the finding's message states it.
+    const fn statement(self) -> &'static str {
+        match self {
+            Undecodable::PathBytes => "its path bytes are not UTF-8",
+            Undecodable::PathSpelling => "its path names no document",
+            Undecodable::BodyBytes => "its bytes are not UTF-8",
+        }
+    }
+}
+
+/// One document held out of derived state, and why.
+#[derive(Clone, Debug)]
+struct Quarantine {
+    cause: Undecodable,
+    /// The decoder's own account of the refusal, which the finding carries as
+    /// its detail.
+    problem: String,
+}
+
+/// What one heal scope has derived and not yet committed: the changeset being
+/// filled, and the findings its quarantined documents record.
+///
+/// The two flush together and in that order. A changeset entry discards the
+/// findings recorded about the path it names, so a finding written ahead of the
+/// increment is a finding the increment takes — and a quarantined document that
+/// reads again is a plain upsert whose own discard clears the finding with no
+/// second mechanism.
+struct Pending<'s> {
+    store: &'s mut Store,
+    changes: Vec<Change>,
+    quarantined: Vec<FindingFacts>,
+    /// The bound on either list, which is what holds a scope's residency
+    /// independent of how much of the vault it covers.
+    bound: usize,
+}
+
+impl<'s> Pending<'s> {
+    fn new(store: &'s mut Store, bound: usize) -> Self {
+        Pending {
+            store,
+            changes: Vec::with_capacity(bound),
+            quarantined: Vec::new(),
+            bound,
+        }
+    }
+
+    fn push(&mut self, change: Change) {
+        self.changes.push(change);
+    }
+
+    /// Derive a document the store holds no row for: its facts where the bytes
+    /// yield them, and a finding where they do not.
+    ///
+    /// There is no row to prune here. The caller that has one prunes it beside
+    /// the finding, because the store holds only what it can represent.
+    fn derive(&mut self, path: &str, bytes: &[u8], hash: String) {
+        match map_document(path, bytes, hash) {
+            Ok(facts) => self.push(Change::Upsert(facts)),
+            Err(quarantine) => self.quarantine(Path::new(path), quarantine),
+        }
+    }
+
+    /// File the finding that says why a path contributes no facts.
+    ///
+    /// The subject is the path as the vault spells it where the document-path
+    /// grammar admits that spelling, and a rendering of it where the grammar
+    /// does not — see [`quarantine_subject`]. A spelling no rendering reaches
+    /// names no subject, and the document is passed over without a finding.
+    fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
+        let Some(subject) = quarantine_subject(path) else {
+            return;
+        };
+        self.quarantined.push(FindingFacts {
+            kind: quarantine.cause.kind().to_string(),
+            severity: QUARANTINE_SEVERITY.to_string(),
+            message: format!(
+                "`{}` is quarantined: {}",
+                subject.as_str(),
+                quarantine.cause.statement()
+            ),
+            path: subject,
+            // Quarantine is not a reading of a resolution target, so the
+            // finding belongs to no ambiguity class and no class-scoped
+            // maintenance owns it.
+            class_keys: BTreeSet::new(),
+            target: None,
+            span: None,
+            candidates: Vec::new(),
+            candidates_total: 0,
+            detail: Some(quarantine.problem),
+        });
+    }
+
+    /// Whether either list has reached the bound one flush may hold.
+    fn is_full(&self) -> bool {
+        self.changes.len() >= self.bound || self.quarantined.len() >= self.bound
+    }
+
+    /// Apply the changeset, then record what its quarantines say.
+    fn flush(&mut self) -> Result<(), JobFailure> {
+        if !self.changes.is_empty() {
+            self.store
+                .begin_request()
+                .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
+                .map_err(effect)?;
+        }
+        for finding in self.quarantined.drain(..) {
+            let mut request = self.store.begin_request();
+            let standing = request.stored_findings(&finding.path).map_err(effect)?;
+            // A subject the changeset named has no findings left to duplicate.
+            // A subject it did not — a path no document row can hold — keeps the
+            // finding already at rest rather than gaining a second copy of it
+            // on every heal.
+            let already = standing.iter().any(|stood| {
+                stood.kind == finding.kind
+                    && stood.message == finding.message
+                    && stood.detail == finding.detail
+            });
+            if !already {
+                request.record_finding(&finding).map_err(effect)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The document path a vault-relative spelling names, or why it names none.
+///
+/// This is the one place a walked or watched path becomes a document identity,
+/// so the two ways a spelling fails to be one are told apart here rather than
+/// at each caller.
+fn document_path(path: &Path) -> Result<DocumentPath, Quarantine> {
+    let Some(spelling) = path.to_str() else {
+        return Err(Quarantine {
+            cause: Undecodable::PathBytes,
+            problem: format!("`{}` is not valid UTF-8", path.display()),
+        });
+    };
+    DocumentPath::new(spelling).map_err(|problem| Quarantine {
+        cause: Undecodable::PathSpelling,
+        problem: problem.to_string(),
+    })
+}
+
+/// The document path a quarantine finding is filed under.
+///
+/// The vault's own spelling where the document-path grammar admits it, and a
+/// rendering of that spelling where it does not: bytes that are not UTF-8 and
+/// characters the grammar refuses alike become [`REPLACEMENT`], and a leaf whose
+/// stem the grammar refuses carries the marker ahead of it. A rendering names a
+/// place a reader can print, never an identity — no document is stored under
+/// one, and a finding's subject needs no row.
+///
+/// `None` is a spelling no rendering reaches, which a vault-relative walk does
+/// not produce: an empty path, an absolute one, or one carrying a `.` or `..`
+/// segment.
+fn quarantine_subject(path: &Path) -> Option<DocumentPath> {
+    if let Some(spelling) = path.to_str()
+        && let Ok(document) = DocumentPath::new(spelling)
+    {
+        return Some(document);
+    }
+    let rendered: String = path
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character == '\\' || character.is_control() {
+                REPLACEMENT
+            } else {
+                character
+            }
+        })
+        .collect();
+    if let Ok(document) = DocumentPath::new(&rendered) {
+        return Some(document);
+    }
+    // A leaf whose stem reduces to `.` or `..` names no ambiguity class, and no
+    // replacement inside the leaf changes that. The marker goes ahead of the
+    // leaf, which is the shortest rendering that leaves the rest of the name
+    // readable.
+    let (ancestors, leaf) = rendered.rsplit_once('/').unwrap_or(("", rendered.as_str()));
+    let marked = if ancestors.is_empty() {
+        format!("{REPLACEMENT}{leaf}")
+    } else {
+        format!("{ancestors}/{REPLACEMENT}{leaf}")
+    };
+    DocumentPath::new(&marked).ok()
+}
+
+fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts, Quarantine> {
+    // Identity before content: a path that names no document has nothing to
+    // say about its own bytes.
+    let document_path = document_path(Path::new(path))?;
+    let source = std::str::from_utf8(bytes).map_err(|problem| Quarantine {
+        cause: Undecodable::BodyBytes,
+        problem: problem.to_string(),
+    })?;
     let document = Document::parse(source);
     let scan = document.scan_body();
-    let mut facts = DocumentFacts::new(
-        DocumentPath::new(path).map_err(effect)?,
-        hash,
-        document.body(),
-        bytes.len() as u64,
-    );
+    let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64);
     facts.body_offset = document.body_start() as u64;
     facts.frontmatter = document.frontmatter().map(map_value);
     facts.frontmatter_diagnostic_count = document
@@ -838,6 +1105,7 @@ fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
 mod tests {
     use super::*;
     use norn_config::registry::{SchemaSource, VaultRoot};
+    use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1125,36 +1393,49 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn heal_refuses_a_non_utf8_document_name_instead_of_aliasing_it_lossily() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let f = Fixture::new("non-utf8-name");
-        let name = std::ffi::OsString::from_vec(b"bad-\xff.md".to_vec());
-        fs::write(f.vault().join(name), "body").unwrap();
-        let (ops, vault_name) = f.ops(2);
-        let error = match ops.attach(&vault_name, &ProgressReporter::disconnected()) {
-            Ok(_) => panic!("non-UTF-8 document identity must be refused"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            JobFailure::Environmental(message) if message.contains("not valid UTF-8")
-        ));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn document_identity_boundary_refuses_non_utf8_path_bytes() {
+    fn document_identity_boundary_quarantines_non_utf8_path_bytes() {
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(std::ffi::OsStr::from_bytes(b"bad-\xff.md"));
-        assert!(matches!(
-            utf8_path(path),
-            Err(JobFailure::Environmental(message))
-                if message.contains("not valid UTF-8")
-        ));
+        let quarantine = document_path(path).expect_err("non-UTF-8 path bytes name no document");
+        assert_eq!(quarantine.cause, Undecodable::PathBytes);
+        assert_eq!(
+            quarantine_subject(path)
+                .expect("a rendered subject")
+                .as_str(),
+            "bad-\u{fffd}.md"
+        );
+    }
+
+    #[test]
+    fn document_identity_boundary_quarantines_a_spelling_the_grammar_refuses() {
+        let path = Path::new("notes/bad\\name.md");
+        let quarantine = document_path(path).expect_err("a backslash names no document");
+        assert_eq!(quarantine.cause, Undecodable::PathSpelling);
+        assert_eq!(
+            quarantine_subject(path)
+                .expect("a rendered subject")
+                .as_str(),
+            "notes/bad\u{fffd}name.md"
+        );
+    }
+
+    #[test]
+    fn a_quarantine_subject_marks_a_leaf_whose_stem_names_no_class() {
+        assert_eq!(
+            quarantine_subject(Path::new("notes/..md"))
+                .expect("a rendered subject")
+                .as_str(),
+            "notes/\u{fffd}..md"
+        );
+        assert_eq!(
+            quarantine_subject(Path::new("..md"))
+                .expect("a rendered subject")
+                .as_str(),
+            "\u{fffd}..md"
+        );
     }
 
     #[test]
@@ -1307,7 +1588,7 @@ mod tests {
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         prune_subtree(
             &mut attachment.store,
-            Path::new("folder"),
+            &DocumentPath::new("folder").unwrap(),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress,
         )
@@ -1789,32 +2070,47 @@ mod tests {
         );
     }
 
+    /// The budget every lifecycle condition here is given: long enough that a
+    /// loaded machine is not the thing being measured, and short enough that a
+    /// state that never arrives is reported rather than waited on.
+    fn lifecycle_budget() -> Budget {
+        Budget::new(Duration::from_secs(15), Duration::from_millis(250))
+    }
+
     fn wait_state<O: EntryOps>(
         host: &crate::Host<O>,
         name: &VaultName,
         expected: norn_wire::TrustState,
     ) {
-        for _ in 0..500 {
-            if host.state(name) == Some(expected.clone()) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        panic!("state did not become {expected:?}");
+        wait_until(
+            &format!("trust state {expected:?}"),
+            lifecycle_budget(),
+            || match host.state(name) {
+                Some(state) if state == expected => Observed::Met(()),
+                state => Observed::Pending(format!("the state is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     fn wait_state_kind<O: EntryOps>(host: &crate::Host<O>, name: &VaultName, warming: bool) {
-        for _ in 0..500 {
-            if matches!(
-                host.state(name),
-                Some(norn_wire::TrustState::Warming { .. })
-            ) == warming
-            {
-                return;
-            }
-            thread::sleep(Duration::from_millis(2));
-        }
-        panic!("state did not become warming");
+        wait_until(
+            if warming {
+                "a warming trust state"
+            } else {
+                "a settled trust state"
+            },
+            lifecycle_budget(),
+            || {
+                let state = host.state(name);
+                if matches!(state, Some(norn_wire::TrustState::Warming { .. })) == warming {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("the state is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     #[test]
