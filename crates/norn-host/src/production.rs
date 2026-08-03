@@ -336,20 +336,13 @@ fn heal_documents(
                 let file = files.next().expect("peeked").map_err(effect)?;
                 let read = file.read().map_err(effect)?;
                 if read.content_hash().to_string() != stored[index].content_hash {
-                    match map_document(&fp, read.bytes(), read.content_hash().to_string()) {
-                        Ok(facts) => pending.push(Change::Upsert(facts)),
-                        // The row the document no longer accounts for goes with
-                        // the finding that says why: the store holds
-                        // representable truth, and a quarantined path is absent
-                        // from it.
-                        Err(quarantine) => {
-                            pending.push(Change::Death {
-                                path: stored[index].path.clone(),
-                                provenance: Provenance::Quarantine,
-                            });
-                            pending.quarantine(Path::new(&fp), quarantine);
-                        }
-                    }
+                    pending.rederive(
+                        Path::new(&fp),
+                        &fp,
+                        read.bytes(),
+                        read.content_hash().to_string(),
+                        Some(&stored[index].path),
+                    );
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
@@ -477,18 +470,13 @@ fn scoped_increment(
                     .stored_document(&document_path)
                     .map_err(effect)?;
                 if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
-                    match map_document(document_path.as_str(), observed.bytes(), hash) {
-                        Ok(facts) => pending.push(Change::Upsert(facts)),
-                        Err(quarantine) => {
-                            if standing.is_some() {
-                                pending.push(Change::Death {
-                                    path: document_path.clone(),
-                                    provenance: Provenance::Quarantine,
-                                });
-                            }
-                            pending.quarantine(path, quarantine);
-                        }
-                    }
+                    pending.rederive(
+                        path,
+                        document_path.as_str(),
+                        observed.bytes(),
+                        hash,
+                        standing.as_ref().map(|_| &document_path),
+                    );
                 }
             }
             None => pending.push(Change::Death {
@@ -538,10 +526,17 @@ fn quarantine_subtree(
         match document_path(&path) {
             Ok(document) => {
                 let read = file.read().map_err(effect)?;
-                pending.derive(
+                let standing = pending
+                    .store
+                    .begin_request()
+                    .stored_document(&document)
+                    .map_err(effect)?;
+                pending.rederive(
+                    &path,
                     document.as_str(),
                     read.bytes(),
                     read.content_hash().to_string(),
+                    standing.as_ref().map(|_| &document),
                 );
             }
             Err(quarantine) => pending.quarantine(&path, quarantine),
@@ -616,16 +611,13 @@ fn heal_subtree(
                     .read()
                     .map_err(effect)?;
                 if read.content_hash().to_string() != stored[index].content_hash {
-                    match map_document(&fp, read.bytes(), read.content_hash().to_string()) {
-                        Ok(facts) => pending.push(Change::Upsert(facts)),
-                        Err(quarantine) => {
-                            pending.push(Change::Death {
-                                path: stored[index].path.clone(),
-                                provenance: Provenance::Quarantine,
-                            });
-                            pending.quarantine(Path::new(&fp), quarantine);
-                        }
-                    }
+                    pending.rederive(
+                        Path::new(&fp),
+                        &fp,
+                        read.bytes(),
+                        read.content_hash().to_string(),
+                        Some(&stored[index].path),
+                    );
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
@@ -912,13 +904,36 @@ impl<'s> Pending<'s> {
 
     /// Derive a document the store holds no row for: its facts where the bytes
     /// yield them, and a finding where they do not.
+    fn derive(&mut self, spelling: &str, bytes: &[u8], hash: String) {
+        self.rederive(Path::new(spelling), spelling, bytes, hash, None);
+    }
+
+    /// Derive a document, taking with it the row it can no longer account for.
     ///
-    /// There is no row to prune here. The caller that has one prunes it beside
-    /// the finding, because the store holds only what it can represent.
-    fn derive(&mut self, path: &str, bytes: &[u8], hash: String) {
-        match map_document(path, bytes, hash) {
+    /// `stored` is the row standing at this path, which every caller already
+    /// knows: the merge reads it off the page it is walking and the scoped paths
+    /// read it by key. The store holds only what it can represent, so a document
+    /// that stops decoding leaves nothing behind but the finding — and the row's
+    /// death is a **quarantine**, because the file is still there.
+    fn rederive(
+        &mut self,
+        path: &Path,
+        spelling: &str,
+        bytes: &[u8],
+        hash: String,
+        stored: Option<&DocumentPath>,
+    ) {
+        match map_document(spelling, bytes, hash) {
             Ok(facts) => self.push(Change::Upsert(facts)),
-            Err(quarantine) => self.quarantine(Path::new(path), quarantine),
+            Err(quarantine) => {
+                if let Some(row) = stored {
+                    self.push(Change::Death {
+                        path: row.clone(),
+                        provenance: Provenance::Quarantine,
+                    });
+                }
+                self.quarantine(path, quarantine);
+            }
         }
     }
 
@@ -2039,6 +2054,28 @@ mod tests {
 
         assert_eq!(stored_paths(&mut attachment.store), ["..md/note.md"]);
         assert_eq!(finding_total(&mut attachment.store), 0);
+
+        // And one of them that stops decoding loses its row here as it would
+        // anywhere else: the scope has no merge, so the row it prunes is the one
+        // it looked up.
+        fs::write(f.vault().join("..md/note.md"), UNDECODABLE).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "..md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress,
+            &exclusions(&attachment.entry, &attachment._shadows),
+        )
+        .unwrap();
+        assert!(stored_paths(&mut attachment.store).is_empty());
+        assert_eq!(
+            findings_at(&mut attachment.store, "..md/note.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/body-bytes-not-utf8"]
+        );
         ops.detach(&name, attachment);
     }
 
