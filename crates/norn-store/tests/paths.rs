@@ -117,6 +117,13 @@ fn an_unnormalized_path_is_refused_with_the_reason() {
 /// Rendering answers every refusal the grammar states, which is what makes it
 /// total: a caller with something to say about a path always has a path to say
 /// it about.
+///
+/// **The place has to be the one the spelling occupies, not a shared last
+/// resort.** A refusal with no rendering behind it would otherwise be answered
+/// by collapsing every path that carries it onto one subject, where the
+/// findings about them pile up indistinguishably. So the rendering is read for
+/// the shape it keeps: it names as many segments as the spelling did, which
+/// nothing standing in for the whole path can do.
 #[test]
 fn every_refused_spelling_still_renders_to_a_place() {
     for (path, _) in UNNORMALIZED.iter().copied() {
@@ -124,6 +131,12 @@ fn every_refused_spelling_still_renders_to_a_place() {
         assert!(
             DocumentPath::new(rendered.as_str()).is_ok(),
             "`{path}` rendered to `{}`, which the grammar refuses",
+            rendered.as_str()
+        );
+        assert_eq!(
+            rendered.depth(),
+            path.split('/').count(),
+            "`{path}` rendered to `{}`, which names a different number of segments",
             rendered.as_str()
         );
     }

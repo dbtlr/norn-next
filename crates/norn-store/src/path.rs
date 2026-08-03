@@ -197,6 +197,13 @@ impl DocumentPath {
     /// beside the refusals they answer, so the two move together; a caller
     /// spelling the refusal set itself would drift the moment the grammar did.
     ///
+    /// **Totality rests on the two candidates below answering every refusal.**
+    /// Per-segment rendering answers all of them but the leaf's stem, and
+    /// marking ahead of the leaf answers that one — so a refusal added to the
+    /// grammar without a rendering leaves neither candidate standing and this
+    /// panics rather than collapsing every such path onto one subject. The
+    /// corpus in `tests/paths.rs` is what holds the two sets together.
+    ///
     /// **A rendering names a place, never an identity.** Nothing derives a
     /// document under one. A real document whose own name carries the marker
     /// occupies the same key as a rendering of some other path, and that
@@ -226,10 +233,10 @@ impl DocumentPath {
         } else {
             format!("{ancestors}{separator}{RENDERED_MARKER}{leaf}")
         };
-        [rendered.clone(), marked, RENDERED_MARKER.to_string()]
+        [rendered, marked]
             .into_iter()
             .find_map(|candidate| DocumentPath::new(&candidate).ok())
-            .expect("the marker alone is a document path")
+            .expect("every refusal the grammar states has a rendering that answers it")
     }
 
     /// The path as written, which is the document's name and unique key.
