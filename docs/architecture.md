@@ -114,21 +114,29 @@ resolving the situation correctly: the environment is broken, the stored state i
 discarding a sound database would destroy work to fix nothing. **Rung 3 is for damaged
 state, never for a hostile environment.**
 
-**Quarantine is per document; refusal is per vault.** A document norn cannot decode — path
-bytes that are not UTF-8, a path spelling the document-path grammar refuses, or a body that
-is not UTF-8 — is a fact about one document rather than about the vault, so it never
+**Quarantine is per document; refusal is per vault.** See
+[ADR 0013](decisions/0013-quarantine-is-per-document.md). A document norn cannot decode —
+path bytes that are not UTF-8, a path spelling the document-path grammar refuses, or a body
+that is not UTF-8 — is a fact about one document rather than about the vault, so it never
 withdraws the vault. The rung-2 heal skips its facts, records a finding naming the path and
 the cause class, and keeps going; the entry reaches `Ready` and serves every other document.
-Every rung-2 path quarantines the same way: the full tree heal, a scoped subtree heal, and
-the warm scoped increment.
+Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
+subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
+grammar refuses addresses no subtree the store can range, so the warm path converges it by
+reading what is under it — each document derived or quarantined, nothing pruned — and a
+stale row beneath such a directory is reached by the vault-wide heal's merge rather than
+there.
 
 The store holds only representable truth, so a document that stops decoding **loses its
-store row**, and the finding is where its absence is stated. A quarantined path is filed
-under the path the vault spells it, and under a rendering of that spelling where the grammar
-admits no such path; a rendering names a place a reader can print and never an identity, and
-no document is stored under one. Recovery needs no second mechanism: a document that reads
-again is an ordinary derivation, and the increment's own findings discard takes the finding
-with it.
+store row**, and the finding is where its absence is stated. The row's death is recorded
+with the quarantine provenance, which says the derived row died and the file did not; a
+prune or a removal would say the path left the vault. A quarantined path is filed under the
+path the vault spells it, and under a rendering of that spelling where the grammar admits no
+such path. **A rendering names a place, never an identity**: no document is *derived* under
+one, though the vault may genuinely hold a document whose own name is that place — the
+collision is one key holding one row, which is visible rather than silent, and the document
+wins. Recovery needs no second mechanism: a document that reads again is an ordinary
+derivation, and the increment's own findings discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
