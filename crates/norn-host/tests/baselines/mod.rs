@@ -19,12 +19,12 @@
 //! over a long mixed load. Repeated local readings cover **macos-arm64**
 //! natively.
 //!
-//! **The platform that gates is `ubuntu-latest` x86_64-glibc**, and no band
-//! below is measured there yet: the per-PR memory job and the nightly soak lane
-//! are what produce the first hosted readings, and until they do the values are
-//! the macos-arm64 bands with headroom over them. The x86_64-glibc readings are
-//! recorded beside the bands they belong to when they land, the same way the
-//! generator's baselines carry both architectures they were measured on.
+//! **The platform that gates is `ubuntu-latest` x86_64-glibc.** The attachment
+//! bands carry their first hosted readings beside the local ones, the same way
+//! the generator's baselines carry both architectures they were measured on.
+//! The soak bands are not measured there yet: the nightly lane is what produces
+//! their first hosted readings, and until it does those values are the
+//! macos-arm64 bands with headroom over them.
 //!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
 //! lane and `host_soak.rs` for the scheduled one — and each asserts against the
@@ -42,9 +42,11 @@
 ///
 /// Observed over 5 runs: **20.26–20.60 MiB on macos-arm64** — an indicative
 /// band from repeated local runs, not a fixed measurement, so a rerun lands
-/// near an edge rather than the middle. The ceiling sits at roughly twice the
-/// band's top, because a bar that flakes teaches people to rerun rather than to
-/// look.
+/// near an edge rather than the middle. The first hosted run read **17.69 and
+/// 18.26 MiB on ubuntu-latest x86_64-glibc** across this lane's two attaches at
+/// this profile — lower than the local band, as 4 KiB pages against 16 KiB
+/// predict. The ceiling sits at roughly twice the local band's top, because a
+/// bar that flakes teaches people to rerun rather than to look.
 ///
 /// What it forbids is an attachment whose cost is the vault. The heal walks the
 /// tree and commits it in bounded changesets, so what stays resident is one
@@ -66,7 +68,9 @@ pub const ATTACH_PEAK_RSS_CEILING_BYTES: u64 = 40 * 1024 * 1024;
 /// below either profile, and what is left growing with the vault is how many
 /// of those changesets are committed. The observed ratios are **1.17–1.20 on
 /// macos-arm64** (5 runs per profile), against attach peaks of 17.09–17.35 MiB
-/// at `ambiguous` and 20.26–20.60 MiB at `realistic`.
+/// at `ambiguous` and 20.26–20.60 MiB at `realistic`; the first hosted run read
+/// **1.21 on ubuntu-latest x86_64-glibc** (14.60 against 17.69 MiB) — a lower
+/// base and a slightly higher ratio, the shape a smaller page size predicts.
 ///
 /// The bar is 1.6, which leaves a third of headroom over the worse reading
 /// while staying far below the 6.7x a vault-shaped cost would show.
