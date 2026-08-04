@@ -8,8 +8,13 @@
 #
 # The timeout-minutes below are not an exception to that. A timeout is a
 # runaway guard: it bounds what a hung job can cost, and it is set loose
-# enough that a job approaching it is broken rather than slow. Performance
-# clocks — the bars that fail when a number drifts — live in soak.yml.
+# enough that a job approaching it is broken rather than slow. The deadlines
+# the suites here carry in-test — how long a child process may run, how long
+# an attachment may take to converge — are the same species, set the same way
+# and reported the same way: a run that reaches one is stuck rather than slow,
+# and it fails naming what it last saw instead of naming a duration.
+# Performance clocks — the bars that fail when a number drifts — live in
+# soak.yml.
 #
 # A job whose name carries a "(placeholder — ...)" suffix is structure only:
 # it passes trivially so the lane exists, triggers, and is reviewable before
@@ -115,12 +120,14 @@ jobs:
   # generated vault tree on disk, a production attachment that walked it, and
   # the derived store that attachment left behind. Two bars run at profiles the
   # per-PR lane owns. A warm request over the ~2k-document realistic profile
-  # finishes with every derivation counter at zero, so a read that derives is a
-  # failure rather than a slowdown. And one bounded write costs the same at 300
-  # documents as at 2000 — the sharper of the two, because a ceiling passes
-  # anything under it and a pair fails the moment two scales stop moving
-  # together. Both are counts: a counter says the same thing on a loaded runner,
-  # which a clock does not.
+  # finishes with every derivation counter at zero. The store's read paths
+  # derive nothing by construction today, so that bar is a canary rather than a
+  # number the current code strains against: it binds the day a read path starts
+  # deriving, and fails that as a correctness break rather than reporting it as a
+  # slowdown. And one bounded write costs the same at 300 documents as at 2000 —
+  # the sharper of the two, because a ceiling passes anything under it and a pair
+  # fails the moment two scales stop moving together. Both are counts: a counter
+  # says the same thing on a loaded runner, which a clock does not.
   #
   # The plan half waits on the Layer 3 read builders. An `EXPLAIN` assertion is
   # worth something only against the statement a builder emitted — a gate
@@ -132,7 +139,7 @@ jobs:
   # documents beside every other test. The script is what makes the wholesale
   # `--ignored` run fail when it ran nothing.
   gates:
-    name: counter and plan gates
+    name: counter gates
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
