@@ -143,15 +143,16 @@ jobs:
       - name: Counter bars
         run: .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
 
-  # A real gate. It spawns the fixture generator under the testkit's process
-  # harness and reads the peak resident set the kernel accounted to that child,
-  # then asserts two things about it at profiles under 5k documents: a
-  # checked-in ceiling at the ~2k-document realistic profile, and the ratio
-  # between the 300-document and ~2k-document profiles. The ratio is the sharp
-  # instrument — a ceiling passes anything that fits under it, and a ratio
-  # fails the moment two scales stop moving together. Both bars are authored
-  # and move only by a reviewed edit; the readings behind them are in
-  # crates/norn-fixtures/tests/baselines/mod.rs.
+  # A real gate. Each subject runs as a child under the testkit's process
+  # harness, and what is read is the peak resident set the kernel accounted to
+  # that child; a peak read off the test process would include cargo's runner
+  # and every case beside it. Every subject faces the same two instruments at
+  # profiles under 5k documents: a checked-in ceiling at the ~2k-document
+  # realistic profile, and the ratio between the 300-document and ~2k-document
+  # profiles. The ratio is the sharp instrument — a ceiling passes anything
+  # that fits under it, and a ratio fails the moment two scales stop moving
+  # together. Every bar is authored and moves only by a reviewed edit; the
+  # readings behind them are in each crate's own tests/baselines/mod.rs.
   #
   # The cases live in this job alone. They are `#[ignore]`d with a
   # `memory-lane case:` reason so the build job's workspace suite does not run
@@ -162,11 +163,13 @@ jobs:
   # otherwise this lane would run soak.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
-  # Two subjects run here: the fixture generator and the norn-fs streaming
-  # walk. norn-store slots in at Layer 1, and its request paths become another
-  # subject for this job;
-  # the >=5k scale and the recorded peak-memory readings stay in soak.yml,
-  # where a clock is legal to read.
+  # Three subjects run here: the fixture generator, the norn-fs streaming walk,
+  # and a host attaching a generated vault — the first subject that measures a
+  # whole vault's worth of work, where the generator and the walk each measure
+  # one pass over a tree. The child that attaches adopts a tree its parent
+  # generated, so what the kernel accounts to it is the attachment and not the
+  # generation. The >=5k scale and the recorded peak-memory readings stay in
+  # soak.yml, where a clock is legal to read.
   memory:
     name: memory invariant
     runs-on: ubuntu-latest
@@ -180,3 +183,5 @@ jobs:
         run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
         run: .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
+      - name: Attach memory bars
+        run: .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

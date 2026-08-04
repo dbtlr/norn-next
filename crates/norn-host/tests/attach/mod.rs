@@ -142,15 +142,20 @@ impl Vault {
         Store::open(self.database()).expect("open the derived store")
     }
 
-    /// A host serving this vault, with the whole tree reachable in as few
-    /// transactions as the store's own bounds allow.
+    /// A host serving this vault.
+    ///
+    /// **The store page and the changeset are bounded well below the smallest
+    /// profile these suites attach**, so every scale commits its heal in units
+    /// of the same size. A bound a small vault never reaches is a working set
+    /// that grows with the vault up to that bound, and a flatness pair drawn
+    /// across it would be measuring the bound rather than the invariant.
     pub fn host(&self) -> Host<ProductionEntryOps> {
         let entry = Entry::new(
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
         let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
-        let policy = ProductionPolicy::new(1024, 1024).expect("production policy");
+        let policy = ProductionPolicy::new(128, 128).expect("production policy");
         Host::new(
             registry,
             ProductionEntryOps::new([entry], self.dirs(), policy),
