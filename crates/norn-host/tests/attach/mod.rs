@@ -59,7 +59,7 @@ pub const READY_LIMIT: Duration = Duration::from_secs(240);
 /// its host drops and at no other moment. A run that works the host past this
 /// holds a demand lease for the whole of it, and this is the second guard
 /// behind that one.
-pub const IDLE_AFTER: Duration = Duration::from_secs(3600);
+pub const IDLE_AFTER: Duration = Duration::from_secs(7200);
 
 /// The file a parent writes beside a generated tree to say it issued the
 /// harness run that adopts it.

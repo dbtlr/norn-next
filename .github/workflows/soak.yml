@@ -76,12 +76,13 @@ jobs:
   #
   # The timeout is the outer runaway guard, and it is set so the inner one is
   # what fires. The host load's child carries its own deadline — the declared
-  # hour plus five minutes of attach headroom, so 65 minutes at worst — and the
-  # samples this job judges are read off that child's output only once it has
-  # ended. A job killed while the child is still running loses every sample of
-  # the run, so the timeout leaves the worst-case child room to reach its own
-  # deadline and still report: 120 minutes covers checkout, a cold debug build,
-  # the three fixtures steps, and that 65 minutes with headroom over the lot.
+  # hour plus ten minutes of headroom for its bounded attach, recovery, and
+  # reconcile waits, so 70 minutes at worst — and the samples this job judges
+  # are read off that child's output only once it has ended. A job killed while
+  # the child is still running loses every sample of the run, so the timeout
+  # leaves the worst-case child room to reach its own deadline and still
+  # report: 120 minutes covers checkout, a cold debug build, the three fixtures
+  # steps, and that 70 minutes with headroom over the lot.
   # It remains a runaway guard and not a bar on speed: nothing in this job fails
   # because it took longer, and the load itself is a declared duration rather
   # than a measured one.

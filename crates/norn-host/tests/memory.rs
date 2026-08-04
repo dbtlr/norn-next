@@ -72,8 +72,9 @@ const HARNESS_CASE: &str = "the_gate_profile_attaches_inside_its_memory_bar";
 /// is stuck, not slow, and how long one takes is a clock this lane does not
 /// read. It sits above the child's own bound on the same attach
 /// ([`attach::READY_LIMIT`]) so the child fails naming the state it saw, and
-/// below what the lane's job timeout leaves for three of them, so a stuck child
-/// is ended here rather than by the runner.
+/// far enough inside the lane's job timeout that the first stuck child is
+/// ended and reported here; a run where every child hangs is the job
+/// timeout's to end.
 const ATTACH_DEADLINE: Duration = Duration::from_secs(300);
 
 /// **The ceiling**, and the harness the pair spawns.

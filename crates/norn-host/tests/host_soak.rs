@@ -103,17 +103,18 @@ const CHURN_DIR: &str = "soak-churn";
 
 /// How much wall clock the run is given beyond the load itself.
 ///
-/// It covers generating nothing — the parent did that — and attaching the ≥5k
-/// profile, which is the only unbounded-looking part of the child's run. A
-/// child that reaches this is stuck rather than slow: the generate-and-attach
-/// overhead at this profile reads in seconds, so the whole of this is runaway
-/// margin.
+/// It covers everything the child spends outside the declared duration, each
+/// part carrying its own bound: attaching the ≥5k profile
+/// ([`attach::READY_LIMIT`], 240s), every recovery the load may attempt
+/// ([`RECOVERY_ATTEMPTS`] × [`RECOVERY_LIMIT`], 180s), and the wait for the
+/// last write to reconcile ([`RECONCILE_LIMIT`], 120s) — 540s in sum, so a
+/// child that reaches this is stuck rather than slow.
 ///
 /// It is deliberately small enough that the child's deadline lands well inside
 /// the job's own timeout. What the parent judges is the child's stdout, and it
 /// reads that only once the child has ended, so a child the runner kills takes
 /// every sample of the run with it.
-const ATTACH_HEADROOM: Duration = Duration::from_secs(300);
+const ATTACH_HEADROOM: Duration = Duration::from_secs(600);
 
 /// How many times the load asks for an attachment that stopped serving again
 /// before it calls the host unrecoverable.
