@@ -13,15 +13,16 @@
 # 0. What closes it is the pass-count assertion in .github/scripts/lane-suite.sh,
 # which every step below goes through.
 #
-# Every measurement is compared against a checked-in baseline in
-# crates/norn-fixtures/tests/baselines/mod.rs and recorded in the job summary.
-# The baselines are the trend's whole memory: nothing here fetches a history or
+# Every measurement is compared against a checked-in baseline in the measuring
+# crate's own tests/baselines/mod.rs and recorded in the job summary. The
+# baselines are the trend's whole memory: nothing here fetches a history or
 # consults a store. What binds mechanically is the comparison — a reading past
 # a baseline fails the run. **Nothing enforces which direction a baseline
 # moves**: the readings are recorded per run, and the discipline that they
 # should only fall is review-held, carried by the baselines being a small,
-# frequently-read diff. A mechanized trend arrives with the Layer 2 lockdown
-# work, when this lane carries a host workload for a slope to be measured over.
+# frequently-read diff. The one trend this lane does mechanize is the memory
+# slope under the host workload below, which is a comparison the run makes
+# against itself rather than against a recorded history.
 name: soak
 
 on:
@@ -45,32 +46,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # What the lane asserts today is the fixture generator at the >=5k profile:
+  # The lane asserts two subjects. The fixture generator at the >=5k profile:
   # that it reproduces its tree, that the tree stays inside the calibration
-  # envelope, and what the generation costs in peak memory and wall clock.
+  # envelope, and what the generation costs in peak memory and wall clock. And
+  # a host under a nightly ~1h mixed load over that profile's tree: a child
+  # process attaches the vault and then works it — churning Markdown files so
+  # the watcher reconciles, polling the attachment's trust state, and taking
+  # warm read-only requests — while sampling its own resident set and open
+  # descriptors throughout.
   #
-  # Three named slots remain, each waiting on a subject rather than on
-  # machinery. Two arrive with the Layer 1 host: fd growth, which needs a
-  # long-running process to grow them, and the nightly ~1h mixed load the
-  # flat-memory-slope requirement is judged over. The third is the real pinned
-  # embedding model: norn-embed ships the deterministic stub, and the runtime
-  # this lane would measure compiles only behind the release/soak feature,
-  # which arrives with the runtime it gates. There is nothing to run until
-  # then — the stub has no model to load and no weights to fetch.
+  # That mixed load fills two of the three slots this lane carried: fd growth,
+  # which needed a long-running process to grow them, and the flat-memory-slope
+  # requirement, which needed a load for a slope to be measured over. The
+  # remaining slot is the real pinned embedding model: norn-embed ships the
+  # deterministic stub, and the runtime this lane would measure compiles only
+  # behind the release/soak feature, which arrives with the runtime it gates.
+  # There is nothing to run until then — the stub has no model to load and no
+  # weights to fetch.
   #
   # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
   # mixed load, showing zero counter violations, a flat memory slope, and no
-  # file-descriptor growth.** Three of those four terms have no subject yet, so
-  # the count does not start at the first green run of the assertions below: it
-  # starts when the lane asserts what lockdown counts. A green run of a lane
-  # that does not measure a term is not one of the five.
+  # file-descriptor growth.** All three terms now run: the child's warm
+  # requests assert every derivation counter at zero and carry a violation out
+  # as its exit status, the descriptor count is compared between the first
+  # sample and the last, and the resident-set series is judged as the ratio
+  # between its first and last quartile means. So the count starts at the first
+  # green run of this lane as it stands — a green run of a lane that does not
+  # measure a term is not one of the five, and this lane now measures all three.
   #
-  # The timeout below fits the work that runs now with runaway headroom; it is
-  # raised when the mixed load lands.
+  # The timeout fits the hour of load, the attach that precedes it and the build
+  # that precedes that, with runaway headroom. It is a runaway guard and not a
+  # bar on speed: nothing in this job fails because it took longer, and the load
+  # itself is a declared duration rather than a measured one.
   soak:
     name: soak
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -84,3 +95,10 @@ jobs:
       # with nothing else this suite started.
       - name: Memory and wall clock at the soak profile
         run: .github/scripts/lane-suite.sh norn-fixtures memory_soak --nocapture --test-threads=1
+      # The hour is this step's alone: the duration is declared here rather than
+      # in the suite, so a local run of the same case is a short one and the
+      # nightly one is the load lockdown counts.
+      - name: Host mixed load
+        run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
+        env:
+          NORN_SOAK_DURATION_SECS: "3600"

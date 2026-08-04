@@ -86,9 +86,17 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// quartile means rather than endpoints is what keeps one sample taken during a
 /// changeset commit from deciding the run.
 ///
-/// Observed over 90-second local runs: **0.99–1.02 on macos-arm64**. The bar is
-/// 1.25, which is loose enough that a settling allocator does not fail the lane
-/// and tight enough that a load leaking per reconciliation does.
+/// Observed on macos-arm64: **1.04–1.07 over three 90-second runs, and 0.96
+/// over a 300-second one**, against first-quartile means of 21.50–22.31 MiB.
+/// The short runs read higher because their first quartile covers the minute
+/// after an attach, where a store's caches are still filling; a longer run
+/// spends that in its first quartile too and reads flat or falling, which is
+/// the shape the hour-long scheduled run has.
+///
+/// The bar is 1.25, which is loose enough that the settling a short run
+/// measures does not fail the lane, and tight enough that a load paying for
+/// each reconciliation does: a leak at that scale compounds over an hour rather
+/// than levelling off.
 pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_250;
 
 /// How a reading is rendered and where it is recorded is the harness's, and
