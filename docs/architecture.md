@@ -601,7 +601,8 @@ inside it, so a read proceeds while a warm lifecycle job holds the store. The sn
 established under the entry gate lock in the same critical section that reads trust —
 established by a read statement, since a bare deferred `BEGIN` takes no snapshot — so the
 trust label and the snapshot describe the same instant, and the read runs outside the
-lock: it sees the last committed increment, never blocks the writer, and may trail
+lock: it sees the last committed increment, never blocks the writer (checkpointing stays
+passive — an aggressive checkpoint mode would trade that guarantee away), and may trail
 in-flight derivation. Concurrent reads serialize against each other on the one reader per
 entry; measured reader contention is what mints more through the same seam. The reader is
 torn down before the store closes on every closing path, and an in-flight read pins the

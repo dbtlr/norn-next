@@ -45,4 +45,6 @@ Minting only from a live `Store` is load-bearing twice over: it binds the reader
 lifetime, and it guarantees the usable `-shm` a read-only WAL open requires. The price of the second connection per attached
 entry is named: three descriptors, a second page cache and prepared-statement cache under
 the gated memory ceiling, and a held snapshot pinning the write-ahead log against
-checkpointing — the bounded read shapes are what keep that pin short.
+checkpointing — checkpointing stays passive, which is what keeps the reader's
+never-blocks-the-writer guarantee whole, and the bounded read shapes are what keep the
+pin short.
