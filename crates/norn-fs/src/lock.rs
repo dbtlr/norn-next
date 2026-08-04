@@ -39,6 +39,14 @@
 //! lock still held is a process still alive; a wedged live holder is a health
 //! finding, never something to take away.
 //!
+//! **What release waits for is the last descriptor closing, and a `fork`
+//! postpones that.** A child forked while the lock is held carries a copy of the
+//! descriptor until it reaches its `exec`, and the lock stays taken for as long
+//! as that copy lives — so a released lock reads as held, by the process that
+//! released it, for the length of somebody else's spawn. Norn spawns nothing
+//! while holding a maintainership, which makes this a bar on what may be added
+//! here rather than a hazard in the running system.
+//!
 //! # The dead-inode hazard, and the recheck that closes it
 //!
 //! An advisory lock follows the *file*, not the name. If something outside the

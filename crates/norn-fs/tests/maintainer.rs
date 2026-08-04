@@ -139,11 +139,29 @@ fn maintainer_role_child() {
 /// public surface has no such affordance on purpose: an acquisition is two
 /// outcomes and a method that handed back the guard alone would throw away the
 /// incumbent every real caller has to report.
+///
+/// **The wait is what this binary costs, not slack in the lock.** Two cases here
+/// spawn child processes, and a child holds a copy of every descriptor this
+/// process had open at the moment it was forked until it reaches its `exec` —
+/// including a lock descriptor another case is holding, or has just dropped. The
+/// kernel releases a `flock` when the last descriptor on it closes, so for the
+/// length of somebody else's spawn a lock nothing in this process holds still
+/// reads as held, by this process. Every case here works over its own lock file
+/// and no caller of this helper contends on purpose — the cases that assert
+/// contention reach it through a bare `try_acquire` — so a wait is the honest
+/// shape: a caller
+/// with a reason to wait declares its own bound, which is exactly what the
+/// try-only surface asks of one. A lock that never comes free still fails.
 fn take(path: &Path) -> Maintainership {
-    match try_acquire(path).expect("an acquisition") {
-        Acquisition::Acquired(held) => held,
-        Acquisition::Contended { incumbent } => panic!("the lock is held by {incumbent}"),
-    }
+    wait_until("the lock to be free", budget(), || {
+        match try_acquire(path).expect("an acquisition") {
+            Acquisition::Acquired(held) => Observed::Met(held),
+            Acquisition::Contended { incumbent } => {
+                Observed::pending(format!("the lock is held by {incumbent}"))
+            }
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// Write what the child saw, where the parent will look for it.
