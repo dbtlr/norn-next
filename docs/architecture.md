@@ -597,13 +597,15 @@ hydration. Warm requests assert zero derivation counters.
 
 Reads reach the database independently of orchestration, on a read-only snapshot handle
 `norn-store` mints from the live `Store` — held in entry state beside the attachment, never
-inside it, so a read proceeds while a lifecycle job holds the store. Each read is one WAL
-snapshot transaction: it sees the last committed increment, never blocks the writer, and may
-trail in-flight derivation — trust state, not the connection, gates answering. The handle
-dies with the attachment that minted it, so no reader outlives a rung-3 rebuild's discarded
-file. One reader per entry, counted against the attach budget; minting more is the carved
-extension point, taken only when a measured bar demands it. [ADR
-0014](decisions/0014-snapshot-readers.md) records the rationale.
+inside it, so a read proceeds while a warm lifecycle job holds the store. The snapshot is
+established under the entry gate lock in the same critical section that reads trust — the
+trust label and the snapshot describe the same instant — and the read runs outside the
+lock: it sees the last committed increment, never blocks the writer, and may trail
+in-flight derivation. Concurrent reads serialize against each other on the one reader per
+entry; measured reader contention is what mints more through the same seam. The reader is
+torn down before the store closes on every closing path, and an in-flight read pins the
+entry, so no teardown unlinks a database file a reader still holds. [ADR
+0014](decisions/0014-snapshot-readers.md) records the rationale and the priced costs.
 
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`
