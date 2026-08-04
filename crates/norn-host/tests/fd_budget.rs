@@ -139,18 +139,7 @@ fn wait_for_state(host: &Host<ProductionEntryOps>, name: &VaultName, expected: T
 }
 
 fn open_fd_count() -> usize {
-    #[cfg(target_os = "linux")]
-    const FD_DIRECTORY: &str = "/proc/self/fd";
-    #[cfg(target_os = "macos")]
-    const FD_DIRECTORY: &str = "/dev/fd";
-
-    let entries = fs::read_dir(FD_DIRECTORY).expect("open process descriptor directory");
-    // Reading either descriptor directory holds one descriptor for the
-    // iterator itself, and that descriptor is visible in the listing.
-    entries
-        .count()
-        .checked_sub(1)
-        .expect("descriptor directory iterator is represented in its listing")
+    norn_testkit::process::open_fd_count().expect("this process's descriptor count")
 }
 
 struct Fixture {

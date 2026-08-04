@@ -116,53 +116,8 @@ pub const SOAK_TO_GATE_PEAK_RSS_PER_MILLE: u64 = 2_200;
 /// record is the measured duration in the job summary.
 pub const SOAK_WALL_CLOCK_CEILING: Duration = Duration::from_secs(180);
 
-/// Bytes, rendered as mebibytes to two places.
-pub fn mebibytes(bytes: u64) -> String {
-    format!(
-        "{}.{:02}",
-        bytes / (1024 * 1024),
-        bytes * 100 / (1024 * 1024) % 100
-    )
-}
-
-/// A ratio expressed per mille, rendered as a decimal multiple.
-pub fn multiple(per_mille: u64) -> String {
-    format!("{}.{:02}", per_mille / 1000, per_mille / 10 % 100)
-}
-
-/// `numerator / denominator`, per mille, with a zero denominator reported as
-/// zero rather than reached for.
-pub fn per_mille(numerator: u64, denominator: u64) -> u64 {
-    (numerator * 1000).checked_div(denominator).unwrap_or(0)
-}
-
-/// Record a reading where a person will find it: the job summary GitHub
-/// renders under the run, and this process's standard error either way.
-///
-/// A measurement lane's product is the trend, and a trend nobody can read is a
-/// pass with nothing behind it. Outside a workflow there is no summary file,
-/// so the readings go to standard error alone and the suite is unaffected.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Appends this run's readings to the job-summary file the workflow names.
-pub fn record(heading: &str, readings: &[(&str, String)]) {
-    let mut block = format!("### {heading}\n\n| reading | value |\n| --- | --- |\n");
-    for (label, value) in readings {
-        block.push_str(&format!("| {label} | {value} |\n"));
-    }
-    block.push('\n');
-    eprintln!("{block}");
-
-    let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") else {
-        return;
-    };
-    use std::io::Write;
-    let appended = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut file| file.write_all(block.as_bytes()));
-    if let Err(problem) = appended {
-        // A summary that could not be written is a lost reading, not a failed
-        // measurement, and failing the run here would report the wrong thing.
-        eprintln!("could not append to the job summary: {problem}");
-    }
-}
+/// How a reading is rendered and where it is recorded is the harness's, and
+/// every measurement lane in the workspace writes the same table under its run.
+/// What is authored per crate is the numbers above, which is what a reviewer
+/// reads as one diff.
+pub use norn_testkit::readings::{mebibytes, multiple, per_mille, record};

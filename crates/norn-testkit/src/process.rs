@@ -491,6 +491,37 @@ fn capture(path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
     Ok((bytes, truncated))
 }
 
+/// How many descriptors this process holds open.
+///
+/// **A count of this process, taken from the kernel's own listing**: Linux
+/// publishes it at `/proc/self/fd` and macOS at `/dev/fd`, and both list one
+/// entry per open descriptor. Reading the listing holds a descriptor for the
+/// iterator itself and that descriptor is in the listing, so it is subtracted
+/// — the answer is what was open before the question was asked.
+///
+/// A subject whose descriptor cost is the question runs in a child of its own,
+/// because a count taken in a test process includes the harness and every case
+/// running beside it — and, worse, moves while it is being taken, since a case
+/// on another thread opening a file changes the answer. That is also why this
+/// function carries no assertion of its own here: a case stating what it counts
+/// would be stating it about a process where the number is nobody's to hold
+/// still. What holds it is a caller running alone in a process it spawned.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this process's own descriptor listing.
+pub fn open_fd_count() -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    const FD_DIRECTORY: &str = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    const FD_DIRECTORY: &str = "/dev/fd";
+
+    let listed = std::fs::read_dir(FD_DIRECTORY)?.count();
+    listed.checked_sub(1).ok_or_else(|| {
+        io::Error::other(format!(
+            "{FD_DIRECTORY} listed nothing, so the iterator's own descriptor is not in its listing"
+        ))
+    })
+}
+
 fn ignore_missing(error: io::Error) -> io::Result<()> {
     if error.kind() == io::ErrorKind::NotFound {
         Ok(())

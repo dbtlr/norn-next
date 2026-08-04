@@ -47,8 +47,12 @@ The invariant is *measured*, not asserted:
   only by a reviewed edit, and the downward direction of that movement is
   review-held rather than mechanized — nothing here fails a raised baseline,
   so this is a place this section's own rule applies: a review-held invariant
-  rots quietly. The mechanized form, a flat-slope requirement over a nightly
-  mixed load, arrives with the Layer 2 lockdown work.
+  rots quietly.
+- The mechanized form is a flat-slope requirement, and it runs in the same
+  lane: a host attaches the ≥5k profile's vault and works it under a nightly
+  mixed load while sampling its own resident set, and the run compares the
+  first quartile's mean against the last. That comparison is one the run makes
+  against itself, so no recorded history decides it.
 
 Superlinear payloads are defects, and bounded ones stay bounded on the wire and at rest
 alike — see the [bounded candidate head of 5](#the-crates) in the `norn-wire` membership

@@ -1,12 +1,12 @@
 //! The lane assignment is the `#[ignore]` reason, so the reason is checked.
 //!
-//! Two CI lanes adopt this crate's ignored cases by asking for them wholesale:
-//! the per-PR memory job and the nightly soak lane each run a suite's ignored
-//! cases and assert that a non-zero number of them passed. That is what makes a
-//! name filter unnecessary, and it is also what makes a stray `#[ignore]`
-//! dangerous — an `#[ignore = "flaky"]` added for a local reason would be
-//! silently adopted by whichever lane runs that suite, and would run nightly
-//! under a bar nobody meant it to face.
+//! One CI lane adopts this crate's ignored cases by asking for them wholesale:
+//! the per-PR memory job runs this crate's `walk_memory` target with
+//! `--ignored` and asserts that a non-zero number of cases passed. That is what
+//! makes a name filter unnecessary, and it is also what makes a stray
+//! `#[ignore]` dangerous — an `#[ignore = "flaky"]` added for a local reason
+//! would be silently adopted by that lane, and would run under a bar nobody
+//! meant it to face.
 //!
 //! The walk that reads this crate's sources and holds every `#[ignore]` in them
 //! to a lane is `norn_testkit::lanes`, shared with every other crate whose
@@ -17,7 +17,6 @@
 /// Which lane prefix a file's `#[ignore]` reasons must open with, keyed by
 /// the file's stem — its name under `tests/` without the `.rs` extension.
 ///
-/// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.
 /// - `memory-lane case:` — the per-PR `memory invariant` job's `--ignored`
 ///   step.
 ///
@@ -25,12 +24,7 @@
 /// the same diff: a stem this table does not name is an error, not a case with
 /// no lane to check against. Whether a workflow step runs the file is a pairing
 /// this guard does not read and a reviewer does.
-const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
-    ("memory", "memory-lane case:"),
-    ("memory_soak", "soak-lane case:"),
-    ("determinism", "soak-lane case:"),
-    ("calibration", "soak-lane case:"),
-];
+const LANE_BY_FILE_STEM: &[(&str, &str)] = &[("walk_memory", "memory-lane case:")];
 
 #[test]
 fn every_ignored_case_names_the_lane_that_adopts_it() {
