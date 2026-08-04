@@ -2726,15 +2726,33 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    struct SlowProduction(ProductionEntryOps);
-    impl EntryOps for SlowProduction {
+    /// Production ops whose reconcile can be held at its entry.
+    ///
+    /// A reconcile job publishes Warming before it calls in here, so a reconcile
+    /// held at its entry pins the entry in that state for as long as a case wants
+    /// it. **This is what makes the warming leg an observation rather than a
+    /// race.** A slow reconcile in its place leaves a transient the case has to
+    /// catch with a poll cadence that has no relationship to how long it lasts:
+    /// the leg is published either way, and a case that misses it reports a
+    /// warming state that never arrived on a path that behaved correctly.
+    ///
+    /// The hold is armed rather than always on, because the reconcile that
+    /// follows an attach is what carries an entry to Ready in the first place,
+    /// and a case has nothing to observe until it has.
+    struct HeldReconcile {
+        inner: ProductionEntryOps,
+        armed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        released: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl EntryOps for HeldReconcile {
         type Attachment = ProductionAttachment;
         fn attach(
             &self,
             name: &VaultName,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<Self::Attachment, JobFailure> {
-            self.0.attach(name, progress)
+            self.inner.attach(name, progress)
         }
         fn reconcile(
             &self,
@@ -2743,8 +2761,21 @@ mod tests {
             work: ReconcileWork,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            thread::sleep(Duration::from_millis(30));
-            self.0.reconcile(name, attachment, work, progress)
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                wait_until(
+                    "the case to release the held reconcile",
+                    lifecycle_budget(),
+                    || {
+                        if self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                            Observed::Met(())
+                        } else {
+                            Observed::Pending("the case has not released it".to_owned())
+                        }
+                    },
+                )
+                .map_err(|failure| environmental(failure.to_string()))?;
+            }
+            self.inner.reconcile(name, attachment, work, progress)
         }
         fn recover(
             &self,
@@ -2752,17 +2783,17 @@ mod tests {
             attachment: &mut Self::Attachment,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            self.0.recover(name, attachment, progress)
+            self.inner.recover(name, attachment, progress)
         }
         fn poll(
             &self,
             name: &VaultName,
             attachment: &mut Self::Attachment,
         ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-            self.0.poll(name, attachment)
+            self.inner.poll(name, attachment)
         }
         fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
-            self.0.detach(name, attachment)
+            self.inner.detach(name, attachment)
         }
     }
 
@@ -2775,13 +2806,15 @@ mod tests {
         let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let host = crate::Host::new(
             registry,
-            SlowProduction(ProductionEntryOps::new(
-                [entry],
-                dirs,
-                ProductionPolicy::new(2, 2).unwrap(),
-            )),
+            HeldReconcile {
+                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                armed: std::sync::Arc::clone(&armed),
+                released: std::sync::Arc::clone(&released),
+            },
             crate::LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
@@ -2791,8 +2824,13 @@ mod tests {
         .unwrap();
         let _ = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
+        // Armed before the edit, so the reconcile the watcher schedules for it is
+        // held at its entry and the warming leg it published on the way in stays
+        // there to be read.
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
         fs::write(f.vault().join("note.md"), "after").unwrap();
         wait_state_kind(&host, &name, true);
+        released.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(host);
         let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
