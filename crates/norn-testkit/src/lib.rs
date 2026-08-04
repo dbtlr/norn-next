@@ -15,15 +15,22 @@
 //! judgment made in review. That mapping is the authoritative one, and it is
 //! code so that it is checked rather than read.
 //!
+//! [`lanes`] is the third: it walks a crate's `tests/` directory and holds
+//! every `#[ignore]` in it to the lane that adopts it. The walk lives here and
+//! the tables live with the crates they describe, so a crate joining the lanes
+//! gains the guard rather than a copy of it.
+//!
 //! [`generated`] is assistance rather than enforcement: it hands a suite the
 //! documents a fixture profile generates, without the suite holding a
 //! temporary tree to get them.
 //!
 //! The measurement machinery is the same shape: [`counters`] compares counter
 //! readings, [`explain`] states plan assertions over emitted SQL, [`scale`]
-//! expresses the size-independence pair, and [`process`] spawns a child under
-//! isolation and measures what it cost. Each is helpers only — the bars that
-//! use them land with the subjects they measure.
+//! expresses the size-independence pair, [`process`] spawns a child under
+//! isolation and measures what it cost, and [`readings`] renders what a
+//! measurement found and records it under the run. Each is helpers only — the
+//! bars that use them land with the subjects they measure, because a bar is
+//! authored against one subject and moves only by a reviewed edit.
 //!
 //! Two modules bound how long a suite may wait, and they divide by subject:
 //! [`process`] bounds a child process's run, and [`wait`] bounds an
@@ -51,9 +58,11 @@ pub mod explain;
 pub mod generated;
 pub mod invariants;
 mod json;
+pub mod lanes;
 mod poll;
 #[cfg(unix)]
 pub mod process;
+pub mod readings;
 pub mod regression;
 pub mod scale;
 pub mod wait;

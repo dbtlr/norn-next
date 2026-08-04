@@ -97,9 +97,11 @@ pub const NAMED_SOURCES: &[&str] = &[
 /// thing that makes the carrier run at all. An `#[ignore]` for any other
 /// reason means the binding names a test nothing executes.
 ///
-/// Which file may use which prefix is `norn-fixtures`' own guard to decide;
-/// this asks only that a bound carrier's ignore reason names a lane.
-pub const LANE_IGNORE_PREFIXES: &[&str] = &["memory-lane case:", "soak-lane case:"];
+/// Which file may use which prefix is decided by [`crate::lanes`], against the
+/// table the file's own crate holds; this asks only that a bound carrier's
+/// ignore reason names a lane.
+pub const LANE_IGNORE_PREFIXES: &[&str] =
+    &["counter-lane case:", "memory-lane case:", "soak-lane case:"];
 
 /// What kind of obligation a case is.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]

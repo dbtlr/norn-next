@@ -491,6 +491,33 @@ fn capture(path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
     Ok((bytes, truncated))
 }
 
+/// How many descriptors this process holds open.
+///
+/// **A count of this process, taken from the kernel's own listing**: Linux
+/// publishes it at `/proc/self/fd` and macOS at `/dev/fd`, and both list one
+/// entry per open descriptor. Reading the listing holds a descriptor for the
+/// iterator itself and that descriptor is in the listing, so it is subtracted
+/// — the answer is what was open before the question was asked.
+///
+/// A subject whose descriptor cost is the question runs in a child of its own,
+/// because a count taken in a test process includes the harness and every case
+/// running beside it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this process's own descriptor listing.
+pub fn open_fd_count() -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    const FD_DIRECTORY: &str = "/proc/self/fd";
+    #[cfg(target_os = "macos")]
+    const FD_DIRECTORY: &str = "/dev/fd";
+
+    let listed = std::fs::read_dir(FD_DIRECTORY)?.count();
+    listed.checked_sub(1).ok_or_else(|| {
+        io::Error::other(format!(
+            "{FD_DIRECTORY} listed nothing, so the iterator's own descriptor is not in its listing"
+        ))
+    })
+}
+
 fn ignore_missing(error: io::Error) -> io::Result<()> {
     if error.kind() == io::ErrorKind::NotFound {
         Ok(())
@@ -731,6 +758,20 @@ mod tests {
             .wait()
             .expect("running a shell");
         assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGKILL));
+    }
+
+    /// The count is of what was open before the question was asked, so asking
+    /// it twice answers the same number and an open handle moves it by one.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Opens a handle so the count has something to report.
+    fn the_descriptor_count_is_the_listing_without_its_own_iterator() {
+        let before = open_fd_count().expect("a descriptor count");
+        assert_eq!(before, open_fd_count().expect("a second count"));
+        let held = std::fs::File::open("/dev/null").expect("a handle");
+        assert_eq!(open_fd_count().expect("a count while holding"), before + 1);
+        drop(held);
+        assert_eq!(open_fd_count().expect("a count after release"), before);
     }
 
     #[test]
