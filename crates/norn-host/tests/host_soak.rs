@@ -13,13 +13,24 @@
 //!
 //! The parent generates the ≥5k-document `soak` profile's tree and spawns a
 //! child — this test binary re-executed in a harness mode an environment
-//! variable selects. The child attaches the tree through a production host and
-//! then works it: it churns Markdown files in the vault so the watcher has
-//! something to reconcile, polls the attachment's trust state, and takes warm
-//! read-only requests against the derived store, asserting that every one of
-//! them finishes with its derivation counters at zero. Alongside the load it
-//! samples its own resident set and open-descriptor count on a fixed cadence
-//! and prints each sample, which is what the parent judges.
+//! variable selects, paired with a token the parent issued beside the tree so
+//! that a variable leaked into the lane's own environment fails loudly instead
+//! of turning the bar into a load nobody judges. The child attaches the tree
+//! through a production host and then works it: it churns Markdown files in the
+//! vault so the watcher has something to reconcile, polls the attachment's
+//! trust state, and takes warm read-only requests against the derived store,
+//! asserting that every one of them finishes with its derivation counters at
+//! zero. Alongside the load it samples its own resident set and
+//! open-descriptor count on a fixed cadence and prints each sample, which is
+//! what the parent judges.
+//!
+//! **The child holds a demand lease for the whole load.** Demand is what keeps
+//! the idle reaper away from the entry, and it is also the only thing that
+//! re-attaches one that went untrusted, so the load holds one and asks again
+//! — a bounded number of times — whenever the entry stops serving. What the
+//! trust-state assertion says is that the host kept serving under load, not
+//! that nothing ever hiccuped; how many recoveries a run needed is a recorded
+//! reading.
 //!
 //! Generation happens in the parent so that the child's samples are of the
 //! attachment and the load, and the counter assertions are made in the child
@@ -46,6 +57,9 @@ mod baselines;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use norn_config::VaultName;
+use norn_fs::ContentHash;
+use norn_host::{DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
 use norn_wire::TrustState;
@@ -53,6 +67,14 @@ use norn_wire::TrustState;
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
 const HARNESS_ENV: &str = "NORN_HOST_SOAK_HARNESS";
+
+/// The variable carrying the token the tree at that root was issued.
+///
+/// [`HARNESS_ENV`] alone does not select harness mode: a variable already in
+/// the environment this lane runs under would make the case below a load run
+/// that reports samples nobody judges, and the lane would pass having evaluated
+/// no bar. The token is what says a parent in this run issued the harness.
+const HARNESS_TOKEN_ENV: &str = "NORN_HOST_SOAK_HARNESS_TOKEN";
 
 /// The case the child re-executes, which is the one that reads this constant.
 const HARNESS_CASE: &str = "a_long_mixed_load_grows_neither_memory_nor_descriptors";
@@ -83,8 +105,30 @@ const CHURN_DIR: &str = "soak-churn";
 ///
 /// It covers generating nothing — the parent did that — and attaching the ≥5k
 /// profile, which is the only unbounded-looking part of the child's run. A
-/// child that reaches this is stuck rather than slow.
-const ATTACH_HEADROOM: Duration = Duration::from_secs(900);
+/// child that reaches this is stuck rather than slow: the generate-and-attach
+/// overhead at this profile reads in seconds, so the whole of this is runaway
+/// margin.
+///
+/// It is deliberately small enough that the child's deadline lands well inside
+/// the job's own timeout. What the parent judges is the child's stdout, and it
+/// reads that only once the child has ended, so a child the runner kills takes
+/// every sample of the run with it.
+const ATTACH_HEADROOM: Duration = Duration::from_secs(300);
+
+/// How many times the load asks for an attachment that stopped serving again
+/// before it calls the host unrecoverable.
+///
+/// Small on purpose: what the bar says is that the host kept serving under
+/// load, and a run that needed many demands to stay attached is not that, even
+/// if it eventually came back.
+const RECOVERY_ATTEMPTS: u32 = 3;
+
+/// How long one recovery attempt waits for the attachment to be ready again.
+///
+/// A bound on whether it came back at all: a re-attach that lands late still
+/// says the host recovered, and how quickly it did is a clock this suite does
+/// not read.
+const RECOVERY_LIMIT: Duration = Duration::from_secs(60);
 
 /// How long the load waits, once it ends, for the last thing it wrote to reach
 /// the derived store.
@@ -108,10 +152,11 @@ const MINIMUM_SAMPLES: usize = 8;
 #[ignore = "soak-lane case: runs in the nightly soak lane, not the workspace suite"]
 fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        run_load(Path::new(&root));
+        run_load(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
         return;
     }
 
+    baselines::assert_the_profile_the_bars_were_authored_on();
     let duration = declared_duration();
     let sandbox =
         Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "host-soak").expect("a sandbox");
@@ -120,12 +165,14 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         .expect("installing the harness");
     let root: PathBuf = sandbox.work_dir().join("attached");
     attach::Vault::generate(&root, "soak");
+    let token = attach::issue_harness_token(&root);
 
     let outcome = Run::new(&sandbox, &harness)
         // `--ignored` is what makes the filter reach the case at all: the case
         // the child re-executes is ignored, and a plain run would skip it.
         .args(["--exact", HARNESS_CASE, "--ignored", "--nocapture"])
         .env(HARNESS_ENV, &root)
+        .env(HARNESS_TOKEN_ENV, &token)
         .env(DURATION_ENV, duration.as_secs().to_string())
         .deadline(duration + ATTACH_HEADROOM)
         .wait()
@@ -134,8 +181,17 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     // derived is a failed assertion inside the load, and the status is how it
     // reaches here.
     outcome.assert_success();
+    // The slope is read off the tail of the series and the descriptor bar off
+    // its last sample, so a stdout that was cut short is a judgment of a run's
+    // beginning wearing the shape of a judgment of the run.
+    assert!(
+        !outcome.stdout_truncated,
+        "the load wrote more than the capture limit, so the samples that decide this run are a \
+         prefix of the ones it took"
+    );
 
     let samples = Sample::parse_all(&outcome.stdout_text());
+    let recoveries = reported_recoveries(&outcome.stdout_text());
     assert!(
         samples.len() >= MINIMUM_SAMPLES,
         "the load reported {} samples, which is too few to judge a slope over",
@@ -156,6 +212,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         &[
             ("load duration (s)", duration.as_secs().to_string()),
             ("samples", samples.len().to_string()),
+            ("attachment recoveries", recoveries.to_string()),
             (
                 "first quartile mean resident set (MiB)",
                 baselines::mebibytes(head),
@@ -245,14 +302,44 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(rest.split_whitespace().next().unwrap_or(rest))
 }
 
+/// How many times the load had to ask for its attachment again.
+///
+/// The child prints this once, after the loop it counts, so an absent line is a
+/// load that never reached its end — which is a run to fail rather than a
+/// reading of zero.
+fn reported_recoveries(report: &str) -> u32 {
+    let line = report
+        .lines()
+        .find(|line| line.starts_with(RECOVERY_LINE_PREFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "the load printed no `{RECOVERY_LINE_PREFIX}` line, so it did not run its loop to \
+                 the end and the samples above are of a load that stopped somewhere"
+            )
+        });
+    field(line, "recoveries=")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("`{line}` does not carry a recovery count"))
+}
+
 /// The mean resident set of one quarter of the series, indexed from zero.
 ///
 /// Quartile means rather than endpoints: one sample taken while a changeset
 /// commits is a spike, and a comparison of two single readings would let it
 /// decide the run.
+///
+/// The last quartile ends at the last sample rather than at a multiple of the
+/// quarter's width. A series whose length is not a multiple of four otherwise
+/// leaves its final one to three samples out of the slope while the descriptor
+/// bar reads the last of them, and the two bars judge different windows of the
+/// same run.
 fn quartile_mean(samples: &[Sample], quartile: usize) -> u64 {
     let size = samples.len() / 4;
-    let start = quartile * size;
+    let start = if quartile == 3 {
+        samples.len() - size
+    } else {
+        quartile * size
+    };
     let slice = &samples[start..start + size];
     let total: u64 = slice.iter().map(|sample| sample.rss_bytes).sum();
     total / slice.len() as u64
@@ -271,32 +358,53 @@ fn declared_duration() -> Duration {
     Duration::from_secs(seconds)
 }
 
+/// What the child prints once its loop ends, and what the parent reads the
+/// recovery count off.
+const RECOVERY_LINE_PREFIX: &str = "load ";
+
 /// The harness: attach the tree at `root`, work it until the deadline, and
 /// report a sample of this process on every tick.
 #[allow(clippy::disallowed_macros)] // The child's samples are a machine-consumed stream its parent reads.
 fn run_load(root: &Path) {
+    let duration = declared_duration();
+    // The lease below is what keeps the attachment: an entry nothing demands is
+    // reaped once the idle interval passes. The interval is the second guard
+    // behind it, and an interval inside the load's own duration would make a
+    // future edit that stopped holding the lease read as a host that stopped
+    // serving rather than as the policy it is.
+    assert!(
+        attach::IDLE_AFTER > duration,
+        "the load runs for {duration:?} against an idle interval of {:?}, so an attachment nothing \
+         demanded would be reaped part-way through it",
+        attach::IDLE_AFTER
+    );
+
     let vault = attach::Vault::adopt(root);
     let host = vault.host();
-    attach::attach_and_wait(&host, vault.name());
+    // Held for the whole load, not dropped at ready: demand is what the reaper
+    // counts, and it is also the only thing that re-attaches an entry that went
+    // untrusted.
+    let mut lease = attach::attach_and_wait(&host, vault.name());
 
     let mut store = vault.store();
     let subject = a_derived_path(&mut store);
     std::fs::create_dir_all(vault.path().join(CHURN_DIR)).expect("create the churn directory");
 
     let started = Instant::now();
-    let deadline = started + declared_duration();
+    let deadline = started + duration;
     let mut tick = 0u64;
+    let mut recoveries = 0u32;
     loop {
-        churn(vault.path(), tick);
+        let written = churn(vault.path(), tick);
         // Attached and answering: ready, or healing what the churn just
         // changed. A poll taken between a write and the reconcile it triggers
-        // legitimately sees warming, and only losing the attachment or the
-        // trust in it is a load the host stopped serving.
+        // legitimately sees warming, and anything else is an attachment that
+        // needs demanding again before it serves.
         let observed = host.state(vault.name()).expect("registered vault state");
-        assert!(
-            matches!(observed, TrustState::Ready | TrustState::Warming { .. }),
-            "the attachment stopped serving under load: {observed:?}"
-        );
+        if !serving(&observed) {
+            recoveries += 1;
+            lease = recovered(&host, vault.name(), &observed);
+        }
         if tick.is_multiple_of(COUNTER_CHECK_EVERY) {
             assert_warm_reads_derive_nothing(&mut store, &subject);
         }
@@ -308,7 +416,9 @@ fn run_load(root: &Path) {
         println!("{}", sample.line(started.elapsed()));
 
         if Instant::now() >= deadline {
-            assert_the_churn_reached_the_store(&mut store, tick);
+            assert_the_churn_reached_the_store(&mut store, &written);
+            drop(lease);
+            println!("{RECOVERY_LINE_PREFIX}ticks={tick} recoveries={recoveries}");
             return;
         }
         std::thread::sleep(SAMPLE_INTERVAL);
@@ -316,30 +426,79 @@ fn run_load(root: &Path) {
     }
 }
 
+/// Whether a state is one the host answers requests in: ready, or healing
+/// toward it.
+fn serving(state: &TrustState) -> bool {
+    matches!(state, TrustState::Ready | TrustState::Warming { .. })
+}
+
+/// Ask for an attachment that stopped serving again, and wait for it to come
+/// back.
+///
+/// **The bar is that the host kept serving under load, not that nothing ever
+/// hiccuped.** A watcher overflow leaves the entry untrusted, and a demand is
+/// the only thing that re-attaches one — a load that never demands again would
+/// sit beside an untrusted entry for the rest of the run. So a state outside
+/// ready-or-warming is met with a bounded number of fresh demands, and only a
+/// host that will not come back fails the load.
+///
+/// The caller's lease outlives this call, so the entry's demand count never
+/// reaches zero while a recovery is in flight and the reaper never sees an
+/// entry with nothing demanding it.
+fn recovered(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    observed: &TrustState,
+) -> DemandLease<ProductionEntryOps> {
+    let mut last = observed.clone();
+    for _ in 0..RECOVERY_ATTEMPTS {
+        let lease = host.retry(name).expect("re-requesting the attachment");
+        let deadline = Instant::now() + RECOVERY_LIMIT;
+        loop {
+            last = host.state(name).expect("registered vault state");
+            if last == TrustState::Ready {
+                return lease;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    panic!(
+        "the attachment stopped serving under load and {RECOVERY_ATTEMPTS} fresh demands did not \
+         bring it back inside {RECOVERY_LIMIT:?} each: it read {observed:?} and now reads {last:?}"
+    );
+}
+
 /// **The load is only a load if the vault it churns is being reconciled.**
 ///
-/// The last document the churn wrote is asked for by path: a run whose writes
-/// the watcher never saw would sample a host that sat idle, and a flat memory
-/// slope over an idle process says nothing about a leak. The wait is bounded
-/// and generous, because how quickly a reconcile lands is a clock this suite
-/// does not read.
-fn assert_the_churn_reached_the_store(store: &mut Store, tick: u64) {
-    let path = DocumentPath::new(&churn_name(tick)).expect("a document path");
+/// The last document the churn wrote is asked for by path *and* by content: a
+/// run whose writes the watcher never saw would sample a host that sat idle,
+/// and a flat memory slope over an idle process says nothing about a leak. The
+/// churn writes a bounded rotating set of names, so a row left by an earlier
+/// turn of the rotation answers the path on its own — comparing the stored
+/// content hash against the bytes the last tick wrote is what binds the proof
+/// to that write. The wait is bounded and generous, because how quickly a
+/// reconcile lands is a clock this suite does not read.
+fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
+    let expected = ContentHash::of(written.content.as_bytes()).to_hex();
     let deadline = Instant::now() + RECONCILE_LIMIT;
     loop {
-        let found = store
+        let derived = store
             .begin_request()
-            .stored_document(&path)
+            .stored_document(&written.path)
             .expect("reading a document")
-            .is_some();
-        if found {
+            .map(|document| document.content_hash);
+        if derived.as_deref() == Some(expected.as_str()) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "the churn wrote {} and no reconcile derived it inside {RECONCILE_LIMIT:?}, so the \
-             load ran against a host that saw nothing",
-            path.as_str()
+            "the churn last wrote {} and no reconcile derived those bytes inside \
+             {RECONCILE_LIMIT:?}, so the load ran against a host that saw nothing: the store holds \
+             {derived:?} against the {expected} that write hashes to",
+            written.path.as_str()
         );
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -389,15 +548,24 @@ fn a_derived_path(store: &mut Store) -> DocumentPath {
         .path
 }
 
+/// What one turn of the churn left at a path, which is what the reconcile proof
+/// asks the store for.
+struct Written {
+    path: DocumentPath,
+    content: String,
+}
+
 /// One turn of the file churn: a document created, the one before it modified,
-/// and the one before that removed.
+/// and the one before that removed. What comes back is the creation, which is
+/// the newest write of the turn.
 ///
 /// All three event kinds every tick, over a bounded rotating set, so the
 /// watcher reconciles creations, modifications and deaths for as long as the
 /// load runs without the vault growing without bound.
-fn churn(vault: &Path, tick: u64) {
+fn churn(vault: &Path, tick: u64) -> Written {
     let at = |n: u64| vault.join(churn_name(n));
-    std::fs::write(at(tick), format!("# Churn {tick}\n\nA body.\n")).expect("write a churn file");
+    let content = format!("# Churn {tick}\n\nA body.\n");
+    std::fs::write(at(tick), &content).expect("write a churn file");
     if tick >= 1 {
         std::fs::write(
             at(tick - 1),
@@ -409,6 +577,10 @@ fn churn(vault: &Path, tick: u64) {
         // The rotation removes a file a later tick recreates, so a removal
         // finding nothing is the rotation working rather than a failure.
         let _ = std::fs::remove_file(at(tick - 2));
+    }
+    Written {
+        path: DocumentPath::new(&churn_name(tick)).expect("a document path"),
+        content,
     }
 }
 

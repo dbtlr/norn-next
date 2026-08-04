@@ -74,14 +74,21 @@ jobs:
   # green run of this lane as it stands — a green run of a lane that does not
   # measure a term is not one of the five, and this lane now measures all three.
   #
-  # The timeout fits the hour of load, the attach that precedes it and the build
-  # that precedes that, with runaway headroom. It is a runaway guard and not a
-  # bar on speed: nothing in this job fails because it took longer, and the load
-  # itself is a declared duration rather than a measured one.
+  # The timeout is the outer runaway guard, and it is set so the inner one is
+  # what fires. The host load's child carries its own deadline — the declared
+  # hour plus five minutes of attach headroom, so 65 minutes at worst — and the
+  # samples this job judges are read off that child's output only once it has
+  # ended. A job killed while the child is still running loses every sample of
+  # the run, so the timeout leaves the worst-case child room to reach its own
+  # deadline and still report: 120 minutes covers checkout, a cold debug build,
+  # the three fixtures steps, and that 65 minutes with headroom over the lot.
+  # It remains a runaway guard and not a bar on speed: nothing in this job fails
+  # because it took longer, and the load itself is a declared duration rather
+  # than a measured one.
   soak:
     name: soak
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:

@@ -31,7 +31,10 @@
 //! harness entry point — the child re-executes that case by name, and the
 //! environment variable is what tells it to attach instead of to measure. One
 //! case doing both is what keeps this suite from carrying a case that passes
-//! trivially in the lane whenever nothing spawned it.
+//! trivially in the lane whenever nothing spawned it. **The variable alone does
+//! not select the harness**: it is paired with a token the parent issued beside
+//! the tree, so a variable leaked into the lane's own environment fails loudly
+//! here instead of turning every bar into a harness run.
 //!
 //! **Every case here is `#[ignore]`d into the `memory-lane` lane**, and the CI
 //! `memory invariant` job is the only thing that runs them. A measurement
@@ -46,12 +49,19 @@ mod baselines;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use norn_store::Store;
 use norn_testkit::process::{Run, Sandbox};
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
 const HARNESS_ENV: &str = "NORN_HOST_ATTACH_HARNESS";
+
+/// The variable carrying the token the tree at that root was issued.
+///
+/// [`HARNESS_ENV`] alone does not select harness mode: a variable already in
+/// the environment this lane runs under would make each bar below a harness run
+/// that reports an attachment and evaluates no bar at all. The token is what
+/// says a parent in this run issued the harness.
+const HARNESS_TOKEN_ENV: &str = "NORN_HOST_ATTACH_HARNESS_TOKEN";
 
 /// The case the child re-executes, which is the one that reads this constant.
 const HARNESS_CASE: &str = "the_gate_profile_attaches_inside_its_memory_bar";
@@ -60,26 +70,22 @@ const HARNESS_CASE: &str = "the_gate_profile_attaches_inside_its_memory_bar";
 ///
 /// A runaway bound rather than a bar on speed: an attachment approaching this
 /// is stuck, not slow, and how long one takes is a clock this lane does not
-/// read.
-const ATTACH_DEADLINE: Duration = Duration::from_secs(600);
-
-/// How many derived rows the child reads at a time when it reports what it
-/// attached.
-///
-/// Far below the changeset the heal itself holds, so counting what was derived
-/// cannot be what a reading measures.
-const REPORT_PAGE: usize = 64;
+/// read. It sits above the child's own bound on the same attach
+/// ([`attach::READY_LIMIT`]) so the child fails naming the state it saw, and
+/// below what the lane's job timeout leaves for three of them, so a stuck child
+/// is ended here rather than by the runner.
+const ATTACH_DEADLINE: Duration = Duration::from_secs(300);
 
 /// **The ceiling**, and the harness the pair spawns.
 ///
 /// The two roles are one case because the child selects it by name: with
-/// [`HARNESS_ENV`] set this process is the child, and it attaches the tree the
-/// variable names instead of measuring anything.
+/// [`HARNESS_ENV`] and its token set this process is the child, and it attaches
+/// the tree the variable names instead of measuring anything.
 #[test]
 #[ignore = "memory-lane case: runs in the ci memory job, not the workspace suite"]
 fn the_gate_profile_attaches_inside_its_memory_bar() {
     if let Some(root) = std::env::var_os(HARNESS_ENV) {
-        attach_and_report(Path::new(&root));
+        attach_and_report(&attach::accepted_harness_root(&root, HARNESS_TOKEN_ENV));
         return;
     }
 
@@ -156,7 +162,7 @@ fn peak_memory_holds_flat_from_the_ambiguity_profile_to_the_gate_profile() {
 /// artifact cargo built is a file a concurrent build may rewrite. The tree goes
 /// inside the sandbox too, so it is removed with it.
 fn attach_peak(label: &str, profile: &str) -> u64 {
-    assert_the_profile_the_bars_were_authored_on();
+    baselines::assert_the_profile_the_bars_were_authored_on();
     let documents = norn_fixtures::Profile::by_name(profile)
         .unwrap_or_else(|| panic!("no profile named `{profile}`"))
         .docs;
@@ -167,16 +173,24 @@ fn attach_peak(label: &str, profile: &str) -> u64 {
         .expect("installing the harness");
     let root: PathBuf = sandbox.work_dir().join("attached");
     attach::Vault::generate(&root, profile);
+    let token = attach::issue_harness_token(&root);
 
     let outcome = Run::new(&sandbox, &harness)
         // `--ignored` is what makes the filter reach the case at all: the case
         // the child re-executes is ignored, and a plain run would skip it.
         .args(["--exact", HARNESS_CASE, "--ignored", "--nocapture"])
         .env(HARNESS_ENV, &root)
+        .env(HARNESS_TOKEN_ENV, &token)
         .deadline(ATTACH_DEADLINE)
         .wait()
         .expect("running the attach harness");
     outcome.assert_success();
+    // What the parent judges is the child's own report, so a prefix of it is a
+    // reading of a run whose end was cut off rather than a reading of the run.
+    assert!(
+        !outcome.stdout_truncated,
+        "the harness wrote more than the capture limit, so what came back is a prefix"
+    );
 
     // A bar is only a statement about an attachment that happened. The child
     // reports what it found derived, so an attach that converged over nothing
@@ -199,44 +213,10 @@ fn attach_and_report(root: &Path) {
         attach::attach_and_wait(&host, vault.name());
     }
     let mut store = vault.store();
-    println!("{}", report_line(derived_documents(&mut store)));
-}
-
-/// How many documents a store holds, read a bounded page at a time.
-fn derived_documents(store: &mut Store) -> usize {
-    let request = store.begin_request();
-    let mut counted = 0;
-    let mut after = None;
-    loop {
-        let page = request
-            .stored_documents_after(after.as_ref(), REPORT_PAGE)
-            .expect("reading a page of derived documents");
-        let Some(last) = page.last() else {
-            return counted;
-        };
-        after = Some(last.path.clone());
-        counted += page.len();
-    }
+    println!("{}", report_line(attach::derived_documents(&mut store)));
 }
 
 /// What the child prints and the parent looks for.
 fn report_line(documents: usize) -> String {
     format!("attached {documents} documents")
-}
-
-/// Every baseline this suite asserts against is a reading of the unoptimized
-/// build. An optimized one allocates differently enough that the bars would be
-/// measuring a subject they were not authored against, and a bar authored high
-/// enough to hold either would pass quietly rather than fail.
-///
-/// It fails here rather than at compile time on purpose: a release build of the
-/// workspace suite is a normal thing to want, and it is only the measurement
-/// cases that are wrong under it.
-#[allow(clippy::assertions_on_constants)] // The constant is the build profile, and the point is to fail the run under the wrong one.
-fn assert_the_profile_the_bars_were_authored_on() {
-    assert!(
-        cfg!(debug_assertions),
-        "the memory baselines are debug-profile values; this suite was built with optimizations, \
-         so its bars describe a different subject"
-    );
 }

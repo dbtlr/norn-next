@@ -14,12 +14,13 @@
 //! declaration rather than part of the corpus a generator draws. Attachment
 //! pins one, so [`Vault::generate`] writes the minimal schema beside the tree.
 //!
-//! Both binaries that compile this module use part of it — the child harnesses
+//! Each binary that compiles this module uses part of it — the child harnesses
 //! adopt a tree the parent generated rather than generating one — so an unused
-//! remainder in either is the layout rather than a defect.
+//! remainder in any of them is the layout rather than a defect.
 #![allow(dead_code)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -27,8 +28,10 @@ use std::time::{Duration, Instant};
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_fixtures::Profile;
-use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
-use norn_store::Store;
+use norn_host::{
+    DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
+};
+use norn_store::{DocumentPath, Store};
 use norn_wire::TrustState;
 
 /// The seed every generated tree is drawn at. One value, so two readings
@@ -43,40 +46,80 @@ const SCHEMA: &[u8] = b"version: 1\n";
 
 /// How long a suite waits for an attachment to converge.
 ///
-/// A bound on whether the state ever converged, and nothing on how quickly: the
-/// profiles here reach thousands of documents, and a bound near the time an
-/// attach usually takes would make machine speed a test result.
-pub const READY_LIMIT: Duration = Duration::from_secs(600);
+/// A runaway bound rather than a bar on speed: an attachment approaching this
+/// is stuck, not slow, and how long one takes is a clock these lanes do not
+/// read. It sits below the deadline the process harness gives a child that
+/// attaches, so a stuck attach fails here — naming the state it was last seen
+/// in — rather than being killed from outside with nothing to say.
+pub const READY_LIMIT: Duration = Duration::from_secs(240);
 
-/// A directory one case owns, under this target's own temporary directory, and
-/// which is removed with it.
+/// How long an entry nothing demands may sit attached before the host reaps it.
 ///
-/// The name carries the process id and a counter, so two cases in one run never
-/// meet in a tree.
-pub struct Scratch {
-    root: PathBuf,
+/// Longer than any load these suites run, so an attachment is torn down when
+/// its host drops and at no other moment. A run that works the host past this
+/// holds a demand lease for the whole of it, and this is the second guard
+/// behind that one.
+pub const IDLE_AFTER: Duration = Duration::from_secs(3600);
+
+/// The file a parent writes beside a generated tree to say it issued the
+/// harness run that adopts it.
+const TOKEN_FILE: &str = "harness-token";
+
+/// Issue the token for the tree at `root`, and hand back its text.
+///
+/// **A harness variable alone is not an invitation.** These suites put a child
+/// in harness mode with an environment variable naming a tree; the same
+/// variable already present in the environment the *parent* runs under would
+/// turn every bar here into a harness run that reports an attachment and
+/// evaluates nothing. So the parent writes a token inside the tree it generated
+/// and passes the same text in a second variable, and the child refuses the
+/// role unless the two agree.
+pub fn issue_harness_token(root: &Path) -> String {
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock past the epoch")
+        .as_nanos();
+    let token = format!(
+        "{}-{}-{nanos}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    );
+    std::fs::write(root.join(TOKEN_FILE), &token).expect("write the harness token");
+    token
 }
 
-impl Scratch {
-    pub fn new(label: &str) -> Scratch {
-        static SERIAL: AtomicU64 = AtomicU64::new(0);
-        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("{label}-{}-{serial}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
-        Scratch { root }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
+/// The root a child adopts, taken only where the token pairs with it.
+///
+/// Every way the pair can fail to hold is a panic naming what was wrong: a
+/// leaked variable names a root with no token beside it, or one whose token is
+/// another run's. Falling through to the bars instead is what would let a
+/// leaked variable pass a lane having measured nothing.
+pub fn accepted_harness_root(root: &OsStr, token_variable: &str) -> PathBuf {
+    let root = PathBuf::from(root);
+    let issued = std::fs::read_to_string(root.join(TOKEN_FILE)).unwrap_or_else(|e| {
+        panic!(
+            "this suite was put in harness mode naming {}, and reading the harness token there \
+             failed: {e}. The token is what says a parent in this run issued the harness; without \
+             it the bars this suite carries would not run at all.",
+            root.display()
+        )
+    });
+    let presented = std::env::var(token_variable).unwrap_or_else(|e| {
+        panic!(
+            "this suite was put in harness mode naming {}, and `{token_variable}` does not carry \
+             the token that goes with it: {e}",
+            root.display()
+        )
+    });
+    assert_eq!(
+        presented.trim(),
+        issued.trim(),
+        "`{token_variable}` carries a token the tree at {} was not issued, so the harness mode \
+         this suite was put in belongs to another run",
+        root.display()
+    );
+    root
 }
 
 /// The vault tree, and the machine-local directories a host serves it from.
@@ -160,9 +203,7 @@ impl Vault {
             registry,
             ProductionEntryOps::new([entry], self.dirs(), policy),
             LifecyclePolicy {
-                // Longer than any run here, so nothing detaches underneath a
-                // measurement that did not ask for it.
-                idle_after: Duration::from_secs(3600),
+                idle_after: IDLE_AFTER,
                 worker_slots: 1,
                 watch_poll_interval: Duration::from_millis(50),
             },
@@ -171,23 +212,65 @@ impl Vault {
     }
 }
 
-/// Attach `vault` through `host` and wait for the state it converges to.
+/// Attach `vault` through `host`, wait for it to become ready, and hand back
+/// the demand that got it there.
 ///
-/// The lease is dropped here: what the suites measure is an attachment that
-/// reached [`TrustState::Ready`], and holding demand past that only keeps the
-/// reaper away from something no run here reaps.
-pub fn attach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    host.demand(name).expect("request attachment");
+/// **The lease comes back with the attachment rather than being dropped here.**
+/// Demand is what an entry's idle reaper counts: an entry with no lease on it is
+/// detached once the idle interval passes, and a run that keeps working the
+/// host past that interval would lose the attachment underneath itself. Demand
+/// is also the only thing that re-attaches an entry that went untrusted, so a
+/// caller that means to keep being served holds one.
+///
+/// A caller that only wants the derived store on disk lets the lease drop: the
+/// host it attached through is dropped in the same breath, and that detaches
+/// the entry outright.
+pub fn attach_and_wait(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+) -> DemandLease<ProductionEntryOps> {
+    let lease = host.demand(name).expect("request attachment");
     let deadline = Instant::now() + READY_LIMIT;
     loop {
         let observed = host.state(name).expect("registered vault state");
         if observed == TrustState::Ready {
-            return;
+            return lease;
         }
         assert!(
             Instant::now() < deadline,
             "attach did not converge inside {READY_LIMIT:?}; observed {observed:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How many documents a store holds, read a bounded page at a time.
+///
+/// The page is far below the changeset a heal itself holds, so counting what an
+/// attachment derived cannot be what a memory reading measures.
+pub fn derived_documents(store: &mut Store) -> usize {
+    let mut counted = 0;
+    for_each_derived_path(store, |_| counted += 1);
+    counted
+}
+
+/// Every derived path, handed over one at a time, a bounded page behind.
+pub fn for_each_derived_path(store: &mut Store, mut visit: impl FnMut(&DocumentPath)) {
+    /// How many derived rows are read at a time.
+    const PAGE: usize = 64;
+
+    let request = store.begin_request();
+    let mut after: Option<DocumentPath> = None;
+    loop {
+        let page = request
+            .stored_documents_after(after.as_ref(), PAGE)
+            .expect("reading a page of derived documents");
+        let Some(last) = page.last() else {
+            return;
+        };
+        after = Some(last.path.clone());
+        for document in &page {
+            visit(&document.path);
+        }
     }
 }

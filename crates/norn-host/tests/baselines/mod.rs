@@ -19,6 +19,13 @@
 //! over a long mixed load. Repeated local readings cover **macos-arm64**
 //! natively.
 //!
+//! **The platform that gates is `ubuntu-latest` x86_64-glibc**, and no band
+//! below is measured there yet: the per-PR memory job and the nightly soak lane
+//! are what produce the first hosted readings, and until they do the values are
+//! the macos-arm64 bands with headroom over them. The x86_64-glibc readings are
+//! recorded beside the bands they belong to when they land, the same way the
+//! generator's baselines carry both architectures they were measured on.
+//!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
 //! lane and `host_soak.rs` for the scheduled one — and each asserts against the
 //! values its lane owns, so the remainder being unused in either is the layout
@@ -98,6 +105,23 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// each reconciliation does: a leak at that scale compounds over an hour rather
 /// than levelling off.
 pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_250;
+
+/// Every band above is a reading of the unoptimized build. An optimized one
+/// allocates differently enough that the bars would be measuring a subject they
+/// were not authored against, and a bar authored high enough to hold either
+/// would pass quietly rather than fail.
+///
+/// It fails at run time rather than at compile time on purpose: a release build
+/// of the workspace suite is a normal thing to want, and it is only the
+/// measurement cases that are wrong under it.
+#[allow(clippy::assertions_on_constants)] // The constant is the build profile, and the point is to fail the run under the wrong one.
+pub fn assert_the_profile_the_bars_were_authored_on() {
+    assert!(
+        cfg!(debug_assertions),
+        "the host measurement baselines are debug-profile values; this suite was built with \
+         optimizations, so its bars describe a different subject"
+    );
+}
 
 /// How a reading is rendered and where it is recorded is the harness's, and
 /// every measurement lane in the workspace writes the same table under its run.

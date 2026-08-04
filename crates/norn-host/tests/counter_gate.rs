@@ -19,15 +19,22 @@
 //! `counter gates` job is the only thing that runs them. Attaching thousands of
 //! documents beside every other test would put a vault walk in "build and
 //! test", which is a suite that stays free of measurement.
+//!
+//! Each generated tree sits in a testkit sandbox, which is a unix-only harness,
+//! and the lane that runs these cases is a Linux one.
+#![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
+
+use std::path::Path;
 
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, Store,
     StoredDocument, class_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
+use norn_testkit::process::Sandbox;
 use norn_testkit::scale::{ScaleObservation, SizeIndependencePair};
 
 /// The document the size-independence pair writes at both scales.
@@ -47,14 +54,11 @@ const PROBE_PATH: &str = "counter-gate/probe.md";
 #[test]
 #[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
 fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
-    let scratch = attach::Scratch::new("counter-gate-warm");
-    let vault = attach::Vault::generate(scratch.path(), "realistic");
-    {
-        let host = vault.host();
-        attach::attach_and_wait(&host, vault.name());
-    }
+    let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let (_sandbox, vault) = attached("counter-gate-warm", profile.name);
 
     let mut store = vault.store();
+    assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
     let stem = subject.path.stem().to_string();
     let probe = class_probe(&stem).expect("a class stem off a derived path");
@@ -107,8 +111,8 @@ fn a_bounded_write_costs_the_same_at_both_scales() {
     let small = norn_fixtures::Profile::by_name("ambiguous").expect("the ambiguity profile");
     let large = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
 
-    let small_counters = one_probe_write("counter-gate-pair-ambiguous", small.name);
-    let large_counters = one_probe_write("counter-gate-pair-realistic", large.name);
+    let small_counters = one_probe_write("counter-gate-pair-ambiguous", &small);
+    let large_counters = one_probe_write("counter-gate-pair-realistic", &large);
 
     SizeIndependencePair::new(
         "upserting one document",
@@ -120,15 +124,12 @@ fn a_bounded_write_costs_the_same_at_both_scales() {
 
 /// Attach `profile`, then count what upserting one document into its derived
 /// store costs.
-fn one_probe_write(label: &str, profile: &str) -> CounterSnapshot {
-    let scratch = attach::Scratch::new(label);
-    let vault = attach::Vault::generate(scratch.path(), profile);
-    {
-        let host = vault.host();
-        attach::attach_and_wait(&host, vault.name());
-    }
+fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnapshot {
+    let (_sandbox, vault) = attached(label, profile.name);
 
     let mut store = vault.store();
+    assert_the_attachment_derived_the_profile(&mut store, profile);
+    assert_the_probes_stem_is_the_probes_alone(&mut store);
     let mut request = store.begin_request();
     request
         .apply_increment(
@@ -147,6 +148,67 @@ fn one_probe_write(label: &str, profile: &str) -> CounterSnapshot {
         "a write that counted nothing is an instrument that never reached the store"
     );
     reading.readings().collect()
+}
+
+/// Generate `profile`'s tree in a sandbox of its own, attach it, and hand back
+/// the pair.
+///
+/// The sandbox comes back with the vault because it is what removes the tree:
+/// the derived store the bars read sits inside it, and dropping it takes both.
+///
+/// The host is attached and dropped inside this call, so what the bars read is
+/// what an attachment left behind rather than a host still working. The demand
+/// that made it ready goes with it — the host is what an attachment belongs to,
+/// and this one is gone before a bar reads anything.
+fn attached(label: &str, profile: &str) -> (Sandbox, attach::Vault) {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile);
+    {
+        let host = vault.host();
+        attach::attach_and_wait(&host, vault.name());
+    }
+    (sandbox, vault)
+}
+
+/// **A bar is only a statement about an attachment that happened.** The store
+/// holds one derived document per document the profile emits.
+///
+/// The count comes off the profile rather than a number written here, so a
+/// profile that grows moves the expectation with it; what this forbids is an
+/// attach that converged over a fraction of the tree and left bars reading a
+/// vault nobody walked.
+fn assert_the_attachment_derived_the_profile(store: &mut Store, profile: &norn_fixtures::Profile) {
+    let derived = attach::derived_documents(store);
+    assert_eq!(
+        derived, profile.docs,
+        "`{}` emits {} documents and the attachment derived {derived}",
+        profile.name, profile.docs
+    );
+}
+
+/// **The probe's stem is the probe's alone.** No document the attachment
+/// derived carries it.
+///
+/// What a bounded write costs includes the findings maintenance it implies, and
+/// that is keyed by ambiguity class — the document stem. A generated document
+/// sharing the probe's stem would put the probe in a populated class at one
+/// scale and an empty one at the other, and the pair would read a violation
+/// that is the word list's rather than the store's. Asserting it here is what
+/// makes a future word-list edit fail saying so.
+fn assert_the_probes_stem_is_the_probes_alone(store: &mut Store) {
+    let probe = DocumentPath::new(PROBE_PATH).expect("a document path");
+    let mut sharing = Vec::new();
+    attach::for_each_derived_path(store, |path| {
+        if path.stem() == probe.stem() {
+            sharing.push(path.as_str().to_string());
+        }
+    });
+    assert!(
+        sharing.is_empty(),
+        "the probe writes `{PROBE_PATH}`, whose stem `{}` decides the ambiguity class the write \
+         maintains, and the attachment derived documents sharing it: {sharing:?}",
+        probe.stem()
+    );
 }
 
 /// One document the attachment derived, which is what the warm readers are
