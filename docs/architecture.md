@@ -598,8 +598,9 @@ hydration. Warm requests assert zero derivation counters.
 Reads reach the database independently of orchestration, on a read-only snapshot handle
 `norn-store` mints from the live `Store` — held in entry state beside the attachment, never
 inside it, so a read proceeds while a warm lifecycle job holds the store. The snapshot is
-established under the entry gate lock in the same critical section that reads trust — the
-trust label and the snapshot describe the same instant — and the read runs outside the
+established under the entry gate lock in the same critical section that reads trust —
+established by a read statement, since a bare deferred `BEGIN` takes no snapshot — so the
+trust label and the snapshot describe the same instant, and the read runs outside the
 lock: it sees the last committed increment, never blocks the writer, and may trail
 in-flight derivation. Concurrent reads serialize against each other on the one reader per
 entry; measured reader contention is what mints more through the same seam. The reader is
