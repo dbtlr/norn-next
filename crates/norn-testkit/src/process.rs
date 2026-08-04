@@ -501,7 +501,11 @@ fn capture(path: &Path, limit: u64) -> io::Result<(Vec<u8>, bool)> {
 ///
 /// A subject whose descriptor cost is the question runs in a child of its own,
 /// because a count taken in a test process includes the harness and every case
-/// running beside it.
+/// running beside it — and, worse, moves while it is being taken, since a case
+/// on another thread opening a file changes the answer. That is also why this
+/// function carries no assertion of its own here: a case stating what it counts
+/// would be stating it about a process where the number is nobody's to hold
+/// still. What holds it is a caller running alone in a process it spawned.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this process's own descriptor listing.
 pub fn open_fd_count() -> io::Result<usize> {
@@ -758,20 +762,6 @@ mod tests {
             .wait()
             .expect("running a shell");
         assert_eq!(outcome.status, RunStatus::Signaled(libc::SIGKILL));
-    }
-
-    /// The count is of what was open before the question was asked, so asking
-    /// it twice answers the same number and an open handle moves it by one.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Opens a handle so the count has something to report.
-    fn the_descriptor_count_is_the_listing_without_its_own_iterator() {
-        let before = open_fd_count().expect("a descriptor count");
-        assert_eq!(before, open_fd_count().expect("a second count"));
-        let held = std::fs::File::open("/dev/null").expect("a handle");
-        assert_eq!(open_fd_count().expect("a count while holding"), before + 1);
-        drop(held);
-        assert_eq!(open_fd_count().expect("a count after release"), before);
     }
 
     #[test]

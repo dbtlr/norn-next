@@ -297,7 +297,7 @@ fn run_load(root: &Path) {
             matches!(observed, TrustState::Ready | TrustState::Warming { .. }),
             "the attachment stopped serving under load: {observed:?}"
         );
-        if tick % COUNTER_CHECK_EVERY == 0 {
+        if tick.is_multiple_of(COUNTER_CHECK_EVERY) {
             assert_warm_reads_derive_nothing(&mut store, &subject);
         }
 
