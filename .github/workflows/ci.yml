@@ -111,29 +111,37 @@ jobs:
       - name: Gate
         run: cargo test --locked -p norn-testkit --test architecture
 
-  # Still a placeholder, and waiting on subjects rather than on machinery. The
-  # machinery — counter snapshots, the SQL-and-plan pairing, the
-  # size-independence pair — is in norn-testkit already.
+  # The counter half is a real gate, over the path a request really takes: a
+  # generated vault tree on disk, a production attachment that walked it, and
+  # the derived store that attachment left behind. Two bars run at profiles the
+  # per-PR lane owns. A warm request over the ~2k-document realistic profile
+  # finishes with every derivation counter at zero, so a read that derives is a
+  # failure rather than a slowdown. And one bounded write costs the same at 300
+  # documents as at 2000 — the sharper of the two, because a ceiling passes
+  # anything under it and a pair fails the moment two scales stop moving
+  # together. Both are counts: a counter says the same thing on a loaded runner,
+  # which a clock does not.
   #
-  # The derivation counters now exist: norn-store's requests carry their own
-  # reading, its own suite asserts a read-only request finishes at zero, and
-  # the readings feed norn-testkit's comparison primitives. What is still
-  # missing is what makes a *gate* out of them — a request path over the
-  # ~2k-document realistic profile, which arrives with the host. The EXPLAIN
-  # bars wait on the Layer 3 read builders, because a plan assertion is only
-  # worth anything against the statement a builder emitted. All of it is
-  # counts, never clocks.
+  # The plan half waits on the Layer 3 read builders. An `EXPLAIN` assertion is
+  # worth something only against the statement a builder emitted — a gate
+  # against hand-written SQL tests a string nobody executes — so the bars land
+  # with the builders that emit the SQL they judge.
+  #
+  # The cases live in this job alone, `#[ignore]`d with a `counter-lane case:`
+  # reason so the build job's workspace suite does not attach thousands of
+  # documents beside every other test. The script is what makes the wholesale
+  # `--ignored` run fail when it ran nothing.
   gates:
-    name: counter and plan gates (placeholder — Layers 1 and 3)
+    name: counter and plan gates
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Pending
-        run: |
-          echo "Counter and plan gates land with their subjects."
-          echo "norn-store carries the counters; the bars need a request path"
-          echo "over the ~2k-document profile, which the host brings."
-          echo "Layer 3 (read builders): EXPLAIN plans against emitted SQL."
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+      - name: Counter bars
+        run: .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
 
   # A real gate. It spawns the fixture generator under the testkit's process
   # harness and reads the peak resident set the kernel accounted to that child,

@@ -334,6 +334,7 @@ version = "0.0.0"
 dependencies = [
  "norn-config",
  "norn-embed",
+ "norn-fixtures",
  "norn-fs",
  "norn-store",
  "norn-testkit",

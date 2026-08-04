@@ -18,6 +18,12 @@ norn-store = { path = "../norn-store" }
 norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }
 
+# The measurement suites attach a real host over a generated vault tree, so the
+# generator is a development edge of this crate. It is a dev edge and cycles
+# back — the testkit names the generator's profiles as the scales of a
+# size-independence pair — which is why the allowlist does not describe it: dev
+# edges cycle by construction and the architecture gate reads and discards them.
 [dev-dependencies]
+norn-fixtures = { path = "../norn-fixtures" }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }
