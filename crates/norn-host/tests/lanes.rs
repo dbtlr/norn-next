@@ -22,9 +22,10 @@
 ///   step.
 /// - `soak-lane case:` — the nightly soak workflow's `--ignored` steps.
 ///
-/// Adding a lane's test file means adding its stem here, in the same diff as
-/// the workflow step that runs it: a stem this table does not name is an
-/// error, not a case with no lane to check against.
+/// An ignored case in a new test file means adding that file's stem here, in
+/// the same diff: a stem this table does not name is an error, not a case with
+/// no lane to check against. Whether a workflow step runs the file is a pairing
+/// this guard does not read and a reviewer does.
 const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
     ("counter_gate", "counter-lane case:"),
     ("memory", "memory-lane case:"),

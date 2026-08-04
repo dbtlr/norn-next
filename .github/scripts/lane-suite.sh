@@ -10,8 +10,9 @@
 # it**, and that is what this script exists to do.
 #
 # Which lane a case belongs to is its `#[ignore]` reason, and the reasons are
-# checked by crates/norn-fixtures/tests/lanes.rs, so a stray `#[ignore]` cannot
-# be silently adopted by whichever lane runs its suite.
+# checked by norn_testkit::lanes, which walks each crate's tests/ directory
+# against a table that crate owns (its tests/lanes.rs). A stray `#[ignore]`
+# therefore cannot be silently adopted by whichever lane runs its suite.
 #
 # usage: lane-suite.sh <package> <test-target> [extra harness args...]
 

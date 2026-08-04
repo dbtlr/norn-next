@@ -12,10 +12,15 @@
 //! [`assert_every_ignored_case_names_its_lane`] a table mapping each test
 //! file's stem to the one lane prefix its `#[ignore]` reasons may open with,
 //! and this module reads that crate's sources to say so. A stem the table does
-//! not name is an ERROR — unknown, never lane-less — so adding a lane's test
-//! file forces a table edit in the same diff as the workflow step that runs it,
-//! and a prefix sanctioned for a different file is rejected exactly as loudly
-//! as one that is not sanctioned at all.
+//! not name is an ERROR — unknown, never lane-less — so an ignored case in a
+//! new test file fails the crate's own guard until the table names the lane
+//! that adopts it, and a prefix sanctioned for a different file is rejected
+//! exactly as loudly as one that is not sanctioned at all.
+//!
+//! **What binds is the lane a case claims, not that a lane runs it.** Nothing
+//! here reads a workflow: a stem in the table with no step behind it is a lane
+//! that runs nothing, and that pairing is review-held. What this removes is the
+//! opposite hazard — a case a lane picks up under a bar nobody assigned it.
 //!
 //! A second sweep catches the shapes the primary matcher cannot parse:
 //! `#[cfg_attr(unix, ignore = "...")]` never starts a trimmed line with
@@ -46,6 +51,7 @@ use std::path::{Path, PathBuf};
 /// recognizes is bound by some crate.
 pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
     ("norn-fixtures", &["memory-lane case:", "soak-lane case:"]),
+    ("norn-fs", &["memory-lane case:"]),
     (
         "norn-host",
         &["counter-lane case:", "memory-lane case:", "soak-lane case:"],
@@ -103,9 +109,9 @@ fn reason(attribute: &str) -> Option<&str> {
 fn check_ignore_reason(lanes: &[(&str, &str)], stem: &str, reason: &str) -> Result<(), String> {
     let Some(&(_, required)) = lanes.iter().find(|(s, _)| *s == stem) else {
         return Err(format!(
-            "no lane is named for file stem `{stem}` in this crate's lane table. Adding a lane's \
-             test file means adding it there, in the same diff as the workflow step that runs it \
-             — an unnamed stem is an error, not a case with no lane."
+            "no lane is named for file stem `{stem}` in this crate's lane table. An ignored case \
+             in a new test file means adding that file's stem there, in the same diff — an \
+             unnamed stem is an error, not a case with no lane."
         ));
     };
     if reason.starts_with(required) {
