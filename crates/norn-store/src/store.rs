@@ -16,11 +16,15 @@
 //! a property of the vault rather than of the handle; it is carved and not built
 //! (NORN-33).
 //!
-//! **A read-only request will take `&self`.** That is recorded here because it is
-//! the other half of the writer discipline: when the read builders arrive,
-//! a read-only request takes a shared borrow over its own connection, opened
-//! inside this crate so the substrate seam holds, and `&mut` stays what a writer
-//! takes. Nothing implements it yet — every request here is `&mut`.
+//! **Reads will run on a separate handle, not on this connection.** That is
+//! recorded here because it is the other half of the writer discipline: when the
+//! read builders arrive, wire reads run on a dedicated read-only snapshot handle
+//! this crate mints from a live store — its own connection, opened inside this
+//! crate so the substrate seam holds — and `&mut` stays what a writer takes. A
+//! shared borrow of the store itself cannot serve reads, because the store lives
+//! inside an attachment that lifecycle jobs hold mutably for their whole
+//! duration (ADR 0014). Nothing implements it yet — every request here is
+//! `&mut`, and this store still holds exactly one connection.
 //!
 //! # Write-ahead logging, foreign keys, and why they are set in one place
 //!
