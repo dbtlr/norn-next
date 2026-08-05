@@ -11,8 +11,8 @@
 //! restating it.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
-    WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
+    UntrustedReason, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -86,6 +86,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<UntrustedReason>(),
         schema_of::<WatcherLossCause>(),
         schema_of::<ReasonCode>(),
+        schema_of::<FindingKind>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
         schema_of::<ErrorEnvelope>(),
@@ -245,6 +246,28 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault"
+        ]
+    );
+}
+
+/// A finding kind is advertised the same way a reason code is: the flat
+/// namespaced string itself, so one grammar describes both registries.
+#[test]
+fn a_finding_kind_advertises_its_flat_namespaced_string() {
+    let schema = schema_of::<FindingKind>();
+    let kinds: Vec<&str> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a kind branch is not a pinned string: {branch}"))
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "document/path-bytes-not-utf8",
+            "document/path-names-no-document",
+            "document/body-bytes-not-utf8"
         ]
     );
 }

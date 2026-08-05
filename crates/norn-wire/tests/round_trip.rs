@@ -14,8 +14,8 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
-    WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
+    UntrustedReason, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -36,6 +36,15 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
     );
     reasons.push(UntrustedReason::environmental_refusal("the disk is full"));
     reasons
+}
+
+/// Every kind a finding is filed under.
+fn finding_kinds() -> Vec<FindingKind> {
+    vec![
+        FindingKind::PathBytesNotUtf8,
+        FindingKind::PathNamesNoDocument,
+        FindingKind::BodyBytesNotUtf8,
+    ]
 }
 
 /// Every trust state, with one entry per reason behind `Untrusted`.
@@ -110,6 +119,13 @@ fn every_untrusted_reason_survives_the_round_trip() {
 fn every_reason_code_survives_the_round_trip() {
     for code in reason_codes() {
         round_trip(&code);
+    }
+}
+
+#[test]
+fn every_finding_kind_survives_the_round_trip() {
+    for kind in finding_kinds() {
+        round_trip(&kind);
     }
 }
 
@@ -190,6 +206,22 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
         wire(&UntrustedReason::environmental_refusal("the disk is full")),
         r#"{"kind":"environmental_refusal","detail":"the disk is full"}"#
     );
+}
+
+/// A finding kind is the flat namespaced string itself, and the rendering the
+/// crate hands out is the string it serializes as — one spelling, whether a
+/// reader took it off the wire or asked the type for it.
+#[test]
+fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
+    for (kind, string) in finding_kinds().into_iter().zip([
+        "document/path-bytes-not-utf8",
+        "document/path-names-no-document",
+        "document/body-bytes-not-utf8",
+    ]) {
+        assert_eq!(kind.as_str(), string);
+        assert_eq!(kind.to_string(), string);
+        assert_eq!(wire(&kind), format!("\"{string}\""));
+    }
 }
 
 /// The envelope is three fields, and the detail is tagged with the same code
@@ -337,5 +369,9 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
         )
         .is_err(),
         "a watcher-loss cause nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),
+        "a finding kind nobody minted read back as one"
     );
 }

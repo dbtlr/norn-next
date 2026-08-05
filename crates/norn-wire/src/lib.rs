@@ -9,10 +9,11 @@
 //! compared, and that is the whole of what it does.
 //!
 //! What is defined here today is where a vault entry stands — [`TrustState`]
-//! and the [`UntrustedReason`] it carries — and the one shape a refusal takes:
-//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]. Maintainer
-//! contention carries the diagnostic [`MaintainerIdentity`] reported by the
-//! lock without changing an entry's trust state.
+//! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
+//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
+//! finding is filed under, [`FindingKind`]. Maintainer contention carries the
+//! diagnostic [`MaintainerIdentity`] reported by the lock without changing an
+//! entry's trust state.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -47,10 +48,9 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`] and [`WatcherLossCause`] are; an enum whose
-//! variants may carry a payload is
-//! a tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
-//! are. The flat string keeps a code matchable as a value; the tagged object
+//! string, as [`ReasonCode`], [`FindingKind`] and [`WatcherLossCause`] are; an
+//! enum whose variants may carry a payload is a tagged object, as
+//! [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`] are. The flat string keeps a code matchable as a value; the tagged object
 //! keeps a payload's arrival from changing what the value is.
 //!
 //! **Doc comments on a type, a variant or a field are published.** schemars
@@ -70,8 +70,9 @@
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
 //! [`UntrustedReason::watcher_lost`],
-//! [`UntrustedReason::environmental_refusal`] and
-//! [`ErrorDetail::entry_untrusted`].
+//! [`UntrustedReason::environmental_refusal`], [`ErrorDetail::duplicate_root`],
+//! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`] and
+//! [`ErrorDetail::unknown_vault`].
 //!
 //! **A struct tolerates a field it does not know; an enum refuses a variant it
 //! does not know.** A reader drops an unknown field, so a writer that gained
@@ -81,6 +82,31 @@
 //! nobody can interpret is a refusal to parse rather than a value to pass on
 //! degraded.
 //!
+//! # The code grammar, and what is not a code
+//!
+//! **A code is a flat `namespace/what-happened` string**, lowercase kebab-case
+//! on both sides of one slash. Codes are what a client enumerates, switches on
+//! and filters by, and they live in exactly two closed registries: [`ReasonCode`]
+//! for what the host refused (`host/…`), and [`FindingKind`] for what a
+//! finding is filed under (`document/…`). A namespace names who the fact is
+//! about, never which crate produced it, and a code exists nowhere but here —
+//! a surface that needs one adds it to a registry rather than spelling a
+//! string of its own.
+//!
+//! **A nested typed reason is structure inside a code, not a code.** The
+//! reason an `host/entry-untrusted` detail carries — [`UntrustedReason`], and
+//! the [`WatcherLossCause`] inside it — serializes as a `snake_case` tag under
+//! its own key. It is read after the code has been matched, so it carries no
+//! namespace, never appears in a code list, and is not a value a client
+//! dispatches on before it knows the code. Structure grows there without the
+//! code list growing.
+//!
+//! **A `detail` string is prose and never a match target.** Where a payload
+//! carries one — an environmental refusal, a lost watcher — it exists for a
+//! person reading a message or a log. Its wording is not contracted, so a
+//! client that branches on its text is branching on something free to change;
+//! the code and the typed fields beside it are what carry the decision.
+//!
 //! # Minting a reason code
 //!
 //! Each [`ReasonCode`] pairs with exactly one [`ErrorDetail`] variant: the
@@ -88,7 +114,9 @@
 //! the code the detail belongs to.
 
 mod error;
+mod finding;
 mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
+pub use finding::FindingKind;
 pub use trust::{TrustState, UntrustedReason, WatcherLossCause};

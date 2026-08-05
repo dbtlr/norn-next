@@ -16,7 +16,7 @@ use norn_store::{
     Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
-use norn_wire::MaintainerIdentity;
+use norn_wire::{FindingKind, MaintainerIdentity};
 
 use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
 
@@ -895,11 +895,14 @@ enum Undecodable {
 
 impl Undecodable {
     /// The finding kind, which is the cause class a reader dispatches on.
-    const fn kind(self) -> &'static str {
+    ///
+    /// The vocabulary is the wire's, so a kind recorded in the findings table
+    /// is the same string every surface advertises and filters by.
+    const fn kind(self) -> FindingKind {
         match self {
-            Undecodable::PathBytes => "document/path-bytes-not-utf8",
-            Undecodable::PathSpelling => "document/path-names-no-document",
-            Undecodable::BodyBytes => "document/body-bytes-not-utf8",
+            Undecodable::PathBytes => FindingKind::PathBytesNotUtf8,
+            Undecodable::PathSpelling => FindingKind::PathNamesNoDocument,
+            Undecodable::BodyBytes => FindingKind::BodyBytesNotUtf8,
         }
     }
 
