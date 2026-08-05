@@ -26,7 +26,9 @@
 //! serializes but has no schema is a payload no surface can advertise:
 //!
 //! - [`serde::Serialize`] and [`serde::Deserialize`], with `snake_case` field
-//!   and variant names on the wire. One read path is written by hand —
+//!   and variant names on the wire — except the code registries, whose members
+//!   are renamed to the `namespace/what-happened` grammar below. One read path
+//!   is written by hand —
 //!   [`ErrorEnvelope`] refuses a parse whose code is not its detail's — with
 //!   the same wire shape a derive would read.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
@@ -74,8 +76,9 @@
 //! [`TrustState::warming`], [`TrustState::untrusted`],
 //! [`UntrustedReason::watcher_lost`],
 //! [`UntrustedReason::environmental_refusal`], [`ErrorDetail::duplicate_root`],
-//! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`] and
-//! [`ErrorDetail::unknown_vault`].
+//! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
+//! [`ErrorDetail::unknown_vault`], [`MaintainerIdentity::named`] and
+//! [`MaintainerIdentity::unknown`].
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
 //! bytes.** A field added to a payload is a field the read path requires, so

@@ -276,12 +276,18 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
         })
         .collect();
     assert_eq!(
-        sorted(kinds),
+        sorted(kinds.clone()),
         sorted([
             "document/path-bytes-not-utf8",
             "document/path-names-no-document",
             "document/body-bytes-not-utf8"
         ])
+    );
+    // The derived schema enumerates the enum itself, so holding ALL equal to
+    // it keeps the walkable registry from drifting behind a new variant.
+    assert_eq!(
+        sorted(kinds),
+        sorted(FindingKind::ALL.map(|kind| kind.as_str()))
     );
 }
 

@@ -37,6 +37,17 @@ pub enum FindingKind {
 }
 
 impl FindingKind {
+    /// Every kind the registry holds, in declaration order.
+    ///
+    /// Reading a kind back and enumerating the registry both walk this list,
+    /// so a variant absent here is unreadable and unadvertisable — the schema
+    /// suite holds this list equal to the enum itself.
+    pub const ALL: [FindingKind; 3] = [
+        FindingKind::PathBytesNotUtf8,
+        FindingKind::PathNamesNoDocument,
+        FindingKind::BodyBytesNotUtf8,
+    ];
+
     /// The kind as the string it is on the wire.
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -71,17 +82,13 @@ impl std::error::Error for UnknownFindingKind {}
 impl TryFrom<&str> for FindingKind {
     type Error = UnknownFindingKind;
 
-    /// The kind a wire string names, matched against the strings
-    /// [`FindingKind::as_str`] hands out: the registry is spelled once, and
-    /// reading a kind back is the inverse of writing it.
+    /// The kind a wire string names, found by walking [`FindingKind::ALL`]
+    /// against the strings [`FindingKind::as_str`] hands out: reading a kind
+    /// back is the inverse of writing it.
     fn try_from(string: &str) -> Result<Self, Self::Error> {
-        [
-            FindingKind::PathBytesNotUtf8,
-            FindingKind::PathNamesNoDocument,
-            FindingKind::BodyBytesNotUtf8,
-        ]
-        .into_iter()
-        .find(|kind| kind.as_str() == string)
-        .ok_or(UnknownFindingKind)
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == string)
+            .ok_or(UnknownFindingKind)
     }
 }

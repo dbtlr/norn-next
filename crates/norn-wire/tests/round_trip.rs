@@ -40,11 +40,7 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
 
 /// Every kind a finding is filed under.
 fn finding_kinds() -> Vec<FindingKind> {
-    vec![
-        FindingKind::PathBytesNotUtf8,
-        FindingKind::PathNamesNoDocument,
-        FindingKind::BodyBytesNotUtf8,
-    ]
+    FindingKind::ALL.to_vec()
 }
 
 /// Every trust state, with one entry per reason behind `Untrusted`.
@@ -216,11 +212,13 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
 /// refused.
 #[test]
 fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
-    for (kind, string) in finding_kinds().into_iter().zip([
+    let strings = [
         "document/path-bytes-not-utf8",
         "document/path-names-no-document",
         "document/body-bytes-not-utf8",
-    ]) {
+    ];
+    assert_eq!(finding_kinds().len(), strings.len());
+    for (kind, string) in finding_kinds().into_iter().zip(strings) {
         assert_eq!(kind.as_str(), string);
         assert_eq!(kind.to_string(), string);
         assert_eq!(wire(&kind), format!("\"{string}\""));
