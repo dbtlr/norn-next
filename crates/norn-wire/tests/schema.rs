@@ -11,7 +11,8 @@
 //! restating it.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
+    UntrustedReason, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -76,6 +77,15 @@ fn tag_constants<'a>(schema: &'a Value, tag: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The same members in ascending order. A membership assertion sorts both
+/// sides, so it pins the set a surface renders and leaves the order schemars
+/// declared the variants in unpinned.
+fn sorted<'a>(members: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut members: Vec<&str> = members.into_iter().collect();
+    members.sort_unstable();
+    members
+}
+
 // ── Every type derives one ───────────────────────────────────────────────
 
 #[test]
@@ -83,7 +93,9 @@ fn every_wire_type_derives_a_schema() {
     for schema in [
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
+        schema_of::<WatcherLossCause>(),
         schema_of::<ReasonCode>(),
+        schema_of::<FindingKind>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
         schema_of::<ErrorEnvelope>(),
@@ -101,8 +113,8 @@ fn every_wire_type_derives_a_schema() {
 fn a_trust_state_advertises_its_state_tag() {
     let schema = schema_of::<TrustState>();
     assert_eq!(
-        tag_constants(&schema, "state"),
-        ["unattached", "warming", "ready", "untrusted"]
+        sorted(tag_constants(&schema, "state")),
+        sorted(["unattached", "warming", "ready", "untrusted"])
     );
 }
 
@@ -110,12 +122,40 @@ fn a_trust_state_advertises_its_state_tag() {
 fn an_untrusted_reason_advertises_its_kind_tag() {
     let schema = schema_of::<UntrustedReason>();
     assert_eq!(
-        tag_constants(&schema, "kind"),
-        [
-            "torn_increment",
-            "watcher_overflow",
-            "environmental_refusal"
-        ]
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["watcher_overflow", "watcher_lost", "environmental_refusal"])
+    );
+}
+
+/// A lost watcher advertises the cause as a nested enum and the detail as a
+/// string, so a surface renders the branchable half and the prose half apart.
+#[test]
+fn a_lost_watcher_advertises_a_typed_cause_beside_its_prose() {
+    let schema = schema_of::<UntrustedReason>();
+    let lost = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "kind") == Some("watcher_lost"))
+        .expect("the watcher_lost branch");
+    assert_eq!(
+        property_names(lost),
+        ["kind", "cause", "detail"].into_iter().collect()
+    );
+    assert_eq!(
+        lost["properties"]["cause"]["$ref"].as_str(),
+        Some("#/$defs/WatcherLossCause")
+    );
+    assert_eq!(
+        lost["properties"]["detail"]["type"].as_str(),
+        Some("string")
+    );
+    assert_eq!(
+        sorted(
+            branches(&schema_of::<WatcherLossCause>())
+                .iter()
+                .map(|branch| string_constant(branch)
+                    .unwrap_or_else(|| panic!("a cause branch is not a pinned string: {branch}")))
+        ),
+        sorted(["backend", "coverage_lost"])
     );
 }
 
@@ -123,15 +163,23 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
 fn an_error_detail_advertises_the_code_as_its_tag() {
     let schema = schema_of::<ErrorDetail>();
     assert_eq!(
-        tag_constants(&schema, "code"),
-        ["host/entry-untrusted", "host/maintainer-contended"]
+        sorted(tag_constants(&schema, "code")),
+        sorted([
+            "host/duplicate-root",
+            "host/entry-untrusted",
+            "host/maintainer-contended",
+            "host/unknown-vault"
+        ])
     );
 }
 
 #[test]
 fn a_maintainer_identity_advertises_named_and_unknown_shapes() {
     let schema = schema_of::<MaintainerIdentity>();
-    assert_eq!(tag_constants(&schema, "kind"), ["named", "unknown"]);
+    assert_eq!(
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["named", "unknown"])
+    );
     let named = branches(&schema)
         .iter()
         .find(|branch| tag_constant(branch, "kind") == Some("named"))
@@ -204,7 +252,43 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
                 .unwrap_or_else(|| panic!("a code branch is not a pinned string: {branch}"))
         })
         .collect();
-    assert_eq!(codes, ["host/entry-untrusted", "host/maintainer-contended"]);
+    assert_eq!(
+        sorted(codes),
+        sorted([
+            "host/duplicate-root",
+            "host/entry-untrusted",
+            "host/maintainer-contended",
+            "host/unknown-vault"
+        ])
+    );
+}
+
+/// A finding kind is advertised the same way a reason code is: the flat
+/// namespaced string itself, so one grammar describes both registries.
+#[test]
+fn a_finding_kind_advertises_its_flat_namespaced_string() {
+    let schema = schema_of::<FindingKind>();
+    let kinds: Vec<&str> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a kind branch is not a pinned string: {branch}"))
+        })
+        .collect();
+    assert_eq!(
+        sorted(kinds.clone()),
+        sorted([
+            "document/path-bytes-not-utf8",
+            "document/path-names-no-document",
+            "document/body-bytes-not-utf8"
+        ])
+    );
+    // The derived schema enumerates the enum itself, so holding ALL equal to
+    // it keeps the walkable registry from drifting behind a new variant.
+    assert_eq!(
+        sorted(kinds),
+        sorted(FindingKind::ALL.map(|kind| kind.as_str()))
+    );
 }
 
 /// The detail composes the reason type rather than restating its variants, so
@@ -212,7 +296,10 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
 #[test]
 fn a_detail_refers_to_the_reason_type_it_carries() {
     let schema = schema_of::<ErrorDetail>();
-    let branch = &branches(&schema)[0];
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/entry-untrusted"))
+        .expect("the entry-untrusted branch");
     assert_eq!(
         branch["properties"]["reason"]["$ref"].as_str(),
         Some("#/$defs/UntrustedReason")
@@ -220,6 +307,26 @@ fn a_detail_refers_to_the_reason_type_it_carries() {
     assert!(
         schema["$defs"]["UntrustedReason"].is_object(),
         "the referenced definition is absent: {schema}"
+    );
+}
+
+/// An unknown vault advertises the requested name as a field of its detail, so
+/// a surface reads the name the request asked for as typed data rather than
+/// out of the message.
+#[test]
+fn an_unknown_vault_advertises_the_requested_name() {
+    let schema = schema_of::<ErrorDetail>();
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/unknown-vault"))
+        .expect("the unknown-vault branch");
+    assert_eq!(
+        property_names(branch),
+        ["code", "name"].into_iter().collect()
+    );
+    assert_eq!(
+        branch["properties"]["name"]["type"].as_str(),
+        Some("string")
     );
 }
 

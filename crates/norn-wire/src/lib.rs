@@ -9,10 +9,11 @@
 //! compared, and that is the whole of what it does.
 //!
 //! What is defined here today is where a vault entry stands — [`TrustState`]
-//! and the [`UntrustedReason`] it carries — and the one shape a refusal takes:
-//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]. Maintainer
-//! contention carries the diagnostic [`MaintainerIdentity`] reported by the
-//! lock without changing an entry's trust state.
+//! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
+//! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
+//! finding is filed under, [`FindingKind`]. Maintainer contention carries the
+//! diagnostic [`MaintainerIdentity`] reported by the lock without changing an
+//! entry's trust state.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -25,7 +26,9 @@
 //! serializes but has no schema is a payload no surface can advertise:
 //!
 //! - [`serde::Serialize`] and [`serde::Deserialize`], with `snake_case` field
-//!   and variant names on the wire. One read path is written by hand —
+//!   and variant names on the wire — except the code registries, whose members
+//!   are renamed to the `namespace/what-happened` grammar below. One read path
+//!   is written by hand —
 //!   [`ErrorEnvelope`] refuses a parse whose code is not its detail's — with
 //!   the same wire shape a derive would read.
 //! - [`schemars::JsonSchema`], which reads the same serde attributes, so the
@@ -47,10 +50,13 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`] is; an enum whose variants may carry a payload is
-//! a tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
-//! are. The flat string keeps a code matchable as a value; the tagged object
-//! keeps a payload's arrival from changing what the value is.
+//! string, as [`ReasonCode`], [`FindingKind`] and [`WatcherLossCause`] are; an
+//! enum whose variants may carry a payload is a tagged object, as
+//! [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`] are. The flat
+//! string keeps a code matchable as a value; the tagged object keeps a
+//! payload's arrival from changing what the value is. Two of those three flat
+//! strings are code registries; [`WatcherLossCause`] is not a code but a
+//! nested bare-string value under `cause`, carrying no namespace.
 //!
 //! **Doc comments on a type, a variant or a field are published.** schemars
 //! lifts them verbatim into the schema `description`s an MCP consumer reads,
@@ -68,8 +74,19 @@
 //! `#[non_exhaustive]` binds across crates, so a shape consumers cannot write
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
-//! [`UntrustedReason::environmental_refusal`] and
-//! [`ErrorDetail::entry_untrusted`].
+//! [`UntrustedReason::watcher_lost`],
+//! [`UntrustedReason::environmental_refusal`], [`ErrorDetail::duplicate_root`],
+//! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
+//! [`ErrorDetail::unknown_vault`], [`MaintainerIdentity::named`] and
+//! [`MaintainerIdentity::unknown`].
+//!
+//! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
+//! bytes.** A field added to a payload is a field the read path requires, so
+//! JSON an older writer produced — `{"kind":"environmental_refusal"}` once
+//! `detail` exists — fails the read as a missing field. Growth is a promise to
+//! Rust callers and to readers of the payload a current writer emits;
+//! compatibility with bytes an older writer produced is not promised before
+//! 1.0.
 //!
 //! **A struct tolerates a field it does not know; an enum refuses a variant it
 //! does not know.** A reader drops an unknown field, so a writer that gained
@@ -79,6 +96,37 @@
 //! nobody can interpret is a refusal to parse rather than a value to pass on
 //! degraded.
 //!
+//! # The code grammar, and what is not a code
+//!
+//! **A code is a flat `namespace/what-happened` string**, lowercase kebab-case
+//! on both sides of one slash. Codes are what a client enumerates, switches on
+//! and filters by, and they live in exactly two closed registries:
+//! [`ReasonCode`] for what the host refused (`host/…`), and [`FindingKind`]
+//! for what a finding is filed under (`document/…`). A namespace names who the
+//! fact is about, never which crate produced it, and a code is *defined*
+//! nowhere but here: a layer below stores the code it was handed rather than
+//! defining one, and a surface that needs a code it cannot find adds it to a
+//! registry rather than spelling a string of its own.
+//!
+//! **A nested typed reason is structure inside a code, not a code.** The
+//! reason a `host/entry-untrusted` detail carries is [`UntrustedReason`], an
+//! object whose `kind` tag is a `snake_case` string under the detail's own
+//! `reason` key; the [`WatcherLossCause`] inside it is a `snake_case` string
+//! that is the value of `cause` rather than a tag. Both are read after the
+//! code has been matched, so they carry no namespace, never appear in a code
+//! list, and are not values a client dispatches on before it knows the code.
+//! Structure grows there without the code list growing.
+//!
+//! **A `detail` string is prose and never a match target.** Where a payload
+//! carries one — an environmental refusal, a lost watcher — it exists for a
+//! person reading a message or a log. Its wording is not contracted, so a
+//! client that branches on its text is branching on something free to change;
+//! the code and the typed fields beside it are what carry the decision. A
+//! detail is diagnostic text for an operator and may name machine-local paths
+//! — a store file, a lock file, a vault root — because naming what the machine
+//! refused is the point of it. It carries nothing beyond that account of the
+//! failure, and it is never content a client parses.
+//!
 //! # Minting a reason code
 //!
 //! Each [`ReasonCode`] pairs with exactly one [`ErrorDetail`] variant: the
@@ -86,7 +134,9 @@
 //! the code the detail belongs to.
 
 mod error;
+mod finding;
 mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
-pub use trust::{TrustState, UntrustedReason};
+pub use finding::{FindingKind, UnknownFindingKind};
+pub use trust::{TrustState, UntrustedReason, WatcherLossCause};

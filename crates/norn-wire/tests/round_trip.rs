@@ -14,19 +14,33 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
+    UnknownFindingKind, UntrustedReason, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
+/// Every cause a lost watcher carries.
+fn watcher_loss_causes() -> Vec<WatcherLossCause> {
+    vec![WatcherLossCause::Backend, WatcherLossCause::CoverageLost]
+}
+
 /// Every reason the vocabulary carries.
 fn untrusted_reasons() -> Vec<UntrustedReason> {
-    vec![
-        UntrustedReason::TornIncrement,
-        UntrustedReason::WatcherOverflow,
-        UntrustedReason::environmental_refusal(),
-    ]
+    let mut reasons = vec![UntrustedReason::WatcherOverflow];
+    reasons.extend(
+        watcher_loss_causes()
+            .into_iter()
+            .map(|cause| UntrustedReason::watcher_lost(cause, "the watch ended")),
+    );
+    reasons.push(UntrustedReason::environmental_refusal("the disk is full"));
+    reasons
+}
+
+/// Every kind a finding is filed under.
+fn finding_kinds() -> Vec<FindingKind> {
+    FindingKind::ALL.to_vec()
 }
 
 /// Every trust state, with one entry per reason behind `Untrusted`.
@@ -45,8 +59,10 @@ fn trust_states() -> Vec<TrustState> {
 /// Every code the list holds.
 fn reason_codes() -> Vec<ReasonCode> {
     vec![
+        ReasonCode::HostDuplicateRoot,
         ReasonCode::HostEntryUntrusted,
         ReasonCode::HostMaintainerContended,
+        ReasonCode::HostUnknownVault,
     ]
 }
 
@@ -57,8 +73,10 @@ fn error_details() -> Vec<ErrorDetail> {
         .map(ErrorDetail::entry_untrusted)
         .collect();
     details.extend([
+        ErrorDetail::duplicate_root(["notes", "vault"]),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
+        ErrorDetail::unknown_vault("notes"),
     ]);
     details
 }
@@ -97,6 +115,13 @@ fn every_untrusted_reason_survives_the_round_trip() {
 fn every_reason_code_survives_the_round_trip() {
     for code in reason_codes() {
         round_trip(&code);
+    }
+}
+
+#[test]
+fn every_finding_kind_survives_the_round_trip() {
+    for kind in finding_kinds() {
+        round_trip(&kind);
     }
 }
 
@@ -156,16 +181,52 @@ fn an_unknown_estimate_is_the_field_written_null() {
 #[test]
 fn an_untrusted_reason_is_an_object_tagged_kind() {
     assert_eq!(
-        wire(&UntrustedReason::TornIncrement),
-        r#"{"kind":"torn_increment"}"#
-    );
-    assert_eq!(
         wire(&UntrustedReason::WatcherOverflow),
         r#"{"kind":"watcher_overflow"}"#
     );
     assert_eq!(
-        wire(&UntrustedReason::environmental_refusal()),
-        r#"{"kind":"environmental_refusal"}"#
+        wire(&UntrustedReason::watcher_lost(
+            WatcherLossCause::Backend,
+            "the watcher stopped"
+        )),
+        r#"{"kind":"watcher_lost","cause":"backend","detail":"the watcher stopped"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::watcher_lost(
+            WatcherLossCause::CoverageLost,
+            "the vault root left"
+        )),
+        r#"{"kind":"watcher_lost","cause":"coverage_lost","detail":"the vault root left"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::environmental_refusal("the disk is full")),
+        r#"{"kind":"environmental_refusal","detail":"the disk is full"}"#
+    );
+}
+
+/// A finding kind is the flat namespaced string itself, and the rendering the
+/// crate hands out is the string it serializes as — one spelling, whether a
+/// reader took it off the wire or asked the type for it. The string reads back
+/// as the kind it renders, so a row filed under a kind is read as that kind
+/// rather than re-matched by hand; a string the registry does not hold is
+/// refused.
+#[test]
+fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
+    let strings = [
+        "document/path-bytes-not-utf8",
+        "document/path-names-no-document",
+        "document/body-bytes-not-utf8",
+    ];
+    assert_eq!(finding_kinds().len(), strings.len());
+    for (kind, string) in finding_kinds().into_iter().zip(strings) {
+        assert_eq!(kind.as_str(), string);
+        assert_eq!(kind.to_string(), string);
+        assert_eq!(wire(&kind), format!("\"{string}\""));
+        assert_eq!(FindingKind::try_from(string), Ok(kind));
+    }
+    assert_eq!(
+        FindingKind::try_from("document/unreadable"),
+        Err(UnknownFindingKind)
     );
 }
 
@@ -175,15 +236,52 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
 fn an_envelope_is_a_code_a_message_and_a_detail() {
     let envelope = ErrorEnvelope::new(
         "the entry is untrusted",
-        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal()),
+        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal("the disk is full")),
     );
     assert_eq!(
         wire(&envelope),
         concat!(
             r#"{"code":"host/entry-untrusted","message":"the entry is untrusted","#,
             r#""detail":{"code":"host/entry-untrusted","#,
-            r#""reason":{"kind":"environmental_refusal"}}}"#
+            r#""reason":{"kind":"environmental_refusal","detail":"the disk is full"}}}"#
         )
+    );
+}
+
+/// A registry refusal names the vault it is about as typed data: duplicate-root
+/// carries every colliding name, and unknown-vault carries the name the request
+/// asked for.
+#[test]
+fn a_registry_refusal_carries_the_names_the_registry_holds() {
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "two names resolve to one root",
+            ErrorDetail::duplicate_root(["notes", "vault"]),
+        )),
+        concat!(
+            r#"{"code":"host/duplicate-root","message":"two names resolve to one root","#,
+            r#""detail":{"code":"host/duplicate-root","aliases":["notes","vault"]}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "no vault is registered as `notes`",
+            ErrorDetail::unknown_vault("notes"),
+        )),
+        concat!(
+            r#"{"code":"host/unknown-vault","message":"no vault is registered as `notes`","#,
+            r#""detail":{"code":"host/unknown-vault","name":"notes"}}"#
+        )
+    );
+}
+
+/// The colliding names ascend because the detail sorts them, so the order the
+/// field promises holds whatever order a producer collected them in.
+#[test]
+fn duplicate_root_aliases_ascend_whatever_order_they_arrive_in() {
+    assert_eq!(
+        wire(&ErrorDetail::duplicate_root(["vault", "archive", "notes"])),
+        r#"{"code":"host/duplicate-root","aliases":["archive","notes","vault"]}"#
     );
 }
 
@@ -242,7 +340,7 @@ fn a_refusal_carries_the_same_reason_the_state_does() {
 fn a_struct_drops_a_field_it_does_not_know() {
     let json = concat!(
         r#"{"code":"host/entry-untrusted","message":"refused","retryable":true,"#,
-        r#""detail":{"code":"host/entry-untrusted","reason":{"kind":"torn_increment"}}}"#
+        r#""detail":{"code":"host/entry-untrusted","reason":{"kind":"watcher_overflow"}}}"#
     );
     let envelope: ErrorEnvelope = serde_json::from_str(json)
         .expect("an envelope carrying a field this version has no name for");
@@ -250,7 +348,7 @@ fn a_struct_drops_a_field_it_does_not_know() {
         envelope,
         ErrorEnvelope::new(
             "refused",
-            ErrorDetail::entry_untrusted(UntrustedReason::TornIncrement)
+            ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
         )
     );
     assert!(!wire(&envelope).contains("retryable"));
@@ -276,9 +374,20 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
     );
     assert!(
         serde_json::from_str::<ErrorDetail>(
-            r#"{"code":"host/entry-vanished","reason":{"kind":"torn_increment"}}"#
+            r#"{"code":"host/entry-vanished","reason":{"kind":"watcher_overflow"}}"#
         )
         .is_err(),
         "a detail under a code nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<UntrustedReason>(
+            r#"{"kind":"watcher_lost","cause":"solar_flare","detail":"none"}"#
+        )
+        .is_err(),
+        "a watcher-loss cause nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),
+        "a finding kind nobody minted read back as one"
     );
 }

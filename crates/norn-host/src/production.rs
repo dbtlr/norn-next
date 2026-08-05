@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use norn_config::registry::Entry;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
-    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, try_acquire, walk, watch,
+    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, WatchError, try_acquire,
+    walk, watch,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -15,7 +16,7 @@ use norn_store::{
     Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
-use norn_wire::MaintainerIdentity;
+use norn_wire::{FindingKind, MaintainerIdentity};
 
 use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
 
@@ -275,15 +276,19 @@ impl EntryOps for ProductionEntryOps {
     }
 }
 
+/// One settled batch, or no facts.
+///
+/// A terminal watch error takes the subscription and is reported once. An
+/// attachment without a subscription therefore reports no facts rather than a
+/// second failure: the cause that ended coverage is already published, and only
+/// a re-attach installs coverage again.
 fn poll_subscription(
     attachment: &mut ProductionAttachment,
 ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-    let result = attachment
-        .subscription
-        .as_ref()
-        .ok_or_else(|| JobFailure::WatcherTerminal("watcher coverage is absent".into()))?
-        .try_recv();
-    match result {
+    let Some(subscription) = attachment.subscription.as_ref() else {
+        return Ok(None);
+    };
+    match subscription.try_recv() {
         Ok(batch) => Ok(batch),
         Err(error) => {
             attachment.subscription.take();
@@ -894,11 +899,14 @@ enum Undecodable {
 
 impl Undecodable {
     /// The finding kind, which is the cause class a reader dispatches on.
-    const fn kind(self) -> &'static str {
+    ///
+    /// The vocabulary is the wire's, so a kind recorded in the findings table
+    /// is the same string every surface advertises and filters by.
+    const fn kind(self) -> FindingKind {
         match self {
-            Undecodable::PathBytes => "document/path-bytes-not-utf8",
-            Undecodable::PathSpelling => "document/path-names-no-document",
-            Undecodable::BodyBytes => "document/body-bytes-not-utf8",
+            Undecodable::PathBytes => FindingKind::PathBytesNotUtf8,
+            Undecodable::PathSpelling => FindingKind::PathNamesNoDocument,
+            Undecodable::BodyBytes => FindingKind::BodyBytesNotUtf8,
         }
     }
 
@@ -1195,8 +1203,8 @@ fn environmental(message: impl Into<String>) -> JobFailure {
 fn effect(error: impl std::fmt::Display) -> JobFailure {
     environmental(error.to_string())
 }
-fn watcher(error: impl std::fmt::Display) -> JobFailure {
-    JobFailure::WatcherTerminal(error.to_string())
+fn watcher(error: WatchError) -> JobFailure {
+    JobFailure::WatcherTerminal(error)
 }
 
 fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
@@ -2824,12 +2832,14 @@ mod tests {
         .unwrap();
         let _ = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
-        // Armed before the edit, so the reconcile the watcher schedules for it is
-        // held at its entry and the warming leg it published on the way in stays
-        // there to be read.
+        // Armed before the edit, so the reconcile the watcher schedules for it
+        // is held at its entry and the in-flight leg it published on the way in
+        // stays there to be read: Warming for a dirty-path batch, or the
+        // watcher-overflow refusal when the platform coalesces the edit into a
+        // rescan scope.
         armed.store(true, std::sync::atomic::Ordering::SeqCst);
         fs::write(f.vault().join("note.md"), "after").unwrap();
-        wait_state_kind(&host, &name, true);
+        wait_pump_in_flight(&host, &name);
         released.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(host);
@@ -2843,6 +2853,21 @@ mod tests {
             row.content_hash,
             norn_fs::ContentHash::of(b"after").to_string()
         );
+    }
+
+    /// Coverage that ended takes the subscription with it and publishes its
+    /// cause once. A poll of the attachment that remains reports no facts, so
+    /// nothing lands on top of the cause a client is reading.
+    #[test]
+    fn an_attachment_without_a_subscription_polls_to_no_facts() {
+        let f = Fixture::new("absent-subscription");
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        attachment.subscription.take();
+        assert!(matches!(poll_subscription(&mut attachment), Ok(None)));
+        assert!(matches!(ops.poll(&name, &mut attachment), Ok(None)));
     }
 
     #[test]
@@ -3116,23 +3141,27 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
-    fn wait_state_kind<O: EntryOps>(host: &crate::Host<O>, name: &VaultName, warming: bool) {
-        wait_until(
-            if warming {
-                "a warming trust state"
+    /// The pump has left `Ready` with its reconcile leg in flight. The leg
+    /// reads as `Warming` when the batch carried the dirty path, and as the
+    /// watcher-overflow refusal when the platform delivered a rescan scope
+    /// instead — both are the same in-flight fact, and pinning one of them
+    /// pins the watcher backend's batch granularity.
+    fn wait_pump_in_flight<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+        wait_until("an in-flight trust state", lifecycle_budget(), || {
+            let state = host.state(name);
+            if matches!(
+                state,
+                Some(norn_wire::TrustState::Warming { .. })
+                    | Some(norn_wire::TrustState::Untrusted {
+                        reason: norn_wire::UntrustedReason::WatcherOverflow,
+                        ..
+                    })
+            ) {
+                Observed::Met(())
             } else {
-                "a settled trust state"
-            },
-            lifecycle_budget(),
-            || {
-                let state = host.state(name);
-                if matches!(state, Some(norn_wire::TrustState::Warming { .. })) == warming {
-                    Observed::Met(())
-                } else {
-                    Observed::Pending(format!("the state is {state:?}"))
-                }
-            },
-        )
+                Observed::Pending(format!("the state is {state:?}"))
+            }
+        })
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
