@@ -68,6 +68,11 @@ impl MaintainerIdentity {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[non_exhaustive]
 pub enum ReasonCode {
+    /// `host/duplicate-root` — more than one registered name resolves to this
+    /// vault's root, so none of them is served until the registry names one.
+    /// The detail is every name that resolves to it.
+    #[serde(rename = "host/duplicate-root")]
+    HostDuplicateRoot,
     /// `host/entry-untrusted` — the vault entry's derived state cannot be
     /// trusted, so the request is refused rather than answered. The detail is
     /// the reason the state is untrusted.
@@ -77,6 +82,10 @@ pub enum ReasonCode {
     /// vault's derived state.
     #[serde(rename = "host/maintainer-contended")]
     HostMaintainerContended,
+    /// `host/unknown-vault` — the requested name is not in the registry, so
+    /// there is no vault to serve under it.
+    #[serde(rename = "host/unknown-vault")]
+    HostUnknownVault,
 }
 
 /// The typed payload one reason code carries.
@@ -90,6 +99,14 @@ pub enum ReasonCode {
 #[serde(tag = "code")]
 #[non_exhaustive]
 pub enum ErrorDetail {
+    /// The detail of `host/duplicate-root`: every registered name that
+    /// resolves to the one vault root.
+    #[serde(rename = "host/duplicate-root")]
+    #[non_exhaustive]
+    DuplicateRoot {
+        /// The colliding names, in ascending order.
+        aliases: Vec<String>,
+    },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
     /// cannot be trusted.
     #[serde(rename = "host/entry-untrusted")]
@@ -106,9 +123,20 @@ pub enum ErrorDetail {
         /// The incumbent maintainer's diagnostic identity.
         incumbent: MaintainerIdentity,
     },
+    /// The detail of `host/unknown-vault`: the name asked for is the
+    /// envelope's message, and the code carries no payload of its own.
+    #[serde(rename = "host/unknown-vault")]
+    UnknownVault {},
 }
 
 impl ErrorDetail {
+    /// The detail of `host/duplicate-root`, for the colliding `aliases`.
+    pub fn duplicate_root<A: Into<String>>(aliases: impl IntoIterator<Item = A>) -> Self {
+        ErrorDetail::DuplicateRoot {
+            aliases: aliases.into_iter().map(Into::into).collect(),
+        }
+    }
+
     /// The detail of `host/entry-untrusted`, for `reason`.
     pub const fn entry_untrusted(reason: UntrustedReason) -> Self {
         ErrorDetail::EntryUntrusted { reason }
@@ -119,11 +147,18 @@ impl ErrorDetail {
         Self::MaintainerContended { incumbent }
     }
 
+    /// The detail of `host/unknown-vault`.
+    pub const fn unknown_vault() -> Self {
+        ErrorDetail::UnknownVault {}
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
+            ErrorDetail::DuplicateRoot { .. } => ReasonCode::HostDuplicateRoot,
             ErrorDetail::EntryUntrusted { .. } => ReasonCode::HostEntryUntrusted,
             ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
+            ErrorDetail::UnknownVault { .. } => ReasonCode::HostUnknownVault,
         }
     }
 }
@@ -234,8 +269,10 @@ mod tests {
     /// code minted without a row here does not compile.
     fn wire_string(code: &ReasonCode) -> &'static str {
         match code {
+            ReasonCode::HostDuplicateRoot => "host/duplicate-root",
             ReasonCode::HostEntryUntrusted => "host/entry-untrusted",
             ReasonCode::HostMaintainerContended => "host/maintainer-contended",
+            ReasonCode::HostUnknownVault => "host/unknown-vault",
         }
     }
 
@@ -244,12 +281,14 @@ mod tests {
     /// not compile.
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
+            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(["notes", "vault"]),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
             ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
             ),
+            ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault(),
         }
     }
 

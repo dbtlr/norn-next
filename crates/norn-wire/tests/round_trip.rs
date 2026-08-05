@@ -54,8 +54,10 @@ fn trust_states() -> Vec<TrustState> {
 /// Every code the list holds.
 fn reason_codes() -> Vec<ReasonCode> {
     vec![
+        ReasonCode::HostDuplicateRoot,
         ReasonCode::HostEntryUntrusted,
         ReasonCode::HostMaintainerContended,
+        ReasonCode::HostUnknownVault,
     ]
 }
 
@@ -66,8 +68,10 @@ fn error_details() -> Vec<ErrorDetail> {
         .map(ErrorDetail::entry_untrusted)
         .collect();
     details.extend([
+        ErrorDetail::duplicate_root(["notes", "vault"]),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
+        ErrorDetail::unknown_vault(),
     ]);
     details
 }
@@ -202,6 +206,33 @@ fn an_envelope_is_a_code_a_message_and_a_detail() {
             r#"{"code":"host/entry-untrusted","message":"the entry is untrusted","#,
             r#""detail":{"code":"host/entry-untrusted","#,
             r#""reason":{"kind":"environmental_refusal","detail":"the disk is full"}}}"#
+        )
+    );
+}
+
+/// A registry refusal names the vault it is about the way the registry does:
+/// duplicate-root carries every colliding name, and unknown-vault carries
+/// nothing past the message.
+#[test]
+fn a_registry_refusal_carries_the_names_the_registry_holds() {
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "two names resolve to one root",
+            ErrorDetail::duplicate_root(["notes", "vault"]),
+        )),
+        concat!(
+            r#"{"code":"host/duplicate-root","message":"two names resolve to one root","#,
+            r#""detail":{"code":"host/duplicate-root","aliases":["notes","vault"]}}"#
+        )
+    );
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "no vault is registered as `notes`",
+            ErrorDetail::unknown_vault(),
+        )),
+        concat!(
+            r#"{"code":"host/unknown-vault","message":"no vault is registered as `notes`","#,
+            r#""detail":{"code":"host/unknown-vault"}}"#
         )
     );
 }

@@ -153,7 +153,12 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
     let schema = schema_of::<ErrorDetail>();
     assert_eq!(
         tag_constants(&schema, "code"),
-        ["host/entry-untrusted", "host/maintainer-contended"]
+        [
+            "host/duplicate-root",
+            "host/entry-untrusted",
+            "host/maintainer-contended",
+            "host/unknown-vault"
+        ]
     );
 }
 
@@ -233,7 +238,15 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
                 .unwrap_or_else(|| panic!("a code branch is not a pinned string: {branch}"))
         })
         .collect();
-    assert_eq!(codes, ["host/entry-untrusted", "host/maintainer-contended"]);
+    assert_eq!(
+        codes,
+        [
+            "host/duplicate-root",
+            "host/entry-untrusted",
+            "host/maintainer-contended",
+            "host/unknown-vault"
+        ]
+    );
 }
 
 /// The detail composes the reason type rather than restating its variants, so
@@ -241,7 +254,10 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
 #[test]
 fn a_detail_refers_to_the_reason_type_it_carries() {
     let schema = schema_of::<ErrorDetail>();
-    let branch = &branches(&schema)[0];
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/entry-untrusted"))
+        .expect("the entry-untrusted branch");
     assert_eq!(
         branch["properties"]["reason"]["$ref"].as_str(),
         Some("#/$defs/UntrustedReason")
