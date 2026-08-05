@@ -12,6 +12,7 @@
 
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+    WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -83,6 +84,7 @@ fn every_wire_type_derives_a_schema() {
     for schema in [
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
+        schema_of::<WatcherLossCause>(),
         schema_of::<ReasonCode>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
@@ -111,11 +113,38 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
     let schema = schema_of::<UntrustedReason>();
     assert_eq!(
         tag_constants(&schema, "kind"),
-        [
-            "torn_increment",
-            "watcher_overflow",
-            "environmental_refusal"
-        ]
+        ["watcher_overflow", "watcher_lost", "environmental_refusal"]
+    );
+}
+
+/// A lost watcher advertises the cause as a nested enum and the detail as a
+/// string, so a surface renders the branchable half and the prose half apart.
+#[test]
+fn a_lost_watcher_advertises_a_typed_cause_beside_its_prose() {
+    let schema = schema_of::<UntrustedReason>();
+    let lost = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "kind") == Some("watcher_lost"))
+        .expect("the watcher_lost branch");
+    assert_eq!(
+        property_names(lost),
+        ["kind", "cause", "detail"].into_iter().collect()
+    );
+    assert_eq!(
+        lost["properties"]["cause"]["$ref"].as_str(),
+        Some("#/$defs/WatcherLossCause")
+    );
+    assert_eq!(
+        lost["properties"]["detail"]["type"].as_str(),
+        Some("string")
+    );
+    assert_eq!(
+        branches(&schema_of::<WatcherLossCause>())
+            .iter()
+            .map(|branch| string_constant(branch)
+                .unwrap_or_else(|| panic!("a cause branch is not a pinned string: {branch}")))
+            .collect::<Vec<_>>(),
+        ["backend", "coverage_lost"]
     );
 }
 

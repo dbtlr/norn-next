@@ -15,18 +15,27 @@
 
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode, TrustState, UntrustedReason,
+    WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
+/// Every cause a lost watcher carries.
+fn watcher_loss_causes() -> Vec<WatcherLossCause> {
+    vec![WatcherLossCause::Backend, WatcherLossCause::CoverageLost]
+}
+
 /// Every reason the vocabulary carries.
 fn untrusted_reasons() -> Vec<UntrustedReason> {
-    vec![
-        UntrustedReason::TornIncrement,
-        UntrustedReason::WatcherOverflow,
-        UntrustedReason::environmental_refusal(),
-    ]
+    let mut reasons = vec![UntrustedReason::WatcherOverflow];
+    reasons.extend(
+        watcher_loss_causes()
+            .into_iter()
+            .map(|cause| UntrustedReason::watcher_lost(cause, "the watch ended")),
+    );
+    reasons.push(UntrustedReason::environmental_refusal("the disk is full"));
+    reasons
 }
 
 /// Every trust state, with one entry per reason behind `Untrusted`.
@@ -156,16 +165,26 @@ fn an_unknown_estimate_is_the_field_written_null() {
 #[test]
 fn an_untrusted_reason_is_an_object_tagged_kind() {
     assert_eq!(
-        wire(&UntrustedReason::TornIncrement),
-        r#"{"kind":"torn_increment"}"#
-    );
-    assert_eq!(
         wire(&UntrustedReason::WatcherOverflow),
         r#"{"kind":"watcher_overflow"}"#
     );
     assert_eq!(
-        wire(&UntrustedReason::environmental_refusal()),
-        r#"{"kind":"environmental_refusal"}"#
+        wire(&UntrustedReason::watcher_lost(
+            WatcherLossCause::Backend,
+            "the watcher stopped"
+        )),
+        r#"{"kind":"watcher_lost","cause":"backend","detail":"the watcher stopped"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::watcher_lost(
+            WatcherLossCause::CoverageLost,
+            "the vault root left"
+        )),
+        r#"{"kind":"watcher_lost","cause":"coverage_lost","detail":"the vault root left"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::environmental_refusal("the disk is full")),
+        r#"{"kind":"environmental_refusal","detail":"the disk is full"}"#
     );
 }
 
@@ -175,14 +194,14 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
 fn an_envelope_is_a_code_a_message_and_a_detail() {
     let envelope = ErrorEnvelope::new(
         "the entry is untrusted",
-        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal()),
+        ErrorDetail::entry_untrusted(UntrustedReason::environmental_refusal("the disk is full")),
     );
     assert_eq!(
         wire(&envelope),
         concat!(
             r#"{"code":"host/entry-untrusted","message":"the entry is untrusted","#,
             r#""detail":{"code":"host/entry-untrusted","#,
-            r#""reason":{"kind":"environmental_refusal"}}}"#
+            r#""reason":{"kind":"environmental_refusal","detail":"the disk is full"}}}"#
         )
     );
 }
@@ -242,7 +261,7 @@ fn a_refusal_carries_the_same_reason_the_state_does() {
 fn a_struct_drops_a_field_it_does_not_know() {
     let json = concat!(
         r#"{"code":"host/entry-untrusted","message":"refused","retryable":true,"#,
-        r#""detail":{"code":"host/entry-untrusted","reason":{"kind":"torn_increment"}}}"#
+        r#""detail":{"code":"host/entry-untrusted","reason":{"kind":"watcher_overflow"}}}"#
     );
     let envelope: ErrorEnvelope = serde_json::from_str(json)
         .expect("an envelope carrying a field this version has no name for");
@@ -250,7 +269,7 @@ fn a_struct_drops_a_field_it_does_not_know() {
         envelope,
         ErrorEnvelope::new(
             "refused",
-            ErrorDetail::entry_untrusted(UntrustedReason::TornIncrement)
+            ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
         )
     );
     assert!(!wire(&envelope).contains("retryable"));
@@ -276,9 +295,16 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
     );
     assert!(
         serde_json::from_str::<ErrorDetail>(
-            r#"{"code":"host/entry-vanished","reason":{"kind":"torn_increment"}}"#
+            r#"{"code":"host/entry-vanished","reason":{"kind":"watcher_overflow"}}"#
         )
         .is_err(),
         "a detail under a code nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<UntrustedReason>(
+            r#"{"kind":"watcher_lost","cause":"solar_flare","detail":"none"}"#
+        )
+        .is_err(),
+        "a watcher-loss cause nobody minted read back as one"
     );
 }

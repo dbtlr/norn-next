@@ -11,12 +11,19 @@
 //! carrying its reason; it never answers from state it knows is stale, and it
 //! never answers with a caveat attached.
 //!
-//! [`TrustState::Warming`], [`TrustState::Untrusted`] and
-//! [`UntrustedReason::EnvironmentalRefusal`] are the variants whose payloads
-//! grow — how far a heal has come, what made a state untrustworthy, what the
-//! environment refused. Each is `#[non_exhaustive]` at the variant level and
-//! built through its constructor, so a field arriving in one of them extends
-//! the payload rather than breaking every caller that destructured it.
+//! [`TrustState::Warming`], [`TrustState::Untrusted`],
+//! [`UntrustedReason::WatcherLost`] and [`UntrustedReason::EnvironmentalRefusal`]
+//! are the variants whose payloads grow — how far a heal has come, what made a
+//! state untrustworthy, what ended watcher coverage, what the environment
+//! refused. Each is `#[non_exhaustive]` at the variant level and built through
+//! its constructor, so a field arriving in one of them extends the payload
+//! rather than breaking every caller that destructured it.
+//!
+//! **Two watcher reasons, split by who resumes.** [`UntrustedReason::WatcherOverflow`]
+//! is a running watcher that reported less than it saw, and the entry re-heals
+//! itself; [`UntrustedReason::WatcherLost`] is coverage that ended, and the
+//! entry re-heals when a client demands it. One word for both would make a
+//! state that recovers on its own indistinguishable from one that waits.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -72,7 +79,7 @@ impl TrustState {
 /// Why an entry's derived state cannot be trusted.
 ///
 /// On the wire a reason is an object tagged `kind`:
-/// `{"kind":"torn_increment"}`.
+/// `{"kind":"watcher_overflow"}`.
 ///
 /// A refusal carries the same reason as its typed detail, so a caller reads
 /// one vocabulary whether it polled the state or was refused by it.
@@ -80,22 +87,61 @@ impl TrustState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum UntrustedReason {
-    /// An increment stopped part-way, so derived state holds part of a change
-    /// and no record of the rest.
-    TornIncrement,
-    /// The watcher overflowed or lost notifications, so what changed while it
-    /// was not reporting is unknown.
+    /// The watcher is covering the vault and reported less than it saw — an
+    /// overflow, or notifications it dropped — so what changed while it was
+    /// not reporting is unknown. The entry re-heals from this on its own.
     WatcherOverflow,
+    /// Watcher coverage ended, so no change to the vault is reported from here
+    /// on. The entry re-heals when a client asks it to.
+    #[non_exhaustive]
+    WatcherLost {
+        /// What ended coverage.
+        cause: WatcherLossCause,
+        /// The loss in words, for a person reading a message or a log.
+        /// Clients never match on it: `cause` is what a client branches on.
+        detail: String,
+    },
     /// The environment refused the work: the disk is full, or a vault path
     /// stopped being readable. The stored state is sound and the environment
     /// is not.
     #[non_exhaustive]
-    EnvironmentalRefusal {},
+    EnvironmentalRefusal {
+        /// The refusal in words, for a person reading a message or a log.
+        /// Clients never match on it: the reason's `kind` and the refusal's
+        /// code are what a client branches on.
+        detail: String,
+    },
 }
 
 impl UntrustedReason {
-    /// The environment refused the work.
-    pub const fn environmental_refusal() -> Self {
-        UntrustedReason::EnvironmentalRefusal {}
+    /// Watcher coverage ended, for `cause`, described by `detail`.
+    pub fn watcher_lost(cause: WatcherLossCause, detail: impl Into<String>) -> Self {
+        UntrustedReason::WatcherLost {
+            cause,
+            detail: detail.into(),
+        }
     }
+
+    /// The environment refused the work, described by `detail`.
+    pub fn environmental_refusal(detail: impl Into<String>) -> Self {
+        UntrustedReason::EnvironmentalRefusal {
+            detail: detail.into(),
+        }
+    }
+}
+
+/// What ended watcher coverage for an entry.
+///
+/// On the wire a cause is the flat string itself: `"backend"`,
+/// `"coverage_lost"`.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WatcherLossCause {
+    /// The watcher backend stopped: it could not be installed over the vault,
+    /// or it failed while running.
+    Backend,
+    /// The vault root the watcher covered stopped being covered — it was
+    /// removed, replaced, or moved out from under the watch.
+    CoverageLost,
 }

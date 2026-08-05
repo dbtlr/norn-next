@@ -82,7 +82,7 @@ pub enum ReasonCode {
 /// The typed payload one reason code carries.
 ///
 /// One detail shape per code, and the detail's `code` tag *is* the code:
-/// `{"code":"host/entry-untrusted","reason":{"kind":"torn_increment"}}`.
+/// `{"code":"host/entry-untrusted","reason":{"kind":"watcher_overflow"}}`.
 ///
 /// A detail composes the types the rest of the vocabulary already uses — an
 /// untrusted entry's detail is the same reason its trust state carries.
@@ -245,7 +245,7 @@ mod tests {
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
             ReasonCode::HostEntryUntrusted => {
-                ErrorDetail::entry_untrusted(UntrustedReason::TornIncrement)
+                ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
             ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),

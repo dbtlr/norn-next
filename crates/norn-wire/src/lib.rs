@@ -47,7 +47,8 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`] is; an enum whose variants may carry a payload is
+//! string, as [`ReasonCode`] and [`WatcherLossCause`] are; an enum whose
+//! variants may carry a payload is
 //! a tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
 //! are. The flat string keeps a code matchable as a value; the tagged object
 //! keeps a payload's arrival from changing what the value is.
@@ -68,6 +69,7 @@
 //! `#[non_exhaustive]` binds across crates, so a shape consumers cannot write
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
+//! [`UntrustedReason::watcher_lost`],
 //! [`UntrustedReason::environmental_refusal`] and
 //! [`ErrorDetail::entry_untrusted`].
 //!
@@ -89,4 +91,4 @@ mod error;
 mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
-pub use trust::{TrustState, UntrustedReason};
+pub use trust::{TrustState, UntrustedReason, WatcherLossCause};

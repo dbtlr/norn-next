@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason};
+use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason, WatcherLossCause};
 
 use crate::registry::{AliasConflict, ServingRegistry};
 
@@ -125,10 +125,13 @@ fn reporter<A>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressReporter<A> {
 }
 
 /// A lifecycle job's semantic failure class.
+///
+/// A terminal watcher failure carries the watch error itself, because the
+/// trust state it publishes distinguishes a failed backend from lost coverage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobFailure {
     Environmental(String),
-    WatcherTerminal(String),
+    WatcherTerminal(WatchError),
     LostMaintainership,
     MaintainerContended(MaintainerIdentity),
 }
@@ -212,6 +215,23 @@ impl Job {
             | Self::Maintenance(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
         }
+    }
+}
+
+/// The wire reason a terminal watch failure publishes.
+///
+/// Terminal loss and a rescan-worthy overflow are different reasons because
+/// they resume differently: coverage that ended waits for client demand, while
+/// an overflow re-heals on the lifecycle's own dispatch.
+fn watcher_lost(error: WatchError) -> UntrustedReason {
+    match error {
+        WatchError::Backend(message) => {
+            UntrustedReason::watcher_lost(WatcherLossCause::Backend, message)
+        }
+        WatchError::CoverageLost(path) => UntrustedReason::watcher_lost(
+            WatcherLossCause::CoverageLost,
+            path.display().to_string(),
+        ),
     }
 }
 
@@ -314,7 +334,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     }
 }
 
-fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
+fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
     let Some(entry) = shared.entries.get(name) else {
         return;
     };
@@ -327,7 +347,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName)
         state.recovery_required = true;
         state.recovery_demanded = false;
         state.identity_refused = true;
-        state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+        state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
         if state.active_epoch.is_none() && !state.detach_in_flight {
             state.runnable = false;
             state.attachment.take()
@@ -357,8 +377,8 @@ fn recheck_and_refuse<O: EntryOps>(
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
     let conflict = match shared.registry.recheck(name) {
         Ok(conflict) => conflict,
-        Err(_) => {
-            refuse_identity_error(shared, name);
+        Err(refusal) => {
+            refuse_identity_error(shared, name, refusal.to_string());
             return Ok(None);
         }
     };
@@ -749,8 +769,7 @@ impl<O: EntryOps> Host<O> {
                 state.queued = false;
                 state.pending_dispatch = None;
             }
-            state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
-            let _ = error;
+            state.trust = TrustState::untrusted(watcher_lost(error));
         }
     }
 
@@ -861,23 +880,30 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.epoch += 1;
                         detach = Some(attachment);
                     }
-                    Err(JobFailure::WatcherTerminal(_)) => {
+                    Err(JobFailure::MaintainerContended(incumbent)) => {
+                        state.pending = Batch::default();
+                        state.maintainer_contended = Some(incumbent);
+                        state.trust = TrustState::Unattached;
+                        state.epoch += 1;
+                        detach = Some(attachment);
+                    }
+                    Err(JobFailure::WatcherTerminal(error)) => {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
                         state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                        state.trust = TrustState::untrusted(watcher_lost(error));
                         state.attachment = Some(attachment);
                     }
-                    Err(_) => {
+                    Err(JobFailure::Environmental(detail)) => {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
                         state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
-                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                            TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                         state.attachment = Some(attachment);
                     }
                 }
@@ -978,12 +1004,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                     return;
                 }
-                Err(_) => {
+                Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.epoch == epoch {
                         state.runnable = false;
-                        state.trust =
-                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                        state.trust = TrustState::untrusted(
+                            UntrustedReason::environmental_refusal(refusal.to_string()),
+                        );
                     }
                     return;
                 }
@@ -991,12 +1018,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             let claim_identity = match shared.registry.identity(&name) {
                 Ok(identity) => identity,
-                Err(_) => {
+                Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.epoch == epoch {
                         state.runnable = false;
-                        state.trust =
-                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                        state.trust = TrustState::untrusted(
+                            UntrustedReason::environmental_refusal(refusal.to_string()),
+                        );
                     }
                     return;
                 }
@@ -1040,7 +1068,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             let mut post_conflict = match shared.registry.recheck(&name) {
                 Ok(conflict) => conflict,
-                Err(_) => {
+                Err(refusal) => {
                     drop(attach_claims);
                     if let Ok((attachment, _, _)) = result {
                         shared.ops.detach(&name, attachment);
@@ -1048,8 +1076,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.epoch == epoch {
                         state.runnable = false;
-                        state.trust =
-                            TrustState::untrusted(UntrustedReason::environmental_refusal());
+                        state.trust = TrustState::untrusted(
+                            UntrustedReason::environmental_refusal(refusal.to_string()),
+                        );
                     }
                     return;
                 }
@@ -1115,11 +1144,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.pending = Batch::default();
                     state.trust = TrustState::Unattached;
                 }
-                Err(JobFailure::WatcherTerminal(_)) => {
-                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                Err(JobFailure::WatcherTerminal(error)) => {
+                    state.trust = TrustState::untrusted(watcher_lost(error));
                 }
-                Err(_) => {
-                    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+                Err(JobFailure::Environmental(detail)) => {
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                 }
             }
         }
@@ -1180,20 +1210,29 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     shared.ops.detach(&name, attachment);
                     return;
                 }
-                Err(JobFailure::WatcherTerminal(_)) => {
+                Err(JobFailure::MaintainerContended(incumbent)) => {
+                    state.pending = Batch::default();
+                    state.maintainer_contended = Some(incumbent);
+                    state.trust = TrustState::Unattached;
+                    drop(state);
+                    shared.ops.detach(&name, attachment);
+                    return;
+                }
+                Err(JobFailure::WatcherTerminal(error)) => {
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
-                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                    state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
-                Err(_) => {
+                Err(JobFailure::Environmental(detail)) => {
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
-                    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
             }
@@ -1284,13 +1323,22 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     shared.ops.detach(&name, attachment);
                     break;
                 }
-                Err(JobFailure::WatcherTerminal(_)) => {
+                Err(JobFailure::MaintainerContended(incumbent)) => {
+                    state.pending = Batch::default();
+                    state.runnable = false;
+                    state.maintainer_contended = Some(incumbent);
+                    state.trust = TrustState::Unattached;
+                    drop(state);
+                    shared.ops.detach(&name, attachment);
+                    break;
+                }
+                Err(JobFailure::WatcherTerminal(error)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                    state.trust = TrustState::untrusted(watcher_lost(error));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -1298,13 +1346,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                     break;
                 }
-                Err(_) => {
+                Err(JobFailure::Environmental(detail)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
@@ -1370,22 +1419,32 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     shared.ops.detach(&name, attachment);
                     return;
                 }
-                Err(JobFailure::WatcherTerminal(_)) => {
+                Err(JobFailure::MaintainerContended(incumbent)) => {
+                    state.pending = Batch::default();
+                    state.runnable = false;
+                    state.maintainer_contended = Some(incumbent);
+                    state.trust = TrustState::Unattached;
+                    drop(state);
+                    shared.ops.detach(&name, attachment);
+                    return;
+                }
+                Err(JobFailure::WatcherTerminal(error)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+                    state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
-                Err(_) => {
+                Err(JobFailure::Environmental(detail)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
                     state.recovery_required = true;
                     state.recovery_demanded = false;
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal());
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
             }
@@ -1556,7 +1615,9 @@ mod tests {
                 spin_until("reconcile_release", &self.reconcile_release);
             }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
-                return Err(JobFailure::WatcherTerminal("lost".into()));
+                return Err(JobFailure::WatcherTerminal(WatchError::Backend(
+                    "lost".into(),
+                )));
             }
             if self.environmental_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
@@ -1573,7 +1634,9 @@ mod tests {
             self.recovers.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(20));
             if self.terminal_recover.swap(false, Ordering::SeqCst) {
-                return Err(JobFailure::WatcherTerminal("lost".into()));
+                return Err(JobFailure::WatcherTerminal(WatchError::Backend(
+                    "lost".into(),
+                )));
             }
             if self.environmental_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
@@ -1657,6 +1720,25 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         panic!("state did not become {expected:?}");
+    }
+
+    /// The state a lost watcher publishes, with the cause and the prose the
+    /// watch error carried.
+    fn lost(cause: WatcherLossCause, detail: &str) -> TrustState {
+        TrustState::untrusted(UntrustedReason::watcher_lost(cause, detail))
+    }
+
+    /// Whether a state is an environmental refusal, judged by the reason alone.
+    /// The detail beside it is the platform's own account of the refusal, which
+    /// is prose rather than a value to match.
+    fn refuses_environmentally(state: Option<&TrustState>) -> bool {
+        matches!(
+            state,
+            Some(TrustState::Untrusted {
+                reason: UntrustedReason::EnvironmentalRefusal { .. },
+                ..
+            })
+        )
     }
 
     fn spin_until(label: &str, flag: &std::sync::atomic::AtomicBool) {
@@ -1838,6 +1920,31 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
 
+    /// The watch error a terminal failure carried reaches the trust state: a
+    /// backend that stopped and a vault root that left coverage are two causes
+    /// with two states, and the path the watcher lost is the state's detail.
+    #[test]
+    fn a_terminal_watcher_failure_publishes_the_cause_it_carried() {
+        for (error, expected) in [
+            (
+                WatchError::Backend("the backend stopped".into()),
+                lost(WatcherLossCause::Backend, "the backend stopped"),
+            ),
+            (
+                WatchError::CoverageLost(std::path::PathBuf::from("/tmp/norn-host-vault-root")),
+                lost(WatcherLossCause::CoverageLost, "/tmp/norn-host-vault-root"),
+            ),
+        ] {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let held = host.demand(&name).unwrap();
+            wait_for_state(&host, &name, TrustState::Ready);
+            host.watcher_failed(&name, error);
+            assert_eq!(host.state(&name), Some(expected));
+            drop(held);
+        }
+    }
+
     #[test]
     fn recover_drains_pending_invalidations_before_publishing_ready() {
         let ops = Arc::new(FakeOps::default());
@@ -1948,11 +2055,7 @@ mod tests {
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.terminal_recover.store(true, Ordering::SeqCst);
         drop(host.demand(&name).unwrap());
-        wait_for_state(
-            &host,
-            &name,
-            TrustState::untrusted(UntrustedReason::WatcherOverflow),
-        );
+        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
     }
 
     #[test]
@@ -1964,11 +2067,7 @@ mod tests {
         ops.terminal_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        wait_for_state(
-            &host,
-            &name,
-            TrustState::untrusted(UntrustedReason::WatcherOverflow),
-        );
+        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
     }
 
     #[test]
@@ -1983,7 +2082,7 @@ mod tests {
         wait_for_state(
             &host,
             &name,
-            TrustState::untrusted(UntrustedReason::environmental_refusal()),
+            TrustState::untrusted(UntrustedReason::environmental_refusal("refused")),
         );
         let failed_count = ops.reconciles.load(Ordering::SeqCst);
         host.accept_batch(&name, Batch::default()).unwrap();
@@ -1992,7 +2091,7 @@ mod tests {
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(
-                UntrustedReason::environmental_refusal()
+                UntrustedReason::environmental_refusal("refused")
             ))
         );
         drop(host.demand(&name).unwrap());
@@ -2013,7 +2112,7 @@ mod tests {
         wait_for_state(
             &host,
             &name,
-            TrustState::untrusted(UntrustedReason::environmental_refusal()),
+            TrustState::untrusted(UntrustedReason::environmental_refusal("refused")),
         );
         host.accept_batch(&name, Batch::default()).unwrap();
         thread::sleep(Duration::from_millis(20));
@@ -2021,7 +2120,7 @@ mod tests {
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(
-                UntrustedReason::environmental_refusal()
+                UntrustedReason::environmental_refusal("refused")
             ))
         );
         drop(host.demand(&name).unwrap());
@@ -2050,15 +2149,11 @@ mod tests {
         let raced_demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(
-            &host,
-            &name,
-            TrustState::untrusted(UntrustedReason::WatcherOverflow),
-        );
+        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
         thread::sleep(Duration::from_millis(10));
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            Some(lost(WatcherLossCause::Backend, "lost"))
         );
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(raced_demand);
@@ -2138,7 +2233,7 @@ mod tests {
         );
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            Some(lost(WatcherLossCause::Backend, "lost"))
         );
 
         drop(host.demand(&name).unwrap());
@@ -2159,7 +2254,7 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert_eq!(
             demand.completion(),
-            Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            Demand::State(lost(WatcherLossCause::Backend, "lost"))
         );
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
@@ -2191,7 +2286,7 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            Some(lost(WatcherLossCause::Backend, "lost"))
         );
 
         let retry = host.demand(&name).unwrap();
@@ -2658,12 +2753,10 @@ mod tests {
         std::fs::remove_dir(&root).unwrap();
         symlink("root", &root).unwrap();
         let demand = host.demand(&name).unwrap();
-        assert_eq!(
+        assert!(matches!(
             demand.completion(),
-            Demand::State(TrustState::untrusted(
-                UntrustedReason::environmental_refusal()
-            ))
-        );
+            Demand::State(ref state) if refuses_environmentally(Some(state))
+        ));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.poll_release.store(true, Ordering::SeqCst);
         for _ in 0..200 {
@@ -2675,12 +2768,7 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         thread::sleep(Duration::from_millis(10));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            host.state(&name),
-            Some(TrustState::untrusted(
-                UntrustedReason::environmental_refusal()
-            ))
-        );
+        assert!(refuses_environmentally(host.state(&name).as_ref()));
         drop((demand, host));
         let _ = std::fs::remove_dir_all(base);
     }
@@ -2735,12 +2823,10 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
         let refused_again = host.demand(&refused).unwrap();
-        assert_eq!(
+        assert!(matches!(
             refused_again.completion(),
-            Demand::State(TrustState::untrusted(
-                UntrustedReason::environmental_refusal()
-            ))
-        );
+            Demand::State(ref state) if refuses_environmentally(Some(state))
+        ));
         assert_eq!(host.state(&healthy), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
 

@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use norn_config::registry::Entry;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
-    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, try_acquire, walk, watch,
+    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, WatchError, try_acquire,
+    walk, watch,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -281,7 +282,7 @@ fn poll_subscription(
     let result = attachment
         .subscription
         .as_ref()
-        .ok_or_else(|| JobFailure::WatcherTerminal("watcher coverage is absent".into()))?
+        .ok_or_else(|| watcher(WatchError::Backend("watcher coverage is absent".into())))?
         .try_recv();
     match result {
         Ok(batch) => Ok(batch),
@@ -1195,8 +1196,8 @@ fn environmental(message: impl Into<String>) -> JobFailure {
 fn effect(error: impl std::fmt::Display) -> JobFailure {
     environmental(error.to_string())
 }
-fn watcher(error: impl std::fmt::Display) -> JobFailure {
-    JobFailure::WatcherTerminal(error.to_string())
+fn watcher(error: WatchError) -> JobFailure {
+    JobFailure::WatcherTerminal(error)
 }
 
 fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
