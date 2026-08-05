@@ -52,3 +52,36 @@ impl fmt::Display for FindingKind {
         formatter.write_str(self.as_str())
     }
 }
+
+/// A string that spells no kind the registry holds.
+///
+/// A kind nobody minted is read as a refusal rather than as a kind, the same
+/// way the tagged vocabulary refuses a variant it does not know.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownFindingKind;
+
+impl fmt::Display for UnknownFindingKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the string spells no finding kind")
+    }
+}
+
+impl std::error::Error for UnknownFindingKind {}
+
+impl TryFrom<&str> for FindingKind {
+    type Error = UnknownFindingKind;
+
+    /// The kind a wire string names, matched against the strings
+    /// [`FindingKind::as_str`] hands out: the registry is spelled once, and
+    /// reading a kind back is the inverse of writing it.
+    fn try_from(string: &str) -> Result<Self, Self::Error> {
+        [
+            FindingKind::PathBytesNotUtf8,
+            FindingKind::PathNamesNoDocument,
+            FindingKind::BodyBytesNotUtf8,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == string)
+        .ok_or(UnknownFindingKind)
+    }
+}

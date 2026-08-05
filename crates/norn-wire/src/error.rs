@@ -83,7 +83,8 @@ pub enum ReasonCode {
     #[serde(rename = "host/maintainer-contended")]
     HostMaintainerContended,
     /// `host/unknown-vault` — the requested name is not in the registry, so
-    /// there is no vault to serve under it.
+    /// there is no vault to serve under it. The detail is the name that was
+    /// asked for.
     #[serde(rename = "host/unknown-vault")]
     HostUnknownVault,
 }
@@ -123,18 +124,24 @@ pub enum ErrorDetail {
         /// The incumbent maintainer's diagnostic identity.
         incumbent: MaintainerIdentity,
     },
-    /// The detail of `host/unknown-vault`: the name asked for is the
-    /// envelope's message, and the code carries no payload of its own.
+    /// The detail of `host/unknown-vault`: the name the request asked for.
     #[serde(rename = "host/unknown-vault")]
-    UnknownVault {},
+    #[non_exhaustive]
+    UnknownVault {
+        /// The vault name the request asked for, echoed back as typed data.
+        name: String,
+    },
 }
 
 impl ErrorDetail {
     /// The detail of `host/duplicate-root`, for the colliding `aliases`.
+    ///
+    /// The aliases are sorted here, so the ascending order the field promises
+    /// holds for every producer rather than for the ones that sorted first.
     pub fn duplicate_root<A: Into<String>>(aliases: impl IntoIterator<Item = A>) -> Self {
-        ErrorDetail::DuplicateRoot {
-            aliases: aliases.into_iter().map(Into::into).collect(),
-        }
+        let mut aliases: Vec<String> = aliases.into_iter().map(Into::into).collect();
+        aliases.sort();
+        ErrorDetail::DuplicateRoot { aliases }
     }
 
     /// The detail of `host/entry-untrusted`, for `reason`.
@@ -147,9 +154,9 @@ impl ErrorDetail {
         Self::MaintainerContended { incumbent }
     }
 
-    /// The detail of `host/unknown-vault`.
-    pub const fn unknown_vault() -> Self {
-        ErrorDetail::UnknownVault {}
+    /// The detail of `host/unknown-vault`, for the requested `name`.
+    pub fn unknown_vault(name: impl Into<String>) -> Self {
+        ErrorDetail::UnknownVault { name: name.into() }
     }
 
     /// The code this detail is the payload of.
@@ -288,7 +295,7 @@ mod tests {
             ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
             ),
-            ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault(),
+            ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault("notes"),
         }
     }
 

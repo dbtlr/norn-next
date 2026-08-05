@@ -15,7 +15,7 @@
 
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
-    UntrustedReason, WatcherLossCause,
+    UnknownFindingKind, UntrustedReason, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -80,7 +80,7 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::duplicate_root(["notes", "vault"]),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
-        ErrorDetail::unknown_vault(),
+        ErrorDetail::unknown_vault("notes"),
     ]);
     details
 }
@@ -210,7 +210,10 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
 
 /// A finding kind is the flat namespaced string itself, and the rendering the
 /// crate hands out is the string it serializes as — one spelling, whether a
-/// reader took it off the wire or asked the type for it.
+/// reader took it off the wire or asked the type for it. The string reads back
+/// as the kind it renders, so a row filed under a kind is read as that kind
+/// rather than re-matched by hand; a string the registry does not hold is
+/// refused.
 #[test]
 fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
     for (kind, string) in finding_kinds().into_iter().zip([
@@ -221,7 +224,12 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         assert_eq!(kind.as_str(), string);
         assert_eq!(kind.to_string(), string);
         assert_eq!(wire(&kind), format!("\"{string}\""));
+        assert_eq!(FindingKind::try_from(string), Ok(kind));
     }
+    assert_eq!(
+        FindingKind::try_from("document/unreadable"),
+        Err(UnknownFindingKind)
+    );
 }
 
 /// The envelope is three fields, and the detail is tagged with the same code
@@ -242,9 +250,9 @@ fn an_envelope_is_a_code_a_message_and_a_detail() {
     );
 }
 
-/// A registry refusal names the vault it is about the way the registry does:
-/// duplicate-root carries every colliding name, and unknown-vault carries
-/// nothing past the message.
+/// A registry refusal names the vault it is about as typed data: duplicate-root
+/// carries every colliding name, and unknown-vault carries the name the request
+/// asked for.
 #[test]
 fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
@@ -260,12 +268,22 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
         wire(&ErrorEnvelope::new(
             "no vault is registered as `notes`",
-            ErrorDetail::unknown_vault(),
+            ErrorDetail::unknown_vault("notes"),
         )),
         concat!(
             r#"{"code":"host/unknown-vault","message":"no vault is registered as `notes`","#,
-            r#""detail":{"code":"host/unknown-vault"}}"#
+            r#""detail":{"code":"host/unknown-vault","name":"notes"}}"#
         )
+    );
+}
+
+/// The colliding names ascend because the detail sorts them, so the order the
+/// field promises holds whatever order a producer collected them in.
+#[test]
+fn duplicate_root_aliases_ascend_whatever_order_they_arrive_in() {
+    assert_eq!(
+        wire(&ErrorDetail::duplicate_root(["vault", "archive", "notes"])),
+        r#"{"code":"host/duplicate-root","aliases":["archive","notes","vault"]}"#
     );
 }
 

@@ -77,6 +77,15 @@ fn tag_constants<'a>(schema: &'a Value, tag: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The same members in ascending order. A membership assertion sorts both
+/// sides, so it pins the set a surface renders and leaves the order schemars
+/// declared the variants in unpinned.
+fn sorted<'a>(members: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut members: Vec<&str> = members.into_iter().collect();
+    members.sort_unstable();
+    members
+}
+
 // ── Every type derives one ───────────────────────────────────────────────
 
 #[test]
@@ -113,8 +122,8 @@ fn a_trust_state_advertises_its_state_tag() {
 fn an_untrusted_reason_advertises_its_kind_tag() {
     let schema = schema_of::<UntrustedReason>();
     assert_eq!(
-        tag_constants(&schema, "kind"),
-        ["watcher_overflow", "watcher_lost", "environmental_refusal"]
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["watcher_overflow", "watcher_lost", "environmental_refusal"])
     );
 }
 
@@ -140,12 +149,13 @@ fn a_lost_watcher_advertises_a_typed_cause_beside_its_prose() {
         Some("string")
     );
     assert_eq!(
-        branches(&schema_of::<WatcherLossCause>())
-            .iter()
-            .map(|branch| string_constant(branch)
-                .unwrap_or_else(|| panic!("a cause branch is not a pinned string: {branch}")))
-            .collect::<Vec<_>>(),
-        ["backend", "coverage_lost"]
+        sorted(
+            branches(&schema_of::<WatcherLossCause>())
+                .iter()
+                .map(|branch| string_constant(branch)
+                    .unwrap_or_else(|| panic!("a cause branch is not a pinned string: {branch}")))
+        ),
+        sorted(["backend", "coverage_lost"])
     );
 }
 
@@ -153,13 +163,13 @@ fn a_lost_watcher_advertises_a_typed_cause_beside_its_prose() {
 fn an_error_detail_advertises_the_code_as_its_tag() {
     let schema = schema_of::<ErrorDetail>();
     assert_eq!(
-        tag_constants(&schema, "code"),
-        [
+        sorted(tag_constants(&schema, "code")),
+        sorted([
             "host/duplicate-root",
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault"
-        ]
+        ])
     );
 }
 
@@ -240,13 +250,13 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
         })
         .collect();
     assert_eq!(
-        codes,
-        [
+        sorted(codes),
+        sorted([
             "host/duplicate-root",
             "host/entry-untrusted",
             "host/maintainer-contended",
             "host/unknown-vault"
-        ]
+        ])
     );
 }
 
@@ -263,12 +273,12 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
         })
         .collect();
     assert_eq!(
-        kinds,
-        [
+        sorted(kinds),
+        sorted([
             "document/path-bytes-not-utf8",
             "document/path-names-no-document",
             "document/body-bytes-not-utf8"
-        ]
+        ])
     );
 }
 
@@ -288,6 +298,26 @@ fn a_detail_refers_to_the_reason_type_it_carries() {
     assert!(
         schema["$defs"]["UntrustedReason"].is_object(),
         "the referenced definition is absent: {schema}"
+    );
+}
+
+/// An unknown vault advertises the requested name as a field of its detail, so
+/// a surface reads the name the request asked for as typed data rather than
+/// out of the message.
+#[test]
+fn an_unknown_vault_advertises_the_requested_name() {
+    let schema = schema_of::<ErrorDetail>();
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/unknown-vault"))
+        .expect("the unknown-vault branch");
+    assert_eq!(
+        property_names(branch),
+        ["code", "name"].into_iter().collect()
+    );
+    assert_eq!(
+        branch["properties"]["name"]["type"].as_str(),
+        Some("string")
     );
 }
 
