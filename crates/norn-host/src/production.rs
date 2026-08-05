@@ -276,15 +276,19 @@ impl EntryOps for ProductionEntryOps {
     }
 }
 
+/// One settled batch, or no facts.
+///
+/// A terminal watch error takes the subscription and is reported once. An
+/// attachment without a subscription therefore reports no facts rather than a
+/// second failure: the cause that ended coverage is already published, and only
+/// a re-attach installs coverage again.
 fn poll_subscription(
     attachment: &mut ProductionAttachment,
 ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-    let result = attachment
-        .subscription
-        .as_ref()
-        .ok_or_else(|| watcher(WatchError::Backend("watcher coverage is absent".into())))?
-        .try_recv();
-    match result {
+    let Some(subscription) = attachment.subscription.as_ref() else {
+        return Ok(None);
+    };
+    match subscription.try_recv() {
         Ok(batch) => Ok(batch),
         Err(error) => {
             attachment.subscription.take();
@@ -2847,6 +2851,21 @@ mod tests {
             row.content_hash,
             norn_fs::ContentHash::of(b"after").to_string()
         );
+    }
+
+    /// Coverage that ended takes the subscription with it and publishes its
+    /// cause once. A poll of the attachment that remains reports no facts, so
+    /// nothing lands on top of the cause a client is reading.
+    #[test]
+    fn an_attachment_without_a_subscription_polls_to_no_facts() {
+        let f = Fixture::new("absent-subscription");
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&name, &progress).unwrap();
+        attachment.subscription.take();
+        assert!(matches!(poll_subscription(&mut attachment), Ok(None)));
+        assert!(matches!(ops.poll(&name, &mut attachment), Ok(None)));
     }
 
     #[test]

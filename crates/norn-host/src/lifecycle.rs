@@ -181,6 +181,10 @@ struct EntryState<A> {
     queued: bool,
     active_epoch: Option<u64>,
     pending_dispatch: Option<Job>,
+    /// The incumbent another process reported while holding this vault's
+    /// maintainer lock. While it is set the entry is parked: `demand` answers
+    /// contention instead of a trust state, and no path re-attaches until
+    /// [`Host::retry`] clears it.
     maintainer_contended: Option<MaintainerIdentity>,
     duplicate_root: Option<AliasConflict>,
     last_demand: Instant,
@@ -223,16 +227,16 @@ impl Job {
 /// Terminal loss and a rescan-worthy overflow are different reasons because
 /// they resume differently: coverage that ended waits for client demand, while
 /// an overflow re-heals on the lifecycle's own dispatch.
+///
+/// The detail is the watch error's own rendering, so the prose a person reads
+/// is a sentence about the failure rather than a bare value inviting a parse.
 fn watcher_lost(error: WatchError) -> UntrustedReason {
-    match error {
-        WatchError::Backend(message) => {
-            UntrustedReason::watcher_lost(WatcherLossCause::Backend, message)
-        }
-        WatchError::CoverageLost(path) => UntrustedReason::watcher_lost(
-            WatcherLossCause::CoverageLost,
-            path.display().to_string(),
-        ),
-    }
+    let detail = error.to_string();
+    let cause = match error {
+        WatchError::Backend(_) => WatcherLossCause::Backend,
+        WatchError::CoverageLost(_) => WatcherLossCause::CoverageLost,
+    };
+    UntrustedReason::watcher_lost(cause, detail)
 }
 
 fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
@@ -924,6 +928,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 && !state.runnable
                 && (!state.recovery_required || state.recovery_demanded)
                 && state.duplicate_root.is_none()
+                && state.maintainer_contended.is_none()
                 && !state.identity_refused
             {
                 state.trust = TrustState::warming(0, None);
@@ -1483,6 +1488,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             if state.demand_leases > 0
                 && reattach_requested
                 && state.duplicate_root.is_none()
+                && state.maintainer_contended.is_none()
                 && !state.identity_refused
             {
                 state.runnable = true;
@@ -1585,6 +1591,8 @@ mod tests {
         polls: Mutex<BTreeMap<VaultName, usize>>,
         empty_poll_batches: AtomicUsize,
         rescan_poll_batch: std::sync::atomic::AtomicBool,
+        terminal_poll: Mutex<Option<WatchError>>,
+        contend_poll: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -1654,6 +1662,19 @@ mod tests {
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
                 spin_until("poll_release", &self.poll_release);
+            }
+            if let Some(error) = self
+                .terminal_poll
+                .lock()
+                .expect("terminal poll poisoned")
+                .take()
+            {
+                return Err(JobFailure::WatcherTerminal(error));
+            }
+            if self.contend_poll.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
             }
             if self.rescan_poll_batch.swap(false, Ordering::SeqCst) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
@@ -1730,15 +1751,27 @@ mod tests {
 
     /// Whether a state is an environmental refusal, judged by the reason alone.
     /// The detail beside it is the platform's own account of the refusal, which
-    /// is prose rather than a value to match.
+    /// is prose rather than a value to match — but a refusal carries an account
+    /// of itself, so the prose is there.
     fn refuses_environmentally(state: Option<&TrustState>) -> bool {
-        matches!(
-            state,
-            Some(TrustState::Untrusted {
-                reason: UntrustedReason::EnvironmentalRefusal { .. },
-                ..
-            })
-        )
+        let Some(TrustState::Untrusted {
+            reason: UntrustedReason::EnvironmentalRefusal { detail, .. },
+            ..
+        }) = state
+        else {
+            return false;
+        };
+        assert!(
+            !detail.is_empty(),
+            "an environmental refusal published no account of itself"
+        );
+        true
+    }
+
+    /// The state the fake's terminal watch error publishes: a failed backend,
+    /// described by the error's own rendering of its message.
+    fn backend_lost() -> TrustState {
+        lost(WatcherLossCause::Backend, "filesystem watcher failed: lost")
     }
 
     fn spin_until(label: &str, flag: &std::sync::atomic::AtomicBool) {
@@ -1922,17 +1955,24 @@ mod tests {
 
     /// The watch error a terminal failure carried reaches the trust state: a
     /// backend that stopped and a vault root that left coverage are two causes
-    /// with two states, and the path the watcher lost is the state's detail.
+    /// with two states, and the error's own account of itself is the state's
+    /// detail — a sentence a person reads, not a value shaped to be parsed.
     #[test]
     fn a_terminal_watcher_failure_publishes_the_cause_it_carried() {
         for (error, expected) in [
             (
                 WatchError::Backend("the backend stopped".into()),
-                lost(WatcherLossCause::Backend, "the backend stopped"),
+                lost(
+                    WatcherLossCause::Backend,
+                    "filesystem watcher failed: the backend stopped",
+                ),
             ),
             (
                 WatchError::CoverageLost(std::path::PathBuf::from("/tmp/norn-host-vault-root")),
-                lost(WatcherLossCause::CoverageLost, "/tmp/norn-host-vault-root"),
+                lost(
+                    WatcherLossCause::CoverageLost,
+                    "watch coverage was lost for /tmp/norn-host-vault-root",
+                ),
             ),
         ] {
             let ops = Arc::new(FakeOps::default());
@@ -1943,6 +1983,73 @@ mod tests {
             assert_eq!(host.state(&name), Some(expected));
             drop(held);
         }
+    }
+
+    /// A terminal poll failure publishes its cause once, and the dispatcher
+    /// keeps polling the attachment it kept. Those later ticks report no facts,
+    /// so the state a client reads long after the loss is still the cause that
+    /// ended coverage rather than something minted on top of it.
+    #[test]
+    fn a_published_watcher_cause_outlives_the_ticks_that_follow_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let held = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(
+            std::path::PathBuf::from("/tmp/norn-host-lifecycle-fixture"),
+        ));
+        let expected = lost(
+            WatcherLossCause::CoverageLost,
+            "watch coverage was lost for /tmp/norn-host-lifecycle-fixture",
+        );
+        wait_for_state(&host, &name, expected.clone());
+        let polls_at_loss = *ops
+            .polls
+            .lock()
+            .unwrap()
+            .get(&name)
+            .expect("the entry was polled");
+        for _ in 0..500 {
+            if ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4,
+            "the dispatcher stopped polling the entry"
+        );
+        assert_eq!(host.state(&name), Some(expected));
+        drop(held);
+    }
+
+    /// Contention reported by a poll parks the entry the way the attach path
+    /// does: the entry publishes Unattached, nothing re-attaches against the
+    /// lock another process holds, and demand keeps answering contention until
+    /// a retry clears it.
+    #[test]
+    fn contention_reported_by_a_poll_parks_the_entry_until_retry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let held = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        ops.contend_poll.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            host.demand(&name).unwrap().outcome(),
+            Demand::MaintainerContended(_)
+        ));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+
+        let retried = host.retry(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop((retried, held));
     }
 
     #[test]
@@ -2055,7 +2162,7 @@ mod tests {
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.terminal_recover.store(true, Ordering::SeqCst);
         drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
+        wait_for_state(&host, &name, backend_lost());
     }
 
     #[test]
@@ -2067,7 +2174,7 @@ mod tests {
         ops.terminal_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
+        wait_for_state(&host, &name, backend_lost());
     }
 
     #[test]
@@ -2149,12 +2256,9 @@ mod tests {
         let raced_demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, lost(WatcherLossCause::Backend, "lost"));
+        wait_for_state(&host, &name, backend_lost());
         thread::sleep(Duration::from_millis(10));
-        assert_eq!(
-            host.state(&name),
-            Some(lost(WatcherLossCause::Backend, "lost"))
-        );
+        assert_eq!(host.state(&name), Some(backend_lost()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(raced_demand);
         drop(host.demand(&name).unwrap());
@@ -2231,10 +2335,7 @@ mod tests {
             1,
             "a demand nobody was holding restarted the entry on its own"
         );
-        assert_eq!(
-            host.state(&name),
-            Some(lost(WatcherLossCause::Backend, "lost"))
-        );
+        assert_eq!(host.state(&name), Some(backend_lost()));
 
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
@@ -2252,10 +2353,7 @@ mod tests {
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         let demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            demand.completion(),
-            Demand::State(lost(WatcherLossCause::Backend, "lost"))
-        );
+        assert_eq!(demand.completion(), Demand::State(backend_lost()));
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
@@ -2284,10 +2382,7 @@ mod tests {
         }
         thread::sleep(Duration::from_millis(10));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            host.state(&name),
-            Some(lost(WatcherLossCause::Backend, "lost"))
-        );
+        assert_eq!(host.state(&name), Some(backend_lost()));
 
         let retry = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
