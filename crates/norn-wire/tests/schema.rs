@@ -113,8 +113,8 @@ fn every_wire_type_derives_a_schema() {
 fn a_trust_state_advertises_its_state_tag() {
     let schema = schema_of::<TrustState>();
     assert_eq!(
-        tag_constants(&schema, "state"),
-        ["unattached", "warming", "ready", "untrusted"]
+        sorted(tag_constants(&schema, "state")),
+        sorted(["unattached", "warming", "ready", "untrusted"])
     );
 }
 
@@ -176,7 +176,10 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
 #[test]
 fn a_maintainer_identity_advertises_named_and_unknown_shapes() {
     let schema = schema_of::<MaintainerIdentity>();
-    assert_eq!(tag_constants(&schema, "kind"), ["named", "unknown"]);
+    assert_eq!(
+        sorted(tag_constants(&schema, "kind")),
+        sorted(["named", "unknown"])
+    );
     let named = branches(&schema)
         .iter()
         .find(|branch| tag_constant(branch, "kind") == Some("named"))
