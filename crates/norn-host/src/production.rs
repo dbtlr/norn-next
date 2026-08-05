@@ -2832,12 +2832,14 @@ mod tests {
         .unwrap();
         let _ = host.demand(&name).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
-        // Armed before the edit, so the reconcile the watcher schedules for it is
-        // held at its entry and the warming leg it published on the way in stays
-        // there to be read.
+        // Armed before the edit, so the reconcile the watcher schedules for it
+        // is held at its entry and the in-flight leg it published on the way in
+        // stays there to be read: Warming for a dirty-path batch, or the
+        // watcher-overflow refusal when the platform coalesces the edit into a
+        // rescan scope.
         armed.store(true, std::sync::atomic::Ordering::SeqCst);
         fs::write(f.vault().join("note.md"), "after").unwrap();
-        wait_state_kind(&host, &name, true);
+        wait_pump_in_flight(&host, &name);
         released.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         drop(host);
@@ -3139,23 +3141,27 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
-    fn wait_state_kind<O: EntryOps>(host: &crate::Host<O>, name: &VaultName, warming: bool) {
-        wait_until(
-            if warming {
-                "a warming trust state"
+    /// The pump has left `Ready` with its reconcile leg in flight. The leg
+    /// reads as `Warming` when the batch carried the dirty path, and as the
+    /// watcher-overflow refusal when the platform delivered a rescan scope
+    /// instead — both are the same in-flight fact, and pinning one of them
+    /// pins the watcher backend's batch granularity.
+    fn wait_pump_in_flight<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
+        wait_until("an in-flight trust state", lifecycle_budget(), || {
+            let state = host.state(name);
+            if matches!(
+                state,
+                Some(norn_wire::TrustState::Warming { .. })
+                    | Some(norn_wire::TrustState::Untrusted {
+                        reason: norn_wire::UntrustedReason::WatcherOverflow,
+                        ..
+                    })
+            ) {
+                Observed::Met(())
             } else {
-                "a settled trust state"
-            },
-            lifecycle_budget(),
-            || {
-                let state = host.state(name);
-                if matches!(state, Some(norn_wire::TrustState::Warming { .. })) == warming {
-                    Observed::Met(())
-                } else {
-                    Observed::Pending(format!("the state is {state:?}"))
-                }
-            },
-        )
+                Observed::Pending(format!("the state is {state:?}"))
+            }
+        })
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
