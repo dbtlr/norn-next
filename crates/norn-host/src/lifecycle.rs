@@ -1759,7 +1759,7 @@ mod tests {
             }
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
-                spin_until("attach_release", &self.attach_release);
+                wait_for_flag("attach_release", &self.attach_release);
             }
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -1782,7 +1782,7 @@ mod tests {
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                spin_until("reconcile_release", &self.reconcile_release);
+                wait_for_flag("reconcile_release", &self.reconcile_release);
             }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal(WatchError::Backend(
@@ -1824,7 +1824,7 @@ mod tests {
                 .or_default() += 1;
             if self.block_poll.load(Ordering::SeqCst) {
                 self.poll_started.store(true, Ordering::SeqCst);
-                spin_until("poll_release", &self.poll_release);
+                wait_for_flag("poll_release", &self.poll_release);
             }
             if let Some(error) = self
                 .terminal_poll
@@ -1870,7 +1870,7 @@ mod tests {
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
-                spin_until("maintenance_release", &self.maintenance_release);
+                wait_for_flag("maintenance_release", &self.maintenance_release);
             }
             Ok(())
         }
@@ -1878,7 +1878,7 @@ mod tests {
         fn detach(&self, _: &VaultName, _: ()) {
             if self.block_detach.load(Ordering::SeqCst) {
                 self.detach_started.store(true, Ordering::SeqCst);
-                spin_until("detach_release", &self.detach_release);
+                wait_for_flag("detach_release", &self.detach_release);
             }
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
@@ -1965,6 +1965,20 @@ mod tests {
         });
     }
 
+    /// Wait for the fake to have given back `expected` attachments, on the one
+    /// budget, reporting how many it had given back when the wait gave up.
+    fn wait_for_detaches(ops: &FakeOps, expected: usize, what: &str) {
+        wait_until(what, lifecycle_wait_budget(), || {
+            let detaches = ops.detaches.load(Ordering::SeqCst);
+            if detaches == expected {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{detaches} detaches so far"))
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     /// The state a lost watcher publishes, with the cause and the prose the
     /// watch error carried.
     fn lost(cause: WatcherLossCause, detail: &str) -> TrustState {
@@ -1996,12 +2010,22 @@ mod tests {
         lost(WatcherLossCause::Backend, "filesystem watcher failed: lost")
     }
 
-    fn spin_until(label: &str, flag: &std::sync::atomic::AtomicBool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !flag.load(Ordering::SeqCst) {
-            assert!(Instant::now() < deadline, "timed out waiting for {label}");
-            thread::yield_now();
-        }
+    /// Wait for one of a fake's own markers, on the budget every other wait
+    /// here obeys. The observation is a boolean, so the failure names the
+    /// marker rather than a state.
+    ///
+    /// Waiting sleeps between questions rather than yielding: several of these
+    /// markers are set by the very job threads the wait is waiting on, and a
+    /// spin competes with them for the core that would set the marker.
+    fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) {
+        wait_until(label, lifecycle_wait_budget(), || {
+            if flag.load(Ordering::SeqCst) {
+                Observed::Met(())
+            } else {
+                Observed::pending("not set")
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// A demanded entry names the work it is doing before it can count any of
@@ -2022,7 +2046,7 @@ mod tests {
                 None
             ))
         );
-        spin_until("attach_started", &ops.attach_started);
+        wait_for_flag("attach_started", &ops.attach_started);
         assert_eq!(
             host.state(&name),
             Some(TrustState::warming(
@@ -2046,7 +2070,7 @@ mod tests {
         ops.block_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let lease = host.demand(&name).unwrap();
-        spin_until("attach_started", &ops.attach_started);
+        wait_for_flag("attach_started", &ops.attach_started);
         assert_eq!(
             host.state(&name),
             Some(TrustState::warming(WarmingPhase::Healing, 1, Some(2)))
@@ -2116,7 +2140,7 @@ mod tests {
         drop(initial);
         ops.block_detach.store(true, Ordering::SeqCst);
         host.reap_idle(Instant::now()).unwrap();
-        spin_until("detach_started", &ops.detach_started);
+        wait_for_flag("detach_started", &ops.detach_started);
         let releasing = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
         assert_eq!(host.state(&name), Some(releasing.clone()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
@@ -2358,7 +2382,7 @@ mod tests {
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
         let lease = host.demand(&name).unwrap();
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert!(matches!(
             host.state(&name),
             Some(TrustState::Warming { .. })
@@ -2377,7 +2401,7 @@ mod tests {
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
         let lease = host.demand(&name).unwrap();
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
@@ -2550,7 +2574,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         let raced_demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -2574,7 +2598,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let drop_returned = Arc::clone(&returned);
         let dropper = thread::spawn(move || {
@@ -2615,19 +2639,12 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
 
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         drop(host.demand(&name).unwrap());
         ops.poll_release.store(true, Ordering::SeqCst);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while ops.detaches.load(Ordering::SeqCst) != 1 {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for the stale poll to give up its attachment"
-            );
-            thread::yield_now();
-        }
+        wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
         thread::sleep(Duration::from_millis(10));
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -2648,7 +2665,7 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         let demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -2667,18 +2684,11 @@ mod tests {
         let held = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
 
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         ops.poll_release.store(true, Ordering::SeqCst);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while ops.detaches.load(Ordering::SeqCst) != 1 {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for stale poll teardown"
-            );
-            thread::yield_now();
-        }
+        wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
         thread::sleep(Duration::from_millis(10));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert_eq!(host.state(&name), Some(backend_lost()));
@@ -2705,7 +2715,7 @@ mod tests {
     /// Hold the entry in a watcher poll's claim, and answer once it is held.
     fn claim_for_a_poll(ops: &Arc<FakeOps>) {
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
     }
 
     /// The demand a claimed entry answers with its own state, having scheduled
@@ -3024,7 +3034,7 @@ mod tests {
         ) -> Result<VaultName, JobFailure> {
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
-                spin_until("release_a", &self.release_a);
+                wait_for_flag("release_a", &self.release_a);
             } else if name.as_str() == "b" {
                 self.b_started.store(true, Ordering::SeqCst);
             }
@@ -3084,9 +3094,9 @@ mod tests {
         .unwrap();
 
         let a_lease = host.demand(&a).unwrap();
-        spin_until("a_started", &ops.a_started);
+        wait_for_flag("a_started", &ops.a_started);
         let b_lease = host.demand(&b).unwrap();
-        spin_until("b_started", &ops.b_started);
+        wait_for_flag("b_started", &ops.b_started);
         wait_for_state(&host, &b, TrustState::Ready);
 
         ops.release_a.store(true, Ordering::SeqCst);
@@ -3115,7 +3125,7 @@ mod tests {
         )
         .unwrap();
         let a_lease = host.demand(&a).unwrap();
-        spin_until("a_started", &ops.a_started);
+        wait_for_flag("a_started", &ops.a_started);
         let b_lease = host.demand(&b).unwrap();
         ops.release_a.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
@@ -3145,7 +3155,7 @@ mod tests {
         )
         .unwrap();
         let a = host.demand(&names[0]).unwrap();
-        spin_until("a_started", &ops.a_started);
+        wait_for_flag("a_started", &ops.a_started);
         let b = host.demand(&names[1]).unwrap();
         let started = Instant::now();
         let c = host.demand(&names[2]).unwrap();
@@ -3183,7 +3193,7 @@ mod tests {
         host.dispatcher_stop.send(()).unwrap();
         host.dispatcher.take().unwrap().join().unwrap();
         let a = host.demand(&names[0]).unwrap();
-        spin_until("a_started", &ops.a_started);
+        wait_for_flag("a_started", &ops.a_started);
         let b = host.demand(&names[1]).unwrap();
 
         let entry = Arc::clone(host.shared.entries.get(&names[2]).unwrap());
@@ -3197,18 +3207,18 @@ mod tests {
         let shared = Arc::clone(&host.shared);
         let dispatched_entry = Arc::clone(&entry);
         let dispatch = thread::spawn(move || dispatch_pending(&shared, &dispatched_entry));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let queued = entry.gate.lock().unwrap().queued;
-            if queued {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for queued marker"
-            );
-            thread::yield_now();
-        }
+        wait_until(
+            "the dispatch to take the queued marker",
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().queued {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the marker is not taken")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         {
             let mut state = entry.gate.lock().unwrap();
             state.epoch = 2;
@@ -3260,7 +3270,7 @@ mod tests {
         )
         .unwrap();
         let a_lease = host.demand(&a).unwrap();
-        spin_until("a_started", &ops.a_started);
+        wait_for_flag("a_started", &ops.a_started);
         let b_lease = host.demand(&b).unwrap();
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
@@ -3325,7 +3335,7 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Ready);
 
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
         let refused = host.demand(&b).unwrap();
@@ -3335,15 +3345,7 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
 
         ops.poll_release.store(true, Ordering::SeqCst);
-        wait_until("both aliases to detach", lifecycle_wait_budget(), || {
-            let detaches = ops.detaches.load(Ordering::SeqCst);
-            if detaches == 2 {
-                Observed::Met(())
-            } else {
-                Observed::pending(format!("{detaches} detaches so far"))
-            }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_detaches(&ops, 2, "both aliases to detach");
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
@@ -3386,7 +3388,7 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_poll.store(true, Ordering::SeqCst);
-        spin_until("poll_started", &ops.poll_started);
+        wait_for_flag("poll_started", &ops.poll_started);
 
         std::fs::remove_dir(&root).unwrap();
         symlink("root", &root).unwrap();
@@ -3397,19 +3399,7 @@ mod tests {
         ));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.poll_release.store(true, Ordering::SeqCst);
-        wait_until(
-            "the refused alias to detach",
-            lifecycle_wait_budget(),
-            || {
-                let detaches = ops.detaches.load(Ordering::SeqCst);
-                if detaches == 1 {
-                    Observed::Met(())
-                } else {
-                    Observed::pending(format!("{detaches} detaches so far"))
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_detaches(&ops, 1, "the refused alias to detach");
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         // A stability check, not a wait for a positive condition: proving no
         // further attach followed the detach needs a fixed margin, since
@@ -3593,7 +3583,7 @@ mod tests {
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        spin_until("maintenance_started", &ops.maintenance_started);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
         // The maintenance job's own handoff drain, isolated from the
         // dispatcher's ambient ticks: see the reconcile-side saturation test
         // above for why a shared counter would leave this ambiguous between
@@ -3604,7 +3594,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.maintenance_release.store(true, Ordering::SeqCst);
 
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert!(matches!(
             host.state(&name),
             Some(TrustState::Warming { .. })
@@ -3624,14 +3614,14 @@ mod tests {
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        spin_until("maintenance_started", &ops.maintenance_started);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.maintenance_release.store(true, Ordering::SeqCst);
 
-        spin_until("reconcile_started", &ops.reconcile_started);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
@@ -3669,7 +3659,7 @@ mod tests {
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        spin_until("maintenance_started", &ops.maintenance_started);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
         let polls_before = *ops
             .polls
             .lock()
