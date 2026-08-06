@@ -423,6 +423,80 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
     Some(job)
 }
 
+/// Enter the window in which an entry's resources are going back.
+///
+/// Taking the attachment is the instant the entry stops being readable, and the
+/// state says so here rather than at the end of the leg. It cannot say
+/// Unattached yet: Unattached is what an entry publishes once
+/// [`EntryOps::detach`] has given the watcher, the store and the maintainer lock
+/// back, and a caller that waits for it is waiting for exactly that. Warming is
+/// the state meaning attached and not readable, and the phase beside it names
+/// the leg — resources going back, nothing counted.
+///
+/// Naming the leg is also what makes the window safe to leave the gate open
+/// across: [`Host::demand`] schedules nothing against a warming entry, so a
+/// lease raised inside the window records itself and is answered by
+/// [`finish_release`] rather than racing the publication that ends it.
+fn begin_release<A>(state: &mut EntryState<A>) {
+    state.runnable = false;
+    state.detach_in_flight = true;
+    state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
+}
+
+/// Give an entry's resources back, publish the state that says they are back,
+/// and honor the demand raised while they were going back.
+///
+/// Every teardown leg ends here, and the order is the whole of the contract:
+/// [`EntryOps::detach`] returns before Unattached is published, so Unattached
+/// means released on every leg that reaches it rather than on one of them.
+///
+/// The lease standing at the end of the release is answered by the release
+/// itself, because the release is what the lease was waiting behind. An entry
+/// parked on a duplicate root, a contended maintainer or an identity refusal
+/// owes it nothing, and neither does one owing a recovery no live lease asked
+/// for. The requirement is read before it is cleared: a lease that asked for a
+/// recovery is asking for the coverage the re-attach below installs.
+///
+/// The follow-up is sent from here and left nowhere else. A `pending_dispatch`
+/// marker beside a job this leg has already sent is one a dispatcher tick would
+/// send a second time, under the same epoch.
+fn finish_release<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    attachment: Option<O::Attachment>,
+) {
+    if let Some(attachment) = attachment {
+        shared.ops.detach(name, attachment);
+    }
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    let reattach_requested = !state.recovery_required || state.recovery_demanded();
+    if state.active_epoch == Some(epoch) {
+        state.active_epoch = None;
+    }
+    state.detach_in_flight = false;
+    state.pending = Batch::default();
+    state.clear_recovery();
+    state.runnable = false;
+    state.detach_due = false;
+    state.detach_scheduled = false;
+    state.trust = TrustState::Unattached;
+    if state.demand_leases > 0
+        && reattach_requested
+        && state.duplicate_root.is_none()
+        && state.maintainer_contended.is_none()
+        && !state.identity_refused
+    {
+        state.runnable = true;
+        state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+        state.epoch += 1;
+        let next = Job::Attach(name.clone(), state.epoch);
+        drop(state);
+        dispatch_followup(shared, next);
+    }
+}
+
 fn dispatch_pending<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -1580,45 +1654,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     return;
                 }
                 let attachment = state.attachment.take();
-                state.detach_in_flight = attachment.is_some();
-                // Taking the attachment is the instant the entry stops being
-                // readable, and the state says so here rather than at the end
-                // of the leg. It cannot say Unattached yet: Unattached is what
-                // this entry publishes once EntryOps::detach has given the
-                // watcher, the store and the maintainer lock back, and a
-                // caller that waits for it is waiting for exactly that.
-                // Warming is the state meaning attached and not readable, and
-                // the phase beside it names the leg — resources going back,
-                // nothing counted, and a demand arriving now honored by the
-                // re-attach at the end of this leg.
-                state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
+                begin_release(&mut state);
                 attachment
             };
-            if let Some(attachment) = attachment {
-                shared.ops.detach(&name, attachment);
-            }
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            let reattach_requested = !state.recovery_required || state.recovery_demanded();
-            state.detach_in_flight = false;
-            state.pending = Batch::default();
-            state.clear_recovery();
-            state.runnable = false;
-            state.detach_due = false;
-            state.detach_scheduled = false;
-            state.trust = TrustState::Unattached;
-            if state.demand_leases > 0
-                && reattach_requested
-                && state.duplicate_root.is_none()
-                && state.maintainer_contended.is_none()
-                && !state.identity_refused
-            {
-                state.runnable = true;
-                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-                state.epoch += 1;
-                let next = Job::Attach(name.clone(), state.epoch);
-                drop(state);
-                dispatch_followup(shared, next);
-            }
+            finish_release(shared, entry, &name, epoch, attachment);
         }
     }
 }
