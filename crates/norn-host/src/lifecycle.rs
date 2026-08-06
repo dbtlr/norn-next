@@ -2726,6 +2726,29 @@ mod tests {
         drop(lease);
     }
 
+    /// Watcher facts arriving while an entry's resources are going back are
+    /// merged without touching the window: the entry holds nothing to reconcile
+    /// them against, so the phase that names the release stands until the
+    /// release ends it.
+    #[test]
+    fn watcher_facts_arriving_in_a_release_window_leave_it_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        assert_eq!(host.state(&name), Some(releasing()));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
     /// Destruction is a teardown like any other: the entry names the leg it is
     /// on while its resources are going back, and says released only once they
     /// are. The window has a reader — a lease holds the shared state itself and
