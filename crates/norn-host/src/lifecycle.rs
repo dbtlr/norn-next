@@ -4539,9 +4539,12 @@ mod tests {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
+        // One vault attaches at a time: the single queue slot this fixture
+        // gives is the one the attaches would otherwise contend for, and a
+        // send this fixture refuses waits for a tick a minute away.
         let lease_a = host.demand(&a).unwrap();
-        let lease_b = host.demand(&b).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
+        let lease_b = host.demand(&b).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
 
         ops.block_poll.store(true, Ordering::SeqCst);
