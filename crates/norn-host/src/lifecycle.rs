@@ -2734,10 +2734,14 @@ mod tests {
     fn watcher_facts_arriving_in_a_release_window_leave_it_standing() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
-        drop(host.demand(&name).unwrap());
+        // The lease is held until the release is armed: the idle interval here
+        // is zero, so an entry with no lease on it is reapable the instant it
+        // attaches, and the reap this test is about is the armed one.
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_detach.store(true, Ordering::SeqCst);
+        drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
