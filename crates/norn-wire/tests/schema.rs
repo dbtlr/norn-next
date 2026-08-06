@@ -12,7 +12,7 @@
 
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
-    UntrustedReason, WatcherLossCause,
+    UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -94,6 +94,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<TrustState>(),
         schema_of::<UntrustedReason>(),
         schema_of::<WatcherLossCause>(),
+        schema_of::<WarmingPhase>(),
         schema_of::<ReasonCode>(),
         schema_of::<FindingKind>(),
         schema_of::<MaintainerIdentity>(),
@@ -196,9 +197,11 @@ fn a_maintainer_identity_advertises_named_and_unknown_shapes() {
 
 /// The counters are advertised under the names the wire uses, and the estimate
 /// is advertised as a number or `null`: a surface rendering progress is told
-/// that the denominator may not be known.
+/// that the denominator may not be known. The phase is advertised beside them
+/// as a nested enum, so a surface renders what the entry is doing apart from
+/// how far it has come.
 #[test]
-fn a_warming_state_advertises_its_two_counters_in_snake_case() {
+fn a_warming_state_advertises_its_phase_and_its_two_counters_in_snake_case() {
     let schema = schema_of::<TrustState>();
     let warming = branches(&schema)
         .iter()
@@ -206,7 +209,20 @@ fn a_warming_state_advertises_its_two_counters_in_snake_case() {
         .expect("the warming branch");
     assert_eq!(
         property_names(warming),
-        ["state", "healed", "total_estimate"].into_iter().collect()
+        ["state", "phase", "healed", "total_estimate"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        warming["properties"]["phase"]["$ref"].as_str(),
+        Some("#/$defs/WarmingPhase")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<WarmingPhase>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a phase branch is not a pinned string: {branch}"))
+        })),
+        sorted(["installing_coverage", "healing"])
     );
     let estimate: BTreeSet<&str> = warming["properties"]["total_estimate"]["type"]
         .as_array()

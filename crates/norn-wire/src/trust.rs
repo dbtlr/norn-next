@@ -19,6 +19,15 @@
 //! its constructor, so a field arriving in one of them extends the payload
 //! rather than breaking every caller that destructured it.
 //!
+//! **Warming names what it is doing, not only how far it has come.** An entry
+//! reaches readable state through work of two kinds — installing change
+//! detection over the vault, then deriving documents — and only the second of
+//! them has anything to count. Counters alone therefore cannot tell a heal
+//! that has not started from one that is not progressing: both read as zero
+//! healed against an unknown total. [`WarmingPhase`] is what separates them,
+//! so a caller waiting on an entry, and an operator reading why a wait
+//! expired, learn which of the two the entry is in.
+//!
 //! **Two watcher reasons, split by who resumes.** [`UntrustedReason::WatcherOverflow`]
 //! is a running watcher that reported less than it saw, and the entry re-heals
 //! itself; [`UntrustedReason::WatcherLost`] is coverage that ended, and the
@@ -31,18 +40,21 @@ use serde::{Deserialize, Serialize};
 /// A vault entry's trust state.
 ///
 /// On the wire the state is an object tagged `state`: `{"state":"ready"}`,
-/// `{"state":"warming","healed":12,"total_estimate":400}`.
+/// `{"state":"warming","phase":"healing","healed":12,"total_estimate":400}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TrustState {
     /// Registered, with no derived state to read from yet.
     Unattached,
-    /// Attached and healing. The entry is not readable until the heal
-    /// finishes.
+    /// Attached and working toward readable derived state. The entry is not
+    /// readable until that work finishes.
     #[non_exhaustive]
     Warming {
-        /// Documents the heal has finished with.
+        /// The kind of work the entry is doing.
+        phase: WarmingPhase,
+        /// Documents the heal has finished with. It stands at zero until the
+        /// heal begins.
         healed: u64,
         /// Documents the heal expects to touch, and `null` when that estimate
         /// is not known yet. The count the heal finishes at may differ from
@@ -61,10 +73,12 @@ pub enum TrustState {
 }
 
 impl TrustState {
-    /// An entry healing, `healed` documents in, against `total_estimate`
-    /// documents expected — `None` while that estimate is not known yet.
-    pub const fn warming(healed: u64, total_estimate: Option<u64>) -> Self {
+    /// An entry warming in `phase`, `healed` documents in, against
+    /// `total_estimate` documents expected — `None` while that estimate is not
+    /// known yet.
+    pub const fn warming(phase: WarmingPhase, healed: u64, total_estimate: Option<u64>) -> Self {
         TrustState::Warming {
+            phase,
             healed,
             total_estimate,
         }
@@ -74,6 +88,23 @@ impl TrustState {
     pub const fn untrusted(reason: UntrustedReason) -> Self {
         TrustState::Untrusted { reason }
     }
+}
+
+/// The kind of work an entry is doing while it warms.
+///
+/// On the wire a phase is the flat string itself: `"installing_coverage"`,
+/// `"healing"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WarmingPhase {
+    /// Change detection is being established over the vault. No document has
+    /// been read yet, so the counters beside this phase stand at zero against
+    /// an unknown total.
+    InstallingCoverage,
+    /// Documents are being derived, and the counters beside this phase advance
+    /// as they are.
+    Healing,
 }
 
 /// Why an entry's derived state cannot be trusted.

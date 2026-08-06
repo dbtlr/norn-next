@@ -16,7 +16,7 @@ use norn_store::{
     Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
-use norn_wire::{FindingKind, MaintainerIdentity};
+use norn_wire::{FindingKind, MaintainerIdentity, WarmingPhase};
 
 use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
 
@@ -141,6 +141,9 @@ impl ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
+        // Coverage is established by the time a heal runs, and what follows is
+        // counted document work.
+        progress.phase(WarmingPhase::Healing);
         let exclusions = exclusions(&attachment.entry, &attachment._shadows);
         Self::pin_schema(&mut attachment.store, &attachment.entry)?;
         heal_documents(
@@ -173,6 +176,12 @@ impl EntryOps for ProductionEntryOps {
         name: &VaultName,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
+        // Everything up to the heal takes the maintainer lock, sweeps the
+        // shadow home and installs watcher coverage — work that counts no
+        // document and can take a while on a loaded machine. The phase is
+        // published before it so a caller reading the entry sees what it is
+        // waiting on rather than a heal that appears not to start.
+        progress.phase(WarmingPhase::InstallingCoverage);
         let entry = self.entry(name)?;
         let derived = self.derived(name);
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
@@ -209,6 +218,9 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
+        // A reconcile derives against coverage that is already installed,
+        // whichever rung of the ladder the envelope reaches for.
+        progress.phase(WarmingPhase::Healing);
         let schema =
             work.batch.schema_dirty() || work.batch.rescans().contains(&RescanScope::Schema);
         if schema {
@@ -236,6 +248,9 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
+        // Recovery re-installs coverage before it re-heals, so it publishes
+        // the same prologue phase an attach does.
+        progress.phase(WarmingPhase::InstallingCoverage);
         let schema = Self::schema_path(&attachment.entry);
         let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
@@ -3125,6 +3140,12 @@ mod tests {
         Budget::new(Duration::from_secs(15), Duration::from_millis(250))
     }
 
+    /// Wait for one exact trust state, reporting the last state observed.
+    ///
+    /// The observation is the whole state, phase included, because that is
+    /// what tells the two ways a wait expires apart: an entry still installing
+    /// coverage and an entry whose heal is not advancing both stand at zero
+    /// healed against an unknown total.
     fn wait_state<O: EntryOps>(
         host: &crate::Host<O>,
         name: &VaultName,

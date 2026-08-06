@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason, WatcherLossCause};
+use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
 
 use crate::registry::{AliasConflict, ServingRegistry};
 
@@ -77,6 +77,13 @@ pub trait EntryOps: Send + Sync + 'static {
 }
 
 /// Epoch-bound, monotonic publication of one lifecycle job's warming progress.
+///
+/// A job publishes two things through it, and they answer different questions:
+/// [`ProgressReporter::phase`] says what kind of work the entry is doing, and
+/// [`ProgressReporter::report`] says how far the counted half of it has come.
+/// The phase is what a caller reads while there is nothing yet to count —
+/// installing change detection produces no counts at all — so a job publishes
+/// it **before** the work it names rather than after.
 pub struct ProgressReporter<A> {
     entry: std::sync::Weak<Entry<A>>,
     epoch: u64,
@@ -90,7 +97,31 @@ impl<A> ProgressReporter<A> {
             epoch: 0,
         }
     }
+
+    /// Publish the phase this job has entered, keeping the counters beside it.
+    pub fn phase(&self, phase: WarmingPhase) {
+        self.publish(|_, healed, total| TrustState::warming(phase, healed, total));
+    }
+
+    /// Publish how far the counted work has come, keeping the phase it is
+    /// running under.
     pub fn report(&self, healed: u64, total_estimate: Option<u64>) {
+        self.publish(|phase, prior_healed, prior_total| {
+            let healed = healed.max(prior_healed);
+            let total = match (prior_total, total_estimate) {
+                (Some(left), Some(right)) => Some(left.max(right).max(healed)),
+                (Some(left), None) => Some(left.max(healed)),
+                (None, Some(right)) => Some(right.max(healed)),
+                (None, None) => None,
+            };
+            TrustState::warming(phase, healed, total)
+        });
+    }
+
+    /// Replace this entry's warming state, under this job's own epoch and only
+    /// while the entry is still warming. Anything else has moved past what
+    /// this job has to say.
+    fn publish(&self, next: impl FnOnce(WarmingPhase, u64, Option<u64>) -> TrustState) {
         let Some(entry) = self.entry.upgrade() else {
             return;
         };
@@ -99,21 +130,15 @@ impl<A> ProgressReporter<A> {
             return;
         }
         let TrustState::Warming {
-            healed: prior,
-            total_estimate: prior_total,
+            phase,
+            healed,
+            total_estimate,
             ..
-        } = &state.trust
+        } = state.trust
         else {
             return;
         };
-        let healed = healed.max(*prior);
-        let total = match (*prior_total, total_estimate) {
-            (Some(left), Some(right)) => Some(left.max(right).max(healed)),
-            (Some(left), None) => Some(left.max(healed)),
-            (None, Some(right)) => Some(right.max(healed)),
-            (None, None) => None,
-        };
-        state.trust = TrustState::warming(healed, total);
+        state.trust = next(phase, healed, total_estimate);
     }
 }
 
@@ -241,7 +266,9 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
 
 fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
     if pending.rescans().is_empty() {
-        TrustState::warming(0, None)
+        // Coverage is installed and the facts it delivered are what is left to
+        // derive, so the entry is warming on the document side of the ladder.
+        TrustState::warming(WarmingPhase::Healing, 0, None)
     } else {
         TrustState::untrusted(UntrustedReason::WatcherOverflow)
     }
@@ -698,7 +725,9 @@ impl<O: EntryOps> Host<O> {
             && !state.identity_refused;
         if schedule {
             state.runnable = true;
-            state.trust = TrustState::warming(0, None);
+            // The job below is an attach or a recover, and both establish
+            // coverage before a document is read.
+            state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
             state.epoch += 1;
             let epoch = state.epoch;
             let job = if state.attachment.is_some() {
@@ -747,7 +776,7 @@ impl<O: EntryOps> Host<O> {
         if rescan {
             state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
         } else if matches!(state.trust, TrustState::Ready) {
-            state.trust = TrustState::warming(0, None);
+            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
         }
         if !state.runnable && state.attachment.is_some() && !state.recovery_required {
             state.runnable = true;
@@ -866,7 +895,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             state.trust = if rescan {
                                 TrustState::untrusted(UntrustedReason::WatcherOverflow)
                             } else {
-                                TrustState::warming(0, None)
+                                TrustState::warming(WarmingPhase::Healing, 0, None)
                             };
                         }
                         state.attachment = Some(attachment);
@@ -931,7 +960,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 && state.maintainer_contended.is_none()
                 && !state.identity_refused
             {
-                state.trust = TrustState::warming(0, None);
+                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
                 state.epoch += 1;
                 state.runnable = true;
                 let job = Job::Attach(name.clone(), state.epoch);
@@ -1265,7 +1294,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.trust,
                     TrustState::Warming { .. } | TrustState::Untrusted { .. }
                 ) {
-                    state.trust = TrustState::warming(0, None);
+                    state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
                 }
                 (attachment, work)
             };
@@ -1468,8 +1497,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 state.detach_in_flight = attachment.is_some();
                 // Teardown still owns live resources until EntryOps::detach
                 // returns. Warming is the existing non-Ready state that keeps
-                // demand nonblocking without claiming the entry is detached.
-                state.trust = TrustState::warming(0, None);
+                // demand nonblocking without claiming the entry is detached,
+                // and the phase beside it says what is true of the entry
+                // meanwhile: no coverage a caller can rely on, and no document
+                // counted.
+                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
                 attachment
             };
             if let Some(attachment) = attachment {
@@ -1492,7 +1524,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 && !state.identity_refused
             {
                 state.runnable = true;
-                state.trust = TrustState::warming(0, None);
+                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
                 state.epoch += 1;
                 let next = Job::Attach(name.clone(), state.epoch);
                 drop(state);
@@ -1573,6 +1605,10 @@ mod tests {
         environmental_recover: std::sync::atomic::AtomicBool,
         environmental_reconcile: std::sync::atomic::AtomicBool,
         contend_attach: std::sync::atomic::AtomicBool,
+        block_attach: std::sync::atomic::AtomicBool,
+        attach_started: std::sync::atomic::AtomicBool,
+        attach_release: std::sync::atomic::AtomicBool,
+        heal_in_attach: std::sync::atomic::AtomicBool,
         block_detach: std::sync::atomic::AtomicBool,
         detach_started: std::sync::atomic::AtomicBool,
         detach_release: std::sync::atomic::AtomicBool,
@@ -1598,8 +1634,16 @@ mod tests {
     impl EntryOps for Arc<FakeOps> {
         type Attachment = ();
 
-        fn attach(&self, _: &VaultName, _: &ProgressReporter<()>) -> Result<(), JobFailure> {
+        fn attach(&self, _: &VaultName, progress: &ProgressReporter<()>) -> Result<(), JobFailure> {
             self.attaches.fetch_add(1, Ordering::SeqCst);
+            if self.heal_in_attach.load(Ordering::SeqCst) {
+                progress.phase(WarmingPhase::Healing);
+                progress.report(1, Some(2));
+            }
+            if self.block_attach.load(Ordering::SeqCst) {
+                self.attach_started.store(true, Ordering::SeqCst);
+                spin_until("attach_release", &self.attach_release);
+            }
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
                     MaintainerIdentity::unknown(),
@@ -1780,6 +1824,58 @@ mod tests {
             assert!(Instant::now() < deadline, "timed out waiting for {label}");
             thread::yield_now();
         }
+    }
+
+    /// A demanded entry names the work it is doing before it can count any of
+    /// it. Coverage installation is the whole of the attach prologue — a lock,
+    /// a sweep, a watcher — and it counts no document, so counters alone
+    /// cannot tell it from a heal that is not progressing.
+    #[test]
+    fn a_demanded_entry_warms_under_the_coverage_phase_before_a_heal_counts() {
+        let ops = Arc::new(FakeOps::default());
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(
+            *lease.outcome(),
+            Demand::State(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None
+            ))
+        );
+        spin_until("attach_started", &ops.attach_started);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None
+            ))
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    /// A phase and the counters beside it are one publication: entering the
+    /// heal moves the phase, and the progress reported under it keeps that
+    /// phase rather than replacing it.
+    #[test]
+    fn counted_progress_is_published_under_the_phase_it_runs_in() {
+        let ops = Arc::new(FakeOps::default());
+        ops.heal_in_attach.store(true, Ordering::SeqCst);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name).unwrap();
+        spin_until("attach_started", &ops.attach_started);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::warming(WarmingPhase::Healing, 1, Some(2)))
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
     }
 
     #[test]
