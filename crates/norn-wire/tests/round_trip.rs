@@ -200,6 +200,27 @@ fn a_warming_phase_is_a_bare_string_beside_the_counters() {
     );
 }
 
+/// The phase is required, and the two fields beside it are the contrast: an
+/// absent estimate is the unknown the type already models, while an absent
+/// phase is a warming state nobody said anything about. Nothing defaults it —
+/// a reader handed one of these learns that the writer's phase vocabulary and
+/// its own have parted, rather than being told the entry is installing
+/// coverage or healing when no one claimed either.
+#[test]
+fn a_warming_state_without_a_phase_is_refused_rather_than_defaulted() {
+    for json in [
+        r#"{"state":"warming","healed":0,"total_estimate":null}"#,
+        r#"{"state":"warming","healed":12,"total_estimate":400}"#,
+        r#"{"state":"warming","healed":0}"#,
+        r#"{"state":"warming","phase":null,"healed":0,"total_estimate":null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<TrustState>(json).is_err(),
+            "reading {json} produced a warming state with a phase nobody wrote"
+        );
+    }
+}
+
 #[test]
 fn an_untrusted_reason_is_an_object_tagged_kind() {
     assert_eq!(
@@ -414,6 +435,11 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
         )
         .is_err(),
         "a warming phase nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<TrustState>(r#"{"state":"warming","phase":null,"healed":0}"#)
+            .is_err(),
+        "a null phase read back as a phase"
     );
     assert!(
         serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),
