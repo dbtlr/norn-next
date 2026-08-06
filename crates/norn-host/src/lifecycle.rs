@@ -390,11 +390,13 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
 /// attachment in hand picks the job exactly as [`Host::demand`] does: coverage
 /// still held is recovered, coverage that is gone is attached again.
 ///
-/// An entry that is serving, already working, parked on a conflict or on a
-/// contended maintainer, refused on identity, or owed a recovery no live lease
-/// has demanded owes an outstanding lease nothing. A recovery runs only where a
-/// lease has demanded it, because a terminal failure does not autonomously
-/// restart coverage.
+/// An entry that is serving, already working, giving its resources back, parked
+/// on a conflict or on a contended maintainer, refused on identity, or owed a
+/// recovery no live lease has demanded owes an outstanding lease nothing. A
+/// recovery runs only where a lease has demanded it, because a terminal failure
+/// does not autonomously restart coverage. A release in flight owes the lease
+/// the re-attach [`finish_release`] ends with, which is why nothing is
+/// scheduled here against one.
 fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.demand_leases == 0
         || !matches!(
@@ -402,6 +404,7 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
             TrustState::Unattached | TrustState::Untrusted { .. }
         )
         || state.runnable
+        || state.detach_in_flight
         || (state.recovery_required && !state.recovery_demanded())
         || state.duplicate_root.is_some()
         || state.maintainer_contended.is_some()
@@ -433,10 +436,12 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
 /// the state meaning attached and not readable, and the phase beside it names
 /// the leg — resources going back, nothing counted.
 ///
-/// Naming the leg is also what makes the window safe to leave the gate open
-/// across: [`Host::demand`] schedules nothing against a warming entry, so a
-/// lease raised inside the window records itself and is answered by
-/// [`finish_release`] rather than racing the publication that ends it.
+/// The flag, not the label, is what makes the window safe to leave the gate
+/// open across. [`Host::demand`] and [`schedule_demanded_work`] both refuse to
+/// schedule while a release is in flight, so a lease raised inside the window
+/// records itself and is answered by [`finish_release`] rather than racing the
+/// publication that ends it — and it stays answered there even where another
+/// writer overwrites the phase mid-window.
 fn begin_release<A>(state: &mut EntryState<A>) {
     state.runnable = false;
     state.detach_in_flight = true;
@@ -929,10 +934,15 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand,
             });
         }
+        // A release in flight is the entry's resources on their way back, and
+        // the flag says so whatever label stands beside it: the lease is
+        // recorded here and honored by the release, so nothing is scheduled
+        // against coverage that is going away.
         let schedule = matches!(
             state.trust,
             TrustState::Unattached | TrustState::Untrusted { .. }
         ) && !state.runnable
+            && !state.detach_in_flight
             && !state.identity_refused;
         if schedule {
             state.runnable = true;
@@ -2605,6 +2615,44 @@ mod tests {
         assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
+        drop(lease);
+    }
+
+    /// The release window is closed by the release itself, not by the label
+    /// standing in the entry: a writer that overwrites the phase mid-window
+    /// still schedules nothing against resources on their way out, and the
+    /// lease raised there is answered by the release.
+    #[test]
+    fn a_relabelled_release_window_still_schedules_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+
+        let lease = host.demand(&name).unwrap();
+        assert!(
+            !matches!(
+                lease.outcome(),
+                Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::InstallingCoverage,
+                    ..
+                })
+            ),
+            "the demand claimed coverage installation against an entry still releasing: {:?}",
+            lease.outcome()
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         drop(lease);
     }
 
