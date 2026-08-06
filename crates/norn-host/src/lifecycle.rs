@@ -735,10 +735,11 @@ impl<O: EntryOps> Drop for Host<O> {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.dispatcher_stop.send(());
         let dispatcher = self.dispatcher.take();
-        // Every entry still holding anything publishes Unattached below,
-        // after the resources are back, as on every other release. The phase
-        // that names the window is not published: destruction holds the host
-        // exclusively, so there is no reader between here and there.
+        // Destruction is a teardown per entry, and it names its leg like every
+        // other one: an entry with resources still out publishes the releasing
+        // phase here and Unattached below, once they are back. The window has a
+        // reader — a demand lease holds the shared state itself, so it outlives
+        // the host and reads the entry through its own handle.
         let mut releasing = Vec::new();
         for (name, entry) in &self.shared.entries {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -750,14 +751,18 @@ impl<O: EntryOps> Drop for Host<O> {
             if state.active_epoch.is_none() && !state.detach_in_flight {
                 match state.attachment.take() {
                     Some(attachment) => {
-                        state.detach_in_flight = true;
+                        begin_release(&mut state);
                         releasing.push((name.clone(), Some(attachment)));
                     }
+                    // Nothing is held, so the entry is already released and can
+                    // say so.
                     None => state.trust = TrustState::Unattached,
                 }
             } else {
-                // A job in flight is holding this entry's resources and gives
-                // them back as it ends, which the joins below wait for.
+                // A job or a release in flight is holding this entry's
+                // resources. The joins below wait for it, and whatever it
+                // leaves in the entry is given back after them.
+                begin_release(&mut state);
                 releasing.push((name.clone(), None));
             }
         }
@@ -775,12 +780,23 @@ impl<O: EntryOps> Drop for Host<O> {
             }
         }
         for (name, attachment) in releasing {
-            if let Some(attachment) = attachment {
-                self.shared.ops.detach(&name, attachment);
-            }
             let Some(entry) = self.shared.entries.get(&name) else {
                 continue;
             };
+            // A leg that ended between the loop above and its join gave its
+            // attachment back to the entry rather than to the ops, so the
+            // entry is asked again for what it holds.
+            let attachment = attachment.or_else(|| {
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .attachment
+                    .take()
+            });
+            if let Some(attachment) = attachment {
+                self.shared.ops.detach(&name, attachment);
+            }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.detach_in_flight = false;
             state.trust = TrustState::Unattached;
@@ -2616,6 +2632,59 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
         drop(lease);
+    }
+
+    /// Destruction is a teardown like any other: the entry names the leg it is
+    /// on while its resources are going back, and says released only once they
+    /// are. The window has a reader — a lease holds the shared state itself and
+    /// reads the entry through it, without the host the destruction consumed.
+    #[test]
+    fn destruction_releases_before_it_publishes_unattached() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let destruction = thread::spawn(move || drop(host));
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(
+            lease.completion(),
+            Demand::State(releasing()),
+            "destruction reported the entry readable, or released, while its resources were out"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        destruction.join().unwrap();
+        assert_eq!(lease.completion(), Demand::State(TrustState::Unattached));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// A job the joins wait for may have given its attachment back to the entry
+    /// before its claim ended, so destruction gives back what it finds in the
+    /// entry as well as what it took itself.
+    #[test]
+    fn destruction_gives_back_an_attachment_a_finished_job_left_behind() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().unwrap();
+            // The instant a leg has re-stored the attachment and has not yet
+            // cleared its claim: destruction reads the entry as busy and takes
+            // nothing from it.
+            state.active_epoch = Some(state.epoch);
+        }
+
+        drop(host);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "destruction dropped an attachment instead of giving it back"
+        );
     }
 
     /// The release window is closed by the release itself, not by the label
