@@ -322,6 +322,48 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
     }
 }
 
+/// Schedule the work an outstanding demand lease is waiting on, where the entry
+/// is free to run it.
+///
+/// A claim holds `runnable` for as long as it lasts, so a demand raised against
+/// a claimed entry records its lease and schedules nothing. Every path that ends
+/// a claim answers those leases here, which is what makes the claim's own
+/// completion the moment the demand is honored rather than some later one. The
+/// attachment in hand picks the job exactly as [`Host::demand`] does: coverage
+/// still held is recovered, coverage that is gone is attached again.
+///
+/// The states that schedule are the states [`Host::demand`] schedules from — an
+/// entry that is serving or already working owes a lease nothing. A recovery the
+/// entry requires runs only where a lease has demanded it, because a terminal
+/// failure does not autonomously restart coverage.
+fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
+    if state.demand_leases == 0
+        || !matches!(
+            state.trust,
+            TrustState::Unattached | TrustState::Untrusted { .. }
+        )
+        || state.runnable
+        || (state.recovery_required && !state.recovery_demanded)
+        || state.duplicate_root.is_some()
+        || state.maintainer_contended.is_some()
+        || state.identity_refused
+    {
+        return None;
+    }
+    state.runnable = true;
+    // The job below is an attach or a recover, and both establish coverage
+    // before a document is read.
+    state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+    state.epoch += 1;
+    let job = if state.attachment.is_some() {
+        Job::Recover(name.clone(), state.epoch)
+    } else {
+        Job::Attach(name.clone(), state.epoch)
+    };
+    state.pending_dispatch = Some(job.clone());
+    Some(job)
+}
+
 fn dispatch_pending<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -950,11 +992,15 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.epoch += 1;
                         detach = Some(attachment);
                     }
+                    // A recovery demand outlives the failure that follows it:
+                    // the lease that raised it is still waiting, and a trust
+                    // snapshot cannot tell one lost-coverage state from the
+                    // next, so a demand voided here is one no caller knows to
+                    // raise again.
                     Err(JobFailure::WatcherTerminal(error)) => {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
-                        state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(watcher_lost(error));
                         state.attachment = Some(attachment);
@@ -963,12 +1009,14 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.active_epoch = None;
                         state.runnable = false;
                         state.recovery_required = true;
-                        state.recovery_demanded = false;
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
                             TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                         state.attachment = Some(attachment);
                     }
+                }
+                if schedule.is_none() {
+                    schedule = schedule_demanded_work(&mut state, name);
                 }
                 if schedule.is_none() {
                     schedule = schedule_due_detach(&mut state, name);
@@ -982,19 +1030,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 state.active_epoch = None;
                 state.runnable = false;
             }
-            if state.demand_leases > 0
-                && state.attachment.is_none()
-                && !state.runnable
-                && (!state.recovery_required || state.recovery_demanded)
-                && state.duplicate_root.is_none()
-                && state.maintainer_contended.is_none()
-                && !state.identity_refused
-            {
-                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-                state.epoch += 1;
-                state.runnable = true;
-                let job = Job::Attach(name.clone(), state.epoch);
-                state.pending_dispatch = Some(job.clone());
+            if let Some(job) = schedule_demanded_work(&mut state, name) {
                 schedule = Some(job);
             }
         }
@@ -1662,6 +1698,7 @@ mod tests {
         empty_poll_batches: AtomicUsize,
         rescan_poll_batch: std::sync::atomic::AtomicBool,
         terminal_poll: Mutex<Option<WatchError>>,
+        environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
     }
 
@@ -1747,6 +1784,9 @@ mod tests {
                 .take()
             {
                 return Err(JobFailure::WatcherTerminal(error));
+            }
+            if self.environmental_poll.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::Environmental("refused".into()));
             }
             if self.contend_poll.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -2520,6 +2560,148 @@ mod tests {
         let retry = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop((held, retry));
+    }
+
+    /// Leave the entry where a terminal watcher failure leaves it: attached,
+    /// untrusted, and recovering only on demand. The dispatcher goes on claiming
+    /// it for watcher polls from here, and that claim is the window a demand
+    /// raised against the entry has to survive.
+    fn attached_awaiting_recovery(ops: &Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        let (host, name) = fixture(Arc::clone(ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        wait_for_state(&host, &name, backend_lost());
+        (host, name)
+    }
+
+    /// Hold the entry in a watcher poll's claim, and answer once it is held.
+    fn claim_for_a_poll(ops: &Arc<FakeOps>) {
+        ops.block_poll.store(true, Ordering::SeqCst);
+        spin_until("poll_started", &ops.poll_started);
+    }
+
+    /// The demand a claimed entry answers with its own state, having scheduled
+    /// nothing: what the entry publishes is the proof the claim was held, since
+    /// a demand that scheduled the work would have published `Warming` instead.
+    fn demand_inside_a_claim(
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> DemandLease<Arc<FakeOps>> {
+        let lease = host.demand(name).unwrap();
+        assert_eq!(
+            host.state(name),
+            Some(backend_lost()),
+            "the demand reached an unclaimed entry and scheduled the work itself"
+        );
+        lease
+    }
+
+    /// A poll that finds nothing gives the entry back, and the demand raised
+    /// while it held the claim is run against the coverage it hands back.
+    #[test]
+    fn a_demand_raised_during_a_poll_runs_when_the_poll_finds_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        claim_for_a_poll(&ops);
+        let lease = demand_inside_a_claim(&host, &name);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(lease.completion(), Demand::State(TrustState::Ready));
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            1,
+            "the demand was answered by recovering the coverage still in hand"
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        drop(lease);
+    }
+
+    /// Facts reported by the poll are merged first and the demand is run after,
+    /// so an entry that owes a recovery reconciles nothing until coverage is
+    /// installed again.
+    #[test]
+    fn a_demand_raised_during_a_poll_runs_when_the_poll_reports_facts() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        claim_for_a_poll(&ops);
+        ops.empty_poll_batches.store(1, Ordering::SeqCst);
+        let lease = demand_inside_a_claim(&host, &name);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        drop(lease);
+    }
+
+    /// A recovery demanded during the claim outlives the terminal failure the
+    /// same poll reports: the lease that raised it is still waiting, and the
+    /// failure it landed on is the one it asked to be recovered from.
+    #[test]
+    fn a_standing_recovery_demand_survives_a_terminal_poll_failure() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        claim_for_a_poll(&ops);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        let lease = demand_inside_a_claim(&host, &name);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    /// An environmental refusal reported by the poll is answered the same way,
+    /// because the demand it landed on is a demand for the entry to be usable
+    /// and the refusal is what stands between them.
+    #[test]
+    fn a_demand_raised_during_a_poll_survives_an_environmental_poll_refusal() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        claim_for_a_poll(&ops);
+        ops.environmental_poll.store(true, Ordering::SeqCst);
+        let lease = demand_inside_a_claim(&host, &name);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    /// A lease taken before the failure demanded nothing of it, so the terminal
+    /// poll leg leaves the entry lost and waiting. The recovery is the next
+    /// demand's to ask for, and asking runs it.
+    #[test]
+    fn a_lease_predating_a_terminal_poll_failure_does_not_recover_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let held = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        claim_for_a_poll(&ops);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, backend_lost());
+        thread::sleep(Duration::from_millis(10));
+        assert_eq!(host.state(&name), Some(backend_lost()));
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "a lease that demanded no recovery got one anyway"
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+
+        let retry = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         drop((held, retry));
     }
 
