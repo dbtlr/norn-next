@@ -1912,7 +1912,7 @@ mod tests {
     /// ambient watcher poll, no idle reap, and no retry of a dispatch a full
     /// queue refused.
     ///
-    /// Its callers count the reconciles one `accept_batch` handoff produces.
+    /// Some callers count the reconciles one `accept_batch` handoff produces.
     /// An ambient poll claim coincident with that `accept_batch` takes the
     /// rescan into a claimed entry, which leaves the entry watcher-overflowed
     /// and makes the work scheduled at claim completion a recovery rather
@@ -3624,18 +3624,23 @@ mod tests {
     #[test]
     fn maintenance_handoff_saturation_stays_warming_until_a_followup_drain() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // Runs without ambient polling: a dispatcher tick coincident with the
+        // follow-up reconcile's dispatch claims the attachment out from under
+        // it and the reconcile drops itself. This test pins handoff
+        // saturation, not that race, so it drives the single poll it needs —
+        // the one that finds maintenance due — itself.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
-        // The maintenance job's own handoff drain, isolated from the
-        // dispatcher's ambient ticks: see the reconcile-side saturation test
-        // above for why a shared counter would leave this ambiguous between
-        // the handoff saturating and the dispatcher's next tick coincidentally
-        // scheduling a reconcile of its own.
+        // The maintenance job's own handoff drain, not the batch source a
+        // watcher poll spends: see the reconcile-side saturation test above
+        // for why a shared counter would leave this ambiguous between the
+        // handoff saturating and a poll scheduling a reconcile of its own.
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
@@ -3655,12 +3660,17 @@ mod tests {
     #[test]
     fn maintenance_handoff_saturation_preserves_untrusted_rescan_state() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // Runs without ambient polling, and drives the poll that finds
+        // maintenance due itself: see the sibling saturation test above for
+        // the tick that would otherwise claim the attachment the follow-up
+        // reconcile is dispatched against.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
         ops.handoff_poll_batches
