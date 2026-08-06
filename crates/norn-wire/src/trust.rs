@@ -15,9 +15,13 @@
 //! [`UntrustedReason::WatcherLost`] and [`UntrustedReason::EnvironmentalRefusal`]
 //! are the variants whose payloads grow — how far a heal has come, what made a
 //! state untrustworthy, what ended watcher coverage, what the environment
-//! refused. Each is `#[non_exhaustive]` at the variant level and built through
-//! its constructor, so a field arriving in one of them extends the payload
-//! rather than breaking every caller that destructured it.
+//! refused. Each is `#[non_exhaustive]` at the variant level, so a field
+//! arriving in one of them is not a compile error for a caller that
+//! destructured it: a pattern over such a variant already has to accept the
+//! fields it does not name. Construction is what the arriving field does
+//! break, and deliberately — the constructors take their fields positionally,
+//! so a payload that grows one is a signature change every producer is made to
+//! answer for rather than a default nobody chose.
 //!
 //! **Warming names what it is doing, not only how far it has come.** An entry
 //! reaches readable state through work of two kinds — installing change
@@ -98,9 +102,13 @@ impl TrustState {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum WarmingPhase {
-    /// Change detection is being established over the vault. No document has
-    /// been read yet, so the counters beside this phase stand at zero against
-    /// an unknown total.
+    /// The entry is acquiring everything a read runs on, before it reads
+    /// anything: the vault's own working area, sole maintainership of it,
+    /// change detection over the vault tree, and the derived state reads
+    /// answer from. All of it precedes the first document, so the counters
+    /// beside this phase stand at zero against an unknown total, and an entry
+    /// may hold here for a while on a loaded machine without anything being
+    /// wrong.
     InstallingCoverage,
     /// Documents are being derived, and the counters beside this phase advance
     /// as they are.
