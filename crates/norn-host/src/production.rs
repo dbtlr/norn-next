@@ -2960,33 +2960,9 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// Bar the dispatcher from claiming the entry for a watcher poll, and return
-    /// once it holds no claim on it.
-    ///
-    /// A demand raised while any job is claimed is answered with the entry's
-    /// state and schedules nothing — the caller's own lease is what follows the
-    /// completion. A test that raises one and drops its lease therefore has to
-    /// raise it while no job is claimed, and the dispatcher polls on a cadence
-    /// nothing else synchronizes with. The claim is what the hold excludes and
-    /// what it reads, both under the entry gate, so there is no instant between
-    /// this returning and the release in which a poll can claim the entry.
-    fn hold_polls<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
-        wait_until(
-            "the dispatcher to hold no claim on the entry",
-            lifecycle_budget(),
-            || {
-                if host.hold_polls(name) {
-                    Observed::Met(())
-                } else {
-                    Observed::Pending("a job holds the entry".to_owned())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
-    }
-
     struct BlockedRecovery {
         inner: ProductionEntryOps,
+        lose_coverage: std::sync::Arc<std::sync::atomic::AtomicBool>,
         started: std::sync::Arc<std::sync::atomic::AtomicBool>,
         release: std::sync::Arc<std::sync::atomic::AtomicBool>,
         observed: std::sync::Mutex<Option<norn_fs::Batch>>,
@@ -3060,6 +3036,17 @@ mod tests {
             name: &VaultName,
             attachment: &mut Self::Attachment,
         ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+            // Coverage ends the way the backend ends it: the subscription is
+            // given up and the loss is reported once, so what follows is an
+            // entry still holding its store and its lock with nothing watching
+            // the vault for it.
+            if self
+                .lose_coverage
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                attachment.subscription.take();
+                return Err(watcher(WatchError::Backend("test".into())));
+            }
             match self.observed.lock().unwrap().take() {
                 Some(batch) => Ok(Some(batch)),
                 None => self.inner.poll(name, attachment),
@@ -3081,12 +3068,14 @@ mod tests {
         let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
+        let lose_coverage = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let host = crate::Host::new(
             registry,
             BlockedRecovery {
                 inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                lose_coverage: std::sync::Arc::clone(&lose_coverage),
                 started: std::sync::Arc::clone(&started),
                 release: std::sync::Arc::clone(&release),
                 observed: std::sync::Mutex::new(None),
@@ -3100,13 +3089,24 @@ mod tests {
         .unwrap();
         drop(host.demand(&name).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
-        // The demand below has to reach an unclaimed entry: one raised against
-        // a claimed one is answered with its state and schedules nothing, and
-        // this test drops the lease that would otherwise follow the completion.
-        hold_polls(&host, &name);
-        host.watcher_failed(&name, norn_fs::WatchError::Backend("test".into()));
-        drop(host.demand(&name).unwrap());
-        host.release_polls(&name);
+        lose_coverage.store(true, std::sync::atomic::Ordering::SeqCst);
+        wait_until(
+            "coverage to be reported lost",
+            lifecycle_budget(),
+            || match host.state(&name) {
+                Some(norn_wire::TrustState::Untrusted {
+                    reason: norn_wire::UntrustedReason::WatcherLost { .. },
+                    ..
+                }) => Observed::Met(()),
+                state => Observed::Pending(format!("the state is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        // Lost coverage is reinstalled on demand, and the lease is held until
+        // it is: a demand landing while a watcher poll holds the entry
+        // schedules nothing itself, and the outstanding lease is what the
+        // poll's completion answers.
+        let demand = host.demand(&name).unwrap();
         wait_until(
             "the recovery to reach its block",
             lifecycle_budget(),
@@ -3122,6 +3122,7 @@ mod tests {
         fs::write(&note, "during recovery").unwrap();
         release.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
+        drop(demand);
         drop(host);
         let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
         let row = store

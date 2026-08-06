@@ -249,11 +249,6 @@ struct EntryState<A> {
     detach_scheduled: bool,
     detach_in_flight: bool,
     epoch: u64,
-    /// Whether the dispatcher is barred from claiming this entry for a watcher
-    /// poll. Set and read under the entry gate, which is what makes it exclude
-    /// the claim rather than race it. See [`Host::hold_polls`].
-    #[cfg(test)]
-    polls_held: bool,
 }
 
 #[derive(Clone)]
@@ -653,8 +648,6 @@ impl<O: EntryOps> Host<O> {
                             detach_scheduled: false,
                             detach_in_flight: false,
                             epoch: 0,
-                            #[cfg(test)]
-                            polls_held: false,
                         }),
                     }),
                 )
@@ -723,36 +716,6 @@ impl<O: EntryOps> Host<O> {
                 .trust
                 .clone()
         })
-    }
-
-    /// Bar the dispatcher from claiming `name` for a watcher poll, and report
-    /// whether it holds no claim now.
-    ///
-    /// A watcher poll takes its claim under the entry gate and releases it under
-    /// the gate again, with [`EntryOps::poll`] running in between — so a claim is
-    /// outstanding for longer than the poll body, and a flag the poll body sets
-    /// says nothing about the window on either side of it. The hold is written
-    /// and the claim is read in **one** critical section, which is what makes
-    /// them exclusive: a poll that reaches the gate first is seen here as a
-    /// claim, and one that reaches it after sees the hold and takes none. So a
-    /// caller that keeps asking until this answers `true` may then act on an
-    /// entry no watcher poll can claim until [`Host::release_polls`].
-    #[cfg(test)]
-    pub(crate) fn hold_polls(&self, name: &VaultName) -> bool {
-        let Some(entry) = self.shared.entries.get(name) else {
-            return false;
-        };
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        state.polls_held = true;
-        state.active_epoch.is_none()
-    }
-
-    /// Let the dispatcher claim `name` for watcher polls again.
-    #[cfg(test)]
-    pub(crate) fn release_polls(&self, name: &VaultName) {
-        if let Some(entry) = self.shared.entries.get(name) {
-            entry.gate.lock().expect("entry gate poisoned").polls_held = false;
-        }
     }
 
     /// Record client demand and, where necessary, start one asynchronous
@@ -912,10 +875,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
     for (name, entry) in &shared.entries {
         let (mut attachment, epoch) = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            #[cfg(test)]
-            if state.polls_held {
-                continue;
-            }
             if state.runnable {
                 continue;
             }
