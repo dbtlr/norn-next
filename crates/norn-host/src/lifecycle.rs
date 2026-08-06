@@ -576,12 +576,14 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
                 // say so.
                 None => state.trust = TrustState::Unattached,
             }
-        } else {
+        } else if !state.detach_in_flight {
             // The entry has a job in flight, which is holding the attachment
             // and will give it back when it ends. Unattached is published here
             // rather than there, so for the length of that job this entry says
             // released while its resources are still out — the one publication
-            // this contract does not yet cover.
+            // this contract does not yet cover. A release already under way
+            // takes neither route: it has published the phase that names it,
+            // and publishes Unattached itself once the resources are back.
             state.trust = TrustState::Unattached;
         }
     }
@@ -2517,12 +2519,14 @@ mod tests {
         );
     }
 
-    /// A duplicate-root refusal reaching idle entries is a teardown per alias:
-    /// each one names the leg it is on, and none of them reports its resources
-    /// released until they are.
-    #[test]
-    fn a_refused_alias_releases_before_it_publishes_unattached() {
-        let ops = Arc::new(FakeOps::default());
+    /// Two attached aliases of one vault, ready to be refused as a duplicate
+    /// root.
+    ///
+    /// Without ambient polling: a dispatcher tick holding either alias in a
+    /// watcher poll makes a refusal take the in-flight route, where the release
+    /// belongs to the job that holds it rather than to the refusal these tests
+    /// are about.
+    fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
         let registry = ServingRegistry::from_entries([
@@ -2536,13 +2540,9 @@ mod tests {
             ),
         ])
         .unwrap();
-        // Without ambient polling: a dispatcher tick holding either alias in a
-        // watcher poll makes the refusal below take the in-flight route, where
-        // the release belongs to the job that holds it rather than to the
-        // refusal this test is about.
         let host = Host::new(
             registry,
-            Arc::clone(&ops),
+            ops,
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 2,
@@ -2554,6 +2554,16 @@ mod tests {
         drop(host.demand(&b).unwrap());
         wait_for_state(&host, &a, TrustState::Ready);
         wait_for_state(&host, &b, TrustState::Ready);
+        (host, a, b)
+    }
+
+    /// A duplicate-root refusal reaching idle entries is a teardown per alias:
+    /// each one names the leg it is on, and none of them reports its resources
+    /// released until they are.
+    #[test]
+    fn a_refused_alias_releases_before_it_publishes_unattached() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
@@ -2575,6 +2585,41 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A refusal reaching an entry whose release is already under way leaves
+    /// the publication to that release: a second refusal passing over the
+    /// window is not evidence that anything came back.
+    #[test]
+    fn a_refusal_over_a_release_in_flight_leaves_the_release_to_publish() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        let second = conflict.clone();
+        // The first refusal runs off the test thread because it releases both
+        // aliases inline, and the second one below runs from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        refuse_conflict(&host.shared, &second);
+        assert_eq!(
+            (host.state(&a), host.state(&b)),
+            (Some(releasing()), Some(releasing())),
+            "a refusal published released over a release that had given nothing back"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_state(&host, &b, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
     }
 
     /// A demand raised while an entry is giving its resources back defers to
