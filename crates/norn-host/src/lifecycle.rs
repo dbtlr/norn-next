@@ -3220,7 +3220,10 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         // See the sibling saturation test above: the handoff drain's own
-        // batch source, isolated from the dispatcher's ambient ticks.
+        // batch source, isolated from the dispatcher's ambient ticks. The
+        // `accept_batch` below is also this test's only scheduler, and a batch
+        // carrying no fact schedules nothing against an entry a tick has
+        // claimed — there is no fact left behind for the claim to find.
         ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
