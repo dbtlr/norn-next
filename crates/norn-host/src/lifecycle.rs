@@ -4646,6 +4646,117 @@ mod tests {
         drop(lease);
     }
 
+    /// A claim that ends by refusing environmentally leaves nothing scheduled,
+    /// for the reason its lost-coverage twin above does: the job that was
+    /// waiting on the claim was dispatched against coverage the refusal has
+    /// taken out of service, and what puts it back is the recovery a demand
+    /// asks for.
+    #[test]
+    fn a_claim_that_refuses_environmentally_drops_the_job_that_was_waiting_on_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = entry.gate.lock().unwrap().epoch;
+        dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
+        wait_until(
+            "the job that lost the attachment to record itself for a later tick",
+            lifecycle_wait_budget(),
+            || {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if state.pending_dispatch.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the entry has no job scheduled".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        ops.environmental_poll.store(true, Ordering::SeqCst);
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+
+        let (runnable, scheduled) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.runnable, state.pending_dispatch.is_some())
+        };
+        assert!(
+            !scheduled && !runnable,
+            "an entry owing a recovery kept a job scheduled against coverage it no longer has"
+        );
+        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
+
+        drop(lease);
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    /// A release takes the marker of the job that was waiting on the claim it
+    /// ends. The job was scheduled against resources this leg has given back,
+    /// and a marker standing over an entry the release left not runnable is a
+    /// job no dispatcher tick reaches — work the entry carries and never does.
+    #[test]
+    fn a_release_takes_the_marker_of_the_job_that_was_waiting_on_the_claim() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        // No lease stands over the release below, so the release publishes
+        // Unattached and schedules nothing: what the entry is left holding is
+        // the whole of what this test reads.
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = entry.gate.lock().unwrap().epoch;
+        dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
+        wait_until(
+            "the job that lost the attachment to record itself for a later tick",
+            lifecycle_wait_budget(),
+            || {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if state.pending_dispatch.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the entry has no job scheduled".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        // The claim ends by giving the entry's resources back, which is the
+        // teardown the marker above outlives.
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+
+        wait_for_state(&host, &name, TrustState::Unattached);
+        let (runnable, scheduled) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.runnable, state.pending_dispatch.is_some())
+        };
+        assert!(
+            !scheduled && !runnable,
+            "a released entry kept a job scheduled against resources it has given back"
+        );
+        wait_for_detaches(&ops, 1, "the release to give the attachment back");
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
+    }
+
     /// A job that reached a worker gives the entry's queue slot back, whatever
     /// the entry did while it sat in the channel. A slot standing for a job no
     /// channel holds is an entry every later dispatch refuses, so the work the
