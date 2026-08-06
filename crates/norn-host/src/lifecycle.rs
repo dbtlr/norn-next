@@ -2788,6 +2788,37 @@ mod tests {
         drop(standing);
     }
 
+    /// A demand withdrawn after the recovery it asked for has already run is
+    /// spent, and a spent demand answers for nobody: the lease waiting on the
+    /// recovery the entry owes now is still waiting, and the claim's completion
+    /// runs it.
+    #[test]
+    fn a_spent_recovery_demand_does_not_withdraw_the_one_a_later_lease_raised() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        let spent = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+
+        // A second terminal failure owes a second recovery, and the lease still
+        // holding the first one's demand never asked for this one.
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        wait_for_state(&host, &name, backend_lost());
+        claim_for_a_poll(&ops);
+        let waiting = demand_inside_a_claim(&host, &name);
+        drop(spent);
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            2,
+            "a spent demand cancelled the recovery a live lease was waiting on"
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop(waiting);
+    }
+
     #[derive(Default)]
     struct PollingOps {
         emit: std::sync::atomic::AtomicBool,
