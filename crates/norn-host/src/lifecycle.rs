@@ -546,8 +546,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         .iter()
         .map(|(_, entry)| entry.gate.lock().expect("entry gate poisoned"))
         .collect::<Vec<_>>();
-    let mut attachments = Vec::new();
-    for ((name, _), state) in entries.iter().zip(&mut states) {
+    let mut releasing = Vec::new();
+    for ((name, entry), state) in entries.iter().zip(&mut states) {
         state.epoch += 1;
         state.queued = false;
         state.pending_dispatch = None;
@@ -555,17 +555,34 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.clear_recovery();
         state.identity_refused = false;
         state.duplicate_root = Some(conflict.clone());
-        state.trust = TrustState::Unattached;
         if state.active_epoch.is_none() && !state.detach_in_flight {
             state.runnable = false;
-            if let Some(attachment) = state.attachment.take() {
-                attachments.push(((*name).clone(), attachment));
+            match state.attachment.take() {
+                // The refusal reaches an idle entry holding the coverage the
+                // conflict invalidates, so this is a teardown like any other:
+                // the resources go back below, and Unattached is published
+                // after they have.
+                Some(attachment) => {
+                    let epoch = state.epoch;
+                    begin_release(state);
+                    releasing.push(((*name).clone(), *entry, epoch, attachment));
+                }
+                // Nothing is held, so the entry is already released and can
+                // say so.
+                None => state.trust = TrustState::Unattached,
             }
+        } else {
+            // The entry has a job in flight, which is holding the attachment
+            // and will give it back when it ends. Unattached is published here
+            // rather than there, so for the length of that job this entry says
+            // released while its resources are still out — the one publication
+            // this contract does not yet cover.
+            state.trust = TrustState::Unattached;
         }
     }
     drop(states);
-    for (name, attachment) in attachments {
-        shared.ops.detach(&name, attachment);
+    for (name, entry, epoch, attachment) in releasing {
+        finish_release(shared, entry, &name, epoch, Some(attachment));
     }
 }
 
@@ -713,24 +730,30 @@ impl<O: EntryOps> Drop for Host<O> {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.dispatcher_stop.send(());
         let dispatcher = self.dispatcher.take();
-        let mut attached = Vec::new();
+        // Every entry still holding anything publishes Unattached below,
+        // after the resources are back, as on every other release. The phase
+        // that names the window is not published: destruction holds the host
+        // exclusively, so there is no reader between here and there.
+        let mut releasing = Vec::new();
         for (name, entry) in &self.shared.entries {
-            let attachment = {
-                let mut state = entry.gate.lock().expect("entry gate poisoned");
-                state.epoch += 1;
-                state.runnable = false;
-                state.queued = false;
-                state.pending_dispatch = None;
-                state.pending = Batch::default();
-                state.trust = TrustState::Unattached;
-                if state.active_epoch.is_none() && !state.detach_in_flight {
-                    state.attachment.take()
-                } else {
-                    None
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.epoch += 1;
+            state.runnable = false;
+            state.queued = false;
+            state.pending_dispatch = None;
+            state.pending = Batch::default();
+            if state.active_epoch.is_none() && !state.detach_in_flight {
+                match state.attachment.take() {
+                    Some(attachment) => {
+                        state.detach_in_flight = true;
+                        releasing.push((name.clone(), Some(attachment)));
+                    }
+                    None => state.trust = TrustState::Unattached,
                 }
-            };
-            if let Some(attachment) = attachment {
-                attached.push((name.clone(), attachment));
+            } else {
+                // A job in flight is holding this entry's resources and gives
+                // them back as it ends, which the joins below wait for.
+                releasing.push((name.clone(), None));
             }
         }
         self.shared.jobs.lock().expect("job sender poisoned").take();
@@ -746,8 +769,16 @@ impl<O: EntryOps> Drop for Host<O> {
                 let _ = worker.join();
             }
         }
-        for (name, attachment) in attached {
-            self.shared.ops.detach(&name, attachment);
+        for (name, attachment) in releasing {
+            if let Some(attachment) = attachment {
+                self.shared.ops.detach(&name, attachment);
+            }
+            let Some(entry) = self.shared.entries.get(&name) else {
+                continue;
+            };
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.detach_in_flight = false;
+            state.trust = TrustState::Unattached;
         }
     }
 }
@@ -1043,12 +1074,13 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         let result = shared.ops.poll(name, &mut attachment);
         let maintenance_due = result.is_ok() && shared.ops.maintenance_due(name, &attachment);
         let mut schedule = None;
-        let mut detach = None;
+        let mut stale = None;
+        let mut release = None;
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins = state.safety_pins.saturating_sub(1);
             if state.epoch != epoch {
-                detach = Some(attachment);
+                stale = Some(attachment);
             } else {
                 match result {
                     Ok(None) => {
@@ -1085,17 +1117,15 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         }
                     }
                     Err(JobFailure::LostMaintainership) => {
-                        state.pending = Batch::default();
-                        state.trust = TrustState::Unattached;
                         state.epoch += 1;
-                        detach = Some(attachment);
+                        begin_release(&mut state);
+                        release = Some(attachment);
                     }
                     Err(JobFailure::MaintainerContended(incumbent)) => {
-                        state.pending = Batch::default();
                         state.maintainer_contended = Some(incumbent);
-                        state.trust = TrustState::Unattached;
                         state.epoch += 1;
-                        detach = Some(attachment);
+                        begin_release(&mut state);
+                        release = Some(attachment);
                     }
                     // A recovery demand raised inside this claim outlives the
                     // failure the claim reports, so both legs below keep it.
@@ -1117,15 +1147,28 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.attachment = Some(attachment);
                     }
                 }
-                if schedule.is_none() {
-                    schedule = schedule_demanded_work(&mut state, name);
-                }
-                if schedule.is_none() {
-                    schedule = schedule_due_detach(&mut state, name);
+                // A leg that is releasing the entry schedules nothing against
+                // it: the work an outstanding lease is owed is the re-attach
+                // the release itself ends with, once the resources are back.
+                if release.is_none() {
+                    if schedule.is_none() {
+                        schedule = schedule_demanded_work(&mut state, name);
+                    }
+                    if schedule.is_none() {
+                        schedule = schedule_due_detach(&mut state, name);
+                    }
                 }
             }
         }
-        if let Some(attachment) = detach {
+        if let Some(attachment) = release {
+            finish_release(shared, entry, name, epoch, Some(attachment));
+            continue;
+        }
+        if let Some(attachment) = stale {
+            // The entry moved on while this poll held it, so the poll owns
+            // nothing but the attachment it took: it gives that back and
+            // publishes nothing, because whatever moved the entry on has
+            // already said where the entry stands.
             shared.ops.detach(name, attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.active_epoch == Some(epoch) {
@@ -1202,6 +1245,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if state.epoch == epoch {
                         state.runnable = false;
                         state.duplicate_root = Some(conflict);
+                        // The refusal precedes the attach, so this entry holds
+                        // nothing to give back and Unattached is true as it is
+                        // published.
                         state.trust = TrustState::Unattached;
                     }
                     return;
@@ -1242,6 +1288,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if state.epoch == epoch {
                         state.runnable = false;
                         state.duplicate_root = Some(conflict);
+                        // Another alias holds the claim on this identity, so
+                        // this entry never acquired anything: it holds nothing
+                        // to give back before it says Unattached.
                         state.trust = TrustState::Unattached;
                     }
                     return;
@@ -1336,6 +1385,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         dispatch_followup(shared, Job::Reconcile(name, epoch));
                     }
                 }
+                // An attach that failed acquired nothing, and gave back
+                // whatever it had reached before it failed. Both branches below
+                // therefore publish Unattached holding nothing, which is what
+                // Unattached says.
                 Err(JobFailure::MaintainerContended(incumbent)) => {
                     state.maintainer_contended = Some(incumbent);
                     state.trust = TrustState::Unattached;
@@ -1404,18 +1457,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
@@ -1514,20 +1565,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     break;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     break;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
@@ -1608,20 +1655,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
