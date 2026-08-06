@@ -82,13 +82,16 @@ pub trait EntryOps: Send + Sync + 'static {
 /// the phase **before** the work rather than after: the phase is what a caller
 /// reads while there is nothing yet to count.
 ///
-/// Only one of the two phases counts anything, and that asymmetry is the shape
-/// of this type rather than a rule beside it. [`Self::installing_coverage`]
-/// returns nothing, because the prologue reads no document and has nothing to
-/// report. [`Self::healing`] returns the [`Healing`] handle, and that handle
-/// owns the only `report`. So counted progress cannot be published under the
-/// coverage phase: reporting requires a handle, and the handle exists only
-/// where the heal does.
+/// The two phases a job can be in are the two this type offers, and only one
+/// of them counts anything — an asymmetry that is the shape of the type rather
+/// than a rule beside it. [`Self::installing_coverage`] returns nothing,
+/// because the prologue reads no document and has nothing to report.
+/// [`Self::healing`] returns the [`Healing`] handle, and that handle owns the
+/// only `report`. So counted progress cannot be published under the coverage
+/// phase: reporting requires a handle, and the handle exists only where the
+/// heal does. The teardown phase is not offered here at all, because no job
+/// runs it: the lifecycle publishes it directly on the leg that releases an
+/// entry's resources.
 pub struct ProgressReporter<A> {
     entry: std::sync::Weak<Entry<A>>,
     epoch: u64,
@@ -1523,17 +1526,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 let attachment = state.attachment.take();
                 state.detach_in_flight = attachment.is_some();
                 // Taking the attachment is the instant the entry stops being
-                // readable, so it is where the published state stops saying it
-                // is. Unattached is both what teardown ends at and what is
-                // already true of the entry for a caller: nothing to read, and
-                // no work under way that will make it readable. Live resources
-                // are still owned until EntryOps::detach returns, and
-                // `detach_in_flight` — not the trust state — is what keeps
-                // another path from taking them a second time. A demand
-                // arriving now cannot start a competing attach either, because
-                // this leg holds the entry runnable until it finishes; it is
-                // honored by the re-attach at the end of this leg instead.
-                state.trust = TrustState::Unattached;
+                // readable, and the state says so here rather than at the end
+                // of the leg. It cannot say Unattached yet: Unattached is what
+                // this entry publishes once EntryOps::detach has given the
+                // watcher, the store and the maintainer lock back, and a
+                // caller that waits for it is waiting for exactly that.
+                // Warming is the state meaning attached and not readable, and
+                // the phase beside it names the leg — resources going back,
+                // nothing counted, and a demand arriving now honored by the
+                // re-attach at the end of this leg.
+                state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
                 attachment
             };
             if let Some(attachment) = attachment {
@@ -1949,12 +1951,13 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
 
-    /// Teardown publishes the state it is heading for at the instant the entry
-    /// stops being readable, rather than a state that claims work toward
-    /// readable is under way. A caller therefore sees Ready then Unattached
-    /// across a detach, and never Ready over an entry whose attachment is gone.
+    /// Teardown stops saying Ready at the instant the entry stops being
+    /// readable, and names the leg it is on rather than borrowing the phase of
+    /// the leg that installs coverage. It cannot say Unattached yet: that is
+    /// the state a caller waits on to know the watcher, the store and the lock
+    /// have been given back, and this leg has not given them back yet.
     #[test]
-    fn demand_during_in_flight_detach_never_observes_ready_without_attachment() {
+    fn demand_during_in_flight_detach_reports_the_release_rather_than_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
         let initial = host.demand(&name).unwrap();
@@ -1969,13 +1972,14 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(ops.detach_started.load(Ordering::SeqCst));
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        let releasing = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
+        assert_eq!(host.state(&name), Some(releasing.clone()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         let lease = host.demand(&name).unwrap();
         assert_eq!(
             lease.completion(),
-            Demand::State(TrustState::Unattached),
-            "teardown must not advertise work toward a readable entry"
+            Demand::State(releasing),
+            "teardown must not advertise coverage installation, or a readable entry"
         );
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);

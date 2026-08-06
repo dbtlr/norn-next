@@ -45,7 +45,11 @@ fn finding_kinds() -> Vec<FindingKind> {
 
 /// Every phase an entry warms in.
 fn warming_phases() -> Vec<WarmingPhase> {
-    vec![WarmingPhase::InstallingCoverage, WarmingPhase::Healing]
+    vec![
+        WarmingPhase::InstallingCoverage,
+        WarmingPhase::Healing,
+        WarmingPhase::ReleasingCoverage,
+    ]
 }
 
 /// Every trust state, with one entry per phase behind `Warming` and one per
@@ -185,9 +189,9 @@ fn an_unknown_estimate_is_the_field_written_null() {
     }
 }
 
-/// The phase is a bare string beside the counters, and it is read before any
-/// document has been counted: coverage installation is the state an entry
-/// holds while zero healed against an unknown total is the whole truth.
+/// The phase is a bare string beside the counters, and the two phases that
+/// count nothing are read where zero healed against an unknown total is the
+/// whole truth: acquiring what a read runs on, and giving it back.
 #[test]
 fn a_warming_phase_is_a_bare_string_beside_the_counters() {
     assert_eq!(
@@ -197,6 +201,14 @@ fn a_warming_phase_is_a_bare_string_beside_the_counters() {
             None
         )),
         r#"{"state":"warming","phase":"installing_coverage","healed":0,"total_estimate":null}"#
+    );
+    assert_eq!(
+        wire(&TrustState::warming(
+            WarmingPhase::ReleasingCoverage,
+            0,
+            None
+        )),
+        r#"{"state":"warming","phase":"releasing_coverage","healed":0,"total_estimate":null}"#
     );
 }
 

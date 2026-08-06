@@ -24,13 +24,16 @@
 //! answer for rather than a default nobody chose.
 //!
 //! **Warming names what it is doing, not only how far it has come.** An entry
-//! reaches readable state through work of two kinds — installing change
-//! detection over the vault, then deriving documents — and only the second of
-//! them has anything to count. Counters alone therefore cannot tell a heal
-//! that has not started from one that is not progressing: both read as zero
-//! healed against an unknown total. [`WarmingPhase`] is what separates them,
-//! so a caller waiting on an entry, and an operator reading why a wait
-//! expired, learn which of the two the entry is in.
+//! reaches readable state through work of two kinds — acquiring what a read
+//! runs on, then deriving documents — and only the second of them has anything
+//! to count. Counters alone therefore cannot tell a heal that has not started
+//! from one that is not progressing: both read as zero healed against an
+//! unknown total. [`WarmingPhase`] is what separates them, so a caller waiting
+//! on an entry, and an operator reading why a wait expired, learn which of the
+//! two the entry is in. A third phase names the leg that runs the other way,
+//! giving those resources back; it counts nothing either, and it is the reason
+//! [`TrustState::Warming`] is read as "attached and not readable" rather than
+//! as a promise about where the entry is heading.
 //!
 //! **Two watcher reasons, split by who resumes.** [`UntrustedReason::WatcherOverflow`]
 //! is a running watcher that reported less than it saw, and the entry re-heals
@@ -51,8 +54,10 @@ use serde::{Deserialize, Serialize};
 pub enum TrustState {
     /// Registered, with no derived state to read from yet.
     Unattached,
-    /// Attached and working toward readable derived state. The entry is not
-    /// readable until that work finishes.
+    /// Attached and not readable. The entry is either working toward readable
+    /// derived state or giving up what it holds; `phase` says which, and the
+    /// counters say how far the counted work has come. Reads do not answer
+    /// from the entry in either case.
     #[non_exhaustive]
     Warming {
         /// The kind of work the entry is doing.
@@ -94,10 +99,10 @@ impl TrustState {
     }
 }
 
-/// The kind of work an entry is doing while it warms.
+/// The kind of work an entry is doing while it is attached and not readable.
 ///
 /// On the wire a phase is the flat string itself: `"installing_coverage"`,
-/// `"healing"`.
+/// `"healing"`, `"releasing_coverage"`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -113,6 +118,20 @@ pub enum WarmingPhase {
     /// Documents are being derived, and the counters beside this phase advance
     /// as they are.
     Healing,
+    /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
+    /// acquired: change detection over the vault ends, the derived state is
+    /// closed, and sole maintainership of the vault is released. Nothing is
+    /// counted here, so the counters beside this phase stand at zero against an
+    /// unknown total.
+    ///
+    /// This phase is the one that does not end at [`TrustState::Ready`]: it
+    /// ends at [`TrustState::Unattached`], and an entry only reaches
+    /// [`TrustState::Ready`] from here by being demanded again afterwards. It
+    /// sits under [`TrustState::Warming`] because that is the state meaning
+    /// "attached and not readable", which is what the entry is while its
+    /// resources are still being released — a demand arriving now neither
+    /// blocks nor fails, and is honored once the release finishes.
+    ReleasingCoverage,
 }
 
 /// Why an entry's derived state cannot be trusted.

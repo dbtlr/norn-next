@@ -222,7 +222,7 @@ fn a_warming_state_advertises_its_phase_and_its_two_counters_in_snake_case() {
             string_constant(branch)
                 .unwrap_or_else(|| panic!("a phase branch is not a pinned string: {branch}"))
         })),
-        sorted(["installing_coverage", "healing"])
+        sorted(["installing_coverage", "healing", "releasing_coverage"])
     );
     let estimate: BTreeSet<&str> = warming["properties"]["total_estimate"]["type"]
         .as_array()
