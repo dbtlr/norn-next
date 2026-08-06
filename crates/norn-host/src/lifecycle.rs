@@ -1283,6 +1283,13 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         state.active_epoch = Some(epoch);
     }
     run_job_inner(shared, job);
+    // Whatever the leg still holds ends here. A claim it gave up itself —
+    // handed to the job it dispatched, or ended by the release it ran — is
+    // already over, and the epoch it moved on to is that job's, not a
+    // supersession to clear the entry's runnable flag over. What this epilogue
+    // ends is a claim held to the last: an entry whose epoch moved on under a
+    // leg was invalidated by something that left the scheduling to the leg's
+    // end, so the flag goes back with the claim.
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.active_epoch == Some(epoch) {
         state.active_epoch = None;
@@ -1449,11 +1456,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     } else {
                         state.trust = trust_for_pending_reconcile(&state.pending);
                         state.epoch += 1;
-                        let epoch = state.epoch;
+                        let next_epoch = state.epoch;
                         state.runnable = true;
                         drop(state);
                         drop(attach_claims);
-                        dispatch_followup(shared, Job::Reconcile(name, epoch));
+                        dispatch_handoff(shared, entry, epoch, Job::Reconcile(name, next_epoch));
                     }
                 }
                 // An attach that failed acquired nothing, and gave back
@@ -1558,7 +1565,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             drop(state);
             if let Some(job) = next {
-                dispatch_followup(shared, job);
+                dispatch_handoff(shared, entry, epoch, job);
             }
         }
         Job::Reconcile(name, epoch) => loop {
@@ -1618,14 +1625,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         let next = schedule_due_detach(&mut state, &name);
                         drop(state);
                         if let Some(job) = next {
-                            dispatch_followup(shared, job);
+                            dispatch_handoff(shared, entry, epoch, job);
                         }
                         break;
                     } else if handoff_saturated {
                         state.epoch += 1;
                         let next = Job::Reconcile(name.clone(), state.epoch);
                         drop(state);
-                        dispatch_followup(shared, next);
+                        dispatch_handoff(shared, entry, epoch, next);
                         break;
                     } else if state.pending.is_empty() {
                         state.runnable = false;
@@ -1657,7 +1664,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
-                        dispatch_followup(shared, job);
+                        dispatch_handoff(shared, entry, epoch, job);
                     }
                     break;
                 }
@@ -1671,7 +1678,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
                     if let Some(job) = next {
-                        dispatch_followup(shared, job);
+                        dispatch_handoff(shared, entry, epoch, job);
                     }
                     break;
                 }
@@ -1758,7 +1765,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             drop(state);
             if let Some(job) = next {
-                dispatch_followup(shared, job);
+                dispatch_handoff(shared, entry, epoch, job);
             }
         }
         Job::Detach(name, epoch) => {
@@ -1791,6 +1798,37 @@ fn drain_observed<O: EntryOps>(
         }
     }
     Ok((pending, true))
+}
+
+/// Hand the entry the next job it owes, ending this leg's claim on the entry.
+///
+/// A leg owns the entry until it schedules the entry's next job: what it sends
+/// runs against the entry's own claim, so the epilogue in [`run_job`] finds
+/// nothing left to end — in particular no `runnable` to clear, because that
+/// flag now stands for the job in flight rather than for the leg that sent it.
+/// A flag cleared there is an entry another claim may take, and a job dispatched
+/// against an entry taken from under it is work nothing is left holding.
+///
+/// The job leaves `pending_dispatch` as it goes into the queue. A marker beside
+/// a job already sent is one a dispatcher tick sends a second time, under the
+/// same epoch; [`dispatch_followup`] puts the marker back where a full queue
+/// refuses the send.
+fn dispatch_handoff<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    leg: u64,
+    job: Job,
+) {
+    {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if state.active_epoch == Some(leg) {
+            state.active_epoch = None;
+        }
+        if state.pending_dispatch.as_ref().map(Job::epoch) == Some(job.epoch()) {
+            state.pending_dispatch = None;
+        }
+    }
+    dispatch_followup(shared, job);
 }
 
 /// A worker never waits for room in its own bounded queue. If every queue slot
@@ -2105,12 +2143,9 @@ mod tests {
     /// ambient watcher poll, no idle reap, and no retry of a dispatch a full
     /// queue refused.
     ///
-    /// Some callers count the reconciles one `accept_batch` handoff produces.
-    /// An ambient poll claim coincident with that `accept_batch` takes the
-    /// rescan into a claimed entry, which leaves the entry watcher-overflowed
-    /// and makes the work scheduled at claim completion a recovery rather
-    /// than the reconcile the count is about — a real route, and not the one
-    /// these tests pin.
+    /// A caller here drives those duties itself, which is what makes the
+    /// interleaving under test the one the test set up rather than the one a
+    /// tick arrived at first.
     ///
     /// Standing down the dispatcher costs its other duties too, so a test
     /// here also assumes nothing it dispatches is refused for a full queue:
@@ -4418,18 +4453,12 @@ mod tests {
     #[test]
     fn maintenance_handoff_saturation_stays_warming_until_a_followup_drain() {
         let ops = Arc::new(FakeOps::default());
-        // Runs without ambient polling: a dispatcher tick coincident with the
-        // follow-up reconcile's dispatch claims the attachment out from under
-        // it and the reconcile drops itself. This test pins handoff
-        // saturation, not that race, so it drives the single poll it needs —
-        // the one that finds maintenance due — itself.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         // The maintenance job's own handoff drain, not the batch source a
         // watcher poll spends: see the reconcile-side saturation test above
@@ -4454,17 +4483,12 @@ mod tests {
     #[test]
     fn maintenance_handoff_saturation_preserves_untrusted_rescan_state() {
         let ops = Arc::new(FakeOps::default());
-        // Runs without ambient polling, and drives the poll that finds
-        // maintenance due itself: see the sibling saturation test above for
-        // the tick that would otherwise claim the attachment the follow-up
-        // reconcile is dispatched against.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        poll_watchers(&host.shared);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
         ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
         ops.handoff_poll_batches
