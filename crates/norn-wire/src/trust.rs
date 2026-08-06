@@ -52,7 +52,11 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TrustState {
-    /// Registered, with no derived state to read from yet.
+    /// Registered and holding nothing. There is no derived state to read from
+    /// yet, and none out on loan either: change detection over the vault, the
+    /// derived state and sole maintainership of the vault have all been given
+    /// back before an entry publishes this. A caller waiting for it is waiting
+    /// for exactly that.
     Unattached,
     /// Attached and not readable. The entry is either working toward readable
     /// derived state or giving up what it holds; `phase` says which, and the
@@ -130,8 +134,14 @@ pub enum WarmingPhase {
     /// [`TrustState::Ready`] from here by being demanded again afterwards. It
     /// sits under [`TrustState::Warming`] because that is the state meaning
     /// "attached and not readable", which is what the entry is while its
-    /// resources are still being released — a demand arriving now neither
-    /// blocks nor fails, and is honored once the release finishes.
+    /// resources are still being released.
+    ///
+    /// A demand arriving now neither blocks nor fails: the release is what
+    /// answers it. Where the entry is free to acquire the resources again, the
+    /// release honors the demand by doing so once it finishes. Where the entry
+    /// is parked — on a contended maintainer, a duplicate root, or a refused
+    /// identity — it answers with the park instead, because re-acquiring is
+    /// not something the entry is allowed to do.
     ReleasingCoverage,
 }
 
