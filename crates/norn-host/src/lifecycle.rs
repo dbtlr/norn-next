@@ -2980,6 +2980,12 @@ mod tests {
         emit: std::sync::atomic::AtomicBool,
         queued: AtomicUsize,
         reconciles: AtomicUsize,
+        /// Hold the reconcile half-healed, so the warming leg it opens lasts
+        /// as long as the test watching it needs rather than a fixed span a
+        /// wait's own cadence can step over.
+        hold_reconcile: std::sync::atomic::AtomicBool,
+        reconcile_started: std::sync::atomic::AtomicBool,
+        reconcile_release: std::sync::atomic::AtomicBool,
     }
 
     impl EntryOps for Arc<PollingOps> {
@@ -2997,7 +3003,10 @@ mod tests {
             let healing = progress.healing();
             healing.report(1, Some(2));
             self.reconciles.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(30));
+            if self.hold_reconcile.load(Ordering::SeqCst) {
+                self.reconcile_started.store(true, Ordering::SeqCst);
+                wait_for_flag("reconcile_release", &self.reconcile_release);
+            }
             healing.report(2, Some(2));
             Ok(())
         }
@@ -3529,16 +3538,19 @@ mod tests {
         .unwrap();
         let _ = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        ops.hold_reconcile.store(true, Ordering::SeqCst);
         ops.emit.store(true, Ordering::SeqCst);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         wait_until(
             "warming progress to advance past zero",
             lifecycle_wait_budget(),
             || match host.state(&name) {
                 Some(TrustState::Warming { healed, .. }) if healed > 0 => Observed::Met(()),
-                state => Observed::pending(format!("{state:?}")),
+                state => Observed::pending(format!("the state is {state:?}")),
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
+        ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -3563,18 +3575,23 @@ mod tests {
         .unwrap();
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        // The reconcile is held open across the reap below, which is the whole
+        // point of the pin: idle expiry lands on an entry with work in flight.
+        ops.hold_reconcile.store(true, Ordering::SeqCst);
         ops.emit.store(true, Ordering::SeqCst);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
         wait_until(
             "the polled batch to open a warming leg",
             lifecycle_wait_budget(),
             || match host.state(&name) {
                 Some(TrustState::Warming { .. }) => Observed::Met(()),
-                state => Observed::pending(format!("{state:?}")),
+                state => Observed::pending(format!("the state is {state:?}")),
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
+        ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Unattached);
     }
 
