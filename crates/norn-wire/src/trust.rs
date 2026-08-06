@@ -57,6 +57,10 @@ pub enum TrustState {
     /// derived state and sole maintainership of the vault have all been given
     /// back before an entry publishes this. A caller waiting for it is waiting
     /// for exactly that.
+    ///
+    /// One exception stands: an entry refused as a duplicate root while a job
+    /// is in flight publishes this state before that job's resources come
+    /// back, and a caller acting on it there can act early.
     Unattached,
     /// Attached and not readable. The entry is either working toward readable
     /// derived state or giving up what it holds; `phase` says which, and the
