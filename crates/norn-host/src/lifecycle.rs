@@ -390,11 +390,13 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
 /// attachment in hand picks the job exactly as [`Host::demand`] does: coverage
 /// still held is recovered, coverage that is gone is attached again.
 ///
-/// An entry that is serving, already working, parked on a conflict or on a
-/// contended maintainer, refused on identity, or owed a recovery no live lease
-/// has demanded owes an outstanding lease nothing. A recovery runs only where a
-/// lease has demanded it, because a terminal failure does not autonomously
-/// restart coverage.
+/// An entry that is serving, already working, giving its resources back, parked
+/// on a conflict or on a contended maintainer, refused on identity, or owed a
+/// recovery no live lease has demanded owes an outstanding lease nothing. A
+/// recovery runs only where a lease has demanded it, because a terminal failure
+/// does not autonomously restart coverage. A release in flight owes the lease
+/// the re-attach [`finish_release`] ends with, which is why nothing is
+/// scheduled here against one.
 fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.demand_leases == 0
         || !matches!(
@@ -402,6 +404,7 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
             TrustState::Unattached | TrustState::Untrusted { .. }
         )
         || state.runnable
+        || state.detach_in_flight
         || (state.recovery_required && !state.recovery_demanded())
         || state.duplicate_root.is_some()
         || state.maintainer_contended.is_some()
@@ -421,6 +424,87 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
     };
     state.pending_dispatch = Some(job.clone());
     Some(job)
+}
+
+/// Enter the window in which an entry's resources are going back.
+///
+/// Taking the attachment is the instant the entry stops being readable, and the
+/// state says so here rather than at the end of the leg. It cannot say
+/// Unattached yet: Unattached is what an entry publishes once
+/// [`EntryOps::detach`] has given the watcher, the store and the maintainer lock
+/// back, and a caller that waits for it is waiting for exactly that. Warming is
+/// the state meaning attached and not readable, and the phase beside it names
+/// the leg — resources going back, nothing counted.
+///
+/// The flag, not the label, is what makes the window safe to leave the gate
+/// open across. [`Host::demand`] and [`schedule_demanded_work`] both refuse to
+/// schedule while a release is in flight, so a lease raised inside the window
+/// records itself and is answered by [`finish_release`] rather than racing the
+/// publication that ends it — and it stays answered there even where another
+/// writer overwrites the phase mid-window.
+fn begin_release<A>(state: &mut EntryState<A>) {
+    state.runnable = false;
+    state.detach_in_flight = true;
+    state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
+}
+
+/// Give an entry's resources back, publish the state that says they are back,
+/// and honor the demand raised while they were going back.
+///
+/// Every teardown leg ends here, and the order is the whole of the contract:
+/// [`EntryOps::detach`] returns before Unattached is published, so Unattached
+/// means released on every leg that reaches it rather than on one of them.
+///
+/// The lease standing at the end of the release is answered by the release
+/// itself, because the release is what the lease was waiting behind. An entry
+/// parked on a duplicate root, a contended maintainer or an identity refusal
+/// owes it nothing, and neither does one owing a recovery no live lease asked
+/// for. The requirement is read before it is cleared: a lease that asked for a
+/// recovery is asking for the coverage the re-attach below installs.
+///
+/// The leg's claim on the entry ends where its release does, so the epilogue
+/// that would otherwise end it later finds nothing left to end: a re-attach
+/// dispatched below is the entry's own work, running against a claim it holds
+/// rather than one a finished leg is still entitled to take away.
+///
+/// The follow-up is sent from here and left nowhere else. A `pending_dispatch`
+/// marker beside a job this leg has already sent is one a dispatcher tick would
+/// send a second time, under the same epoch.
+fn finish_release<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    attachment: Option<O::Attachment>,
+) {
+    if let Some(attachment) = attachment {
+        shared.ops.detach(name, attachment);
+    }
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    let reattach_requested = !state.recovery_required || state.recovery_demanded();
+    if state.active_epoch == Some(epoch) {
+        state.active_epoch = None;
+    }
+    state.detach_in_flight = false;
+    state.pending = Batch::default();
+    state.clear_recovery();
+    state.runnable = false;
+    state.detach_due = false;
+    state.detach_scheduled = false;
+    state.trust = TrustState::Unattached;
+    if state.demand_leases > 0
+        && reattach_requested
+        && state.duplicate_root.is_none()
+        && state.maintainer_contended.is_none()
+        && !state.identity_refused
+    {
+        state.runnable = true;
+        state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+        state.epoch += 1;
+        let next = Job::Attach(name.clone(), state.epoch);
+        drop(state);
+        dispatch_followup(shared, next);
+    }
 }
 
 fn dispatch_pending<O: EntryOps>(
@@ -472,8 +556,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         .iter()
         .map(|(_, entry)| entry.gate.lock().expect("entry gate poisoned"))
         .collect::<Vec<_>>();
-    let mut attachments = Vec::new();
-    for ((name, _), state) in entries.iter().zip(&mut states) {
+    let mut releasing = Vec::new();
+    for ((name, entry), state) in entries.iter().zip(&mut states) {
         state.epoch += 1;
         state.queued = false;
         state.pending_dispatch = None;
@@ -481,17 +565,36 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.clear_recovery();
         state.identity_refused = false;
         state.duplicate_root = Some(conflict.clone());
-        state.trust = TrustState::Unattached;
         if state.active_epoch.is_none() && !state.detach_in_flight {
             state.runnable = false;
-            if let Some(attachment) = state.attachment.take() {
-                attachments.push(((*name).clone(), attachment));
+            match state.attachment.take() {
+                // The refusal reaches an idle entry holding the coverage the
+                // conflict invalidates, so this is a teardown like any other:
+                // the resources go back below, and Unattached is published
+                // after they have.
+                Some(attachment) => {
+                    let epoch = state.epoch;
+                    begin_release(state);
+                    releasing.push(((*name).clone(), *entry, epoch, attachment));
+                }
+                // Nothing is held, so the entry is already released and can
+                // say so.
+                None => state.trust = TrustState::Unattached,
             }
+        } else if !state.detach_in_flight {
+            // The entry has a job in flight, which is holding the attachment
+            // and will give it back when it ends. Unattached is published here
+            // rather than there, so for the length of that job this entry says
+            // released while its resources are still out — the one publication
+            // this contract does not yet cover. A release already under way
+            // takes neither route: it has published the phase that names it,
+            // and publishes Unattached itself once the resources are back.
+            state.trust = TrustState::Unattached;
         }
     }
     drop(states);
-    for (name, attachment) in attachments {
-        shared.ops.detach(&name, attachment);
+    for (name, entry, epoch, attachment) in releasing {
+        finish_release(shared, entry, &name, epoch, Some(attachment));
     }
 }
 
@@ -639,24 +742,35 @@ impl<O: EntryOps> Drop for Host<O> {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
         let _ = self.dispatcher_stop.send(());
         let dispatcher = self.dispatcher.take();
-        let mut attached = Vec::new();
+        // Destruction is a teardown per entry, and it names its leg like every
+        // other one: an entry with resources still out publishes the releasing
+        // phase here and Unattached below, once they are back. The window has a
+        // reader — a demand lease holds the shared state itself, so it outlives
+        // the host and reads the entry through its own handle.
+        let mut releasing = Vec::new();
         for (name, entry) in &self.shared.entries {
-            let attachment = {
-                let mut state = entry.gate.lock().expect("entry gate poisoned");
-                state.epoch += 1;
-                state.runnable = false;
-                state.queued = false;
-                state.pending_dispatch = None;
-                state.pending = Batch::default();
-                state.trust = TrustState::Unattached;
-                if state.active_epoch.is_none() && !state.detach_in_flight {
-                    state.attachment.take()
-                } else {
-                    None
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.epoch += 1;
+            state.runnable = false;
+            state.queued = false;
+            state.pending_dispatch = None;
+            state.pending = Batch::default();
+            if state.active_epoch.is_none() && !state.detach_in_flight {
+                match state.attachment.take() {
+                    Some(attachment) => {
+                        begin_release(&mut state);
+                        releasing.push((name.clone(), Some(attachment)));
+                    }
+                    // Nothing is held, so the entry is already released and can
+                    // say so.
+                    None => state.trust = TrustState::Unattached,
                 }
-            };
-            if let Some(attachment) = attachment {
-                attached.push((name.clone(), attachment));
+            } else {
+                // A job or a release in flight is holding this entry's
+                // resources. The joins below wait for it, and whatever it
+                // leaves in the entry is given back after them.
+                begin_release(&mut state);
+                releasing.push((name.clone(), None));
             }
         }
         self.shared.jobs.lock().expect("job sender poisoned").take();
@@ -672,8 +786,27 @@ impl<O: EntryOps> Drop for Host<O> {
                 let _ = worker.join();
             }
         }
-        for (name, attachment) in attached {
-            self.shared.ops.detach(&name, attachment);
+        for (name, attachment) in releasing {
+            let Some(entry) = self.shared.entries.get(&name) else {
+                continue;
+            };
+            // A leg that ended between the loop above and its join gave its
+            // attachment back to the entry rather than to the ops, so the
+            // entry is asked again for what it holds.
+            let attachment = attachment.or_else(|| {
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .attachment
+                    .take()
+            });
+            if let Some(attachment) = attachment {
+                self.shared.ops.detach(&name, attachment);
+            }
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.detach_in_flight = false;
+            state.trust = TrustState::Unattached;
         }
     }
 }
@@ -824,10 +957,15 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand,
             });
         }
+        // A release in flight is the entry's resources on their way back, and
+        // the flag says so whatever label stands beside it: the lease is
+        // recorded here and honored by the release, so nothing is scheduled
+        // against coverage that is going away.
         let schedule = matches!(
             state.trust,
             TrustState::Unattached | TrustState::Untrusted { .. }
         ) && !state.runnable
+            && !state.detach_in_flight
             && !state.identity_refused;
         if schedule {
             state.runnable = true;
@@ -969,12 +1107,13 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         let result = shared.ops.poll(name, &mut attachment);
         let maintenance_due = result.is_ok() && shared.ops.maintenance_due(name, &attachment);
         let mut schedule = None;
-        let mut detach = None;
+        let mut stale = None;
+        let mut release = None;
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.safety_pins = state.safety_pins.saturating_sub(1);
             if state.epoch != epoch {
-                detach = Some(attachment);
+                stale = Some(attachment);
             } else {
                 match result {
                     Ok(None) => {
@@ -1011,17 +1150,15 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         }
                     }
                     Err(JobFailure::LostMaintainership) => {
-                        state.pending = Batch::default();
-                        state.trust = TrustState::Unattached;
                         state.epoch += 1;
-                        detach = Some(attachment);
+                        begin_release(&mut state);
+                        release = Some(attachment);
                     }
                     Err(JobFailure::MaintainerContended(incumbent)) => {
-                        state.pending = Batch::default();
                         state.maintainer_contended = Some(incumbent);
-                        state.trust = TrustState::Unattached;
                         state.epoch += 1;
-                        detach = Some(attachment);
+                        begin_release(&mut state);
+                        release = Some(attachment);
                     }
                     // A recovery demand raised inside this claim outlives the
                     // failure the claim reports, so both legs below keep it.
@@ -1043,15 +1180,28 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.attachment = Some(attachment);
                     }
                 }
-                if schedule.is_none() {
-                    schedule = schedule_demanded_work(&mut state, name);
-                }
-                if schedule.is_none() {
-                    schedule = schedule_due_detach(&mut state, name);
+                // A leg that is releasing the entry schedules nothing against
+                // it: the work an outstanding lease is owed is the re-attach
+                // the release itself ends with, once the resources are back.
+                if release.is_none() {
+                    if schedule.is_none() {
+                        schedule = schedule_demanded_work(&mut state, name);
+                    }
+                    if schedule.is_none() {
+                        schedule = schedule_due_detach(&mut state, name);
+                    }
                 }
             }
         }
-        if let Some(attachment) = detach {
+        if let Some(attachment) = release {
+            finish_release(shared, entry, name, epoch, Some(attachment));
+            continue;
+        }
+        if let Some(attachment) = stale {
+            // The entry moved on while this poll held it, so the poll owns
+            // nothing but the attachment it took: it gives that back and
+            // publishes nothing, because whatever moved the entry on has
+            // already said where the entry stands.
             shared.ops.detach(name, attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.active_epoch == Some(epoch) {
@@ -1128,6 +1278,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if state.epoch == epoch {
                         state.runnable = false;
                         state.duplicate_root = Some(conflict);
+                        // The refusal precedes the attach, so this entry holds
+                        // nothing to give back and Unattached is true as it is
+                        // published.
                         state.trust = TrustState::Unattached;
                     }
                     return;
@@ -1168,6 +1321,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if state.epoch == epoch {
                         state.runnable = false;
                         state.duplicate_root = Some(conflict);
+                        // Another alias holds the claim on this identity, so
+                        // this entry never acquired anything: it holds nothing
+                        // to give back before it says Unattached.
                         state.trust = TrustState::Unattached;
                     }
                     return;
@@ -1262,6 +1418,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         dispatch_followup(shared, Job::Reconcile(name, epoch));
                     }
                 }
+                // An attach that failed acquired nothing, and gave back
+                // whatever it had reached before it failed. Both branches below
+                // therefore publish Unattached holding nothing, which is what
+                // Unattached says.
                 Err(JobFailure::MaintainerContended(incumbent)) => {
                     state.maintainer_contended = Some(incumbent);
                     state.trust = TrustState::Unattached;
@@ -1330,18 +1490,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
@@ -1440,20 +1598,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     break;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     break;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
@@ -1534,20 +1688,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
-                    state.pending = Batch::default();
-                    state.runnable = false;
                     state.maintainer_contended = Some(incumbent);
-                    state.trust = TrustState::Unattached;
+                    begin_release(&mut state);
                     drop(state);
-                    shared.ops.detach(&name, attachment);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
@@ -1580,45 +1730,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     return;
                 }
                 let attachment = state.attachment.take();
-                state.detach_in_flight = attachment.is_some();
-                // Taking the attachment is the instant the entry stops being
-                // readable, and the state says so here rather than at the end
-                // of the leg. It cannot say Unattached yet: Unattached is what
-                // this entry publishes once EntryOps::detach has given the
-                // watcher, the store and the maintainer lock back, and a
-                // caller that waits for it is waiting for exactly that.
-                // Warming is the state meaning attached and not readable, and
-                // the phase beside it names the leg — resources going back,
-                // nothing counted, and a demand arriving now honored by the
-                // re-attach at the end of this leg.
-                state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
+                begin_release(&mut state);
                 attachment
             };
-            if let Some(attachment) = attachment {
-                shared.ops.detach(&name, attachment);
-            }
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            let reattach_requested = !state.recovery_required || state.recovery_demanded();
-            state.detach_in_flight = false;
-            state.pending = Batch::default();
-            state.clear_recovery();
-            state.runnable = false;
-            state.detach_due = false;
-            state.detach_scheduled = false;
-            state.trust = TrustState::Unattached;
-            if state.demand_leases > 0
-                && reattach_requested
-                && state.duplicate_root.is_none()
-                && state.maintainer_contended.is_none()
-                && !state.identity_refused
-            {
-                state.runnable = true;
-                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-                state.epoch += 1;
-                let next = Job::Attach(name.clone(), state.epoch);
-                drop(state);
-                dispatch_followup(shared, next);
-            }
+            finish_release(shared, entry, &name, epoch, attachment);
         }
     }
 }
@@ -1711,6 +1826,19 @@ mod tests {
         terminal_reconcile: std::sync::atomic::AtomicBool,
         environmental_recover: std::sync::atomic::AtomicBool,
         environmental_reconcile: std::sync::atomic::AtomicBool,
+        /// The maintainership a leg reports it has lost, one leg per flag.
+        /// Every one of them is a teardown: the leg gives the entry back and
+        /// the entry stops being attached.
+        lost_recover: std::sync::atomic::AtomicBool,
+        lost_reconcile: std::sync::atomic::AtomicBool,
+        lost_maintenance: std::sync::atomic::AtomicBool,
+        lost_poll: std::sync::atomic::AtomicBool,
+        /// The incumbent a leg reports while giving the entry back — the same
+        /// teardown as a lost maintainership, plus the park that keeps the
+        /// entry from re-attaching against another process's lock.
+        contend_recover: std::sync::atomic::AtomicBool,
+        contend_reconcile: std::sync::atomic::AtomicBool,
+        contend_maintenance: std::sync::atomic::AtomicBool,
         contend_attach: std::sync::atomic::AtomicBool,
         block_attach: std::sync::atomic::AtomicBool,
         attach_started: std::sync::atomic::AtomicBool,
@@ -1793,6 +1921,14 @@ mod tests {
             if self.environmental_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
             }
+            if self.lost_reconcile.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_reconcile.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
+            }
             Ok(())
         }
 
@@ -1814,6 +1950,14 @@ mod tests {
             }
             if self.environmental_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
+            }
+            if self.lost_recover.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_recover.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
             }
             Ok(())
         }
@@ -1845,6 +1989,9 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
+            if self.lost_poll.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
             if on_job_thread && self.handoff_rescan_poll_batch.swap(false, Ordering::SeqCst) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
@@ -1875,6 +2022,14 @@ mod tests {
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
                 wait_for_flag("maintenance_release", &self.maintenance_release);
+            }
+            if self.lost_maintenance.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_maintenance.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
             }
             Ok(())
         }
@@ -2173,6 +2328,515 @@ mod tests {
             Demand::State(releasing),
             "teardown must not advertise coverage installation, or a readable entry"
         );
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
+    }
+
+    /// The state a leg publishes while the resources it is giving back are
+    /// still out.
+    fn releasing() -> TrustState {
+        TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None)
+    }
+
+    /// Provoke one teardown leg, answering the lease it took to provoke it.
+    type Provoke =
+        fn(&Arc<FakeOps>, &Host<Arc<FakeOps>>, &VaultName) -> Option<DemandLease<Arc<FakeOps>>>;
+
+    /// Build the host one teardown family runs on.
+    type Fixture = fn(Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName);
+
+    /// Drive an entry into one teardown leg and prove the leg releases before
+    /// it publishes the state that says it has released.
+    ///
+    /// The fake holds `detach` open, so the entry is read from inside the
+    /// release rather than after it. A leg that published Unattached before
+    /// calling `detach` is caught here by the entry saying released while the
+    /// fake has given nothing back — the ordering this pins is the whole
+    /// difference between the two observations.
+    ///
+    /// The held `detach` is why the fixture matters: the wait below takes the
+    /// first release it sees for the leg's own, so a family whose provocation
+    /// can invalidate a watcher poll in flight runs without ambient polling.
+    /// The stale poll's release is a real one and reaches the same fake first,
+    /// and the entry it reads is then the one the poll left rather than the one
+    /// the leg under test is tearing down.
+    ///
+    /// The lease a leg needed to run at all is dropped inside the window,
+    /// because a lease outstanding when a release finishes is honored by
+    /// re-attaching, and the re-attach is the subject of its own test.
+    fn teardown_releases_before_it_publishes(
+        fixture: Fixture,
+        arm: fn(&FakeOps),
+        provoke: Provoke,
+    ) {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        arm(&ops);
+        let lease = provoke(&ops, &host, &name);
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(
+            host.state(&name),
+            Some(releasing()),
+            "the entry reported its resources released while they were still out"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        drop(lease);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// The host a poll-leg teardown runs on: the leg is the dispatcher's own
+    /// watcher poll, so the dispatcher has to be ticking.
+    fn polling_fixture(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        fixture(ops, Duration::from_secs(60))
+    }
+
+    /// The dispatcher's own watcher poll reaches the entry unprompted, so the
+    /// leg needs nothing to provoke it.
+    fn by_a_watcher_poll(
+        _: &Arc<FakeOps>,
+        _: &Host<Arc<FakeOps>>,
+        _: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        None
+    }
+
+    /// A recovery runs where a lease asks for one, so the lease that asks is
+    /// held until the leg it schedules is inside its release.
+    ///
+    /// The watcher failure that owes the recovery also invalidates any watcher
+    /// poll in flight, which is why this family runs without ambient polling.
+    fn by_a_demanded_recovery(
+        _: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        host.watcher_failed(name, WatchError::Backend("gone".into()));
+        Some(host.demand(name).unwrap())
+    }
+
+    /// Watcher facts schedule the reconcile that reports the failure, and the
+    /// rescan is what keeps them scheduling it: a batch merged into an entry a
+    /// poll claim already holds is picked up by the next tick only where the
+    /// entry has something pending.
+    fn by_a_reconciled_batch(
+        _: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        host.accept_batch(name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        None
+    }
+
+    /// Maintenance is scheduled by the watcher poll that finds it due, and
+    /// this family runs without ambient polling, so the poll it needs is the
+    /// one driven here.
+    fn by_due_maintenance(
+        ops: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        _: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        None
+    }
+
+    #[test]
+    fn a_poll_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            polling_fixture,
+            |ops| ops.lost_poll.store(true, Ordering::SeqCst),
+            by_a_watcher_poll,
+        );
+    }
+
+    #[test]
+    fn a_poll_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            polling_fixture,
+            |ops| ops.contend_poll.store(true, Ordering::SeqCst),
+            by_a_watcher_poll,
+        );
+    }
+
+    #[test]
+    fn a_recover_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.lost_recover.store(true, Ordering::SeqCst),
+            by_a_demanded_recovery,
+        );
+    }
+
+    #[test]
+    fn a_recover_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.contend_recover.store(true, Ordering::SeqCst),
+            by_a_demanded_recovery,
+        );
+    }
+
+    #[test]
+    fn a_reconcile_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.lost_reconcile.store(true, Ordering::SeqCst),
+            by_a_reconciled_batch,
+        );
+    }
+
+    #[test]
+    fn a_reconcile_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.contend_reconcile.store(true, Ordering::SeqCst),
+            by_a_reconciled_batch,
+        );
+    }
+
+    #[test]
+    fn a_maintenance_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.lost_maintenance.store(true, Ordering::SeqCst),
+            by_due_maintenance,
+        );
+    }
+
+    #[test]
+    fn a_maintenance_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
+            |ops| ops.contend_maintenance.store(true, Ordering::SeqCst),
+            by_due_maintenance,
+        );
+    }
+
+    /// Two attached aliases of one vault, ready to be refused as a duplicate
+    /// root.
+    ///
+    /// Without ambient polling: a dispatcher tick holding either alias in a
+    /// watcher poll makes a refusal take the in-flight route, where the release
+    /// belongs to the job that holds it rather than to the refusal these tests
+    /// are about.
+    fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(
+                a.clone(),
+                VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
+            ),
+            RegistryEntry::new(
+                b.clone(),
+                VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
+            ),
+        ])
+        .unwrap();
+        let host = Host::new(
+            registry,
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&a).unwrap());
+        drop(host.demand(&b).unwrap());
+        wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_state(&host, &b, TrustState::Ready);
+        (host, a, b)
+    }
+
+    /// A duplicate-root refusal reaching idle entries is a teardown per alias:
+    /// each one names the leg it is on, and none of them reports its resources
+    /// released until they are.
+    #[test]
+    fn a_refused_alias_releases_before_it_publishes_unattached() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        // The refusal runs off the test thread because it releases both
+        // aliases inline, and this test reads the entries from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(host.state(&a), Some(releasing()));
+        assert_eq!(host.state(&b), Some(releasing()));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_state(&host, &b, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A refusal reaching an entry whose release is already under way leaves
+    /// the publication to that release: a second refusal passing over the
+    /// window is not evidence that anything came back.
+    #[test]
+    fn a_refusal_over_a_release_in_flight_leaves_the_release_to_publish() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        let second = conflict.clone();
+        // The first refusal runs off the test thread because it releases both
+        // aliases inline, and the second one below runs from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        refuse_conflict(&host.shared, &second);
+        assert_eq!(
+            (host.state(&a), host.state(&b)),
+            (Some(releasing()), Some(releasing())),
+            "a refusal published released over a release that had given nothing back"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_state(&host, &b, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A demand raised while an entry is giving its resources back defers to
+    /// the release and is honored by it: the entry is warming, so nothing is
+    /// scheduled against resources still on their way out, and the re-attach
+    /// the lease is owed runs when they are back.
+    #[test]
+    fn a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(releasing()));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the demand scheduled an attach against an entry still holding its resources"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    /// A demand raised inside a job leg's release is honored the same way the
+    /// dispatcher's own leg honors one, and the re-attach it dispatches runs as
+    /// the entry's own claimed work: the leg's claim ended with its release, so
+    /// nothing left over from the finished leg unclaims the job in flight.
+    #[test]
+    fn a_job_leg_release_honors_a_demand_with_a_claimed_re_attach() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_recover.store(true, Ordering::SeqCst);
+        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        let recovering = host.demand(&name).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(releasing()));
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.runnable,
+                "the release's own re-attach is in flight against an unclaimed entry"
+            );
+            assert_eq!(state.active_epoch, Some(state.epoch));
+        }
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
+        drop(recovering);
+    }
+
+    /// A teardown that parks the entry on a contended maintainer honors the
+    /// demand raised inside it by reporting the contention: the release owes
+    /// the lease an answer, and re-attaching against another process's lock is
+    /// not one.
+    #[test]
+    fn a_demand_raised_during_a_contended_teardown_stays_parked() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.contend_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert!(matches!(lease.outcome(), Demand::MaintainerContended(_)));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        settle();
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
+        drop(lease);
+    }
+
+    /// Watcher facts arriving while an entry's resources are going back are
+    /// merged without touching the window: the entry holds nothing to reconcile
+    /// them against, so the phase that names the release stands until the
+    /// release ends it.
+    #[test]
+    fn watcher_facts_arriving_in_a_release_window_leave_it_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
+        // The lease is held until the release is armed: the idle interval here
+        // is zero, so an entry with no lease on it is reapable the instant it
+        // attaches, and the reap this test is about is the armed one.
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        drop(lease);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        assert_eq!(host.state(&name), Some(releasing()));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// Destruction is a teardown like any other: the entry names the leg it is
+    /// on while its resources are going back, and says released only once they
+    /// are. The window has a reader — a lease holds the shared state itself and
+    /// reads the entry through it, without the host the destruction consumed.
+    #[test]
+    fn destruction_releases_before_it_publishes_unattached() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let destruction = thread::spawn(move || drop(host));
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(
+            lease.completion(),
+            Demand::State(releasing()),
+            "destruction reported the entry readable, or released, while its resources were out"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        destruction.join().unwrap();
+        assert_eq!(lease.completion(), Demand::State(TrustState::Unattached));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// A job the joins wait for may have given its attachment back to the entry
+    /// before its claim ended, so destruction gives back what it finds in the
+    /// entry as well as what it took itself.
+    #[test]
+    fn destruction_gives_back_an_attachment_a_finished_job_left_behind() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().unwrap();
+            // The instant a leg has re-stored the attachment and has not yet
+            // cleared its claim: destruction reads the entry as busy and takes
+            // nothing from it.
+            state.active_epoch = Some(state.epoch);
+        }
+
+        drop(host);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "destruction dropped an attachment instead of giving it back"
+        );
+    }
+
+    /// The release window is closed by the release itself, not by the label
+    /// standing in the entry: a writer that overwrites the phase mid-window
+    /// still schedules nothing against resources on their way out, and the
+    /// lease raised there is answered by the release.
+    #[test]
+    fn a_relabelled_release_window_still_schedules_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+
+        let lease = host.demand(&name).unwrap();
+        assert!(
+            !matches!(
+                lease.outcome(),
+                Demand::State(TrustState::Warming {
+                    phase: WarmingPhase::InstallingCoverage,
+                    ..
+                })
+            ),
+            "the demand claimed coverage installation against an entry still releasing: {:?}",
+            lease.outcome()
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);

@@ -52,7 +52,15 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TrustState {
-    /// Registered, with no derived state to read from yet.
+    /// Registered and holding nothing. There is no derived state to read from
+    /// yet, and none out on loan either: change detection over the vault, the
+    /// derived state and sole maintainership of the vault have all been given
+    /// back before an entry publishes this. A caller waiting for it is waiting
+    /// for exactly that.
+    ///
+    /// One exception stands: an entry refused as a duplicate root while a job
+    /// is in flight publishes this state before that job's resources come
+    /// back, and a caller acting on it there can act early.
     Unattached,
     /// Attached and not readable. The entry is either working toward readable
     /// derived state or giving up what it holds; `phase` says which, and the
@@ -120,17 +128,24 @@ pub enum WarmingPhase {
     Healing,
     /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
     /// acquired: change detection over the vault ends, the derived state is
-    /// closed, and sole maintainership of the vault is released. Nothing is
-    /// counted here, so the counters beside this phase stand at zero against an
-    /// unknown total.
+    /// closed, and sole maintainership of the vault is given up — released
+    /// where the entry still holds it, and put down where the entry has already
+    /// lost it to another maintainer. Nothing is counted here, so the counters
+    /// beside this phase stand at zero against an unknown total.
     ///
     /// This phase is the one that does not end at [`TrustState::Ready`]: it
     /// ends at [`TrustState::Unattached`], and an entry only reaches
     /// [`TrustState::Ready`] from here by being demanded again afterwards. It
     /// sits under [`TrustState::Warming`] because that is the state meaning
     /// "attached and not readable", which is what the entry is while its
-    /// resources are still being released — a demand arriving now neither
-    /// blocks nor fails, and is honored once the release finishes.
+    /// resources are still being released.
+    ///
+    /// A demand arriving now neither blocks nor fails: the release is what
+    /// answers it. Where the entry is free to acquire the resources again, the
+    /// release honors the demand by doing so once it finishes. Where the entry
+    /// is parked — on a contended maintainer, a duplicate root, or a refused
+    /// identity — it answers with the park instead, because re-acquiring is
+    /// not something the entry is allowed to do.
     ReleasingCoverage,
 }
 
