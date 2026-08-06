@@ -120,9 +120,10 @@ pub enum WarmingPhase {
     Healing,
     /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
     /// acquired: change detection over the vault ends, the derived state is
-    /// closed, and sole maintainership of the vault is released. Nothing is
-    /// counted here, so the counters beside this phase stand at zero against an
-    /// unknown total.
+    /// closed, and sole maintainership of the vault is given up — released
+    /// where the entry still holds it, and put down where the entry has already
+    /// lost it to another maintainer. Nothing is counted here, so the counters
+    /// beside this phase stand at zero against an unknown total.
     ///
     /// This phase is the one that does not end at [`TrustState::Ready`]: it
     /// ends at [`TrustState::Unattached`], and an entry only reaches
