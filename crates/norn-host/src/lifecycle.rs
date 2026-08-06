@@ -230,7 +230,13 @@ struct EntryState<A> {
     attachment: Option<A>,
     pending: Batch,
     recovery_required: bool,
-    recovery_demanded: bool,
+    /// The live demand leases asking for the recovery the entry currently owes.
+    recovery_demands: usize,
+    /// Which recovery requirement the demands above were raised against. A
+    /// requirement that replaces another retires its demands by moving on from
+    /// their generation, so a lease that asked for an earlier recovery neither
+    /// satisfies this one nor discounts a lease that did ask for it.
+    recovery_generation: u64,
     identity_refused: bool,
     runnable: bool,
     queued: bool,
@@ -249,6 +255,63 @@ struct EntryState<A> {
     detach_scheduled: bool,
     detach_in_flight: bool,
     epoch: u64,
+}
+
+impl<A> EntryState<A> {
+    /// Owe a recovery no lease has asked for yet.
+    ///
+    /// The demands standing behind the requirement this one replaces are
+    /// retired with it: what they asked for is the run that just ended, and a
+    /// lease that watched it fail is not asking for the same run again.
+    fn require_recovery(&mut self) {
+        self.recovery_required = true;
+        self.retire_recovery_demands();
+    }
+
+    /// Owe a recovery, leaving the demands already standing behind one
+    /// standing.
+    ///
+    /// A lease that asked for lost coverage to come back is still asking for
+    /// exactly that, and a trust snapshot cannot tell one lost-coverage state
+    /// from the next — so a demand retired here is one no caller knows to raise
+    /// again.
+    fn require_recovery_keeping_demands(&mut self) {
+        self.recovery_required = true;
+    }
+
+    /// Owe no recovery. The demands that were waiting on one retire with it.
+    fn clear_recovery(&mut self) {
+        self.recovery_required = false;
+        self.retire_recovery_demands();
+    }
+
+    fn retire_recovery_demands(&mut self) {
+        self.recovery_demands = 0;
+        self.recovery_generation += 1;
+    }
+
+    /// Ask for the recovery the entry owes, answering the token that withdraws
+    /// the demand. An entry owing no recovery has nothing to ask of it.
+    fn demand_recovery(&mut self) -> Option<u64> {
+        if !self.recovery_required {
+            return None;
+        }
+        self.recovery_demands += 1;
+        Some(self.recovery_generation)
+    }
+
+    /// Withdraw a demand, where the requirement it was raised against is still
+    /// the one the entry owes.
+    fn withdraw_recovery_demand(&mut self, generation: u64) {
+        if generation == self.recovery_generation {
+            self.recovery_demands = self.recovery_demands.saturating_sub(1);
+        }
+    }
+
+    /// Whether a live lease is waiting on the recovery the entry owes.
+    fn recovery_demanded(&self) -> bool {
+        self.recovery_demands > 0
+    }
 }
 
 #[derive(Clone)]
@@ -338,7 +401,7 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
             TrustState::Unattached | TrustState::Untrusted { .. }
         )
         || state.runnable
-        || (state.recovery_required && !state.recovery_demanded)
+        || (state.recovery_required && !state.recovery_demanded())
         || state.duplicate_root.is_some()
         || state.maintainer_contended.is_some()
         || state.identity_refused
@@ -414,8 +477,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.queued = false;
         state.pending_dispatch = None;
         state.pending = Batch::default();
-        state.recovery_required = false;
-        state.recovery_demanded = false;
+        state.clear_recovery();
         state.identity_refused = false;
         state.duplicate_root = Some(conflict.clone());
         state.trust = TrustState::Unattached;
@@ -442,8 +504,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         state.queued = false;
         state.pending_dispatch = None;
         state.pending.merge(Batch::rescan(RescanScope::Vault));
-        state.recovery_required = true;
-        state.recovery_demanded = false;
+        state.require_recovery();
         state.identity_refused = true;
         state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
         if state.active_epoch.is_none() && !state.detach_in_flight {
@@ -514,6 +575,10 @@ pub struct Host<O: EntryOps> {
 pub struct DemandLease<O: EntryOps> {
     outcome: Demand,
     held: Option<(Arc<Shared<O>>, VaultName)>,
+    /// The recovery this lease asked the entry for, where it found one owed.
+    /// The demand is the lease's own, so dropping withdraws it: a requirement
+    /// outliving every lease that asked for it is one nobody is waiting on.
+    recovery_demand: Option<u64>,
 }
 
 impl<O: EntryOps> Deref for DemandLease<O> {
@@ -558,6 +623,9 @@ impl<O: EntryOps> Drop for DemandLease<O> {
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.demand_leases = state.demand_leases.saturating_sub(1);
+        if let Some(generation) = self.recovery_demand {
+            state.withdraw_recovery_demand(generation);
+        }
         if state.demand_leases == 0 {
             state.last_demand = Instant::now();
             state.detach_due = false;
@@ -633,7 +701,8 @@ impl<O: EntryOps> Host<O> {
                             attachment: None,
                             pending: Batch::default(),
                             recovery_required: false,
-                            recovery_demanded: false,
+                            recovery_demands: 0,
+                            recovery_generation: 0,
                             identity_refused: false,
                             runnable: false,
                             queued: false,
@@ -725,19 +794,19 @@ impl<O: EntryOps> Host<O> {
             return Ok(DemandLease {
                 outcome: Demand::UnknownVault,
                 held: None,
+                recovery_demand: None,
             });
         };
         if let Some(conflict) = recheck_and_refuse(&self.shared, name)? {
             return Ok(DemandLease {
                 outcome: Demand::DuplicateRoot(conflict),
                 held: None,
+                recovery_demand: None,
             });
         }
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.demand_leases += 1;
-        if state.recovery_required {
-            state.recovery_demanded = true;
-        }
+        let recovery_demand = state.demand_recovery();
         state.detach_due = false;
         if state.detach_scheduled && !state.detach_in_flight {
             state.epoch += 1;
@@ -751,6 +820,7 @@ impl<O: EntryOps> Host<O> {
             return Ok(DemandLease {
                 outcome: Demand::MaintainerContended(incumbent),
                 held: Some((Arc::clone(&self.shared), name.clone())),
+                recovery_demand,
             });
         }
         let schedule = matches!(
@@ -777,6 +847,7 @@ impl<O: EntryOps> Host<O> {
             return Ok(DemandLease {
                 outcome: answer,
                 held: Some((Arc::clone(&self.shared), name.clone())),
+                recovery_demand,
             });
         }
         let answer = Demand::State(state.trust.clone());
@@ -784,6 +855,7 @@ impl<O: EntryOps> Host<O> {
         Ok(DemandLease {
             outcome: answer,
             held: Some((Arc::clone(&self.shared), name.clone())),
+            recovery_demand,
         })
     }
 
@@ -828,8 +900,7 @@ impl<O: EntryOps> Host<O> {
     pub fn watcher_failed(&self, name: &VaultName, error: WatchError) {
         if let Some(entry) = self.shared.entries.get(name) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.recovery_required = true;
-            state.recovery_demanded = false;
+            state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.epoch += 1;
             if state.active_epoch.is_none() {
@@ -951,15 +1022,12 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.epoch += 1;
                         detach = Some(attachment);
                     }
-                    // A recovery demand outlives the failure that follows it:
-                    // the lease that raised it is still waiting, and a trust
-                    // snapshot cannot tell one lost-coverage state from the
-                    // next, so a demand voided here is one no caller knows to
-                    // raise again.
+                    // A recovery demand raised inside this claim outlives the
+                    // failure the claim reports, so both legs below keep it.
                     Err(JobFailure::WatcherTerminal(error)) => {
                         state.active_epoch = None;
                         state.runnable = false;
-                        state.recovery_required = true;
+                        state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(watcher_lost(error));
                         state.attachment = Some(attachment);
@@ -967,7 +1035,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     Err(JobFailure::Environmental(detail)) => {
                         state.active_epoch = None;
                         state.runnable = false;
-                        state.recovery_required = true;
+                        state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
                             TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -1177,8 +1245,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
-                    state.recovery_required = false;
-                    state.recovery_demanded = false;
+                    state.clear_recovery();
                     state.identity_refused = false;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
@@ -1250,8 +1317,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Ok(()) => {
                     state.pending.merge(observed);
                     state.attachment = Some(attachment);
-                    state.recovery_required = false;
-                    state.recovery_demanded = false;
+                    state.clear_recovery();
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
                     } else if state.pending.is_empty() && !handoff_saturated {
@@ -1278,16 +1344,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.attachment = Some(attachment);
                     state.trust =
@@ -1394,8 +1458,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     let next = schedule_due_detach(&mut state, &name);
@@ -1408,8 +1471,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Err(JobFailure::Environmental(detail)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -1490,8 +1552,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
@@ -1499,8 +1560,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Err(JobFailure::Environmental(detail)) => {
                     state.attachment = Some(attachment);
                     state.runnable = false;
-                    state.recovery_required = true;
-                    state.recovery_demanded = false;
+                    state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -1537,11 +1597,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 shared.ops.detach(&name, attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            let reattach_requested = !state.recovery_required || state.recovery_demanded;
+            let reattach_requested = !state.recovery_required || state.recovery_demanded();
             state.detach_in_flight = false;
             state.pending = Batch::default();
-            state.recovery_required = false;
-            state.recovery_demanded = false;
+            state.clear_recovery();
             state.runnable = false;
             state.detach_due = false;
             state.detach_scheduled = false;
@@ -2662,6 +2721,70 @@ mod tests {
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         drop((held, retry));
+    }
+
+    /// Wait for the dispatcher to run `count` further watcher polls of the
+    /// entry. A leg that publishes nothing is observed through the polls that
+    /// follow it, because the entry is only claimable again once it has run.
+    fn wait_for_polls(ops: &Arc<FakeOps>, name: &VaultName, count: usize) {
+        let polls = || ops.polls.lock().unwrap().get(name).copied().unwrap_or(0);
+        let target = polls() + count;
+        for _ in 0..2000 {
+            if polls() >= target {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the dispatcher stopped polling the entry");
+    }
+
+    /// A recovery demand belongs to the lease that raised it. A lease that
+    /// withdraws inside the claim has asked for nothing, so the poll's
+    /// completion leaves the entry waiting even though other leases are
+    /// outstanding — they demanded the entry, not its recovery.
+    #[test]
+    fn a_recovery_demand_withdrawn_inside_a_claim_is_not_served_to_another_lease() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let held = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        wait_for_state(&host, &name, backend_lost());
+        claim_for_a_poll(&ops);
+        drop(demand_inside_a_claim(&host, &name));
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_polls(&ops, &name, 3);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "a demand nobody was holding restarted the entry on its own"
+        );
+        assert_eq!(host.state(&name), Some(backend_lost()));
+
+        let retry = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop((held, retry));
+    }
+
+    /// Withdrawing one recovery demand withdraws only that one. A lease still
+    /// holding its own is still waiting on the recovery, and the poll's
+    /// completion runs it.
+    #[test]
+    fn a_withdrawn_recovery_demand_leaves_a_concurrent_one_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = attached_awaiting_recovery(&ops);
+        claim_for_a_poll(&ops);
+        let standing = demand_inside_a_claim(&host, &name);
+        drop(demand_inside_a_claim(&host, &name));
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop(standing);
     }
 
     #[derive(Default)]
