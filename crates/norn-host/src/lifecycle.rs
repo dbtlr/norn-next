@@ -1904,13 +1904,21 @@ mod tests {
         (host, name)
     }
 
-    /// A fixture for tests whose subject is `accept_batch`'s own dispatch, not
-    /// the dispatcher's ambient polling. A live watcher poll claims the entry
-    /// on the same cadence `accept_batch` needs to dispatch its reconcile, and
-    /// a coincident claim leaves nothing to pick up a batch that carries no
-    /// dirty paths of its own — a real race, but not the one these tests
-    /// pin, so the interval here is wide enough that the dispatcher never
-    /// ticks inside a test's own run.
+    /// A fixture whose dispatcher never ticks inside a test's own run: no
+    /// ambient watcher poll, no idle reap, and no retry of a dispatch a full
+    /// queue refused.
+    ///
+    /// Its callers count the reconciles one `accept_batch` handoff produces.
+    /// An ambient poll claim coincident with that `accept_batch` takes the
+    /// rescan into a claimed entry, which leaves the entry watcher-overflowed
+    /// and makes the work scheduled at claim completion a recovery rather
+    /// than the reconcile the count is about — a real route, and not the one
+    /// these tests pin.
+    ///
+    /// Standing down the dispatcher costs its other duties too, so a test
+    /// here also assumes nothing it dispatches is refused for a full queue:
+    /// the tick that would retry such a dispatch is a minute away, past any
+    /// wait budget in this suite.
     fn fixture_without_ambient_polling(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
         let name = VaultName::new("notes").unwrap();
         let entry = RegistryEntry::new(
@@ -2206,12 +2214,7 @@ mod tests {
     #[test]
     fn terminal_watcher_failure_recovers_only_on_demand() {
         let ops = Arc::new(FakeOps::default());
-        // No ambient polling: the dispatcher's own tick can claim the entry
-        // between `watcher_failed` and the demand below, and a demand raised
-        // on a claimed entry is only honored once the claim ends — a real
-        // race, but this test pins the recovery-on-demand contract, not the
-        // dispatcher's cadence.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let _ = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
@@ -2332,11 +2335,12 @@ mod tests {
     #[test]
     fn recover_drains_pending_invalidations_before_publishing_ready() {
         let ops = Arc::new(FakeOps::default());
-        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        // Held across the wait: the recovery this test counts is the one this
+        // lease asks for, and a lease dropped before it runs withdraws it.
         let lease = host.demand(&name).unwrap();
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
@@ -2447,12 +2451,13 @@ mod tests {
     #[test]
     fn terminal_failure_during_recover_stays_watcher_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.terminal_recover.store(true, Ordering::SeqCst);
+        // Held across the wait: the recovery that fails below is the one this
+        // lease asks for, and a lease dropped before it runs withdraws it.
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, backend_lost());
         drop(lease);
@@ -2473,8 +2478,7 @@ mod tests {
     #[test]
     fn failed_reconcile_requires_demand_recovery_before_later_facts_can_be_ready() {
         let ops = Arc::new(FakeOps::default());
-        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
@@ -2507,8 +2511,7 @@ mod tests {
     #[test]
     fn failed_recover_cannot_be_bypassed_by_a_later_watcher_fact() {
         let ops = Arc::new(FakeOps::default());
-        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
