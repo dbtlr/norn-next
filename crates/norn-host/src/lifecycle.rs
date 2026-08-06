@@ -529,6 +529,10 @@ fn finish_release<O: EntryOps>(
         state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
         state.epoch += 1;
         let next = Job::Attach(name.clone(), state.epoch);
+        // The queue slot goes with the claim: taken under the lock that ends
+        // this leg, so no producer takes it for a newer job in the window
+        // between, and given back below where the send does not happen.
+        state.queued = Some(state.epoch);
         drop(state);
         dispatch_followup(shared, next);
     }
@@ -1886,6 +1890,11 @@ fn drain_observed<O: EntryOps>(
 /// a job already sent is one a dispatcher tick sends a second time, under the
 /// same epoch; [`dispatch_followup`] puts the marker back where a full queue
 /// refuses the send.
+///
+/// The queue slot is taken under the same lock that ends the claim, so no
+/// instant separates the two: a slot taken after that lock is one another
+/// producer can take for a newer job first, and the follow-up would then be
+/// standing in a slot naming work the channel really holds.
 fn dispatch_handoff<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -1900,6 +1909,7 @@ fn dispatch_handoff<O: EntryOps>(
         if state.pending_dispatch.as_ref().map(Job::epoch) == Some(job.epoch()) {
             state.pending_dispatch = None;
         }
+        state.queued = Some(job.epoch());
     }
     dispatch_followup(shared, job);
 }
@@ -1908,18 +1918,21 @@ fn dispatch_handoff<O: EntryOps>(
 /// is occupied, its capacity-one follow-up returns to `pending_dispatch` for a
 /// later dispatcher tick, after the queued sibling has had a chance to run.
 ///
-/// The entry's queue slot is taken here like it is for any other send: a job
-/// that entered the channel without naming itself in the slot is a job some
-/// other arrival gives the slot away under, and a dispatcher tick that finds
-/// the slot free sends the job in it a second time.
+/// The caller takes the entry's queue slot for this job, under the lock that
+/// ends its claim on the entry. What this send does with the slot is give it
+/// back — where the channel refuses the job, where the channel is gone, and
+/// where the host is shutting down — and it gives back only a slot still
+/// naming this job, because a slot at another epoch is that job's own
+/// occupancy and an entry whose slot is free is one a tick sends the job in it
+/// a second time.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
-    if shared.shutting_down.load(Ordering::SeqCst) {
-        return;
-    }
     let epoch = job.epoch();
     let entry = shared.entries.get(job.name());
-    if let Some(entry) = entry {
-        entry.gate.lock().expect("entry gate poisoned").queued = Some(epoch);
+    if shared.shutting_down.load(Ordering::SeqCst) {
+        if let Some(entry) = entry {
+            release_queue_slot(entry, epoch);
+        }
+        return;
     }
     let result = {
         let jobs = shared.jobs.lock().expect("job sender poisoned");
@@ -4492,7 +4505,9 @@ mod tests {
         let entry = host.shared.entries.get(&name).unwrap();
         let epoch = entry.gate.lock().unwrap().epoch;
         // The send a job leg makes when it hands the entry its next job: no
-        // marker beside it, because the leg sent it itself.
+        // marker beside it, because the leg sent it itself, and the queue slot
+        // already taken, because the leg takes it under its own claim.
+        entry.gate.lock().unwrap().queued = Some(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
         wait_until(
             "the job that lost the attachment to record itself for a later tick",
@@ -4555,7 +4570,9 @@ mod tests {
         let entry = host.shared.entries.get(&a).unwrap();
         let epoch = entry.gate.lock().unwrap().epoch;
         // The job that loses the attachment to the poll above and records
-        // itself for a later tick.
+        // itself for a later tick, sent as a leg sends one: the queue slot
+        // taken under the claim the leg is ending.
+        entry.gate.lock().unwrap().queued = Some(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(a.clone(), epoch));
         wait_until(
             "the job that lost the attachment to record itself for a later tick",
@@ -4610,6 +4627,8 @@ mod tests {
 
         let entry = host.shared.entries.get(&name).unwrap();
         let epoch = entry.gate.lock().unwrap().epoch;
+        // A leg's send, taking the entry's queue slot under the claim it ends.
+        entry.gate.lock().unwrap().queued = Some(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
         wait_until(
             "the job that lost the attachment to record itself for a later tick",
@@ -4665,6 +4684,8 @@ mod tests {
 
         let entry = host.shared.entries.get(&name).unwrap();
         let epoch = entry.gate.lock().unwrap().epoch;
+        // A leg's send, taking the entry's queue slot under the claim it ends.
+        entry.gate.lock().unwrap().queued = Some(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
         wait_until(
             "the job that lost the attachment to record itself for a later tick",
@@ -4723,6 +4744,8 @@ mod tests {
 
         let entry = host.shared.entries.get(&name).unwrap();
         let epoch = entry.gate.lock().unwrap().epoch;
+        // A leg's send, taking the entry's queue slot under the claim it ends.
+        entry.gate.lock().unwrap().queued = Some(epoch);
         dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
         wait_until(
             "the job that lost the attachment to record itself for a later tick",
@@ -4783,12 +4806,13 @@ mod tests {
         let entry = host.shared.entries.get(&subject).unwrap();
         let superseded = entry.gate.lock().expect("entry gate poisoned").epoch;
         // The send a leg makes when it hands the entry its next job: a job the
-        // channel really holds, standing in the entry's queue slot.
+        // channel really holds, standing in the queue slot the leg took for it.
+        entry.gate.lock().expect("entry gate poisoned").queued = Some(superseded);
         dispatch_followup(&host.shared, Job::Reconcile(subject.clone(), superseded));
         assert_eq!(
             entry.gate.lock().expect("entry gate poisoned").queued,
             Some(superseded),
-            "a job entered the channel without taking the entry's queue slot"
+            "a job the channel accepted gave its own queue slot back"
         );
 
         // The entry moves past that job and schedules work of its own, which
@@ -4910,6 +4934,76 @@ mod tests {
             "a second dispatch left a marker over an entry no dispatch reaches"
         );
         drop(state);
+        drop(lease);
+        drop(reconciling_lease);
+        drop(attaching_lease);
+    }
+
+    /// A follow-up stands in the queue slot its own leg took and in no other.
+    /// The slot an unclaimed entry holds may name a newer job the channel
+    /// really holds, and an entry whose slot is given away under that job is
+    /// one the next dispatcher tick sends it into the channel a second time.
+    #[test]
+    fn a_follow_up_send_leaves_the_slot_of_the_job_already_in_the_channel() {
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("a").unwrap();
+        let reconciling = VaultName::new("b").unwrap();
+        let attaching = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            &[&subject, &reconciling, &attaching],
+            2,
+        );
+        let lease = host.demand(&subject).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let reconciling_lease = host.demand(&reconciling).unwrap();
+        wait_for_state(&host, &reconciling, TrustState::Ready);
+
+        // Both workers go to vaults that are not the one under test: the
+        // channel then holds what this test sends for it, and has the room a
+        // second send takes.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        host.accept_batch(&reconciling, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let attaching_lease = host.demand(&attaching).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        let entry = host.shared.entries.get(&subject).unwrap();
+        // The epoch a leg's follow-up is sent at, superseded by the batch
+        // below while the leg is between its own gate and the channel.
+        let superseded = entry.gate.lock().expect("entry gate poisoned").epoch;
+        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        assert_eq!(
+            entry.gate.lock().expect("entry gate poisoned").queued,
+            Some(superseded + 1),
+            "the scheduled reconcile never reached the channel"
+        );
+
+        dispatch_followup(&host.shared, Job::Reconcile(subject.clone(), superseded));
+        assert_eq!(
+            entry.gate.lock().expect("entry gate poisoned").queued,
+            Some(superseded + 1),
+            "a follow-up took the slot of the newer job the channel holds"
+        );
+
+        // The tick that would send the job in the channel a second time, had
+        // the follow-up above left the slot free.
+        retry_pending_dispatches(&host.shared);
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        wait_for_state(&host, &reconciling, TrustState::Ready);
+        wait_for_state(&host, &attaching, TrustState::Ready);
+        settle();
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "a job the channel held one copy of ran twice"
+        );
         drop(lease);
         drop(reconciling_lease);
         drop(attaching_lease);
