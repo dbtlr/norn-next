@@ -239,7 +239,19 @@ struct EntryState<A> {
     recovery_generation: u64,
     identity_refused: bool,
     runnable: bool,
-    queued: bool,
+    /// The epoch of the job this entry is waiting on in the job channel, where
+    /// it is waiting on one.
+    ///
+    /// The slot names its occupant, so only that job's own arrival gives it
+    /// back: an arrival at a superseded epoch answers for itself alone, and a
+    /// slot freed under the job that replaced it is that job sent into the
+    /// channel a second time.
+    ///
+    /// An entry that supersedes the job holding its slot stops waiting on it
+    /// and gives the slot up there and then: what that job's arrival finds is
+    /// an entry that has moved past it, and the work that replaced it is not
+    /// held behind a job with nothing left to do.
+    queued: Option<u64>,
     active_epoch: Option<u64>,
     pending_dispatch: Option<Job>,
     /// The incumbent another process reported while holding this vault's
@@ -331,6 +343,16 @@ impl Job {
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
+        }
+    }
+
+    fn name(&self) -> &VaultName {
+        match self {
+            Self::Attach(name, _)
+            | Self::Recover(name, _)
+            | Self::Reconcile(name, _)
+            | Self::Maintenance(name, _)
+            | Self::Detach(name, _) => name,
         }
     }
 }
@@ -551,19 +573,36 @@ fn end_poll_claim<A>(state: &mut EntryState<A>) {
     state.runnable = state.pending_dispatch.is_some();
 }
 
+/// Give back the queue slot a send took, where the entry still holds it for
+/// that send. A slot standing for a job no channel holds is an entry every
+/// later dispatch refuses; a slot standing for another job is that job's own
+/// occupancy, and taking it away is what sends that job twice.
+fn release_queue_slot<A>(entry: &Arc<Entry<A>>, epoch: u64) {
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    if state.queued == Some(epoch) {
+        state.queued = None;
+    }
+}
+
+/// Send the job an entry has scheduled, where the entry has no job in the
+/// channel and none in flight.
+///
+/// The slot is taken under the same lock that reads the marker, so the job in
+/// the channel and the slot naming it are installed together, and given back
+/// together where a full queue refuses the send.
 fn dispatch_pending<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
 ) -> Result<(), HostError> {
     let job = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
-        if state.queued || state.active_epoch.is_some() {
+        if state.queued.is_some() || state.active_epoch.is_some() {
             return Ok(());
         }
         let Some(job) = state.pending_dispatch.clone() else {
             return Ok(());
         };
-        state.queued = true;
+        state.queued = Some(job.epoch());
         job
     };
     if shared.shutting_down.load(Ordering::SeqCst) {
@@ -576,8 +615,7 @@ fn dispatch_pending<O: EntryOps>(
     match jobs.try_send(job.clone()) {
         Ok(()) => Ok(()),
         Err(mpsc::TrySendError::Full(_)) => {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.queued = false;
+            release_queue_slot(entry, job.epoch());
             Ok(())
         }
         Err(mpsc::TrySendError::Disconnected(_)) => Err(HostError::WorkerStopped),
@@ -603,7 +641,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     let mut releasing = Vec::new();
     for ((name, entry), state) in entries.iter().zip(&mut states) {
         state.epoch += 1;
-        state.queued = false;
+        state.queued = None;
         state.pending_dispatch = None;
         state.pending = Batch::default();
         state.clear_recovery();
@@ -649,7 +687,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
     let attachment = {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.epoch += 1;
-        state.queued = false;
+        state.queued = None;
         state.pending_dispatch = None;
         state.pending.merge(Batch::rescan(RescanScope::Vault));
         state.require_recovery();
@@ -796,7 +834,7 @@ impl<O: EntryOps> Drop for Host<O> {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.epoch += 1;
             state.runnable = false;
-            state.queued = false;
+            state.queued = None;
             state.pending_dispatch = None;
             state.pending = Batch::default();
             if state.active_epoch.is_none() && !state.detach_in_flight {
@@ -883,7 +921,7 @@ impl<O: EntryOps> Host<O> {
                             recovery_generation: 0,
                             identity_refused: false,
                             runnable: false,
-                            queued: false,
+                            queued: None,
                             active_epoch: None,
                             pending_dispatch: None,
                             maintainer_contended: None,
@@ -989,7 +1027,7 @@ impl<O: EntryOps> Host<O> {
         if state.detach_scheduled && !state.detach_in_flight {
             state.epoch += 1;
             state.runnable = false;
-            state.queued = false;
+            state.queued = None;
             state.pending_dispatch = None;
             state.detach_scheduled = false;
         }
@@ -1097,7 +1135,7 @@ impl<O: EntryOps> Host<O> {
             state.epoch += 1;
             if state.active_epoch.is_none() {
                 state.runnable = false;
-                state.queued = false;
+                state.queued = None;
                 state.pending_dispatch = None;
             }
             state.trust = TrustState::untrusted(watcher_lost(error));
@@ -1294,32 +1332,26 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
 }
 
 fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
-    let name = match &job {
-        Job::Attach(name, _)
-        | Job::Recover(name, _)
-        | Job::Reconcile(name, _)
-        | Job::Maintenance(name, _)
-        | Job::Detach(name, _) => name,
-    };
-    let Some(entry) = shared.entries.get(name) else {
+    let Some(entry) = shared.entries.get(job.name()) else {
         return;
     };
     let epoch = job.epoch();
     {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
+        // The job reached a worker, so the queue slot it took is given back
+        // whatever epoch the entry stands at: a slot standing for a job no
+        // channel holds is an entry no later dispatch can reach. The slot goes
+        // back only where it is this job's own, and so does the marker — both
+        // at another epoch belong to the work that superseded this job.
+        if state.queued == Some(epoch) {
+            state.queued = None;
+        }
         if state.epoch != epoch {
-            // The job reached a worker, so the queue slot it held is given
-            // back whatever epoch it carries: `queued` standing over a job no
-            // channel holds is an entry no later dispatch can reach. The
-            // marker goes only where it is this job's own — a marker at
-            // another epoch belongs to the work that superseded this one.
-            state.queued = false;
             if state.pending_dispatch.as_ref().map(Job::epoch) == Some(epoch) {
                 state.pending_dispatch = None;
             }
             return;
         }
-        state.queued = false;
         state.pending_dispatch = None;
         state.active_epoch = Some(epoch);
     }
@@ -1875,36 +1907,45 @@ fn dispatch_handoff<O: EntryOps>(
 /// A worker never waits for room in its own bounded queue. If every queue slot
 /// is occupied, its capacity-one follow-up returns to `pending_dispatch` for a
 /// later dispatcher tick, after the queued sibling has had a chance to run.
+///
+/// The entry's queue slot is taken here like it is for any other send: a job
+/// that entered the channel without naming itself in the slot is a job some
+/// other arrival gives the slot away under, and a dispatcher tick that finds
+/// the slot free sends the job in it a second time.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     if shared.shutting_down.load(Ordering::SeqCst) {
         return;
     }
+    let epoch = job.epoch();
+    let entry = shared.entries.get(job.name());
+    if let Some(entry) = entry {
+        entry.gate.lock().expect("entry gate poisoned").queued = Some(epoch);
+    }
     let result = {
         let jobs = shared.jobs.lock().expect("job sender poisoned");
-        let Some(jobs) = jobs.as_ref() else {
-            return;
-        };
-        jobs.try_send(job)
+        match jobs.as_ref() {
+            Some(jobs) => jobs.try_send(job),
+            None => Err(mpsc::TrySendError::Disconnected(job)),
+        }
     };
     match result {
         Ok(()) => {}
         Err(mpsc::TrySendError::Full(job)) => {
-            let name = match &job {
-                Job::Attach(name, _)
-                | Job::Recover(name, _)
-                | Job::Reconcile(name, _)
-                | Job::Maintenance(name, _)
-                | Job::Detach(name, _) => name,
-            };
-            if let Some(entry) = shared.entries.get(name) {
+            if let Some(entry) = entry {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
-                if state.epoch == job.epoch() {
-                    state.queued = false;
+                if state.queued == Some(epoch) {
+                    state.queued = None;
+                }
+                if state.epoch == epoch {
                     state.pending_dispatch = Some(job);
                 }
             }
         }
-        Err(mpsc::TrySendError::Disconnected(_)) => {}
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            if let Some(entry) = entry {
+                release_queue_slot(entry, epoch);
+            }
+        }
     }
 }
 
@@ -4059,13 +4100,13 @@ mod tests {
         let dispatched_entry = Arc::clone(&entry);
         let dispatch = thread::spawn(move || dispatch_pending(&shared, &dispatched_entry));
         wait_until(
-            "the dispatch to take the queued marker",
+            "the dispatch to take the entry's queue slot",
             lifecycle_wait_budget(),
             || {
-                if entry.gate.lock().unwrap().queued {
+                if entry.gate.lock().unwrap().queued == Some(1) {
                     Observed::Met(())
                 } else {
-                    Observed::pending("the marker is not taken")
+                    Observed::pending("the slot is not taken")
                 }
             },
         )
@@ -4079,7 +4120,7 @@ mod tests {
         dispatch.join().unwrap().unwrap();
 
         let state = entry.gate.lock().unwrap();
-        assert!(!state.queued);
+        assert!(state.queued.is_none());
         assert_eq!(state.pending_dispatch.as_ref().map(Job::epoch), Some(2));
         drop(state);
         ops.release_a.store(true, Ordering::SeqCst);
@@ -4603,58 +4644,161 @@ mod tests {
     }
 
     /// A job that reached a worker gives the entry's queue slot back, whatever
-    /// the entry did while it sat in the channel. A `queued` flag standing for
-    /// a job no channel holds is an entry every later dispatch refuses.
+    /// the entry did while it sat in the channel. A slot standing for a job no
+    /// channel holds is an entry every later dispatch refuses, so the work the
+    /// entry moved on to would wait behind a job that has already been
+    /// discarded.
     #[test]
     fn a_job_the_entry_moved_past_gives_its_queue_slot_back() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
-        let lease = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
+        let subject = VaultName::new("a").unwrap();
+        let holding = VaultName::new("b").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        let lease = host.demand(&subject).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let holding_lease = host.demand(&holding).unwrap();
+        wait_for_state(&host, &holding, TrustState::Ready);
 
-        let entry = host.shared.entries.get(&name).unwrap();
-        // A job in the channel, and an entry that moved on to work of its own
-        // while it was there: the arrival owns the queue slot and nothing
-        // else.
-        let stale = {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            let stale = Job::Reconcile(name.clone(), state.epoch);
-            state.queued = true;
-            state.epoch += 1;
-            state.runnable = true;
-            state.pending_dispatch = Some(Job::Reconcile(name.clone(), state.epoch));
-            stale
-        };
-        run_job(&host.shared, stale);
+        // The one worker goes to the other vault, so a job sent for the entry
+        // under test stays in the channel until this test lets the worker go.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        host.accept_batch(&holding, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        let entry = host.shared.entries.get(&subject).unwrap();
+        let superseded = entry.gate.lock().expect("entry gate poisoned").epoch;
+        // The send a leg makes when it hands the entry its next job: a job the
+        // channel really holds, standing in the entry's queue slot.
+        dispatch_followup(&host.shared, Job::Reconcile(subject.clone(), superseded));
+        assert_eq!(
+            entry.gate.lock().expect("entry gate poisoned").queued,
+            Some(superseded),
+            "a job entered the channel without taking the entry's queue slot"
+        );
+
+        // The entry moves past that job and schedules work of its own, which
+        // the occupied slot defers to a later tick.
+        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
+            .unwrap();
         let (queued, scheduled) = {
             let state = entry.gate.lock().expect("entry gate poisoned");
-            (state.queued, state.pending_dispatch.is_some())
+            (
+                state.queued,
+                state.pending_dispatch.as_ref().map(Job::epoch),
+            )
         };
-        assert!(
-            !queued,
-            "the entry kept a queue slot for a job no channel holds"
-        );
-        assert!(
+        assert_eq!(queued, Some(superseded));
+        assert_eq!(
             scheduled,
-            "a job took away the marker of the work that superseded it"
+            Some(superseded + 1),
+            "the entry scheduled nothing to wait on the slot"
         );
 
-        retry_pending_dispatches(&host.shared);
+        // The worker frees up and takes the superseded job off the channel.
+        ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_until(
-            "the work the entry moved on to to run",
+            "the arrival at a superseded epoch to give the queue slot back",
             lifecycle_wait_budget(),
-            || {
-                let reconciles = ops.reconciles.load(Ordering::SeqCst);
-                if reconciles == 1 {
-                    Observed::Met(())
-                } else {
-                    Observed::pending(format!("{reconciles} reconciles so far"))
-                }
+            || match entry.gate.lock().expect("entry gate poisoned").queued {
+                None => Observed::Met(()),
+                Some(epoch) => Observed::pending(format!("the slot still stands at {epoch}")),
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        wait_for_state(&host, &name, TrustState::Ready);
+
+        retry_pending_dispatches(&host.shared);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
         drop(lease);
+        drop(holding_lease);
+    }
+
+    /// A job the entry has moved past gives back its own queue slot and no
+    /// other. The slot standing when it arrives may already name the job that
+    /// superseded it — a job the channel really holds — and an entry whose
+    /// slot is free is one the next dispatcher tick sends that job into the
+    /// channel a second time.
+    #[test]
+    fn an_arrival_at_a_superseded_epoch_leaves_the_slot_of_the_job_that_replaced_it() {
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("a").unwrap();
+        let reconciling = VaultName::new("b").unwrap();
+        let attaching = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            &[&subject, &reconciling, &attaching],
+            2,
+        );
+        let lease = host.demand(&subject).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let reconciling_lease = host.demand(&reconciling).unwrap();
+        wait_for_state(&host, &reconciling, TrustState::Ready);
+
+        // Both workers go to vaults that are not the one under test: the
+        // channel then holds what this test sends for it, and has the room a
+        // duplicate would take.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        host.accept_batch(&reconciling, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let attaching_lease = host.demand(&attaching).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        let entry = host.shared.entries.get(&subject).unwrap();
+        // The epoch a leg's follow-up was sent at, superseded by the batch
+        // below before it reached a worker.
+        let superseded = entry.gate.lock().expect("entry gate poisoned").epoch;
+        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        assert_eq!(
+            entry.gate.lock().expect("entry gate poisoned").queued,
+            Some(superseded + 1),
+            "the scheduled reconcile never reached the channel"
+        );
+
+        // What a worker does with the superseded follow-up. Driving it here
+        // rather than through a worker of its own is what lands the arrival
+        // while the job that replaced it is still in the channel.
+        run_job(&host.shared, Job::Reconcile(subject.clone(), superseded));
+        let (queued, scheduled) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (
+                state.queued,
+                state.pending_dispatch.as_ref().map(Job::epoch),
+            )
+        };
+        assert_eq!(
+            queued,
+            Some(superseded + 1),
+            "an arrival at a superseded epoch gave away the slot of the job that replaced it"
+        );
+        assert_eq!(scheduled, Some(superseded + 1));
+
+        // The tick that would send the job in the channel a second time.
+        retry_pending_dispatches(&host.shared);
+
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &subject, TrustState::Ready);
+        wait_for_state(&host, &reconciling, TrustState::Ready);
+        wait_for_state(&host, &attaching, TrustState::Ready);
+        settle();
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "a job the channel held one copy of ran twice"
+        );
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        assert!(
+            state.pending_dispatch.is_none() && !state.runnable,
+            "a second dispatch left a marker over an entry no dispatch reaches"
+        );
+        drop(state);
+        drop(lease);
+        drop(reconciling_lease);
+        drop(attaching_lease);
     }
 
     /// A leg holds its claim on the entry until the job it hands off is in the
