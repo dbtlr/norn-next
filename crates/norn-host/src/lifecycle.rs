@@ -1044,12 +1044,21 @@ impl<O: EntryOps> Host<O> {
         if state.attachment.is_none() && !state.runnable {
             return Ok(());
         }
-        if rescan {
-            state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
-        } else if matches!(state.trust, TrustState::Ready) {
-            state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+        let schedulable = !state.runnable && state.attachment.is_some() && !state.recovery_required;
+        // Saying an entry is no longer serving is a claim that work is owed on
+        // it, and the claim stands only where something answers it: the job
+        // scheduled below, or the facts merged above, which the claim holding
+        // this entry finds when it gives the attachment back. A batch carrying
+        // no fact into an entry nothing can be scheduled against leaves the
+        // entry exactly as it was.
+        if schedulable || !state.pending.is_empty() {
+            if rescan {
+                state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+            } else if matches!(state.trust, TrustState::Ready) {
+                state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+            }
         }
-        if !state.runnable && state.attachment.is_some() && !state.recovery_required {
+        if schedulable {
             state.runnable = true;
             state.epoch += 1;
             let epoch = state.epoch;
@@ -4448,6 +4457,34 @@ mod tests {
             0,
             "the facts were healed by a recovery rather than the reconcile they are owed"
         );
+    }
+
+    /// A batch carrying no fact into an entry a watcher poll has claimed
+    /// schedules nothing, so it says nothing either: an entry left warming for
+    /// a reconcile no one owes it is one that never becomes readable again.
+    #[test]
+    fn a_factless_batch_accepted_during_a_poll_claim_leaves_the_entry_serving() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        host.accept_batch(&name, Batch::default()).unwrap();
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::Ready),
+            "the entry stopped serving for work no batch brought it"
+        );
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
     }
 
     #[test]
