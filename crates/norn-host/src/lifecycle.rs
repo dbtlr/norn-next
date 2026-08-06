@@ -1495,13 +1495,18 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
                 let attachment = state.attachment.take();
                 state.detach_in_flight = attachment.is_some();
-                // Teardown still owns live resources until EntryOps::detach
-                // returns. Warming is the existing non-Ready state that keeps
-                // demand nonblocking without claiming the entry is detached,
-                // and the phase beside it says what is true of the entry
-                // meanwhile: no coverage a caller can rely on, and no document
-                // counted.
-                state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+                // Taking the attachment is the instant the entry stops being
+                // readable, so it is where the published state stops saying it
+                // is. Unattached is both what teardown ends at and what is
+                // already true of the entry for a caller: nothing to read, and
+                // no work under way that will make it readable. Live resources
+                // are still owned until EntryOps::detach returns, and
+                // `detach_in_flight` — not the trust state — is what keeps
+                // another path from taking them a second time. A demand
+                // arriving now cannot start a competing attach either, because
+                // this leg holds the entry runnable until it finishes; it is
+                // honored by the re-attach at the end of this leg instead.
+                state.trust = TrustState::Unattached;
                 attachment
             };
             if let Some(attachment) = attachment {
@@ -1918,6 +1923,10 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
 
+    /// Teardown publishes the state it is heading for at the instant the entry
+    /// stops being readable, rather than a state that claims work toward
+    /// readable is under way. A caller therefore sees Ready then Unattached
+    /// across a detach, and never Ready over an entry whose attachment is gone.
     #[test]
     fn demand_during_in_flight_detach_never_observes_ready_without_attachment() {
         let ops = Arc::new(FakeOps::default());
@@ -1934,16 +1943,14 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(ops.detach_started.load(Ordering::SeqCst));
-        assert!(matches!(
-            host.state(&name),
-            Some(TrustState::Warming { .. })
-        ));
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         let lease = host.demand(&name).unwrap();
-        assert!(matches!(
+        assert_eq!(
             lease.completion(),
-            Demand::State(TrustState::Warming { .. })
-        ));
+            Demand::State(TrustState::Unattached),
+            "teardown must not advertise work toward a readable entry"
+        );
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
