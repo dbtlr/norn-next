@@ -2312,6 +2312,9 @@ mod tests {
     type Provoke =
         fn(&Arc<FakeOps>, &Host<Arc<FakeOps>>, &VaultName) -> Option<DemandLease<Arc<FakeOps>>>;
 
+    /// Build the host one teardown family runs on.
+    type Fixture = fn(Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName);
+
     /// Drive an entry into one teardown leg and prove the leg releases before
     /// it publishes the state that says it has released.
     ///
@@ -2321,12 +2324,23 @@ mod tests {
     /// fake has given nothing back — the ordering this pins is the whole
     /// difference between the two observations.
     ///
+    /// The held `detach` is why the fixture matters: the wait below takes the
+    /// first release it sees for the leg's own, so a family whose provocation
+    /// can invalidate a watcher poll in flight runs without ambient polling.
+    /// The stale poll's release is a real one and reaches the same fake first,
+    /// and the entry it reads is then the one the poll left rather than the one
+    /// the leg under test is tearing down.
+    ///
     /// The lease a leg needed to run at all is dropped inside the window,
     /// because a lease outstanding when a release finishes is honored by
     /// re-attaching, and the re-attach is the subject of its own test.
-    fn teardown_releases_before_it_publishes(arm: fn(&FakeOps), provoke: Provoke) {
+    fn teardown_releases_before_it_publishes(
+        fixture: Fixture,
+        arm: fn(&FakeOps),
+        provoke: Provoke,
+    ) {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let (host, name) = fixture(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
@@ -2348,6 +2362,12 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
 
+    /// The host a poll-leg teardown runs on: the leg is the dispatcher's own
+    /// watcher poll, so the dispatcher has to be ticking.
+    fn polling_fixture(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        fixture(ops, Duration::from_secs(60))
+    }
+
     /// The dispatcher's own watcher poll reaches the entry unprompted, so the
     /// leg needs nothing to provoke it.
     fn by_a_watcher_poll(
@@ -2360,6 +2380,9 @@ mod tests {
 
     /// A recovery runs where a lease asks for one, so the lease that asks is
     /// held until the leg it schedules is inside its release.
+    ///
+    /// The watcher failure that owes the recovery also invalidates any watcher
+    /// poll in flight, which is why this family runs without ambient polling.
     fn by_a_demanded_recovery(
         _: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
@@ -2369,6 +2392,10 @@ mod tests {
         Some(host.demand(name).unwrap())
     }
 
+    /// Watcher facts schedule the reconcile that reports the failure, and the
+    /// rescan is what keeps them scheduling it: a batch merged into an entry a
+    /// poll claim already holds is picked up by the next tick only where the
+    /// entry has something pending.
     fn by_a_reconciled_batch(
         _: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
@@ -2379,18 +2406,23 @@ mod tests {
         None
     }
 
+    /// Maintenance is scheduled by the watcher poll that finds it due, and
+    /// this family runs without ambient polling, so the poll it needs is the
+    /// one driven here.
     fn by_due_maintenance(
         ops: &Arc<FakeOps>,
-        _: &Host<Arc<FakeOps>>,
+        host: &Host<Arc<FakeOps>>,
         _: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
         ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
         None
     }
 
     #[test]
     fn a_poll_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            polling_fixture,
             |ops| ops.lost_poll.store(true, Ordering::SeqCst),
             by_a_watcher_poll,
         );
@@ -2399,6 +2431,7 @@ mod tests {
     #[test]
     fn a_poll_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            polling_fixture,
             |ops| ops.contend_poll.store(true, Ordering::SeqCst),
             by_a_watcher_poll,
         );
@@ -2407,6 +2440,7 @@ mod tests {
     #[test]
     fn a_recover_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.lost_recover.store(true, Ordering::SeqCst),
             by_a_demanded_recovery,
         );
@@ -2415,6 +2449,7 @@ mod tests {
     #[test]
     fn a_recover_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.contend_recover.store(true, Ordering::SeqCst),
             by_a_demanded_recovery,
         );
@@ -2423,6 +2458,7 @@ mod tests {
     #[test]
     fn a_reconcile_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.lost_reconcile.store(true, Ordering::SeqCst),
             by_a_reconciled_batch,
         );
@@ -2431,6 +2467,7 @@ mod tests {
     #[test]
     fn a_reconcile_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.contend_reconcile.store(true, Ordering::SeqCst),
             by_a_reconciled_batch,
         );
@@ -2439,6 +2476,7 @@ mod tests {
     #[test]
     fn a_maintenance_that_lost_maintainership_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.lost_maintenance.store(true, Ordering::SeqCst),
             by_due_maintenance,
         );
@@ -2447,6 +2485,7 @@ mod tests {
     #[test]
     fn a_maintenance_that_found_contention_releases_before_it_publishes_unattached() {
         teardown_releases_before_it_publishes(
+            fixture_without_ambient_polling,
             |ops| ops.contend_maintenance.store(true, Ordering::SeqCst),
             by_due_maintenance,
         );
