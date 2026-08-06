@@ -2206,26 +2206,21 @@ mod tests {
         (host, name)
     }
 
-    /// The fixture above with a second vault, whose only role is to occupy a
-    /// worker slot: a job blocked on one entry is what holds another entry's
-    /// job in the channel long enough for a test to drive the window around
-    /// it.
-    fn two_entry_host_without_ambient_polling(
+    /// The fixture above with vaults beside the one under test, whose only
+    /// role is to occupy worker slots: a job blocked on one entry is what
+    /// holds another entry's job in the channel long enough for a test to
+    /// drive the window around it.
+    fn host_without_ambient_polling(
         ops: Arc<FakeOps>,
-        first: &VaultName,
-        second: &VaultName,
+        names: &[&VaultName],
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = ServingRegistry::from_entries([
+        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
-                first.clone(),
-                VaultRoot::new("/tmp/norn-host-lifecycle-first").unwrap(),
-            ),
-            RegistryEntry::new(
-                second.clone(),
-                VaultRoot::new("/tmp/norn-host-lifecycle-second").unwrap(),
-            ),
-        ])
+                (*name).clone(),
+                VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
+            )
+        }))
         .unwrap();
         Host::new(
             registry,
@@ -4496,7 +4491,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let host = two_entry_host_without_ambient_polling(Arc::clone(&ops), &a, &b, 1);
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&a, &b], 1);
         let lease_a = host.demand(&a).unwrap();
         let lease_b = host.demand(&b).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
@@ -4600,6 +4595,68 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
+    }
+
+    /// A leg holds its claim on the entry until the job it hands off is in the
+    /// queue, so there is no instant between the two at which the entry looks
+    /// idle. A dispatcher tick arriving in that window finds an entry it
+    /// cannot take, and the job the leg sent still finds the attachment it was
+    /// dispatched to work on.
+    #[test]
+    fn a_tick_cannot_claim_an_entry_whose_next_job_is_already_in_the_queue() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("a").unwrap();
+        let first_slot = VaultName::new("b").unwrap();
+        let second_slot = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(
+            Arc::clone(&ops),
+            &[&working, &first_slot, &second_slot],
+            2,
+        );
+        let lease = host.demand(&working).unwrap();
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The leg under test: a maintenance whose own handoff drain saturates,
+        // so it hands the entry a reconcile carrying no fact of its own — the
+        // entry a tick would otherwise find idle and attached.
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        ops.block_maintenance.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+        ops.handoff_poll_batches
+            .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
+
+        // Both worker slots go to vaults that are not the one under test: one
+        // taken now, one waiting in the queue ahead of the handoff below. The
+        // handed-off reconcile therefore stays in the queue while the test
+        // drives a tick at the entry it was sent against.
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding = host.demand(&first_slot).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        ops.attach_started.store(false, Ordering::SeqCst);
+        let waiting = host.demand(&second_slot).unwrap();
+
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        let claimed_before = ops.polls.lock().unwrap().get(&working).copied().unwrap();
+        poll_watchers(&host.shared);
+        assert_eq!(
+            ops.polls.lock().unwrap().get(&working).copied().unwrap(),
+            claimed_before,
+            "a tick took an entry whose next job was already on its way to a worker"
+        );
+        assert!(
+            matches!(host.state(&working), Some(TrustState::Warming { .. })),
+            "the entry stopped waiting for the reconcile its leg handed it"
+        );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &working, TrustState::Ready);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+        drop(lease);
+        drop(holding);
+        drop(waiting);
     }
 
     /// Facts accepted while a watcher poll holds the entry are the claim's to
