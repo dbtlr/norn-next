@@ -78,12 +78,17 @@ pub trait EntryOps: Send + Sync + 'static {
 
 /// Epoch-bound, monotonic publication of one lifecycle job's warming progress.
 ///
-/// A job publishes two things through it, and they answer different questions:
-/// [`ProgressReporter::phase`] says what kind of work the entry is doing, and
-/// [`ProgressReporter::report`] says how far the counted half of it has come.
-/// The phase is what a caller reads while there is nothing yet to count —
-/// installing change detection produces no counts at all — so a job publishes
-/// it **before** the work it names rather than after.
+/// A job says what kind of work it is doing by entering a phase, and it enters
+/// the phase **before** the work rather than after: the phase is what a caller
+/// reads while there is nothing yet to count.
+///
+/// Only one of the two phases counts anything, and that asymmetry is the shape
+/// of this type rather than a rule beside it. [`Self::installing_coverage`]
+/// returns nothing, because the prologue reads no document and has nothing to
+/// report. [`Self::healing`] returns the [`Healing`] handle, and that handle
+/// owns the only `report`. So counted progress cannot be published under the
+/// coverage phase: reporting requires a handle, and the handle exists only
+/// where the heal does.
 pub struct ProgressReporter<A> {
     entry: std::sync::Weak<Entry<A>>,
     epoch: u64,
@@ -98,24 +103,22 @@ impl<A> ProgressReporter<A> {
         }
     }
 
-    /// Publish the phase this job has entered, keeping the counters beside it.
-    pub fn phase(&self, phase: WarmingPhase) {
-        self.publish(|_, healed, total| TrustState::warming(phase, healed, total));
+    /// Enter the prologue that precedes the first document read, keeping the
+    /// counters beside it. Nothing is counted here, so nothing is handed back
+    /// to count with.
+    pub fn installing_coverage(&self) {
+        self.enter(WarmingPhase::InstallingCoverage);
     }
 
-    /// Publish how far the counted work has come, keeping the phase it is
-    /// running under.
-    pub fn report(&self, healed: u64, total_estimate: Option<u64>) {
-        self.publish(|phase, prior_healed, prior_total| {
-            let healed = healed.max(prior_healed);
-            let total = match (prior_total, total_estimate) {
-                (Some(left), Some(right)) => Some(left.max(right).max(healed)),
-                (Some(left), None) => Some(left.max(healed)),
-                (None, Some(right)) => Some(right.max(healed)),
-                (None, None) => None,
-            };
-            TrustState::warming(phase, healed, total)
-        });
+    /// Enter the heal, keeping the counters beside it, and take the handle its
+    /// counted progress is reported through.
+    pub fn healing(&self) -> Healing<'_, A> {
+        self.enter(WarmingPhase::Healing);
+        Healing(self)
+    }
+
+    fn enter(&self, phase: WarmingPhase) {
+        self.publish(|_, healed, total| TrustState::warming(phase, healed, total));
     }
 
     /// Replace this entry's warming state, under this job's own epoch and only
@@ -139,6 +142,30 @@ impl<A> ProgressReporter<A> {
             return;
         };
         state.trust = next(phase, healed, total_estimate);
+    }
+}
+
+/// The counting half of a warming entry, reached only by entering the heal.
+///
+/// It borrows the reporter that made it, so it cannot outlive the job whose
+/// progress it publishes, and holding one is the standing evidence that the
+/// counts it publishes belong to the phase it was entered under.
+pub struct Healing<'a, A>(&'a ProgressReporter<A>);
+
+impl<A> Healing<'_, A> {
+    /// Publish how far the heal has come, keeping the phase it is running
+    /// under.
+    pub fn report(&self, healed: u64, total_estimate: Option<u64>) {
+        self.0.publish(|phase, prior_healed, prior_total| {
+            let healed = healed.max(prior_healed);
+            let total = match (prior_total, total_estimate) {
+                (Some(left), Some(right)) => Some(left.max(right).max(healed)),
+                (Some(left), None) => Some(left.max(healed)),
+                (None, Some(right)) => Some(right.max(healed)),
+                (None, None) => None,
+            };
+            TrustState::warming(phase, healed, total)
+        });
     }
 }
 
@@ -1642,8 +1669,7 @@ mod tests {
         fn attach(&self, _: &VaultName, progress: &ProgressReporter<()>) -> Result<(), JobFailure> {
             self.attaches.fetch_add(1, Ordering::SeqCst);
             if self.heal_in_attach.load(Ordering::SeqCst) {
-                progress.phase(WarmingPhase::Healing);
-                progress.report(1, Some(2));
+                progress.healing().report(1, Some(2));
             }
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
@@ -2512,10 +2538,11 @@ mod tests {
             _: ReconcileWork,
             progress: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
-            progress.report(1, Some(2));
+            let healing = progress.healing();
+            healing.report(1, Some(2));
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(30));
-            progress.report(2, Some(2));
+            healing.report(2, Some(2));
             Ok(())
         }
         fn recover(

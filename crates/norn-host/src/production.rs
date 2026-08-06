@@ -16,9 +16,9 @@ use norn_store::{
     Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
-use norn_wire::{FindingKind, MaintainerIdentity, WarmingPhase};
+use norn_wire::{FindingKind, MaintainerIdentity};
 
-use crate::{EntryOps, JobFailure, ProgressReporter, ReconcileWork};
+use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork};
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
@@ -142,8 +142,10 @@ impl ProductionEntryOps {
             return Err(JobFailure::LostMaintainership);
         }
         // Coverage is established by the time a heal runs, and what follows is
-        // counted document work.
-        progress.phase(WarmingPhase::Healing);
+        // counted document work. Entering the phase is what yields the handle
+        // that work counts through, so the three callers never have to
+        // remember to announce it.
+        let healing = progress.healing();
         let exclusions = exclusions(&attachment.entry, &attachment._shadows);
         Self::pin_schema(&mut attachment.store, &attachment.entry)?;
         heal_documents(
@@ -151,7 +153,7 @@ impl ProductionEntryOps {
             attachment.entry.root.as_path(),
             &exclusions,
             self.policy,
-            progress,
+            &healing,
         )
     }
 }
@@ -177,11 +179,11 @@ impl EntryOps for ProductionEntryOps {
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
         // Everything up to the heal takes the maintainer lock, sweeps the
-        // shadow home and installs watcher coverage — work that counts no
-        // document and can take a while on a loaded machine. The phase is
-        // published before it so a caller reading the entry sees what it is
-        // waiting on rather than a heal that appears not to start.
-        progress.phase(WarmingPhase::InstallingCoverage);
+        // shadow home, installs watcher coverage and opens the store — work
+        // that counts no document and can take a while on a loaded machine.
+        // The phase is entered before it so a caller reading the entry sees
+        // what it is waiting on rather than a heal that appears not to start.
+        progress.installing_coverage();
         let entry = self.entry(name)?;
         let derived = self.derived(name);
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
@@ -220,7 +222,7 @@ impl EntryOps for ProductionEntryOps {
         }
         // A reconcile derives against coverage that is already installed,
         // whichever rung of the ladder the envelope reaches for.
-        progress.phase(WarmingPhase::Healing);
+        let healing = progress.healing();
         let schema =
             work.batch.schema_dirty() || work.batch.rescans().contains(&RescanScope::Schema);
         if schema {
@@ -234,7 +236,7 @@ impl EntryOps for ProductionEntryOps {
             attachment.entry.root.as_path(),
             work.batch.vault_roots(),
             self.policy,
-            progress,
+            &healing,
             &exclusions(&attachment.entry, &attachment._shadows),
         )
     }
@@ -248,9 +250,9 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
         }
-        // Recovery re-installs coverage before it re-heals, so it publishes
-        // the same prologue phase an attach does.
-        progress.phase(WarmingPhase::InstallingCoverage);
+        // Recovery re-installs coverage before it re-heals, so it enters the
+        // same prologue phase an attach does.
+        progress.installing_coverage();
         let schema = Self::schema_path(&attachment.entry);
         let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
@@ -317,7 +319,7 @@ fn heal_documents(
     root: &Path,
     exclusions: &[PathBuf],
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
 ) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
@@ -401,7 +403,7 @@ fn scoped_increment(
     root: &Path,
     dirty: &std::collections::BTreeSet<norn_fs::NormalizedPath>,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let sensitivity = norn_fs::PathNormalizer::detect(root)
@@ -537,7 +539,7 @@ fn quarantine_subtree(
     vault_root: &Path,
     relative_root: &Path,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let scoped_exclusions = exclusions
@@ -597,7 +599,7 @@ fn heal_subtree(
     vault_root: &Path,
     scope: SubtreeScope<'_>,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let prefix = scope.as_str();
@@ -747,7 +749,7 @@ fn prune_subtree(
     store: &mut Store,
     root: &DocumentPath,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
 ) -> Result<(), JobFailure> {
     prune_subtree_ordered(
         store,
@@ -762,7 +764,7 @@ fn prune_subtree_ordered(
     store: &mut Store,
     scope: SubtreeScope<'_>,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
     order: StoredPathOrder,
 ) -> Result<(), JobFailure> {
     let mut after = None;
@@ -794,7 +796,7 @@ fn prune_descendants_and_aliases(
     store: &mut Store,
     root: &DocumentPath,
     policy: ProductionPolicy,
-    progress: &ProgressReporter<ProductionAttachment>,
+    progress: &Healing<'_, ProductionAttachment>,
     sensitivity: norn_fs::CaseSensitivity,
 ) -> Result<(), JobFailure> {
     let mut after = None;
@@ -1447,7 +1449,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -1512,7 +1514,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "archive.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -1882,7 +1884,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -1910,7 +1912,7 @@ mod tests {
             f.vault().as_path(),
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -1945,7 +1947,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -1985,7 +1987,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2021,7 +2023,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2053,7 +2055,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2085,7 +2087,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2133,7 +2135,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2150,7 +2152,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2203,7 +2205,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2222,7 +2224,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2237,7 +2239,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2284,7 +2286,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2415,7 +2417,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "NOTE.md"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2454,7 +2456,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "FOLDER"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2498,7 +2500,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "UPPER.MD"),
             ProductionPolicy::new(2, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2529,7 +2531,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "before.md"),
             ProductionPolicy::new(8, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
@@ -2546,7 +2548,7 @@ mod tests {
             &mut attachment.store,
             &DocumentPath::new("folder").unwrap(),
             ProductionPolicy::new(8, 2).unwrap(),
-            &progress,
+            &progress.healing(),
         )
         .unwrap();
         fs::write(f.vault().join("after.md"), "after").unwrap();
@@ -2555,7 +2557,7 @@ mod tests {
             f.vault().as_path(),
             &dirty_path(f.vault().as_path(), "after.md"),
             ProductionPolicy::new(8, 2).unwrap(),
-            &progress,
+            &progress.healing(),
             &exclusions(&attachment.entry, &attachment._shadows),
         )
         .unwrap();
