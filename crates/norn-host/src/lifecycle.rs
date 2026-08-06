@@ -1151,6 +1151,19 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             let job = Job::Maintenance(name.clone(), state.epoch);
                             state.pending_dispatch = Some(job.clone());
                             schedule = Some(job);
+                        } else if !state.pending.is_empty() && !state.recovery_required {
+                            // Facts that arrived while this claim held the
+                            // entry: `accept_batch` finds an entry it cannot
+                            // schedule against and merges them alone, so the
+                            // claim that took the attachment is what schedules
+                            // the reconcile they are owed. Maintenance above
+                            // carries them instead where both are due, because
+                            // its own handoff ends in the same reconcile.
+                            state.runnable = true;
+                            state.epoch += 1;
+                            let job = Job::Reconcile(name.clone(), state.epoch);
+                            state.pending_dispatch = Some(job.clone());
+                            schedule = Some(job);
                         }
                     }
                     Ok(Some(batch)) => {
@@ -4365,6 +4378,41 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
+    }
+
+    /// Facts accepted while a watcher poll holds the entry are the claim's to
+    /// schedule. `accept_batch` cannot dispatch against a claimed entry, so it
+    /// merges and leaves; the claim that took the attachment schedules the
+    /// reconcile they are owed when it gives the attachment back.
+    #[test]
+    fn a_batch_accepted_during_a_poll_claim_is_reconciled_when_the_claim_ends() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+            "the accepted rescan left the entry trusted while nothing had healed it"
+        );
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the facts were healed by a recovery rather than the reconcile they are owed"
+        );
     }
 
     #[test]
