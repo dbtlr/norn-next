@@ -1681,7 +1681,25 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 mod tests {
     use super::*;
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
+    use norn_testkit::wait::{Budget, Observed, wait_until};
+    use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        /// Whether `poll` on this thread runs inside a job's own handoff drain
+        /// — the loop `drain_observed` runs right after `attach`, `reconcile`,
+        /// `recover` or `maintain` return — rather than the dispatcher's
+        /// unprompted per-tick check. A job thread marks itself on entry to one
+        /// of those calls and stays marked for the rest of its life, because
+        /// every job this suite runs lands on the same small, dedicated pool of
+        /// worker threads, and the dispatcher's own poll never runs on one of
+        /// them.
+        ///
+        /// This is what gives the dispatcher's ambient poll and a job's own
+        /// handoff drain independent batch sources below: setting one without
+        /// the other no longer depends on which of the two ticks first.
+        static ON_JOB_THREAD: Cell<bool> = const { Cell::new(false) };
+    }
 
     #[derive(Default)]
     struct FakeOps {
@@ -1714,8 +1732,17 @@ mod tests {
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
+        /// The batch source for the dispatcher's own unprompted poll ticks.
         empty_poll_batches: AtomicUsize,
         rescan_poll_batch: std::sync::atomic::AtomicBool,
+        /// The batch source for a job's own handoff drain — the poll loop
+        /// `drain_observed` runs after `attach`, `reconcile`, `recover` or
+        /// `maintain` returns, on the same thread. Separate from
+        /// `empty_poll_batches` so a caller that wants a handoff to saturate
+        /// does not race the dispatcher's own ambient tick for the same
+        /// batches; see `ON_JOB_THREAD`.
+        handoff_poll_batches: AtomicUsize,
+        handoff_rescan_poll_batch: std::sync::atomic::AtomicBool,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
@@ -1725,6 +1752,7 @@ mod tests {
         type Attachment = ();
 
         fn attach(&self, _: &VaultName, progress: &ProgressReporter<()>) -> Result<(), JobFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
             self.attaches.fetch_add(1, Ordering::SeqCst);
             if self.heal_in_attach.load(Ordering::SeqCst) {
                 progress.healing().report(1, Some(2));
@@ -1748,6 +1776,7 @@ mod tests {
             _: ReconcileWork,
             _: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
             let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
             if self.block_reconcile.load(Ordering::SeqCst)
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
@@ -1772,6 +1801,7 @@ mod tests {
             _: &mut (),
             _: &ProgressReporter<()>,
         ) -> Result<(), JobFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
             self.recovers.fetch_add(1, Ordering::SeqCst);
             thread::sleep(Duration::from_millis(20));
             if self.terminal_recover.swap(false, Ordering::SeqCst) {
@@ -1812,11 +1842,15 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
-            if self.rescan_poll_batch.swap(false, Ordering::SeqCst) {
+            let (rescan_flag, batch_count) = if ON_JOB_THREAD.with(Cell::get) {
+                (&self.handoff_rescan_poll_batch, &self.handoff_poll_batches)
+            } else {
+                (&self.rescan_poll_batch, &self.empty_poll_batches)
+            };
+            if rescan_flag.swap(false, Ordering::SeqCst) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
             }
-            if self
-                .empty_poll_batches
+            if batch_count
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     value.checked_sub(1)
                 })
@@ -1832,6 +1866,7 @@ mod tests {
         }
 
         fn maintain(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
@@ -1869,14 +1904,57 @@ mod tests {
         (host, name)
     }
 
+    /// A fixture for tests whose subject is `accept_batch`'s own dispatch, not
+    /// the dispatcher's ambient polling. A live watcher poll claims the entry
+    /// on the same cadence `accept_batch` needs to dispatch its reconcile, and
+    /// a coincident claim leaves nothing to pick up a batch that carries no
+    /// dirty paths of its own — a real race, but not the one these tests
+    /// pin, so the interval here is wide enough that the dispatcher never
+    /// ticks inside a test's own run.
+    fn fixture_without_ambient_polling(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        let name = VaultName::new("notes").unwrap();
+        let entry = RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
+        );
+        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let host = Host::new(
+            registry,
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        (host, name)
+    }
+
+    /// The budget every wait in this suite obeys: long enough that a loaded
+    /// machine is not the thing under test, and short enough that a state
+    /// that never arrives is reported rather than waited on. A 20ms
+    /// `FakeOps::recover` alone can eat a tenth of this on a quiet machine,
+    /// so the bound is a wall clock, not an iteration count that races it.
+    fn lifecycle_wait_budget() -> Budget {
+        Budget::new(Duration::from_secs(10), Duration::from_millis(250))
+    }
+
     fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
-        for _ in 0..200 {
-            if host.state(name) == Some(expected.clone()) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        panic!("state did not become {expected:?}");
+        wait_until(
+            &format!("state to become {expected:?}"),
+            lifecycle_wait_budget(),
+            || match host.state(name) {
+                Some(state) if state == expected => Observed::Met(()),
+                state => Observed::pending(format!("{state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| {
+            panic!(
+                "state did not become {expected:?}; it is {}",
+                failure.last_state
+            )
+        });
     }
 
     /// The state a lost watcher publishes, with the cause and the prose the
@@ -1987,14 +2065,20 @@ mod tests {
         ops.contend_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let initial = host.demand(&name).unwrap();
-        for _ in 0..200 {
-            if ops.attaches.load(Ordering::SeqCst) == 1
-                && host.state(&name) == Some(TrustState::Unattached)
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "the contended attach to park the entry",
+            lifecycle_wait_budget(),
+            || {
+                let attaches = ops.attaches.load(Ordering::SeqCst);
+                let state = host.state(&name);
+                if attaches == 1 && state == Some(TrustState::Unattached) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{attaches} attaches, state is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(matches!(
             initial.completion(),
             Demand::MaintainerContended(_)
@@ -2024,13 +2108,7 @@ mod tests {
         drop(initial);
         ops.block_detach.store(true, Ordering::SeqCst);
         host.reap_idle(Instant::now()).unwrap();
-        for _ in 0..200 {
-            if ops.detach_started.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(ops.detach_started.load(Ordering::SeqCst));
+        spin_until("detach_started", &ops.detach_started);
         let releasing = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
         assert_eq!(host.state(&name), Some(releasing.clone()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
@@ -2078,13 +2156,7 @@ mod tests {
         host.reap_idle(released + idle_after / 2).unwrap();
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
-        for _ in 0..500 {
-            if host.state(&name) == Some(TrustState::Unattached) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
@@ -2134,15 +2206,21 @@ mod tests {
     #[test]
     fn terminal_watcher_failure_recovers_only_on_demand() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // No ambient polling: the dispatcher's own tick can claim the entry
+        // between `watcher_failed` and the demand below, and a demand raised
+        // on a claimed entry is only honored once the claim ends — a real
+        // race, but this test pins the recovery-on-demand contract, not the
+        // dispatcher's cadence.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let _ = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
-        let _ = host.demand(&name).unwrap();
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        drop(lease);
     }
 
     /// The watch error a terminal failure carried reaches the trust state: a
@@ -2201,12 +2279,19 @@ mod tests {
             .unwrap()
             .get(&name)
             .expect("the entry was polled");
-        for _ in 0..500 {
-            if ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "four more watcher polls of the entry",
+            lifecycle_wait_budget(),
+            || {
+                let polls = ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0);
+                if polls > polls_at_loss + 4 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{polls} polls so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
             ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4,
             "the dispatcher stopped polling the entry"
@@ -2247,7 +2332,8 @@ mod tests {
     #[test]
     fn recover_drains_pending_invalidations_before_publishing_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
@@ -2262,7 +2348,7 @@ mod tests {
     #[test]
     fn attach_handoff_saturation_stays_warming_until_a_followup_drain() {
         let ops = Arc::new(FakeOps::default());
-        ops.empty_poll_batches
+        ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
@@ -2282,7 +2368,7 @@ mod tests {
     #[test]
     fn attach_handoff_preserves_observed_rescan_as_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
         ops.block_reconcile_at.store(1, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
@@ -2301,11 +2387,15 @@ mod tests {
     #[test]
     fn reconcile_handoff_saturation_requires_an_additional_reconcile_before_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.empty_poll_batches
+        // The handoff drain's own batch source, not the dispatcher's ambient
+        // one: a shared counter would let an ambient tick spend a batch this
+        // saturation depends on before `accept_batch` below ever schedules
+        // the reconcile that is supposed to drain it.
+        ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
@@ -2318,22 +2408,31 @@ mod tests {
     #[test]
     fn reconcile_handoff_saturation_preserves_observed_rescan_as_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
-        ops.empty_poll_batches
+        // See the sibling saturation test above: the handoff drain's own
+        // batch source, isolated from the dispatcher's ambient ticks.
+        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile_at.store(2, Ordering::SeqCst);
         host.accept_batch(&name, Batch::default()).unwrap();
 
-        for _ in 0..200 {
-            if ops.reconciles.load(Ordering::SeqCst) == 2 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "a second reconcile, saturating the handoff",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                if reconciles == 2 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
         assert_eq!(
             host.state(&name),
@@ -2348,13 +2447,15 @@ mod tests {
     #[test]
     fn terminal_failure_during_recover_stays_watcher_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.terminal_recover.store(true, Ordering::SeqCst);
-        drop(host.demand(&name).unwrap());
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, backend_lost());
+        drop(lease);
     }
 
     #[test]
@@ -2372,7 +2473,8 @@ mod tests {
     #[test]
     fn failed_reconcile_requires_demand_recovery_before_later_facts_can_be_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
@@ -2393,21 +2495,27 @@ mod tests {
                 UntrustedReason::environmental_refusal("refused")
             ))
         );
-        drop(host.demand(&name).unwrap());
+        // Held across the wait; see the sibling recover-side test below for
+        // why an immediately dropped lease here can wedge the entry.
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
         assert!(ops.reconciles.load(Ordering::SeqCst) > failed_count);
+        drop(lease);
     }
 
     #[test]
     fn failed_recover_cannot_be_bypassed_by_a_later_watcher_fact() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        // No ambient polling: see `terminal_watcher_failure_recovers_only_on_demand`.
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         host.watcher_failed(&name, WatchError::Backend("gone".into()));
         ops.environmental_recover.store(true, Ordering::SeqCst);
-        drop(host.demand(&name).unwrap());
+        // Held across both waits below: a lease dropped before either state
+        // is reached would withdraw the recovery request it raised.
+        let lease = host.demand(&name).unwrap();
         wait_for_state(
             &host,
             &name,
@@ -2422,10 +2530,12 @@ mod tests {
                 UntrustedReason::environmental_refusal("refused")
             ))
         );
-        drop(host.demand(&name).unwrap());
+        drop(lease);
+        let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 2);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+        drop(lease);
     }
 
     #[test]
@@ -2437,13 +2547,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
-        for _ in 0..200 {
-            if ops.reconcile_started.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(ops.reconcile_started.load(Ordering::SeqCst));
+        spin_until("reconcile_started", &ops.reconcile_started);
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         let raced_demand = host.demand(&name).unwrap();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -2730,13 +2834,19 @@ mod tests {
     fn wait_for_polls(ops: &Arc<FakeOps>, name: &VaultName, count: usize) {
         let polls = || ops.polls.lock().unwrap().get(name).copied().unwrap_or(0);
         let target = polls() + count;
-        for _ in 0..2000 {
-            if polls() >= target {
-                return;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        panic!("the dispatcher stopped polling the entry");
+        wait_until(
+            &format!("{count} further watcher polls of the entry"),
+            lifecycle_wait_budget(),
+            || {
+                let seen = polls();
+                if seen >= target {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{seen} of {target} polls"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// A recovery demand belongs to the lease that raised it. A lease that
@@ -3002,12 +3112,7 @@ mod tests {
         )
         .unwrap();
         let a_lease = host.demand(&a).unwrap();
-        for _ in 0..200 {
-            if ops.a_started.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        spin_until("a_started", &ops.a_started);
         let b_lease = host.demand(&b).unwrap();
         ops.release_a.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
@@ -3152,22 +3257,24 @@ mod tests {
         )
         .unwrap();
         let a_lease = host.demand(&a).unwrap();
-        for _ in 0..200 {
-            if ops.a_started.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        spin_until("a_started", &ops.a_started);
         let b_lease = host.demand(&b).unwrap();
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
         ops.release_a.store(true, Ordering::SeqCst);
-        for _ in 0..200 {
-            if matches!(b_lease.completion(), Demand::DuplicateRoot(_)) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "b's demand to report the alias conflict",
+            lifecycle_wait_budget(),
+            || {
+                let completion = b_lease.completion();
+                if matches!(completion, Demand::DuplicateRoot(_)) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{completion:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         drop((a_lease, b_lease, host));
@@ -3225,12 +3332,15 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
 
         ops.poll_release.store(true, Ordering::SeqCst);
-        for _ in 0..200 {
-            if ops.detaches.load(Ordering::SeqCst) == 2 {
-                break;
+        wait_until("both aliases to detach", lifecycle_wait_budget(), || {
+            let detaches = ops.detaches.load(Ordering::SeqCst);
+            if detaches == 2 {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{detaches} detaches so far"))
             }
-            thread::sleep(Duration::from_millis(1));
-        }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
@@ -3284,13 +3394,23 @@ mod tests {
         ));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.poll_release.store(true, Ordering::SeqCst);
-        for _ in 0..200 {
-            if ops.detaches.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "the refused alias to detach",
+            lifecycle_wait_budget(),
+            || {
+                let detaches = ops.detaches.load(Ordering::SeqCst);
+                if detaches == 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{detaches} detaches so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        // A stability check, not a wait for a positive condition: proving no
+        // further attach followed the detach needs a fixed margin, since
+        // there is no "attach happened" event to poll for instead.
         thread::sleep(Duration::from_millis(10));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(refuses_environmentally(host.state(&name).as_ref()));
@@ -3387,23 +3507,15 @@ mod tests {
         let _ = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.emit.store(true, Ordering::SeqCst);
-        let mut saw_warming = false;
-        let mut saw_progress = false;
-        for _ in 0..100 {
-            if let Some(TrustState::Warming { healed, .. }) = host.state(&name) {
-                saw_warming = true;
-                saw_progress |= healed > 0;
-                if saw_progress {
-                    break;
-                }
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(saw_warming, "polled dirtiness never closed Ready");
-        assert!(
-            saw_progress,
-            "warming progress did not advance before Ready"
-        );
+        wait_until(
+            "warming progress to advance past zero",
+            lifecycle_wait_budget(),
+            || match host.state(&name) {
+                Some(TrustState::Warming { healed, .. }) if healed > 0 => Observed::Met(()),
+                state => Observed::pending(format!("{state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         wait_for_state(&host, &name, TrustState::Ready);
     }
 
@@ -3429,15 +3541,15 @@ mod tests {
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.emit.store(true, Ordering::SeqCst);
-        let mut warming = false;
-        for _ in 0..200 {
-            if matches!(host.state(&name), Some(TrustState::Warming { .. })) {
-                warming = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        assert!(warming);
+        wait_until(
+            "the polled batch to open a warming leg",
+            lifecycle_wait_budget(),
+            || match host.state(&name) {
+                Some(TrustState::Warming { .. }) => Observed::Met(()),
+                state => Observed::pending(format!("{state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -3451,12 +3563,19 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.maintenance_due.store(true, Ordering::SeqCst);
-        for _ in 0..200 {
-            if ops.maintenances.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "scheduled maintenance to run once",
+            lifecycle_wait_budget(),
+            || {
+                let maintenances = ops.maintenances.load(Ordering::SeqCst);
+                if maintenances == 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{maintenances} maintenances so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         drop(lease);
@@ -3472,7 +3591,12 @@ mod tests {
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
         spin_until("maintenance_started", &ops.maintenance_started);
-        ops.empty_poll_batches
+        // The maintenance job's own handoff drain, isolated from the
+        // dispatcher's ambient ticks: see the reconcile-side saturation test
+        // above for why a shared counter would leave this ambiguous between
+        // the handoff saturating and the dispatcher's next tick coincidentally
+        // scheduling a reconcile of its own.
+        ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.maintenance_release.store(true, Ordering::SeqCst);
@@ -3498,8 +3622,8 @@ mod tests {
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
         spin_until("maintenance_started", &ops.maintenance_started);
-        ops.rescan_poll_batch.store(true, Ordering::SeqCst);
-        ops.empty_poll_batches
+        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.maintenance_release.store(true, Ordering::SeqCst);
@@ -3549,12 +3673,19 @@ mod tests {
             .unwrap()
             .get(&b)
             .expect("vault b was polled");
-        for _ in 0..200 {
-            if ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0) > polls_before {
-                break;
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
+        wait_until(
+            "vault b to be polled again",
+            lifecycle_wait_budget(),
+            || {
+                let polls = ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0);
+                if polls > polls_before {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{polls} polls so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(ops.polls.lock().unwrap().get(&b).copied().unwrap_or(0) > polls_before);
 
         drop(lease_b);
