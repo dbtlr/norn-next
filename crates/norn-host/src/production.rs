@@ -3058,6 +3058,14 @@ mod tests {
         }
     }
 
+    /// Coverage lost against a live dispatcher is reinstalled on demand, and an
+    /// event the watcher observes while the heal runs is reconciled after the
+    /// handoff instead of being lost with the batch the heal drained.
+    ///
+    /// The demand is held for the whole recovery, so it is answered whether it
+    /// reaches an unclaimed entry or one a watcher poll holds. Which of those a
+    /// demand lands on is the dispatcher's cadence to decide; the claim window
+    /// itself is pinned leg by leg by the lifecycle tests.
     #[test]
     fn recovery_handoff_reconciles_an_event_observed_during_the_heal() {
         let f = Fixture::new("recovery-handoff");
@@ -3102,10 +3110,8 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
-        // Lost coverage is reinstalled on demand, and the lease is held until
-        // it is: a demand landing while a watcher poll holds the entry
-        // schedules nothing itself, and the outstanding lease is what the
-        // poll's completion answers.
+        // The recovery runs for a demand that is still outstanding, so the
+        // lease lives until the entry is serving again.
         let demand = host.demand(&name).unwrap();
         wait_until(
             "the recovery to reach its block",

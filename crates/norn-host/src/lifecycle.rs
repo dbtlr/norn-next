@@ -390,10 +390,11 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
 /// attachment in hand picks the job exactly as [`Host::demand`] does: coverage
 /// still held is recovered, coverage that is gone is attached again.
 ///
-/// The states that schedule are the states [`Host::demand`] schedules from — an
-/// entry that is serving or already working owes a lease nothing. A recovery the
-/// entry requires runs only where a lease has demanded it, because a terminal
-/// failure does not autonomously restart coverage.
+/// An entry that is serving, already working, parked on a conflict or on a
+/// contended maintainer, refused on identity, or owed a recovery no live lease
+/// has demanded owes an outstanding lease nothing. A recovery runs only where a
+/// lease has demanded it, because a terminal failure does not autonomously
+/// restart coverage.
 fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.demand_leases == 0
         || !matches!(
