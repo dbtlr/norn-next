@@ -1803,6 +1803,8 @@ mod tests {
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.recovers.fetch_add(1, Ordering::SeqCst);
+            // Recovery is the one leg this fake gives a duration to: it is
+            // what a wait that spans a recovery has to outlast.
             thread::sleep(Duration::from_millis(20));
             if self.terminal_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal(WatchError::Backend(
@@ -2016,6 +2018,19 @@ mod tests {
         lost(WatcherLossCause::Backend, "filesystem watcher failed: lost")
     }
 
+    /// The margin a negative check gets. Proving that nothing happened has no
+    /// event to wait for, so the check waits a fixed span and then reads the
+    /// counter or state it expects to find unmoved.
+    ///
+    /// The span is sized against the work being ruled out, not against the
+    /// machine: the dispatcher ticks every 2ms under `fixture` and the fake's
+    /// whole recover leg is 20ms, so this covers several chances for the ruled
+    /// out thing to happen. A positive condition is never waited for this way
+    /// — that is `wait_until` and the wrappers here that build on it.
+    fn settle() {
+        thread::sleep(Duration::from_millis(20));
+    }
+
     /// Wait for one of a fake's own markers, on the budget every other wait
     /// here obeys. The observation is a boolean, so the failure names the
     /// marker rather than a state.
@@ -2123,7 +2138,7 @@ mod tests {
         ));
         let lease = host.demand(&name).unwrap();
         assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         drop(lease);
         drop(initial);
@@ -2169,6 +2184,10 @@ mod tests {
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        // Elapsed time is the subject here, so these two sleeps are the test's
+        // own clock rather than a wait: the first spends more than the idle
+        // interval while the lease is held, and the second spends it again
+        // after the lease ends, when it is allowed to count.
         thread::sleep(Duration::from_millis(30));
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
@@ -2185,6 +2204,9 @@ mod tests {
         let (host, name) = fixture(Arc::clone(&ops), idle_after);
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+        // The test's own clock, not a wait: it spends the whole idle interval
+        // and more while the lease is held, so the reap that follows is the
+        // one a fresh interval has to survive.
         thread::sleep(idle_after + Duration::from_millis(50));
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
@@ -2220,6 +2242,9 @@ mod tests {
         for _ in 0..3 {
             host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
                 .unwrap();
+            // Churn is what this test feeds the dispatcher, so the gap is the
+            // input rather than a wait: it spaces the batches across several
+            // dispatcher ticks instead of collapsing them into one.
             thread::sleep(Duration::from_millis(4));
         }
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -2234,7 +2259,7 @@ mod tests {
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now()).unwrap();
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(host.state(&name), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         drop(lease);
@@ -2345,7 +2370,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         ops.contend_poll.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Unattached);
-        thread::sleep(Duration::from_millis(20));
+        settle();
         assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -2353,7 +2378,7 @@ mod tests {
             host.demand(&name).unwrap().outcome(),
             Demand::MaintainerContended(_)
         ));
-        thread::sleep(Duration::from_millis(20));
+        settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
 
         let retried = host.retry(&name).unwrap();
@@ -2521,7 +2546,7 @@ mod tests {
         );
         let failed_count = ops.reconciles.load(Ordering::SeqCst);
         host.accept_batch(&name, Batch::default()).unwrap();
-        thread::sleep(Duration::from_millis(20));
+        settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), failed_count);
         assert_eq!(
             host.state(&name),
@@ -2555,7 +2580,7 @@ mod tests {
             TrustState::untrusted(UntrustedReason::environmental_refusal("refused")),
         );
         host.accept_batch(&name, Batch::default()).unwrap();
-        thread::sleep(Duration::from_millis(20));
+        settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
         assert_eq!(
             host.state(&name),
@@ -2586,7 +2611,7 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, backend_lost());
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(host.state(&name), Some(backend_lost()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(raced_demand);
@@ -2611,7 +2636,7 @@ mod tests {
             drop(host);
             drop_returned.store(true, Ordering::SeqCst);
         });
-        thread::sleep(Duration::from_millis(20));
+        settle();
         assert!(!returned.load(Ordering::SeqCst));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -2651,7 +2676,7 @@ mod tests {
         drop(host.demand(&name).unwrap());
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             1,
@@ -2695,7 +2720,7 @@ mod tests {
         host.watcher_failed(&name, WatchError::Backend("lost".into()));
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert_eq!(host.state(&name), Some(backend_lost()));
 
@@ -2831,7 +2856,7 @@ mod tests {
 
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, backend_lost());
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(host.state(&name), Some(backend_lost()));
         assert_eq!(
             ops.recovers.load(Ordering::SeqCst),
@@ -3407,10 +3432,7 @@ mod tests {
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_detaches(&ops, 1, "the refused alias to detach");
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
-        // A stability check, not a wait for a positive condition: proving no
-        // further attach followed the detach needs a fixed margin, since
-        // there is no "attach happened" event to poll for instead.
-        thread::sleep(Duration::from_millis(10));
+        settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(refuses_environmentally(host.state(&name).as_ref()));
         drop((demand, host));
