@@ -462,6 +462,11 @@ fn begin_release<A>(state: &mut EntryState<A>) {
 /// for. The requirement is read before it is cleared: a lease that asked for a
 /// recovery is asking for the coverage the re-attach below installs.
 ///
+/// The leg's claim on the entry ends where its release does, so the epilogue
+/// that would otherwise end it later finds nothing left to end: a re-attach
+/// dispatched below is the entry's own work, running against a claim it holds
+/// rather than one a finished leg is still entitled to take away.
+///
 /// The follow-up is sent from here and left nowhere else. A `pending_dispatch`
 /// marker beside a job this leg has already sent is one a dispatcher tick would
 /// send a second time, under the same epoch.
@@ -2650,6 +2655,48 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         drop(lease);
+    }
+
+    /// A demand raised inside a job leg's release is honored the same way the
+    /// dispatcher's own leg honors one, and the re-attach it dispatches runs as
+    /// the entry's own claimed work: the leg's claim ended with its release, so
+    /// nothing left over from the finished leg unclaims the job in flight.
+    #[test]
+    fn a_job_leg_release_honors_a_demand_with_a_claimed_re_attach() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_recover.store(true, Ordering::SeqCst);
+        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        let recovering = host.demand(&name).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(releasing()));
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_flag("attach_started", &ops.attach_started);
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.runnable,
+                "the release's own re-attach is in flight against an unclaimed entry"
+            );
+            assert_eq!(state.active_epoch, Some(state.epoch));
+        }
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
+        drop(recovering);
     }
 
     /// A teardown that parks the entry on a contended maintainer honors the
