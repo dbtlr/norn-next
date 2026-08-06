@@ -1793,6 +1793,19 @@ mod tests {
         terminal_reconcile: std::sync::atomic::AtomicBool,
         environmental_recover: std::sync::atomic::AtomicBool,
         environmental_reconcile: std::sync::atomic::AtomicBool,
+        /// The maintainership a leg reports it has lost, one leg per flag.
+        /// Every one of them is a teardown: the leg gives the entry back and
+        /// the entry stops being attached.
+        lost_recover: std::sync::atomic::AtomicBool,
+        lost_reconcile: std::sync::atomic::AtomicBool,
+        lost_maintenance: std::sync::atomic::AtomicBool,
+        lost_poll: std::sync::atomic::AtomicBool,
+        /// The incumbent a leg reports while giving the entry back — the same
+        /// teardown as a lost maintainership, plus the park that keeps the
+        /// entry from re-attaching against another process's lock.
+        contend_recover: std::sync::atomic::AtomicBool,
+        contend_reconcile: std::sync::atomic::AtomicBool,
+        contend_maintenance: std::sync::atomic::AtomicBool,
         contend_attach: std::sync::atomic::AtomicBool,
         block_attach: std::sync::atomic::AtomicBool,
         attach_started: std::sync::atomic::AtomicBool,
@@ -1875,6 +1888,14 @@ mod tests {
             if self.environmental_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
             }
+            if self.lost_reconcile.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_reconcile.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
+            }
             Ok(())
         }
 
@@ -1896,6 +1917,14 @@ mod tests {
             }
             if self.environmental_recover.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
+            }
+            if self.lost_recover.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_recover.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
             }
             Ok(())
         }
@@ -1927,6 +1956,9 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
+            if self.lost_poll.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
             if on_job_thread && self.handoff_rescan_poll_batch.swap(false, Ordering::SeqCst) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
@@ -1957,6 +1989,14 @@ mod tests {
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
                 wait_for_flag("maintenance_release", &self.maintenance_release);
+            }
+            if self.lost_maintenance.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::LostMaintainership);
+            }
+            if self.contend_maintenance.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::MaintainerContended(
+                    MaintainerIdentity::unknown(),
+                ));
             }
             Ok(())
         }
@@ -2259,6 +2299,273 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
+    }
+
+    /// The state a leg publishes while the resources it is giving back are
+    /// still out.
+    fn releasing() -> TrustState {
+        TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None)
+    }
+
+    /// Provoke one teardown leg, answering the lease it took to provoke it.
+    type Provoke =
+        fn(&Arc<FakeOps>, &Host<Arc<FakeOps>>, &VaultName) -> Option<DemandLease<Arc<FakeOps>>>;
+
+    /// Drive an entry into one teardown leg and prove the leg releases before
+    /// it publishes the state that says it has released.
+    ///
+    /// The fake holds `detach` open, so the entry is read from inside the
+    /// release rather than after it. A leg that published Unattached before
+    /// calling `detach` is caught here by the entry saying released while the
+    /// fake has given nothing back — the ordering this pins is the whole
+    /// difference between the two observations.
+    ///
+    /// The lease a leg needed to run at all is dropped inside the window,
+    /// because a lease outstanding when a release finishes is honored by
+    /// re-attaching, and the re-attach is the subject of its own test.
+    fn teardown_releases_before_it_publishes(arm: fn(&FakeOps), provoke: Provoke) {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        arm(&ops);
+        let lease = provoke(&ops, &host, &name);
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(
+            host.state(&name),
+            Some(releasing()),
+            "the entry reported its resources released while they were still out"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        drop(lease);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// The dispatcher's own watcher poll reaches the entry unprompted, so the
+    /// leg needs nothing to provoke it.
+    fn by_a_watcher_poll(
+        _: &Arc<FakeOps>,
+        _: &Host<Arc<FakeOps>>,
+        _: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        None
+    }
+
+    /// A recovery runs where a lease asks for one, so the lease that asks is
+    /// held until the leg it schedules is inside its release.
+    fn by_a_demanded_recovery(
+        _: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        host.watcher_failed(name, WatchError::Backend("gone".into()));
+        Some(host.demand(name).unwrap())
+    }
+
+    fn by_a_reconciled_batch(
+        _: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        host.accept_batch(name, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        None
+    }
+
+    fn by_due_maintenance(
+        ops: &Arc<FakeOps>,
+        _: &Host<Arc<FakeOps>>,
+        _: &VaultName,
+    ) -> Option<DemandLease<Arc<FakeOps>>> {
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        None
+    }
+
+    #[test]
+    fn a_poll_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.lost_poll.store(true, Ordering::SeqCst),
+            by_a_watcher_poll,
+        );
+    }
+
+    #[test]
+    fn a_poll_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.contend_poll.store(true, Ordering::SeqCst),
+            by_a_watcher_poll,
+        );
+    }
+
+    #[test]
+    fn a_recover_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.lost_recover.store(true, Ordering::SeqCst),
+            by_a_demanded_recovery,
+        );
+    }
+
+    #[test]
+    fn a_recover_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.contend_recover.store(true, Ordering::SeqCst),
+            by_a_demanded_recovery,
+        );
+    }
+
+    #[test]
+    fn a_reconcile_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.lost_reconcile.store(true, Ordering::SeqCst),
+            by_a_reconciled_batch,
+        );
+    }
+
+    #[test]
+    fn a_reconcile_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.contend_reconcile.store(true, Ordering::SeqCst),
+            by_a_reconciled_batch,
+        );
+    }
+
+    #[test]
+    fn a_maintenance_that_lost_maintainership_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.lost_maintenance.store(true, Ordering::SeqCst),
+            by_due_maintenance,
+        );
+    }
+
+    #[test]
+    fn a_maintenance_that_found_contention_releases_before_it_publishes_unattached() {
+        teardown_releases_before_it_publishes(
+            |ops| ops.contend_maintenance.store(true, Ordering::SeqCst),
+            by_due_maintenance,
+        );
+    }
+
+    /// A duplicate-root refusal reaching idle entries is a teardown per alias:
+    /// each one names the leg it is on, and none of them reports its resources
+    /// released until they are.
+    #[test]
+    fn a_refused_alias_releases_before_it_publishes_unattached() {
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let registry = ServingRegistry::from_entries([
+            RegistryEntry::new(
+                a.clone(),
+                VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
+            ),
+            RegistryEntry::new(
+                b.clone(),
+                VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
+            ),
+        ])
+        .unwrap();
+        // Without ambient polling: a dispatcher tick holding either alias in a
+        // watcher poll makes the refusal below take the in-flight route, where
+        // the release belongs to the job that holds it rather than to the
+        // refusal this test is about.
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&a).unwrap());
+        drop(host.demand(&b).unwrap());
+        wait_for_state(&host, &a, TrustState::Ready);
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        // The refusal runs off the test thread because it releases both
+        // aliases inline, and this test reads the entries from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(host.state(&a), Some(releasing()));
+        assert_eq!(host.state(&b), Some(releasing()));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_state(&host, &b, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A demand raised while an entry is giving its resources back defers to
+    /// the release and is honored by it: the entry is warming, so nothing is
+    /// scheduled against resources still on their way out, and the re-attach
+    /// the lease is owed runs when they are back.
+    #[test]
+    fn a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(releasing()));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the demand scheduled an attach against an entry still holding its resources"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        drop(lease);
+    }
+
+    /// A teardown that parks the entry on a contended maintainer honors the
+    /// demand raised inside it by reporting the contention: the release owes
+    /// the lease an answer, and re-attaching against another process's lock is
+    /// not one.
+    #[test]
+    fn a_demand_raised_during_a_contended_teardown_stays_parked() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.contend_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        let lease = host.demand(&name).unwrap();
+        assert!(matches!(lease.outcome(), Demand::MaintainerContended(_)));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        settle();
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
         drop(lease);
     }
 
