@@ -365,21 +365,35 @@ fn coverage_plan(
 /// Install a whole coverage plan as **one** backend commit.
 ///
 /// Registration is batched rather than performed one edge at a time because a
-/// backend is free to rebuild its whole event stream per registration call —
-/// the macOS backend stops its run loop, joins that thread, and creates a new
-/// stream — so an edge-at-a-time installation pays that rebuild once per edge
-/// and spends the wait before the first heal can start. A commit installs the
-/// same edges the plan names, and nothing about what is delivered changes with
-/// how they were registered.
+/// backend may rebuild its whole event stream per registration call, so an
+/// edge-at-a-time installation pays that rebuild once per edge and spends the
+/// wait before the first heal can start. A commit installs the same edges the
+/// plan names, and post-registration delivery is the same either way. What the
+/// batch does change is the registration window itself: it delivers nothing,
+/// where a serial installation ran an intermediate stream over each prefix of
+/// the plan. Nothing consumes that window — [`watch`] returns no subscription
+/// until this call is past — so no fact reaches a caller either way.
+///
+/// **The batch is committed whether or not every edge was accepted.** A
+/// `PathsMut` dropped without a commit leaves the watcher in a state notify
+/// declines to specify — started, stopped, changes applied or ignored — so a
+/// refused edge commits what was staged before it and then returns that first
+/// refusal unchanged, path identity included. Partial coverage is never
+/// returned as success: the caller of a failed install has a watcher whose
+/// only sound use is to drop it, and dropping it is now deterministic.
 fn install(
     watcher: &mut RecommendedWatcher,
     plan: &[(PathBuf, RecursiveMode)],
 ) -> Result<(), WatchError> {
     let mut paths = watcher.paths_mut();
-    for (path, mode) in plan {
-        paths.add(path, *mode).map_err(backend)?;
+    let refused = plan
+        .iter()
+        .find_map(|(path, mode)| paths.add(path, *mode).err());
+    let committed = paths.commit();
+    match refused {
+        Some(error) => Err(backend(error)),
+        None => committed.map_err(backend),
     }
-    paths.commit().map_err(backend)
 }
 
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault/schema path resolution.
@@ -786,22 +800,26 @@ mod tests {
                 Path::new("/vaults/notes"),
                 &external_schema("/etc/norn/schemas")
             )
-            .unwrap()
-            .last(),
-            Some(&(
-                PathBuf::from("/etc/norn/schemas"),
-                RecursiveMode::NonRecursive
-            ))
+            .unwrap(),
+            [
+                (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
+                (
+                    PathBuf::from("/etc/norn/schemas"),
+                    RecursiveMode::NonRecursive
+                ),
+            ]
         );
     }
 
     #[test]
     fn an_external_schema_beside_the_vault_root_adds_no_edge() {
         assert_eq!(
-            coverage_plan(Path::new("/vaults/notes"), &external_schema("/vaults"))
-                .unwrap()
-                .len(),
-            2
+            coverage_plan(Path::new("/vaults/notes"), &external_schema("/vaults")).unwrap(),
+            [
+                (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
+            ]
         );
     }
 
