@@ -71,6 +71,13 @@ restores trust. Three rungs, cheapest first:
    first request under a framed `Warming` progress display. Its resumable-friendly shape is
    carved for a later stat-prioritized, progressive-verification evolution; nothing measures
    it today.
+
+   **Coverage comes before the heal, and the display says which of the two an entry is
+   in.** Change detection is established over the vault first, so the first request is
+   billed for that prologue too — and it counts no document, which is why `Warming` carries
+   a typed phase beside its counters rather than counters alone. An entry that has not
+   finished installing coverage and an entry whose heal is not advancing are different
+   waits, and zero healed against an unknown total is the whole truth of both.
 3. **Rebuild from zero** — the derived database is discarded and rebuilt.
 
 Vault files are never the thing being healed; they are the source of truth. The ladder
