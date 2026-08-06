@@ -287,6 +287,9 @@ pub fn watch(
     let normalizer =
         PathNormalizer::detect(&root).map_err(|error| WatchError::Backend(error.to_string()))?;
     let schema = schema_location(&root, &schema_source, &normalizer)?;
+    // Every coverage edge is decided before a backend resource exists, so a
+    // plan this vault cannot express refuses without a watcher to tear down.
+    let plan = coverage_plan(&root, &schema)?;
     let ledger = Arc::new(Mutex::new(Ledger::default()));
     let shared = Arc::new(Mutex::new(State::new(
         root.clone(),
@@ -310,23 +313,7 @@ pub fn watch(
     )
     .map_err(backend)?;
 
-    watcher
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(backend)?;
-    let parent = root
-        .parent()
-        .ok_or_else(|| WatchError::Backend("vault root has no parent".into()))?;
-    watcher
-        .watch(parent, RecursiveMode::NonRecursive)
-        .map_err(backend)?;
-    if let SchemaLocation::External { parent, .. } =
-        &shared.lock().expect("watch state poisoned").schema
-        && parent != root.parent().expect("checked above")
-    {
-        watcher
-            .watch(parent, RecursiveMode::NonRecursive)
-            .map_err(backend)?;
-    }
+    install(&mut watcher, &plan)?;
 
     let worker_state = shared;
     drop(wake_tx);
@@ -344,6 +331,69 @@ pub fn watch(
         },
         owns,
     ))
+}
+
+/// Every coverage edge one subscription installs, in registration order.
+///
+/// The vault tree is covered recursively. Its parent is covered
+/// non-recursively for one fact the tree's own watch cannot report: the name
+/// the root occupies, whose removal or rename is the end of coverage rather
+/// than a change inside the vault. A schema source outside the vault adds its
+/// own parent, and only when neither of those two already covers it.
+fn coverage_plan(
+    root: &Path,
+    schema: &SchemaLocation,
+) -> Result<Vec<(PathBuf, RecursiveMode)>, WatchError> {
+    let parent = root
+        .parent()
+        .ok_or_else(|| WatchError::Backend("vault root has no parent".into()))?;
+    let mut plan = vec![
+        (root.to_owned(), RecursiveMode::Recursive),
+        (parent.to_owned(), RecursiveMode::NonRecursive),
+    ];
+    if let SchemaLocation::External {
+        parent: schema_parent,
+        ..
+    } = schema
+        && schema_parent != parent
+    {
+        plan.push((schema_parent.clone(), RecursiveMode::NonRecursive));
+    }
+    Ok(plan)
+}
+
+/// Install a whole coverage plan as **one** backend commit.
+///
+/// Registration is batched rather than performed one edge at a time because a
+/// backend may rebuild its whole event stream per registration call, so an
+/// edge-at-a-time installation pays that rebuild once per edge and spends the
+/// wait before the first heal can start. A commit installs the same edges the
+/// plan names, and post-registration delivery is the same either way. What the
+/// batch does change is the registration window itself: it delivers nothing,
+/// where a serial installation ran an intermediate stream over each prefix of
+/// the plan. Nothing consumes that window — [`watch`] returns no subscription
+/// until this call is past — so no fact reaches a caller either way.
+///
+/// **The batch is committed whether or not every edge was accepted.** A
+/// `PathsMut` dropped without a commit leaves the watcher in a state notify
+/// declines to specify — started, stopped, changes applied or ignored — so a
+/// refused edge commits what was staged before it and then returns that first
+/// refusal unchanged, path identity included. Partial coverage is never
+/// returned as success: the caller of a failed install has a watcher whose
+/// only sound use is to drop it, and dropping it is now deterministic.
+fn install(
+    watcher: &mut RecommendedWatcher,
+    plan: &[(PathBuf, RecursiveMode)],
+) -> Result<(), WatchError> {
+    let mut paths = watcher.paths_mut();
+    let refused = plan
+        .iter()
+        .find_map(|(path, mode)| paths.add(path, *mode).err());
+    let committed = paths.commit();
+    match refused {
+        Some(error) => Err(backend(error)),
+        None => committed.map_err(backend),
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault/schema path resolution.
@@ -707,6 +757,70 @@ mod tests {
             SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
         )))
+    }
+
+    fn external_schema(parent: &str) -> SchemaLocation {
+        let normalizer = normalizer();
+        SchemaLocation::External {
+            name: normalizer.normalize(Path::new("schema.yml")).unwrap(),
+            parent: PathBuf::from(parent),
+            normalizer,
+        }
+    }
+
+    #[test]
+    fn the_plan_covers_the_vault_tree_and_the_name_the_root_occupies() {
+        let normalizer = normalizer();
+        let in_vault =
+            SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
+        assert_eq!(
+            coverage_plan(Path::new("/vaults/notes"), &in_vault).unwrap(),
+            [
+                (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rootless_vault_path_is_refused_before_any_backend_exists() {
+        let normalizer = normalizer();
+        let in_vault =
+            SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
+        assert!(matches!(
+            coverage_plan(Path::new("/"), &in_vault),
+            Err(WatchError::Backend(_))
+        ));
+    }
+
+    #[test]
+    fn an_external_schema_adds_the_one_edge_the_vault_plan_does_not_reach() {
+        assert_eq!(
+            coverage_plan(
+                Path::new("/vaults/notes"),
+                &external_schema("/etc/norn/schemas")
+            )
+            .unwrap(),
+            [
+                (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
+                (
+                    PathBuf::from("/etc/norn/schemas"),
+                    RecursiveMode::NonRecursive
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_external_schema_beside_the_vault_root_adds_no_edge() {
+        assert_eq!(
+            coverage_plan(Path::new("/vaults/notes"), &external_schema("/vaults")).unwrap(),
+            [
+                (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
+            ]
+        );
     }
 
     #[test]

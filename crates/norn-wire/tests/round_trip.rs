@@ -15,7 +15,7 @@
 
 use norn_wire::{
     ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
-    UnknownFindingKind, UntrustedReason, WatcherLossCause,
+    UnknownFindingKind, UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -43,15 +43,26 @@ fn finding_kinds() -> Vec<FindingKind> {
     FindingKind::ALL.to_vec()
 }
 
-/// Every trust state, with one entry per reason behind `Untrusted`.
+/// Every phase an entry warms in.
+fn warming_phases() -> Vec<WarmingPhase> {
+    vec![
+        WarmingPhase::InstallingCoverage,
+        WarmingPhase::Healing,
+        WarmingPhase::ReleasingCoverage,
+    ]
+}
+
+/// Every trust state, with one entry per phase behind `Warming` and one per
+/// reason behind `Untrusted`.
 fn trust_states() -> Vec<TrustState> {
-    let mut states = vec![
-        TrustState::Unattached,
-        TrustState::warming(0, None),
-        TrustState::warming(0, Some(0)),
-        TrustState::warming(12, Some(400)),
-        TrustState::Ready,
-    ];
+    let mut states = vec![TrustState::Unattached, TrustState::Ready];
+    states.extend(warming_phases().into_iter().flat_map(|phase| {
+        [
+            TrustState::warming(phase, 0, None),
+            TrustState::warming(phase, 0, Some(0)),
+            TrustState::warming(phase, 12, Some(400)),
+        ]
+    }));
     states.extend(untrusted_reasons().into_iter().map(TrustState::untrusted));
     states
 }
@@ -149,8 +160,8 @@ fn a_trust_state_is_an_object_tagged_state() {
     assert_eq!(wire(&TrustState::Unattached), r#"{"state":"unattached"}"#);
     assert_eq!(wire(&TrustState::Ready), r#"{"state":"ready"}"#);
     assert_eq!(
-        wire(&TrustState::warming(12, Some(400))),
-        r#"{"state":"warming","healed":12,"total_estimate":400}"#
+        wire(&TrustState::warming(WarmingPhase::Healing, 12, Some(400))),
+        r#"{"state":"warming","phase":"healing","healed":12,"total_estimate":400}"#
     );
     assert_eq!(
         wire(&TrustState::untrusted(UntrustedReason::WatcherOverflow)),
@@ -165,16 +176,60 @@ fn a_trust_state_is_an_object_tagged_state() {
 #[test]
 fn an_unknown_estimate_is_the_field_written_null() {
     assert_eq!(
-        wire(&TrustState::warming(7, None)),
-        r#"{"state":"warming","healed":7,"total_estimate":null}"#
+        wire(&TrustState::warming(WarmingPhase::Healing, 7, None)),
+        r#"{"state":"warming","phase":"healing","healed":7,"total_estimate":null}"#
     );
     for json in [
-        r#"{"state":"warming","healed":7,"total_estimate":null}"#,
-        r#"{"state":"warming","healed":7}"#,
+        r#"{"state":"warming","phase":"healing","healed":7,"total_estimate":null}"#,
+        r#"{"state":"warming","phase":"healing","healed":7}"#,
     ] {
         let state: TrustState =
             serde_json::from_str(json).unwrap_or_else(|error| panic!("reading {json}: {error}"));
-        assert_eq!(state, TrustState::warming(7, None));
+        assert_eq!(state, TrustState::warming(WarmingPhase::Healing, 7, None));
+    }
+}
+
+/// The phase is a bare string beside the counters, and the two phases that
+/// count nothing are read where zero healed against an unknown total is the
+/// whole truth: acquiring what a read runs on, and giving it back.
+#[test]
+fn a_warming_phase_is_a_bare_string_beside_the_counters() {
+    assert_eq!(
+        wire(&TrustState::warming(
+            WarmingPhase::InstallingCoverage,
+            0,
+            None
+        )),
+        r#"{"state":"warming","phase":"installing_coverage","healed":0,"total_estimate":null}"#
+    );
+    assert_eq!(
+        wire(&TrustState::warming(
+            WarmingPhase::ReleasingCoverage,
+            0,
+            None
+        )),
+        r#"{"state":"warming","phase":"releasing_coverage","healed":0,"total_estimate":null}"#
+    );
+}
+
+/// The phase is required, and the two fields beside it are the contrast: an
+/// absent estimate is the unknown the type already models, while an absent
+/// phase is a warming state nobody said anything about. Nothing defaults it —
+/// a reader handed one of these learns that the writer's phase vocabulary and
+/// its own have parted, rather than being told the entry is installing
+/// coverage or healing when no one claimed either.
+#[test]
+fn a_warming_state_without_a_phase_is_refused_rather_than_defaulted() {
+    for json in [
+        r#"{"state":"warming","healed":0,"total_estimate":null}"#,
+        r#"{"state":"warming","healed":12,"total_estimate":400}"#,
+        r#"{"state":"warming","healed":0}"#,
+        r#"{"state":"warming","phase":null,"healed":0,"total_estimate":null}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<TrustState>(json).is_err(),
+            "reading {json} produced a warming state with a phase nobody wrote"
+        );
     }
 }
 
@@ -385,6 +440,18 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
         )
         .is_err(),
         "a watcher-loss cause nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<TrustState>(
+            r#"{"state":"warming","phase":"daydreaming","healed":0}"#
+        )
+        .is_err(),
+        "a warming phase nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<TrustState>(r#"{"state":"warming","phase":null,"healed":0}"#)
+            .is_err(),
+        "a null phase read back as a phase"
     );
     assert!(
         serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),

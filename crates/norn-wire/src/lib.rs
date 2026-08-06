@@ -50,13 +50,14 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`], [`FindingKind`] and [`WatcherLossCause`] are; an
-//! enum whose variants may carry a payload is a tagged object, as
-//! [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`] are. The flat
-//! string keeps a code matchable as a value; the tagged object keeps a
-//! payload's arrival from changing what the value is. Two of those three flat
-//! strings are code registries; [`WatcherLossCause`] is not a code but a
-//! nested bare-string value under `cause`, carrying no namespace.
+//! string, as [`ReasonCode`], [`FindingKind`], [`WatcherLossCause`] and
+//! [`WarmingPhase`] are; an enum whose variants may carry a payload is a
+//! tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
+//! are. The flat string keeps a code matchable as a value; the tagged object
+//! keeps a payload's arrival from changing what the value is. Two of those
+//! four flat strings are code registries; [`WatcherLossCause`] and
+//! [`WarmingPhase`] are not codes but nested bare-string values under `cause`
+//! and `phase`, carrying no namespace.
 //!
 //! **Doc comments on a type, a variant or a field are published.** schemars
 //! lifts them verbatim into the schema `description`s an MCP consumer reads,
@@ -115,7 +116,9 @@
 //! that is the value of `cause` rather than a tag. Both are read after the
 //! code has been matched, so they carry no namespace, never appear in a code
 //! list, and are not values a client dispatches on before it knows the code.
-//! Structure grows there without the code list growing.
+//! Structure grows there without the code list growing. [`WarmingPhase`] sits
+//! the same way inside [`TrustState`]: a `snake_case` value under `phase`,
+//! read after the `state` tag has been matched.
 //!
 //! **A `detail` string is prose and never a match target.** Where a payload
 //! carries one — an environmental refusal, a lost watcher — it exists for a
@@ -139,4 +142,4 @@ mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, UnknownFindingKind};
-pub use trust::{TrustState, UntrustedReason, WatcherLossCause};
+pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};

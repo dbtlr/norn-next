@@ -15,9 +15,25 @@
 //! [`UntrustedReason::WatcherLost`] and [`UntrustedReason::EnvironmentalRefusal`]
 //! are the variants whose payloads grow — how far a heal has come, what made a
 //! state untrustworthy, what ended watcher coverage, what the environment
-//! refused. Each is `#[non_exhaustive]` at the variant level and built through
-//! its constructor, so a field arriving in one of them extends the payload
-//! rather than breaking every caller that destructured it.
+//! refused. Each is `#[non_exhaustive]` at the variant level, so a field
+//! arriving in one of them is not a compile error for a caller that
+//! destructured it: a pattern over such a variant already has to accept the
+//! fields it does not name. Construction is what the arriving field does
+//! break, and deliberately — the constructors take their fields positionally,
+//! so a payload that grows one is a signature change every producer is made to
+//! answer for rather than a default nobody chose.
+//!
+//! **Warming names what it is doing, not only how far it has come.** An entry
+//! reaches readable state through work of two kinds — acquiring what a read
+//! runs on, then deriving documents — and only the second of them has anything
+//! to count. Counters alone therefore cannot tell a heal that has not started
+//! from one that is not progressing: both read as zero healed against an
+//! unknown total. [`WarmingPhase`] is what separates them, so a caller waiting
+//! on an entry, and an operator reading why a wait expired, learn which of the
+//! two the entry is in. A third phase names the leg that runs the other way,
+//! giving those resources back; it counts nothing either, and it is the reason
+//! [`TrustState::Warming`] is read as "attached and not readable" rather than
+//! as a promise about where the entry is heading.
 //!
 //! **Two watcher reasons, split by who resumes.** [`UntrustedReason::WatcherOverflow`]
 //! is a running watcher that reported less than it saw, and the entry re-heals
@@ -31,18 +47,23 @@ use serde::{Deserialize, Serialize};
 /// A vault entry's trust state.
 ///
 /// On the wire the state is an object tagged `state`: `{"state":"ready"}`,
-/// `{"state":"warming","healed":12,"total_estimate":400}`.
+/// `{"state":"warming","phase":"healing","healed":12,"total_estimate":400}`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TrustState {
     /// Registered, with no derived state to read from yet.
     Unattached,
-    /// Attached and healing. The entry is not readable until the heal
-    /// finishes.
+    /// Attached and not readable. The entry is either working toward readable
+    /// derived state or giving up what it holds; `phase` says which, and the
+    /// counters say how far the counted work has come. Reads do not answer
+    /// from the entry in either case.
     #[non_exhaustive]
     Warming {
-        /// Documents the heal has finished with.
+        /// The kind of work the entry is doing.
+        phase: WarmingPhase,
+        /// Documents the heal has finished with. It stands at zero until the
+        /// heal begins.
         healed: u64,
         /// Documents the heal expects to touch, and `null` when that estimate
         /// is not known yet. The count the heal finishes at may differ from
@@ -61,10 +82,12 @@ pub enum TrustState {
 }
 
 impl TrustState {
-    /// An entry healing, `healed` documents in, against `total_estimate`
-    /// documents expected — `None` while that estimate is not known yet.
-    pub const fn warming(healed: u64, total_estimate: Option<u64>) -> Self {
+    /// An entry warming in `phase`, `healed` documents in, against
+    /// `total_estimate` documents expected — `None` while that estimate is not
+    /// known yet.
+    pub const fn warming(phase: WarmingPhase, healed: u64, total_estimate: Option<u64>) -> Self {
         TrustState::Warming {
+            phase,
             healed,
             total_estimate,
         }
@@ -74,6 +97,41 @@ impl TrustState {
     pub const fn untrusted(reason: UntrustedReason) -> Self {
         TrustState::Untrusted { reason }
     }
+}
+
+/// The kind of work an entry is doing while it is attached and not readable.
+///
+/// On the wire a phase is the flat string itself: `"installing_coverage"`,
+/// `"healing"`, `"releasing_coverage"`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WarmingPhase {
+    /// The entry is acquiring everything a read runs on, before it reads
+    /// anything: the vault's own working area, sole maintainership of it,
+    /// change detection over the vault tree, and the derived state reads
+    /// answer from. All of it precedes the first document, so the counters
+    /// beside this phase stand at zero against an unknown total, and an entry
+    /// may hold here for a while on a loaded machine without anything being
+    /// wrong.
+    InstallingCoverage,
+    /// Documents are being derived, and the counters beside this phase advance
+    /// as they are.
+    Healing,
+    /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
+    /// acquired: change detection over the vault ends, the derived state is
+    /// closed, and sole maintainership of the vault is released. Nothing is
+    /// counted here, so the counters beside this phase stand at zero against an
+    /// unknown total.
+    ///
+    /// This phase is the one that does not end at [`TrustState::Ready`]: it
+    /// ends at [`TrustState::Unattached`], and an entry only reaches
+    /// [`TrustState::Ready`] from here by being demanded again afterwards. It
+    /// sits under [`TrustState::Warming`] because that is the state meaning
+    /// "attached and not readable", which is what the entry is while its
+    /// resources are still being released — a demand arriving now neither
+    /// blocks nor fails, and is honored once the release finishes.
+    ReleasingCoverage,
 }
 
 /// Why an entry's derived state cannot be trusted.
