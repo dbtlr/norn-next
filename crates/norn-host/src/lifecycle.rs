@@ -1944,25 +1944,31 @@ mod tests {
     /// that never arrives is reported rather than waited on. A 20ms
     /// `FakeOps::recover` alone can eat a tenth of this on a quiet machine,
     /// so the bound is a wall clock, not an iteration count that races it.
+    ///
+    /// It is tighter than the bound the production suite in `production`
+    /// declares, and deliberately: the subjects here converge over a channel
+    /// and a fake, while those cross a real filesystem and a real watcher.
     fn lifecycle_wait_budget() -> Budget {
         Budget::new(Duration::from_secs(10), Duration::from_millis(250))
     }
 
+    /// Wait for one exact trust state, reporting the last state observed.
+    ///
+    /// The failure is the testkit's own: which bound it passed, how long it
+    /// ran, how many times it asked, and the state it last saw. A wait that
+    /// expires because one probe was slow and a wait that expires because the
+    /// state never came are different diagnoses, and only that report tells
+    /// them apart.
     fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
         wait_until(
-            &format!("state to become {expected:?}"),
+            &format!("the trust state to become {expected:?}"),
             lifecycle_wait_budget(),
             || match host.state(name) {
                 Some(state) if state == expected => Observed::Met(()),
-                state => Observed::pending(format!("{state:?}")),
+                state => Observed::pending(format!("the state is {state:?}")),
             },
         )
-        .unwrap_or_else(|failure| {
-            panic!(
-                "state did not become {expected:?}; it is {}",
-                failure.last_state
-            )
-        });
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// Wait for the fake to have given back `expected` attachments, on the one
