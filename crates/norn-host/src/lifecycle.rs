@@ -1733,12 +1733,13 @@ mod tests {
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
         /// The batch source for the dispatcher's own unprompted poll ticks.
-        empty_poll_batches: AtomicUsize,
-        rescan_poll_batch: std::sync::atomic::AtomicBool,
+        /// It yields empty batches only; a rescan is something only the
+        /// handoff source below hands out.
+        ambient_poll_batches: AtomicUsize,
         /// The batch source for a job's own handoff drain — the poll loop
         /// `drain_observed` runs after `attach`, `reconcile`, `recover` or
         /// `maintain` returns, on the same thread. Separate from
-        /// `empty_poll_batches` so a caller that wants a handoff to saturate
+        /// `ambient_poll_batches` so a caller that wants a handoff to saturate
         /// does not race the dispatcher's own ambient tick for the same
         /// batches; see `ON_JOB_THREAD`.
         handoff_poll_batches: AtomicUsize,
@@ -1844,14 +1845,15 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
-            let (rescan_flag, batch_count) = if ON_JOB_THREAD.with(Cell::get) {
-                (&self.handoff_rescan_poll_batch, &self.handoff_poll_batches)
-            } else {
-                (&self.rescan_poll_batch, &self.empty_poll_batches)
-            };
-            if rescan_flag.swap(false, Ordering::SeqCst) {
+            let on_job_thread = ON_JOB_THREAD.with(Cell::get);
+            if on_job_thread && self.handoff_rescan_poll_batch.swap(false, Ordering::SeqCst) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
             }
+            let batch_count = if on_job_thread {
+                &self.handoff_poll_batches
+            } else {
+                &self.ambient_poll_batches
+            };
             if batch_count
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                     value.checked_sub(1)
@@ -2795,7 +2797,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = attached_awaiting_recovery(&ops);
         claim_for_a_poll(&ops);
-        ops.empty_poll_batches.store(1, Ordering::SeqCst);
+        ops.ambient_poll_batches.store(1, Ordering::SeqCst);
         let lease = demand_inside_a_claim(&host, &name);
 
         ops.poll_release.store(true, Ordering::SeqCst);
