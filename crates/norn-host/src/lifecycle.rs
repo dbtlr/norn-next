@@ -507,6 +507,31 @@ fn finish_release<O: EntryOps>(
     }
 }
 
+/// Answer for a scheduled job that found the attachment taken at its own
+/// epoch.
+///
+/// The entry still stands at this job's epoch, so nothing has moved on from the
+/// work the job carries: the one claim that takes an attachment without moving
+/// the epoch on is the dispatcher's own watcher poll, and a pin standing here
+/// says such a claim is live. That claim gives the attachment back when it
+/// ends, so the job returns to `pending_dispatch` for a later dispatcher tick
+/// rather than being dropped, and the entry stays runnable because the work is
+/// still scheduled against it.
+///
+/// Where no pin stands, no claim is holding the attachment and none will give
+/// one back, so the job ends here rather than waiting for coverage that is not
+/// coming.
+fn restore_lost_claim<A>(state: &mut EntryState<A>, job: Job) {
+    if state.safety_pins == 0 {
+        state.runnable = false;
+        return;
+    }
+    state.runnable = true;
+    if state.pending_dispatch.is_none() {
+        state.pending_dispatch = Some(job);
+    }
+}
+
 fn dispatch_pending<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -1449,7 +1474,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 state.safety_pins += 1;
                 let Some(attachment) = state.attachment.take() else {
                     state.safety_pins -= 1;
-                    state.runnable = false;
+                    restore_lost_claim(&mut state, Job::Recover(name.clone(), epoch));
                     return;
                 };
                 attachment
@@ -1532,7 +1557,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 state.safety_pins += 1;
                 let Some(attachment) = state.attachment.take() else {
                     state.safety_pins -= 1;
-                    state.runnable = false;
+                    restore_lost_claim(&mut state, Job::Reconcile(name.clone(), epoch));
                     return;
                 };
                 let work = ReconcileWork {
@@ -1648,7 +1673,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 state.safety_pins += 1;
                 let Some(attachment) = state.attachment.take() else {
                     state.safety_pins -= 1;
-                    state.runnable = false;
+                    restore_lost_claim(&mut state, Job::Maintenance(name.clone(), epoch));
                     return;
                 };
                 attachment
@@ -4282,6 +4307,63 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
         assert_eq!(host.state(&name), Some(TrustState::Ready));
+        drop(lease);
+    }
+
+    /// A job dispatched against an entry whose attachment a watcher poll then
+    /// claims is the entry's work either way. The poll gives back what it took,
+    /// so the job waits for the tick that follows rather than disappearing with
+    /// the trust state it was dispatched to publish.
+    #[test]
+    fn a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        // The claim the follow-up below loses: a poll holding the attachment
+        // at the very epoch the follow-up was dispatched against.
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = entry.gate.lock().unwrap().epoch;
+        // The send a job leg makes when it hands the entry its next job: no
+        // marker beside it, because the leg sent it itself.
+        dispatch_followup(&host.shared, Job::Reconcile(name.clone(), epoch));
+        wait_until(
+            "the job that lost the attachment to record itself for a later tick",
+            lifecycle_wait_budget(),
+            || {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if state.pending_dispatch.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the entry has no job scheduled".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        retry_pending_dispatches(&host.shared);
+        wait_until(
+            "the restored reconcile to run",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                if reconciles == 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
     }
 
