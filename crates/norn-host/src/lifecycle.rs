@@ -823,6 +823,23 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 /// could say what any root resolves to — so it neither confirms nor contradicts
 /// a conflict, and [`EntryState::parked`] ranks the conflict first for exactly
 /// that reason. A read that can reach the root again is what retires it.
+///
+/// What the refusal gives back is what the entry itself holds, whatever leg is
+/// registered against it: a leg standing over parked coverage holds none, so
+/// leaving the release to that leg would leave a refused entry serving the
+/// coverage every producer that reads parked coverage goes on taking. The
+/// registration ends with the taking, for the reason [`Claim::end_running_leg`]
+/// gives.
+///
+/// Coverage out with a leg is that leg's, and comes back where the leg ends:
+/// the invalidation above moves the entry past every leg's epoch, so each one
+/// hands its coverage up rather than parking it back here. A release already in
+/// flight holds the coverage the same way and publishes its own end.
+///
+/// The entry stays untrusted and owing a recovery once the coverage is back,
+/// which is why the release here is the ops alone: this is a park with the
+/// resources given back under it, not a teardown, and a demand asking for the
+/// recovery is what serves the entry again.
 fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
     let Some(entry) = shared.entries.get(name) else {
         return;
@@ -834,11 +851,26 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         state.require_recovery();
         state.identity_refused = Some(detail.clone());
         state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
-        if state.claim.leg().is_none() && !state.detach_in_flight {
-            state.claim.open();
-            state.coverage.give_up()
-        } else {
-            None
+        match state.coverage.give_up() {
+            // The entry holds its own coverage, whatever leg is registered
+            // against it. The refusal gives it back, and the registration ends
+            // with the taking: what would otherwise stand is a leg recorded as
+            // holding coverage the entry no longer has.
+            Some(attachment) => {
+                state.claim.end_running_leg();
+                state.claim.open();
+                Some(attachment)
+            }
+            // Coverage out with a leg is that leg's, and comes back where the
+            // leg ends. The gate stays where it is: a leg running against the
+            // entry is holding it, and a release in flight is holding the entry
+            // for the publication it ends with.
+            None => {
+                if state.claim.leg().is_none() && !state.detach_in_flight {
+                    state.claim.open();
+                }
+                None
+            }
         }
     };
     if let Some(attachment) = attachment {
@@ -3385,6 +3417,78 @@ mod tests {
         let state = entry.gate.lock().unwrap();
         assert!(!state.coverage.in_hand());
         assert!(state.pending.is_empty());
+    }
+
+    /// An identity refusal reaching an entry whose coverage is parked gives it
+    /// back too, whatever leg is registered against the entry, and the refused
+    /// entry is polled by nothing afterwards.
+    ///
+    /// The refusal is a park with the resources given back under it: the entry
+    /// stays untrusted and owing a recovery, and a demand asking for that
+    /// recovery is what serves it again.
+    #[test]
+    fn an_identity_refusal_over_a_leg_standing_at_parked_coverage_releases_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+        {
+            // The window between a leg's registration and its taking the
+            // entry's coverage, reached under the lock a running leg would
+            // reach it under.
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            assert!(state.coverage.in_hand(), "the entry parked its coverage");
+        }
+
+        refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "a refused entry kept the coverage no leg was holding"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                !state.coverage.in_hand(),
+                "a refused entry is still serving coverage to whatever polls it"
+            );
+            assert!(
+                state.claim.leg().is_none(),
+                "a leg holding none of the entry's coverage is still registered as what holds it"
+            );
+            assert!(
+                state.recovery_required,
+                "the refused entry owes no recovery"
+            );
+            assert!(
+                !state.claim.is_held(),
+                "a refused entry holds its own gate against the recovery a demand asks for"
+            );
+            assert!(matches!(state.trust, TrustState::Untrusted { .. }));
+        }
+
+        let polls = ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0);
+        poll_watchers(&host.shared);
+        poll_watchers(&host.shared);
+        assert_eq!(
+            ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0),
+            polls,
+            "a refused entry served its coverage to a watcher poll"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "a refused entry re-attached"
+        );
     }
 
     /// A refusal reaching an entry whose release is already under way leaves
