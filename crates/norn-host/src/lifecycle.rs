@@ -2296,21 +2296,32 @@ mod tests {
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
-        /// The batch source for the dispatcher's own unprompted poll ticks.
-        /// It yields empty batches only; a rescan is something only the
-        /// handoff source below hands out.
+        /// The batch sources for a poll that runs off a job thread: the
+        /// dispatcher's own unprompted tick, and the tick a case drives itself
+        /// by calling [`poll_watchers`]. Each batch is spent by one poll —
+        /// empty from the first counter, a vault-wide rescan from the second.
         ambient_poll_batches: AtomicUsize,
-        /// The batch source for a job's own handoff drain — the poll loop
+        ambient_rescan_poll_batches: AtomicUsize,
+        /// The batch sources for a job's own handoff drain — the poll loop
         /// `drain_observed` runs after `attach`, `reconcile`, `recover` or
-        /// `maintain` returns, on the same thread. Separate from
-        /// `ambient_poll_batches` so a caller that wants a handoff to saturate
-        /// does not race the dispatcher's own ambient tick for the same
-        /// batches; see `ON_JOB_THREAD`.
+        /// `maintain` returns, on the same thread. Separate from the ambient
+        /// pair above so a caller that wants a handoff to saturate does not
+        /// race the dispatcher's own ambient tick for the same batches; see
+        /// `ON_JOB_THREAD`.
         handoff_poll_batches: AtomicUsize,
-        handoff_rescan_poll_batch: std::sync::atomic::AtomicBool,
+        handoff_rescan_poll_batches: AtomicUsize,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
+    }
+
+    /// Take one batch off a source, reporting whether there was one to take.
+    fn spend_one(source: &AtomicUsize) -> bool {
+        source
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
     }
 
     impl EntryOps for Arc<FakeOps> {
@@ -2429,20 +2440,15 @@ mod tests {
                 return Err(JobFailure::LostMaintainership);
             }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
-            if on_job_thread && self.handoff_rescan_poll_batch.swap(false, Ordering::SeqCst) {
+            let (empty, rescans) = if on_job_thread {
+                (&self.handoff_poll_batches, &self.handoff_rescan_poll_batches)
+            } else {
+                (&self.ambient_poll_batches, &self.ambient_rescan_poll_batches)
+            };
+            if spend_one(rescans) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
             }
-            let batch_count = if on_job_thread {
-                &self.handoff_poll_batches
-            } else {
-                &self.ambient_poll_batches
-            };
-            if batch_count
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                    value.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if spend_one(empty) {
                 return Ok(Some(Batch::default()));
             }
             Ok(None)
@@ -3946,7 +3952,7 @@ mod tests {
     #[test]
     fn attach_handoff_preserves_observed_rescan_as_untrusted() {
         let ops = Arc::new(FakeOps::default());
-        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.block_reconcile_at.store(1, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
 
@@ -3995,7 +4001,7 @@ mod tests {
         // `accept_batch` below is also this test's only scheduler, and a batch
         // carrying no fact schedules nothing against an entry a tick has
         // claimed — there is no fact left behind for the claim to find.
-        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile_at.store(2, Ordering::SeqCst);
@@ -6044,7 +6050,7 @@ mod tests {
         ops.block_maintenance.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
         wait_for_flag("maintenance_started", &ops.maintenance_started);
-        ops.handoff_rescan_poll_batch.store(true, Ordering::SeqCst);
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile.store(true, Ordering::SeqCst);
