@@ -1378,42 +1378,6 @@ impl<O: EntryOps> Host<O> {
         self.demand(name)
     }
 
-    /// Merge watcher facts and schedule at most one job for the entry.
-    pub fn accept_batch(&self, name: &VaultName, batch: Batch) -> Result<(), HostError> {
-        let Some(entry) = self.shared.entries.get(name) else {
-            return Ok(());
-        };
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let rescan = !batch.rescans().is_empty();
-        state.pending.merge(batch);
-        if state.attachment.is_none() && !state.claim.is_held() {
-            return Ok(());
-        }
-        let schedulable =
-            !state.claim.is_held() && state.attachment.is_some() && !state.recovery_required;
-        // Saying an entry is no longer serving is a claim that work is owed on
-        // it, and the claim stands only where something answers it: the job
-        // scheduled below, or the facts merged above, which the claim holding
-        // this entry finds when it gives the attachment back. A batch carrying
-        // no fact into an entry nothing can be scheduled against leaves the
-        // entry exactly as it was.
-        if schedulable || !state.pending.is_empty() {
-            if rescan {
-                state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
-            } else if matches!(state.trust, TrustState::Ready) {
-                state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
-            }
-        }
-        if schedulable {
-            state
-                .claim
-                .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
-            drop(state);
-            dispatch_pending(&self.shared, entry)?;
-        }
-        Ok(())
-    }
-
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {
@@ -1490,13 +1454,15 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                                     .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
                             );
                         } else if !state.pending.is_empty() && !state.recovery_required {
-                            // Facts that arrived while this claim held the
-                            // entry: `accept_batch` finds an entry it cannot
-                            // schedule against and merges them alone, so the
-                            // claim that took the attachment is what schedules
-                            // the reconcile they are owed. Maintenance above
-                            // carries them instead where both are due, because
-                            // its own handoff ends in the same reconcile.
+                            // Facts standing in the entry with nothing
+                            // scheduled against them. This poll is what holds
+                            // the entry, so it is what schedules the reconcile
+                            // they are owed; maintenance above carries them
+                            // instead where both are due, because its own
+                            // handoff ends in the same reconcile. An entry
+                            // owing a recovery schedules neither: what
+                            // reconciles facts is coverage, and the recovery a
+                            // demand asks for is what installs it again.
                             schedule = Some(
                                 state
                                     .claim
@@ -2441,9 +2407,15 @@ mod tests {
             }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
             let (empty, rescans) = if on_job_thread {
-                (&self.handoff_poll_batches, &self.handoff_rescan_poll_batches)
+                (
+                    &self.handoff_poll_batches,
+                    &self.handoff_rescan_poll_batches,
+                )
             } else {
-                (&self.ambient_poll_batches, &self.ambient_rescan_poll_batches)
+                (
+                    &self.ambient_poll_batches,
+                    &self.ambient_rescan_poll_batches,
+                )
             };
             if spend_one(rescans) {
                 return Ok(Some(Batch::rescan(RescanScope::Vault)));
@@ -2666,6 +2638,22 @@ mod tests {
                 Observed::Met(())
             } else {
                 Observed::pending(format!("{detaches} detaches so far"))
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// Wait for the fake to have entered `expected` attaches, on the one
+    /// budget, reporting how many it had entered when the wait gave up. The
+    /// count rises before an attach that blocks starts waiting, so a case that
+    /// wants its workers occupied waits here.
+    fn wait_for_attaches(ops: &FakeOps, expected: usize, what: &str) {
+        wait_until(what, lifecycle_wait_budget(), || {
+            let attaches = ops.attaches.load(Ordering::SeqCst);
+            if attaches == expected {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{attaches} attaches so far"))
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
@@ -2989,6 +2977,52 @@ mod tests {
         );
     }
 
+    /// How many watcher polls have reached the vault.
+    fn polls_of(ops: &Arc<FakeOps>, name: &VaultName) -> usize {
+        ops.polls
+            .lock()
+            .expect("poll counts poisoned")
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Arm one batch on the given source and drive one round of watcher polls.
+    ///
+    /// The poll is driven rather than ambient, so the facts land in the entry
+    /// the caller aimed them at rather than wherever a dispatcher tick arrived
+    /// first. A poll skips an entry whose claim is held, and an unspent batch
+    /// stays armed for whichever poll runs next, so the source being empty is
+    /// what says the caller got the poll it named.
+    fn report_through_a_driven_poll(source: &AtomicUsize, host: &Host<Arc<FakeOps>>) {
+        source.store(1, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        assert_eq!(
+            source.load(Ordering::SeqCst),
+            0,
+            "the driven poll did not reach the entry"
+        );
+    }
+
+    /// Arm one batch on the given source and wait for the dispatcher's own tick
+    /// to spend it. The wait is what makes the arrival something the case can
+    /// order against, rather than something it assumes a tick reached.
+    fn report_through_an_ambient_poll(source: &AtomicUsize) {
+        source.store(1, Ordering::SeqCst);
+        wait_until(
+            "a dispatcher tick to report the armed batch",
+            lifecycle_wait_budget(),
+            || {
+                if source.load(Ordering::SeqCst) == 0 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the batch is still armed".to_string())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     /// The dispatcher's own watcher poll reaches the entry unprompted, so the
     /// leg needs nothing to provoke it.
     fn by_a_watcher_poll(
@@ -3015,16 +3049,15 @@ mod tests {
     }
 
     /// Watcher facts schedule the reconcile that reports the failure, and the
-    /// rescan is what keeps them scheduling it: a batch merged into an entry a
-    /// poll claim already holds is picked up by the next tick only where the
-    /// entry has something pending.
+    /// poll that observes them is the one driven here: this family runs without
+    /// ambient polling, so the tick that carries the facts in is the case's
+    /// own.
     fn by_a_reconciled_batch(
-        _: &Arc<FakeOps>,
+        ops: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
-        name: &VaultName,
+        _: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        host.accept_batch(name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, host);
         None
     }
 
@@ -3576,12 +3609,16 @@ mod tests {
         drop(lease);
     }
 
-    /// Watcher facts arriving while an entry's resources are going back are
-    /// merged without touching the window: the entry holds nothing to reconcile
-    /// them against, so the phase that names the release stands until the
-    /// release ends it.
+    /// Watcher facts standing in an entry whose resources are going back leave
+    /// the window alone: the entry holds nothing to reconcile them against, so
+    /// the phase that names the release stands until the release ends it, and
+    /// the release takes the facts with the resources.
+    ///
+    /// The facts are written under the entry gate. The detach leg holds the
+    /// claim for the length of the window, so every poll passes the entry over,
+    /// and the gate is where facts reaching a release really stand.
     #[test]
-    fn watcher_facts_arriving_in_a_release_window_leave_it_standing() {
+    fn watcher_facts_standing_in_a_release_window_leave_it_standing() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::ZERO);
         // The lease is held until the release is armed: the idle interval here
@@ -3594,13 +3631,32 @@ mod tests {
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            assert!(
+                state.detach_in_flight,
+                "the release these facts stand in is not in flight"
+            );
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+        }
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+
+        // The facts went back with the resources they described, so the
+        // coverage installed next owes nothing to a vault it never watched.
+        let lease = host.demand(&name).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "the release left facts standing for the next attach to reconcile"
+        );
+        drop(lease);
     }
 
     /// Destruction is a teardown like any other: the entry names the leg it is
@@ -3770,8 +3826,8 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         drop(lease);
         for _ in 0..3 {
-            host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-                .unwrap();
+            ops.ambient_rescan_poll_batches
+                .fetch_add(1, Ordering::SeqCst);
             // Churn is what this test feeds the dispatcher, so the gap is the
             // input rather than a wait: it spaces the batches across several
             // dispatcher ticks instead of collapsing them into one.
@@ -3915,6 +3971,10 @@ mod tests {
         drop((retried, held));
     }
 
+    /// The invalidation the recovery drains is the vault-wide rescan the
+    /// terminal poll left standing when it lost coverage: nothing that was
+    /// watched while coverage was gone is known, so the entry serves again only
+    /// after the reconcile that rereads it.
     #[test]
     fn recover_drains_pending_invalidations_before_publishing_ready() {
         let ops = Arc::new(FakeOps::default());
@@ -3922,8 +3982,6 @@ mod tests {
         // Held across the wait: the recovery this test counts is the one this
         // lease asks for, and a lease dropped before it runs withdraws it.
         let lease = host.demand(&name).unwrap();
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
         drop(lease);
@@ -3975,14 +4033,13 @@ mod tests {
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
 
-        // The handoff drain's own batch source, not the dispatcher's ambient
-        // one: a shared counter would let an ambient tick spend a batch this
-        // saturation depends on before `accept_batch` below ever schedules
-        // the reconcile that is supposed to drain it.
+        // The handoff drain's own batch source, not the source the driven poll
+        // below spends: a shared counter would let that poll take a batch this
+        // saturation depends on before it ever schedules the reconcile that is
+        // supposed to drain it.
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
@@ -3997,15 +4054,16 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         // See the sibling saturation test above: the handoff drain's own
-        // batch source, isolated from the dispatcher's ambient ticks. The
-        // `accept_batch` below is also this test's only scheduler, and a batch
-        // carrying no fact schedules nothing against an entry a tick has
-        // claimed — there is no fact left behind for the claim to find.
+        // batch source, isolated from the poll the case drives. The rescan
+        // this test is about is the one the handoff observes, so the poll
+        // below reports a batch carrying no fact — the reconcile it schedules
+        // is what runs the handoff, and the entry stays trusted until the
+        // handoff itself says otherwise.
         ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile_at.store(2, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::default()).unwrap();
+        report_through_a_driven_poll(&ops.ambient_poll_batches, &host);
 
         wait_until(
             "a second reconcile, saturating the handoff",
@@ -4062,8 +4120,10 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.terminal_reconcile.store(true, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        // The reconcile is scheduled by a dispatcher tick that finds facts:
+        // the subject is the leg's own failure, so the tick that starts it is
+        // the ambient one.
+        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
         wait_for_state(&host, &name, backend_lost());
     }
 
@@ -4074,15 +4134,17 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
         wait_for_state(
             &host,
             &name,
             TrustState::untrusted(UntrustedReason::environmental_refusal("refused")),
         );
         let failed_count = ops.reconciles.load(Ordering::SeqCst);
-        host.accept_batch(&name, Batch::default()).unwrap();
+        // The later fact reaches the entry through a tick of its own, and the
+        // wait for the batch to be spent is what says the tick got there: the
+        // entry owes a recovery, so the poll reporting it schedules nothing.
+        report_through_an_ambient_poll(&ops.ambient_poll_batches);
         settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), failed_count);
         assert_eq!(
@@ -4113,7 +4175,10 @@ mod tests {
             &name,
             TrustState::untrusted(UntrustedReason::environmental_refusal("refused")),
         );
-        host.accept_batch(&name, Batch::default()).unwrap();
+        // The later fact reaches the entry through a tick of its own, and the
+        // wait for the batch to be spent is what says the tick got there: the
+        // entry owes a recovery, so the poll reporting it schedules nothing.
+        report_through_an_ambient_poll(&ops.ambient_poll_batches);
         settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -4147,8 +4212,9 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
 
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        // A dispatcher tick reporting facts is what puts a reconcile in
+        // flight; which tick it was is not this case's subject.
+        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
 
         refuse_root_identity(&root);
@@ -4184,8 +4250,9 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        // A dispatcher tick reporting facts is what puts a reconcile in
+        // flight; which tick it was is not this case's subject.
+        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let drop_returned = Arc::clone(&returned);
@@ -5301,9 +5368,9 @@ mod tests {
 
     /// A claim gives back an entry that has a job scheduled against it with its
     /// gate still held. The gate stands for the job the claim did not take
-    /// away, so nothing may claim the entry out from under it — a batch
-    /// arriving here merges its facts and schedules nothing, and the job that
-    /// was waiting runs at the epoch it was dispatched against.
+    /// away, so nothing may claim the entry out from under it — a later tick
+    /// passes the entry over, and the job that was waiting runs at the epoch it
+    /// was dispatched against.
     #[test]
     fn a_poll_giving_an_entry_back_leaves_the_job_waiting_on_it_dispatchable() {
         let ops = Arc::new(FakeOps::default());
@@ -5351,12 +5418,20 @@ mod tests {
         // the other vault, which is the window a claim taken here would leave
         // it stranded in.
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        host.accept_batch(&b, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         retry_pending_dispatches(&host.shared);
-        host.accept_batch(&a, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+
+        // A tick reaching the entry now finds the gate standing for the job in
+        // the channel, so it takes nothing: the entry is passed over, and the
+        // job runs at the epoch it was dispatched against.
+        let polled_before = polls_of(&ops, &a);
+        poll_watchers(&host.shared);
+        assert_eq!(
+            polls_of(&ops, &a),
+            polled_before,
+            "a tick claimed an entry whose gate stands for a job in the channel"
+        );
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
@@ -5549,15 +5624,12 @@ mod tests {
         let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
         let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
-        let holding_lease = host.demand(&holding).unwrap();
-        wait_for_state(&host, &holding, TrustState::Ready);
 
         // The one worker goes to the other vault, so a job sent for the entry
         // under test stays in the channel until this test lets the worker go.
-        ops.block_reconcile_at.store(1, Ordering::SeqCst);
-        host.accept_batch(&holding, Batch::rescan(RescanScope::Vault))
-            .unwrap();
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
 
         let entry = host.shared.entries.get(&subject).unwrap();
         let superseded = entry
@@ -5582,9 +5654,10 @@ mod tests {
         );
 
         // The entry moves past that job and schedules work of its own, which
-        // the occupied slot defers to a later tick.
-        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        // the occupied slot defers to a later tick. The other vault's claim is
+        // held by the attach blocking the worker, so this tick reaches the
+        // entry under test alone.
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         let (queued, scheduled) = {
             let state = entry.gate.lock().expect("entry gate poisoned");
             (state.claim.slot(), state.claim.marker().map(Job::epoch))
@@ -5597,7 +5670,7 @@ mod tests {
         );
 
         // The worker frees up and takes the superseded job off the channel.
-        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
         wait_until(
             "the arrival at a superseded epoch to give the queue slot back",
             lifecycle_wait_budget(),
@@ -5610,7 +5683,11 @@ mod tests {
 
         retry_pending_dispatches(&host.shared);
         wait_for_state(&host, &subject, TrustState::Ready);
-        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            1,
+            "the job the entry moved past ran anyway"
+        );
         drop(lease);
         drop(holding_lease);
     }
@@ -5624,31 +5701,24 @@ mod tests {
     fn an_arrival_at_a_superseded_epoch_leaves_the_slot_of_the_job_that_replaced_it() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("a").unwrap();
-        let reconciling = VaultName::new("b").unwrap();
+        let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host = host_without_ambient_polling(
-            Arc::clone(&ops),
-            &[&subject, &reconciling, &attaching],
-            2,
-        );
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
         let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
-        let reconciling_lease = host.demand(&reconciling).unwrap();
-        wait_for_state(&host, &reconciling, TrustState::Ready);
 
         // Both workers go to vaults that are not the one under test: the
         // channel then holds what this test sends for it, and has the room a
-        // duplicate would take.
-        ops.block_reconcile_at.store(1, Ordering::SeqCst);
-        host.accept_batch(&reconciling, Batch::rescan(RescanScope::Vault))
-            .unwrap();
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        // duplicate would take. Their claims are held by the legs blocking
+        // them, so the tick below reaches the entry under test alone.
         ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding).unwrap();
         let attaching_lease = host.demand(&attaching).unwrap();
-        wait_for_flag("attach_started", &ops.attach_started);
+        wait_for_attaches(&ops, 3, "both workers to be inside an attach");
 
         let entry = host.shared.entries.get(&subject).unwrap();
-        // The epoch a leg's follow-up was sent at, superseded by the batch
+        // The epoch a leg's follow-up was sent at, superseded by the tick
         // below before it reached a worker.
         let superseded = entry
             .gate
@@ -5656,8 +5726,7 @@ mod tests {
             .expect("entry gate poisoned")
             .claim
             .epoch();
-        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         assert_eq!(
             entry.gate.lock().expect("entry gate poisoned").claim.slot(),
             Some(superseded + 1),
@@ -5682,15 +5751,14 @@ mod tests {
         // The tick that would send the job in the channel a second time.
         retry_pending_dispatches(&host.shared);
 
-        ops.reconcile_release.store(true, Ordering::SeqCst);
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &subject, TrustState::Ready);
-        wait_for_state(&host, &reconciling, TrustState::Ready);
+        wait_for_state(&host, &holding, TrustState::Ready);
         wait_for_state(&host, &attaching, TrustState::Ready);
         settle();
         assert_eq!(
             ops.reconciles.load(Ordering::SeqCst),
-            2,
+            1,
             "a job the channel held one copy of ran twice"
         );
         let state = entry.gate.lock().expect("entry gate poisoned");
@@ -5700,7 +5768,7 @@ mod tests {
         );
         drop(state);
         drop(lease);
-        drop(reconciling_lease);
+        drop(holding_lease);
         drop(attaching_lease);
     }
 
@@ -5712,40 +5780,32 @@ mod tests {
     fn a_follow_up_send_leaves_the_slot_of_the_job_already_in_the_channel() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("a").unwrap();
-        let reconciling = VaultName::new("b").unwrap();
+        let holding = VaultName::new("b").unwrap();
         let attaching = VaultName::new("c").unwrap();
-        let host = host_without_ambient_polling(
-            Arc::clone(&ops),
-            &[&subject, &reconciling, &attaching],
-            2,
-        );
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding, &attaching], 2);
         let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
-        let reconciling_lease = host.demand(&reconciling).unwrap();
-        wait_for_state(&host, &reconciling, TrustState::Ready);
 
         // Both workers go to vaults that are not the one under test: the
         // channel then holds what this test sends for it, and has the room a
-        // second send takes.
-        ops.block_reconcile_at.store(1, Ordering::SeqCst);
-        host.accept_batch(&reconciling, Batch::rescan(RescanScope::Vault))
-            .unwrap();
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        // second send takes. Their claims are held by the legs blocking them,
+        // so the tick below reaches the entry under test alone.
         ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding).unwrap();
         let attaching_lease = host.demand(&attaching).unwrap();
-        wait_for_flag("attach_started", &ops.attach_started);
+        wait_for_attaches(&ops, 3, "both workers to be inside an attach");
 
         let entry = host.shared.entries.get(&subject).unwrap();
-        // The epoch a leg's follow-up is sent at, superseded by the batch
-        // below while the leg is between its own gate and the channel.
+        // The epoch a leg's follow-up is sent at, superseded by the tick below
+        // while the leg is between its own gate and the channel.
         let superseded = entry
             .gate
             .lock()
             .expect("entry gate poisoned")
             .claim
             .epoch();
-        host.accept_batch(&subject, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         assert_eq!(
             entry.gate.lock().expect("entry gate poisoned").claim.slot(),
             Some(superseded + 1),
@@ -5763,19 +5823,18 @@ mod tests {
         // the follow-up above left the slot free.
         retry_pending_dispatches(&host.shared);
 
-        ops.reconcile_release.store(true, Ordering::SeqCst);
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &subject, TrustState::Ready);
-        wait_for_state(&host, &reconciling, TrustState::Ready);
+        wait_for_state(&host, &holding, TrustState::Ready);
         wait_for_state(&host, &attaching, TrustState::Ready);
         settle();
         assert_eq!(
             ops.reconciles.load(Ordering::SeqCst),
-            2,
+            1,
             "a job the channel held one copy of ran twice"
         );
         drop(lease);
-        drop(reconciling_lease);
+        drop(holding_lease);
         drop(attaching_lease);
     }
 
@@ -5795,17 +5854,13 @@ mod tests {
             host_without_ambient_polling(Arc::clone(&ops), &[&subject, &working, &waiting], 1);
         let lease = host.demand(&subject).unwrap();
         wait_for_state(&host, &subject, TrustState::Ready);
-        let working_lease = host.demand(&working).unwrap();
-        wait_for_state(&host, &working, TrustState::Ready);
 
         // The one worker goes to a vault that is not the one under test, and
         // the channel's one place goes to a job no worker is left to take:
         // every send from here is refused.
-        ops.block_reconcile_at.store(1, Ordering::SeqCst);
-        host.accept_batch(&working, Batch::rescan(RescanScope::Vault))
-            .unwrap();
-        wait_for_flag("reconcile_started", &ops.reconcile_started);
         ops.block_attach.store(true, Ordering::SeqCst);
+        let working_lease = host.demand(&working).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
         let waiting_lease = host.demand(&waiting).unwrap();
         let waiting_entry = host.shared.entries.get(&waiting).unwrap();
         assert!(
@@ -5857,7 +5912,6 @@ mod tests {
 
         // The channel drains, and the tick that follows sends the entry the
         // job it owes.
-        ops.reconcile_release.store(true, Ordering::SeqCst);
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &waiting, TrustState::Ready);
         retry_pending_dispatches(&host.shared);
@@ -5866,7 +5920,7 @@ mod tests {
             lifecycle_wait_budget(),
             || {
                 let reconciles = ops.reconciles.load(Ordering::SeqCst);
-                if reconciles == 2 {
+                if reconciles == 1 {
                     Observed::Met(())
                 } else {
                     Observed::pending(format!("{reconciles} reconciles so far"))
@@ -5877,7 +5931,7 @@ mod tests {
         settle();
         assert_eq!(
             ops.reconciles.load(Ordering::SeqCst),
-            2,
+            1,
             "the follow-up the entry took its marker back for ran more than once"
         );
         drop(lease);
@@ -5947,32 +6001,29 @@ mod tests {
         drop(waiting);
     }
 
-    /// Facts accepted while a watcher poll holds the entry are the claim's to
-    /// schedule. `accept_batch` cannot dispatch against a claimed entry, so it
-    /// merges and leaves; the claim that took the attachment schedules the
-    /// reconcile they are owed when it gives the attachment back.
+    /// A rescan a watcher poll reports overflowed the watcher, so what the
+    /// entry knows about the vault is unreliable until it is reread: the poll
+    /// that reports it publishes the overflow before it gives the entry back,
+    /// and schedules the reconcile that clears it. Coverage was never lost, so
+    /// nothing recovers.
     #[test]
-    fn a_batch_accepted_during_a_poll_claim_is_reconciled_when_the_claim_ends() {
+    fn a_polled_rescan_publishes_the_overflow_and_schedules_its_reconcile() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.block_poll.store(true, Ordering::SeqCst);
-        let shared = Arc::clone(&host.shared);
-        let poll = thread::spawn(move || poll_watchers(&shared));
-        wait_for_flag("poll_started", &ops.poll_started);
-
-        host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
-            .unwrap();
+        // The reconcile the poll schedules is blocked, so the state read below
+        // is the one the poll published rather than the one that cleared it.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
-            "the accepted rescan left the entry trusted while nothing had healed it"
+            "the reported rescan left the entry trusted while nothing had reread it"
         );
 
-        ops.poll_release.store(true, Ordering::SeqCst);
-        poll.join().unwrap();
+        ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -5982,32 +6033,30 @@ mod tests {
         );
     }
 
-    /// A batch carrying no fact into an entry a watcher poll has claimed
-    /// schedules nothing, so it says nothing either: an entry left warming for
-    /// a reconcile no one owes it is one that never becomes readable again.
+    /// A batch a watcher poll reports without a rescan names the paths that
+    /// changed, so the entry has work to do and says so — healing, not
+    /// overflowed. The reconcile the poll schedules is what makes it serve
+    /// again.
     #[test]
-    fn a_factless_batch_accepted_during_a_poll_claim_leaves_the_entry_serving() {
+    fn a_polled_batch_without_a_rescan_publishes_healing() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
 
-        ops.block_poll.store(true, Ordering::SeqCst);
-        let shared = Arc::clone(&host.shared);
-        let poll = thread::spawn(move || poll_watchers(&shared));
-        wait_for_flag("poll_started", &ops.poll_started);
-
-        host.accept_batch(&name, Batch::default()).unwrap();
+        // The reconcile the poll schedules is blocked, so the state read below
+        // is the one the poll published rather than the one that cleared it.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops.ambient_poll_batches, &host);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::Ready),
-            "the entry stopped serving for work no batch brought it"
+            Some(TrustState::warming(WarmingPhase::Healing, 0, None)),
+            "the entry went on serving against facts nothing had reconciled"
         );
 
-        ops.poll_release.store(true, Ordering::SeqCst);
-        poll.join().unwrap();
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
-        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
     }
 
     #[test]
