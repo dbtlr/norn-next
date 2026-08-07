@@ -464,12 +464,30 @@ enum DemandedWork {
 
 impl DemandedWork {
     /// The work this entry owes a demand lease.
+    ///
+    /// The reconcile arm rests on where the untrusted reasons are written:
+    /// every writer of a watcher loss or an environmental refusal against an
+    /// entry holding coverage sets `recovery_required` beside it. An overflow
+    /// is the one reason that stands without one, and rereading the facts is
+    /// what clears an overflow. The assertion says that invariant out loud, so
+    /// a writer that stops pairing the two is caught here rather than by an
+    /// entry a reconcile drove to Ready over a cause nothing addressed.
     fn owed_by<A>(state: &EntryState<A>) -> Self {
         if !state.coverage.in_hand() {
             Self::Attach
         } else if state.recovery_required {
             Self::Recover
         } else {
+            debug_assert!(
+                match &state.trust {
+                    TrustState::Untrusted { reason, .. } =>
+                        matches!(reason, UntrustedReason::WatcherOverflow),
+                    _ => true,
+                },
+                "an entry holding coverage and owing no recovery stands at {:?}, \
+                 which a reconcile does not clear",
+                state.trust
+            );
             Self::Reconcile
         }
     }
