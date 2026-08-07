@@ -4578,6 +4578,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// The recheck a scheduled attach runs before it acquires anything is a
+    /// second read of the registry, and a root that stopped answering between
+    /// the demand and the job is what it is there to catch: the attach refuses
+    /// environmentally with the platform's account of the refusal, having
+    /// acquired nothing.
+    ///
+    /// The window is the queue. The one worker is inside another vault's
+    /// attach, so the job scheduled for the entry under test waits in the
+    /// channel while its root is retargeted.
+    ///
+    /// The recheck is the arm every refusing root reaches: it and the identity
+    /// read beside it ask the filesystem the same question about the same root,
+    /// and the recheck asks first. The identity arm answers a root whose
+    /// identity stops resolving between those two reads.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_time_registry_refusal_acquires_nothing_and_says_why() {
+        let base = temp_base("attach-recheck-refusal");
+        let subject_root = base.join("subject");
+        let holding_root = base.join("holding");
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("subject").unwrap();
+        let holding = VaultName::new("holding").unwrap();
+        let host = host_over_roots(
+            Arc::clone(&ops),
+            &[(&subject, &subject_root), (&holding, &holding_root)],
+            1,
+        );
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let lease = host.demand(&subject).unwrap();
+
+        refuse_root_identity(&subject_root);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_environmental_refusal(&host, &subject);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the refused attach acquired the entry before it read the registry"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        drop((lease, holding_lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The recheck an attach runs after its heal catches a root that stopped
+    /// answering while the heal ran: the attach gives back everything it
+    /// acquired and then refuses environmentally, with the platform's account
+    /// of the refusal.
+    #[cfg(unix)]
+    #[test]
+    fn a_post_heal_registry_refusal_gives_the_attachment_back_and_says_why() {
+        let base = temp_base("post-heal-recheck-refusal");
+        let root = base.join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        refuse_root_identity(&root);
+        ops.attach_release.store(true, Ordering::SeqCst);
+
+        wait_for_environmental_refusal(&host, &name);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the refused attach kept the resources its heal acquired"
+        );
+        settle();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the entry re-attached against a root the registry refuses"
+        );
+        assert!(refuses_environmentally(host.state(&name).as_ref()));
+
+        drop((lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[cfg(unix)]
     #[test]
     fn identity_refusal_does_not_poison_demand_for_an_unrelated_live_entry() {
