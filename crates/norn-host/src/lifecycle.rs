@@ -262,6 +262,16 @@ struct EntryState<A> {
     duplicate_root: Option<AliasConflict>,
     last_demand: Instant,
     demand_leases: usize,
+    /// The legs running against the entry that are between the lock which gave
+    /// them its coverage and the lock which ends them.
+    ///
+    /// This is what says the entry's coverage is coming back, which is a
+    /// narrower fact than [`EntryState::coverage`] answering who holds it: a
+    /// leg past its own end holds coverage no lock of its own will give back —
+    /// the poll giving a stale attachment to the ops, a release on its way to
+    /// [`finish_release`] — and a pin stands for neither. What reads a pin is
+    /// therefore work deciding whether to wait, and what reads the coverage is
+    /// work deciding whether it may be taken.
     safety_pins: usize,
     detach_due: bool,
     detach_scheduled: bool,
@@ -278,6 +288,10 @@ struct EntryState<A> {
 /// A leg is registered against the entry from the instant it begins and holds
 /// the coverage only from the instant it takes it, so a leg standing over
 /// parked coverage is a state of its own rather than a contradiction.
+///
+/// Every move names the leg making it, and each is total: a leg takes what the
+/// entry holds and none other, parks back what it took, and ends the coverage
+/// it took alone.
 enum Coverage<A> {
     /// The entry has none.
     None,
@@ -287,14 +301,21 @@ enum Coverage<A> {
     /// The leg at this epoch holds the entry's coverage. What becomes of it —
     /// parked back, handed to a release, or given to [`EntryOps::detach`] — is
     /// that leg's to say until it ends.
+    ///
+    /// A leg here is whatever the entry handed its coverage to at that epoch:
+    /// the claim registered in [`Claim::leg`], or a release the entry began
+    /// itself, which registers no claim. One of them holds it at a time —
+    /// [`Coverage::take`] takes from [`Coverage::Parked`] alone, so coverage
+    /// already out with a leg is taken by no other, whatever epoch that other
+    /// stands at.
     OnLeg(u64),
 }
 
 impl<A> Coverage<A> {
-    /// Whether the entry itself holds its coverage. Work runs against parked
-    /// coverage alone: coverage a leg holds is that leg's until it ends, and an
-    /// entry with none is one an attach is what serves.
-    fn parked(&self) -> bool {
+    /// Whether the entry itself holds its coverage. Work runs against coverage
+    /// in the entry's own hand alone: coverage a leg holds is that leg's until
+    /// it ends, and an entry with none is one an attach is what serves.
+    fn in_hand(&self) -> bool {
         matches!(self, Self::Parked(_))
     }
 
@@ -313,19 +334,40 @@ impl<A> Coverage<A> {
 
     /// Take the coverage the entry holds and give it up: the caller returns it
     /// to [`EntryOps::detach`], and the entry accounts for none from here.
+    ///
+    /// Coverage out with a leg is not the caller's to give up, and the record
+    /// of the leg holding it stands: that leg is what ends it.
     fn give_up(&mut self) -> Option<A> {
         match std::mem::replace(self, Self::None) {
             Self::Parked(coverage) => Some(coverage),
-            _ => None,
+            held => {
+                *self = held;
+                None
+            }
         }
     }
 
-    /// Park coverage in the entry: a leg puts down what it holds, or an attach
-    /// puts down what it installed.
-    fn park(&mut self, coverage: A) {
+    /// Park the coverage this leg took back in the entry, which holds it from
+    /// here.
+    ///
+    /// A leg parks back what it took: coverage another leg holds is that leg's
+    /// until it ends, and parking over it would leave the entry holding
+    /// coverage with a leg still out with the entry's own.
+    fn park_by(&mut self, leg: u64, coverage: A) {
         debug_assert!(
-            !self.parked(),
-            "coverage parked over coverage the entry already holds"
+            matches!(self, Self::OnLeg(held) if *held == leg) || matches!(self, Self::None),
+            "coverage parked by a leg that is not what holds it"
+        );
+        *self = Self::Parked(coverage);
+    }
+
+    /// Put coverage an attach installed into an entry that holds none. What an
+    /// attach installs is coverage the entry never had, so this takes nothing
+    /// out of any leg's hands.
+    fn install(&mut self, coverage: A) {
+        debug_assert!(
+            matches!(self, Self::None),
+            "coverage installed over coverage the entry accounts for"
         );
         *self = Self::Parked(coverage);
     }
@@ -382,6 +424,10 @@ impl Leg {
 }
 
 /// What holds an entry's gate where no job is scheduled against it.
+///
+/// A claim writes this from the leg it has registered — [`Claim::holder`] is
+/// where every write of it comes from — so the gate names the leg running
+/// against the entry, and names a job sent into the channel where none is.
 #[derive(Clone, Copy)]
 enum Holder {
     /// The leg running against the entry.
@@ -528,10 +574,15 @@ impl Claim {
             // The leg running against the entry keeps the gate across the move
             // it is making.
             Gate::Held(Holder::Running(leg)) if self.leg == Some(leg) => {}
-            Gate::Held(_) | Gate::Open => {
-                self.gate = Gate::Held(self.leg.map_or(Holder::Sent, Holder::from));
-            }
+            Gate::Held(_) | Gate::Open => self.gate = Gate::Held(self.holder()),
         }
+    }
+
+    /// What holds the gate where this claim is what takes it: the leg
+    /// registered against the entry, and where none is, the job the entry is
+    /// sending into the channel.
+    fn holder(&self) -> Holder {
+        self.leg.map_or(Holder::Sent, Holder::from)
     }
 
     /// Schedule the entry's next job: the entry moves on to it, and its marker
@@ -725,10 +776,11 @@ impl Claim {
     /// it.
     fn hand_off(&mut self, leg: u64, job: &Job) {
         self.end_job_leg(leg);
+        let holder = self.holder();
         match self.gate {
-            Gate::Held(_) => self.gate = Gate::Held(Holder::Sent),
+            Gate::Held(_) => self.gate = Gate::Held(holder),
             Gate::Scheduled(ref marker) if marker.epoch() == job.epoch() => {
-                self.gate = Gate::Held(Holder::Sent);
+                self.gate = Gate::Held(holder);
             }
             Gate::Open | Gate::Scheduled(_) => {}
         }
@@ -790,6 +842,24 @@ impl<A> EntryState<A> {
     /// Whether a live lease is waiting on the recovery the entry owes.
     fn recovery_demanded(&self) -> bool {
         self.recovery_demands > 0
+    }
+
+    /// Pin the entry for a leg that is about to run outside its lock. The leg
+    /// comes back to a lock of its own, so what it holds is coming back with
+    /// it.
+    fn pin(&mut self) {
+        self.safety_pins += 1;
+    }
+
+    /// Give back the pin a leg took. A leg answers for what it holds from here.
+    fn unpin(&mut self) {
+        self.safety_pins = self.safety_pins.saturating_sub(1);
+    }
+
+    /// Whether a leg is running against the entry that comes back to a lock of
+    /// its own.
+    fn pinned(&self) -> bool {
+        self.safety_pins > 0
     }
 
     /// What the entry is parked on, where it is parked.
@@ -877,9 +947,9 @@ fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
 
 fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.detach_due
-        && state.coverage.parked()
+        && state.coverage.in_hand()
         && state.demand_leases == 0
-        && state.safety_pins == 0
+        && !state.pinned()
         && !state.claim.is_held()
     {
         state.detach_scheduled = true;
@@ -925,7 +995,7 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
     // The job below is an attach or a recover, and both establish coverage
     // before a document is read.
     state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-    let attached = state.coverage.parked();
+    let attached = state.coverage.in_hand();
     Some(state.claim.schedule(|epoch| {
         if attached {
             Job::Recover(name.clone(), epoch)
@@ -1047,7 +1117,7 @@ fn finish_release<O: EntryOps>(
 /// why [`Claim::end_poll`] leaves it standing: a claim that opened the gate
 /// over it would leave a job no dispatch can reach.
 fn restore_lost_claim<A>(state: &mut EntryState<A>, job: Job) {
-    if state.safety_pins == 0 {
+    if !state.pinned() {
         state.claim.open();
         return;
     }
@@ -1537,7 +1607,7 @@ impl<O: EntryOps> Host<O> {
             // The job below is an attach or a recover, and both establish
             // coverage before a document is read.
             state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-            let attached = state.coverage.parked();
+            let attached = state.coverage.in_hand();
             state.claim.schedule(|epoch| {
                 if attached {
                     Job::Recover(name.clone(), epoch)
@@ -1593,7 +1663,7 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
     for (name, entry) in &shared.entries {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.demand_leases == 0
-            && (state.coverage.parked() || state.safety_pins > 0)
+            && (state.coverage.in_hand() || state.pinned())
             && now.saturating_duration_since(state.last_demand) >= shared.idle_after
         {
             state.detach_due = true;
@@ -1623,7 +1693,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             // leaves facts standing in an unclaimed entry with no recovery owed
             // and nothing scheduled. The guard is live — an entry owing a
             // recovery is passed through to the poll rather than reconciled.
-            if !state.pending.is_empty() && state.coverage.parked() && !state.recovery_required {
+            if !state.pending.is_empty() && state.coverage.in_hand() && !state.recovery_required {
                 state
                     .claim
                     .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
@@ -1635,7 +1705,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             let Some(attachment) = state.coverage.take(epoch) else {
                 continue;
             };
-            state.safety_pins += 1;
+            state.pin();
             state.claim.begin_poll(epoch);
             (attachment, epoch)
         };
@@ -1646,14 +1716,14 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         let mut release = None;
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.safety_pins = state.safety_pins.saturating_sub(1);
+            state.unpin();
             if !state.claim.stands_at(epoch) {
                 stale = Some(attachment);
             } else {
                 match result {
                     Ok(None) => {
                         state.claim.end_poll(epoch);
-                        state.coverage.park(attachment);
+                        state.coverage.park_by(epoch, attachment);
                         if maintenance_due && !state.recovery_required {
                             schedule = Some(
                                 state
@@ -1695,7 +1765,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                                 TrustState::warming(WarmingPhase::Healing, 0, None)
                             };
                         }
-                        state.coverage.park(attachment);
+                        state.coverage.park_by(epoch, attachment);
                         if !state.recovery_required {
                             schedule = Some(
                                 state
@@ -1727,7 +1797,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(watcher_lost(error));
-                        state.coverage.park(attachment);
+                        state.coverage.park_by(epoch, attachment);
                     }
                     Err(JobFailure::Environmental(detail)) => {
                         state.claim.drop_marker();
@@ -1736,7 +1806,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
                             TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
-                        state.coverage.park(attachment);
+                        state.coverage.park_by(epoch, attachment);
                     }
                 }
                 // A leg that is releasing the entry schedules nothing against
@@ -1974,7 +2044,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
-                    state.coverage.park(attachment);
+                    state.coverage.install(attachment);
                     state.clear_recovery();
                     state.identity_refused = None;
                     state.maintainer_contended = None;
@@ -2018,9 +2088,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 if !state.claim.stands_at(epoch) {
                     return;
                 }
-                state.safety_pins += 1;
+                state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
-                    state.safety_pins -= 1;
+                    state.unpin();
                     restore_lost_claim(&mut state, Job::Recover(name.clone(), epoch));
                     return;
                 };
@@ -2038,7 +2108,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     Ok(())
                 });
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.safety_pins -= 1;
+            state.unpin();
             if !state.claim.stands_at(epoch) {
                 drop(state);
                 shared.ops.detach(&name, attachment);
@@ -2049,7 +2119,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.clear_recovery();
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -2079,14 +2149,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
@@ -2103,9 +2173,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 if !state.claim.stands_at(epoch) {
                     return;
                 }
-                state.safety_pins += 1;
+                state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
-                    state.safety_pins -= 1;
+                    state.unpin();
                     restore_lost_claim(&mut state, Job::Reconcile(name.clone(), epoch));
                     return;
                 };
@@ -2136,7 +2206,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.safety_pins -= 1;
+            state.unpin();
             if !state.claim.stands_at(epoch) {
                 drop(state);
                 shared.ops.detach(&name, attachment);
@@ -2145,7 +2215,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     if handoff_saturated || !state.pending.is_empty() {
                         state.trust = trust_for_pending_reconcile(&state.pending);
                     }
@@ -2186,7 +2256,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     break;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -2199,7 +2269,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     break;
                 }
                 Err(JobFailure::Environmental(detail)) => {
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -2220,9 +2290,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 if !state.claim.stands_at(epoch) {
                     return;
                 }
-                state.safety_pins += 1;
+                state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
-                    state.safety_pins -= 1;
+                    state.unpin();
                     restore_lost_claim(&mut state, Job::Maintenance(name.clone(), epoch));
                     return;
                 };
@@ -2241,7 +2311,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 }
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.safety_pins -= 1;
+            state.unpin();
             if !state.claim.stands_at(epoch) {
                 drop(state);
                 shared.ops.detach(&name, attachment);
@@ -2251,7 +2321,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.claim.release();
                     if state.detach_due {
                         next = schedule_due_detach(&mut state, &name);
@@ -2278,7 +2348,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     return;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
@@ -2286,7 +2356,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     next = schedule_due_detach(&mut state, &name);
                 }
                 Err(JobFailure::Environmental(detail)) => {
-                    state.coverage.park(attachment);
+                    state.coverage.park_by(epoch, attachment);
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
