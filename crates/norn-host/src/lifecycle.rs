@@ -742,6 +742,26 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
     }
 }
 
+/// Park every alias of a root reached under more than one name, and give back
+/// what each of them is holding.
+///
+/// The refusal routes on who holds the entry's resources, because that is who
+/// gives them back:
+///
+/// - The entry holds its own coverage. The refusal takes it and is the release
+///   that gives it back, whatever leg is registered against the entry — a leg
+///   that no longer holds the entry's coverage is not what ends it, and the
+///   registration ends here with the taking. Leaving the release to that leg
+///   would leave a refused entry holding coverage every producer that reads
+///   parked coverage goes on taking.
+/// - A leg holds the resources, or is about to: the refusal opens the release
+///   window and the leg's own end closes it. The window is what says the
+///   resources are coming back, so nothing re-arms over them and no lease is
+///   answered before they are.
+/// - Neither holds anything. The entry is released, and says so.
+///
+/// A release already in flight is left alone: it has published the phase that
+/// names it and publishes Unattached itself once the resources are back.
 fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
     let entries = conflict
         .aliases
@@ -759,31 +779,34 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         state.clear_recovery();
         state.identity_refused = None;
         state.duplicate_root = Some(conflict.clone());
-        if state.claim.leg().is_none() && !state.detach_in_flight {
-            state.claim.open();
-            let epoch = state.claim.epoch();
-            match state.coverage.take(epoch) {
-                // The refusal reaches an idle entry holding the coverage the
-                // conflict invalidates, so this is a teardown like any other:
-                // the release below is what holds it from here, the resources
-                // go back, and Unattached is published after they have.
-                Some(attachment) => {
-                    begin_release(state);
-                    releasing.push(((*name).clone(), *entry, epoch, attachment));
-                }
-                // Nothing is held, so the entry is already released and can
-                // say so.
-                None => state.trust = TrustState::Unattached,
+        if state.detach_in_flight {
+            continue;
+        }
+        // The gate goes back on every route below: a refused entry owes no
+        // work, so a job it had scheduled or sent is one nothing is left
+        // holding the entry for, and a gate left standing for it is an entry
+        // no later dispatch reaches.
+        state.claim.open();
+        let epoch = state.claim.epoch();
+        match state.coverage.take(epoch) {
+            // The entry holds the coverage the conflict invalidates, so this is
+            // a teardown like any other: the release below is what holds it
+            // from here, the resources go back, and Unattached is published
+            // after they have.
+            Some(attachment) => {
+                state.claim.end_running_leg();
+                begin_release(state);
+                releasing.push(((*name).clone(), *entry, epoch, attachment));
             }
-        } else if !state.detach_in_flight {
-            // The entry has a job in flight, which is holding the attachment
-            // and will give it back when it ends. Unattached is published here
-            // rather than there, so for the length of that job this entry says
-            // released while its resources are still out — the one publication
-            // this contract does not yet cover. A release already under way
-            // takes neither route: it has published the phase that names it,
-            // and publishes Unattached itself once the resources are back.
-            state.trust = TrustState::Unattached;
+            // The resources are out with a leg, or with one that has yet to
+            // take them. The window opens here and the leg's own end closes it,
+            // so nothing is published as released before the leg gives them
+            // back.
+            None if state.coverage.out_with_leg() || state.claim.leg().is_some() => {
+                begin_release(state);
+            }
+            // Nothing is held, so the entry is already released and can say so.
+            None => state.trust = TrustState::Unattached,
         }
     }
     drop(states);
@@ -966,22 +989,34 @@ impl<O: EntryOps> Drop for Host<O> {
             state.claim.invalidate();
             state.claim.open();
             state.pending = Batch::default();
-            if state.claim.leg().is_none() && !state.detach_in_flight {
-                match state.coverage.give_up() {
-                    Some(attachment) => {
-                        begin_release(&mut state);
-                        releasing.push((name.clone(), Some(attachment)));
-                    }
-                    // Nothing is held, so the entry is already released and can
-                    // say so.
-                    None => state.trust = TrustState::Unattached,
-                }
-            } else {
-                // A job or a release in flight is holding this entry's
-                // resources. The joins below wait for it, and whatever it
+            if state.detach_in_flight {
+                // A release is already under way with this entry's resources.
+                // The joins below wait for the leg running it, and whatever it
                 // leaves in the entry is given back after them.
                 begin_release(&mut state);
                 releasing.push((name.clone(), None));
+                continue;
+            }
+            match state.coverage.give_up() {
+                // The entry holds its own coverage, whatever leg is registered
+                // against it: a leg standing over coverage it has not taken
+                // gives none back, so the destruction takes it and the pass
+                // below is what gives it back.
+                Some(attachment) => {
+                    state.claim.end_running_leg();
+                    begin_release(&mut state);
+                    releasing.push((name.clone(), Some(attachment)));
+                }
+                // A leg is holding this entry's resources, or is about to take
+                // them. The joins below wait for it, and whatever it leaves in
+                // the entry is given back after them.
+                None if state.coverage.out_with_leg() || state.claim.leg().is_some() => {
+                    begin_release(&mut state);
+                    releasing.push((name.clone(), None));
+                }
+                // Nothing is held, so the entry is already released and can
+                // say so.
+                None => state.trust = TrustState::Unattached,
             }
         }
         self.shared.jobs.lock().expect("job sender poisoned").take();
@@ -1392,6 +1427,17 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             continue;
         }
         if let Some(attachment) = stale {
+            // A release window standing open over this poll is one whatever
+            // moved the entry on opened for the coverage the poll is holding:
+            // the poll hands it to the release, which is what publishes.
+            let releasing = {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                state.detach_in_flight && state.claim.leg() == Some(Leg::Poll(epoch))
+            };
+            if releasing {
+                finish_release(shared, entry, name, epoch, Some(attachment));
+                continue;
+            }
             // The entry moved on while this poll held it, so the poll owns
             // nothing but the attachment it took: it gives that back and
             // publishes nothing, because whatever moved the entry on has
@@ -1400,6 +1446,14 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.coverage.released_by(epoch);
             if state.claim.leg() == Some(Leg::Poll(epoch)) {
+                if state.detach_in_flight {
+                    // The window opened while the coverage was going back, so
+                    // it closes on nothing — which is what it is owed, and the
+                    // release is still what publishes.
+                    drop(state);
+                    finish_release(shared, entry, name, epoch, None);
+                    continue;
+                }
                 // A job that lost the attachment to this poll left its marker
                 // at the poll's own epoch, and the entry has moved past that
                 // epoch: the marker goes back with the claim rather than
@@ -1424,6 +1478,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     let Some(entry) = shared.entries.get(job.name()) else {
         return;
     };
+    let name = job.name().clone();
     let epoch = job.epoch();
     {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1441,28 +1496,71 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         }
         state.claim.begin_job_leg(epoch);
     }
-    run_job_inner(shared, job);
-    // Whatever the leg still holds ends here. A claim it gave up itself —
-    // handed to the job it dispatched, or ended by the release it ran — is
-    // already over, and the epoch it moved on to is that job's, not a
-    // supersession to open the entry's gate over. What this epilogue ends is a
-    // claim held to the last: an entry whose epoch moved on under a leg was
-    // invalidated by something that left the scheduling to the leg's end, so
-    // the gate goes back with the claim.
-    //
-    // Coverage the leg still holds ends with it: a leg gives what it took back
-    // to the entry, to a release, or to the ops, so coverage still out with a
-    // leg that has ended went to the ops and the entry holds none.
+    let held = run_job_inner(shared, job);
+    end_job_leg(shared, entry, &name, epoch, held);
+}
+
+/// End the leg a worker ran, and give back whatever it is still holding.
+///
+/// A leg ending while the entry's release window is open is what closes that
+/// window: the window was opened over this leg, so the coverage the leg hands
+/// up is the coverage the release owes back, and [`finish_release`] is what
+/// publishes the release rather than the leg. The window opens under the
+/// entry's lock and this leg takes that lock at either side of the detach
+/// below, so it is read at both: a window that opens while the coverage is
+/// already going back closes on nothing, which is what it is owed.
+///
+/// Where no window is open, this ends the leg's claim on the entry. A claim
+/// the leg gave up itself — handed to the job it dispatched, or ended by the
+/// release it ran — is already over, and the epoch it moved on to is that
+/// job's, not a supersession to open the entry's gate over. What this ends is
+/// a claim held to the last: an entry whose epoch moved on under a leg was
+/// invalidated by something that left the scheduling to the leg's end, so the
+/// gate goes back with the claim.
+///
+/// Coverage the leg still holds ends with it, and reaches the ops before that
+/// gate goes back: work scheduled against an entry whose resources are still
+/// going back is work running beside them.
+fn end_job_leg<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: &VaultName,
+    epoch: u64,
+    held: Option<O::Attachment>,
+) {
+    let releasing = {
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        state.detach_in_flight && state.claim.leg() == Some(Leg::Job(epoch))
+    };
+    if releasing {
+        finish_release(shared, entry, name, epoch, held);
+        return;
+    }
+    if let Some(attachment) = held {
+        shared.ops.detach(name, attachment);
+    }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     if state.claim.end_job_leg(epoch) {
         state.coverage.released_by(epoch);
+        if state.detach_in_flight {
+            drop(state);
+            finish_release(shared, entry, name, epoch, None);
+            return;
+        }
         if !state.claim.stands_at(epoch) {
             state.claim.release();
         }
     }
 }
 
-fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
+/// Run one job's work, answering with the coverage its leg still holds where
+/// the leg ends holding any.
+///
+/// A leg that finds the entry has moved on from the work it carries hands its
+/// coverage up rather than giving it back itself: what the entry owes for that
+/// coverage — a release window to close, or nothing but the ops — is read
+/// where the leg ends, and one caller reads it for every job.
+fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::Attachment> {
     let name = match &job {
         Job::Attach(name, _)
         | Job::Recover(name, _)
@@ -1470,9 +1568,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         | Job::Maintenance(name, _)
         | Job::Detach(name, _) => name,
     };
-    let Some(entry) = shared.entries.get(name) else {
-        return;
-    };
+    let entry = shared.entries.get(name)?;
     match job {
         Job::Attach(name, epoch) => {
             // Classification and the identity claim are atomic, but the heal is
@@ -1491,7 +1587,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         // published.
                         state.trust = TrustState::Unattached;
                     }
-                    return;
+                    return None;
                 }
                 Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1501,7 +1597,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                             UntrustedReason::environmental_refusal(refusal.to_string()),
                         );
                     }
-                    return;
+                    return None;
                 }
                 Ok(None) => {}
             }
@@ -1515,7 +1611,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                             UntrustedReason::environmental_refusal(refusal.to_string()),
                         );
                     }
-                    return;
+                    return None;
                 }
             };
             if let Some(identity) = claim_identity {
@@ -1534,7 +1630,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         // to give back before it says Unattached.
                         state.trust = TrustState::Unattached;
                     }
-                    return;
+                    return None;
                 }
                 attach_claims.insert(identity, name.clone());
             }
@@ -1572,7 +1668,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                             UntrustedReason::environmental_refusal(refusal.to_string()),
                         );
                     }
-                    return;
+                    return None;
                 }
             };
             if post_conflict.is_none()
@@ -1595,15 +1691,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     state.duplicate_root = Some(conflict);
                     state.trust = TrustState::Unattached;
                 }
-                return;
+                return None;
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if !state.claim.stands_at(epoch) {
-                if let Ok((attachment, _, _)) = result {
-                    drop(state);
-                    shared.ops.detach(&name, attachment);
-                }
-                return;
+                // The entry moved on while this attach ran, so what it
+                // acquired is coverage the entry never installed: it goes back
+                // where the leg ends, with the release the entry owes it read
+                // there.
+                drop(state);
+                return result.ok().map(|(attachment, _, _)| attachment);
             }
             state.claim.release();
             match result {
@@ -1646,18 +1743,19 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                 }
             }
+            None
         }
         Job::Recover(name, epoch) => {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
-                    return;
+                    return None;
                 }
                 state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
                     state.unpin();
                     restore_lost_claim(&mut state, Job::Recover(name.clone(), epoch));
-                    return;
+                    return None;
                 };
                 attachment
             };
@@ -1675,9 +1773,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin();
             if !state.claim.stands_at(epoch) {
+                // The entry moved on while this leg ran, so the coverage it
+                // took goes back where the leg ends: the release the entry
+                // owes it is read there.
                 drop(state);
-                shared.ops.detach(&name, attachment);
-                return;
+                return Some(attachment);
             }
             state.claim.release();
             let mut next = None;
@@ -1702,14 +1802,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    return;
+                    return None;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
                     state.maintainer_contended = Some(incumbent);
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    return;
+                    return None;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.require_recovery();
@@ -1731,18 +1831,19 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
             }
+            None
         }
         Job::Reconcile(name, epoch) => loop {
             let (mut attachment, work) = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
-                    return;
+                    return None;
                 }
                 state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
                     state.unpin();
                     restore_lost_claim(&mut state, Job::Reconcile(name.clone(), epoch));
-                    return;
+                    return None;
                 };
                 let work = ReconcileWork {
                     batch: std::mem::take(&mut state.pending),
@@ -1773,9 +1874,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin();
             if !state.claim.stands_at(epoch) {
+                // The entry moved on while this leg ran, so the coverage it
+                // took goes back where the leg ends: the release the entry
+                // owes it is read there.
                 drop(state);
-                shared.ops.detach(&name, attachment);
-                return;
+                return Some(attachment);
             }
             match result {
                 Ok(()) => {
@@ -1791,34 +1894,34 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                         if let Some(job) = next {
                             dispatch_handoff(shared, entry, epoch, job);
                         }
-                        break;
+                        break None;
                     } else if handoff_saturated {
                         let next = state
                             .claim
                             .hand_on(|epoch| Job::Reconcile(name.clone(), epoch));
                         drop(state);
                         dispatch_handoff(shared, entry, epoch, next);
-                        break;
+                        break None;
                     } else if state.pending.is_empty() {
                         state.claim.release();
                         if !state.recovery_required {
                             state.trust = TrustState::Ready;
                         }
-                        break;
+                        break None;
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    break;
+                    break None;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
                     state.maintainer_contended = Some(incumbent);
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    break;
+                    break None;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.coverage.park_by(epoch, attachment);
@@ -1831,7 +1934,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if let Some(job) = next {
                         dispatch_handoff(shared, entry, epoch, job);
                     }
-                    break;
+                    break None;
                 }
                 Err(JobFailure::Environmental(detail)) => {
                     state.coverage.park_by(epoch, attachment);
@@ -1845,7 +1948,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     if let Some(job) = next {
                         dispatch_handoff(shared, entry, epoch, job);
                     }
-                    break;
+                    break None;
                 }
             }
         },
@@ -1853,13 +1956,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
-                    return;
+                    return None;
                 }
                 state.pin();
                 let Some(attachment) = state.coverage.take(epoch) else {
                     state.unpin();
                     restore_lost_claim(&mut state, Job::Maintenance(name.clone(), epoch));
-                    return;
+                    return None;
                 };
                 attachment
             };
@@ -1878,9 +1981,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin();
             if !state.claim.stands_at(epoch) {
+                // The entry moved on while this leg ran, so the coverage it
+                // took goes back where the leg ends: the release the entry
+                // owes it is read there.
                 drop(state);
-                shared.ops.detach(&name, attachment);
-                return;
+                return Some(attachment);
             }
             let mut next = None;
             match result {
@@ -1903,14 +2008,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    return;
+                    return None;
                 }
                 Err(JobFailure::MaintainerContended(incumbent)) => {
                     state.maintainer_contended = Some(incumbent);
                     begin_release(&mut state);
                     drop(state);
                     finish_release(shared, entry, &name, epoch, Some(attachment));
-                    return;
+                    return None;
                 }
                 Err(JobFailure::WatcherTerminal(error)) => {
                     state.coverage.park_by(epoch, attachment);
@@ -1934,18 +2039,20 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
             }
+            None
         }
         Job::Detach(name, epoch) => {
             let attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
-                    return;
+                    return None;
                 }
                 let attachment = state.coverage.take(epoch);
                 begin_release(&mut state);
                 attachment
             };
             finish_release(shared, entry, &name, epoch, attachment);
+            None
         }
     }
 }
@@ -3103,6 +3210,51 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// A refusal reaching an entry whose coverage is parked releases it there
+    /// and then, whatever leg is registered against the entry.
+    ///
+    /// A leg is registered from the instant it begins and holds the coverage
+    /// only from the instant it takes it, so a leg standing over parked
+    /// coverage gives nothing back: leaving the release to it would leave a
+    /// refused entry holding the coverage it was refused over, and every
+    /// producer that reads parked coverage would go on taking it.
+    #[test]
+    fn a_refusal_over_a_leg_standing_at_parked_coverage_releases_it_inline() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        {
+            // The window between a leg's registration and its taking the
+            // entry's coverage, reached under the lock a running leg would
+            // reach it under.
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            assert!(state.coverage.in_hand(), "the entry parked its coverage");
+        }
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        refuse_conflict(&host.shared, &conflict);
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            2,
+            "a refused alias kept the coverage no leg was holding"
+        );
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            !state.coverage.in_hand(),
+            "a refused entry is still serving coverage to whatever polls it"
+        );
+        assert!(
+            state.claim.leg().is_none(),
+            "a leg holding none of the entry's coverage is still registered as what holds it"
+        );
+        assert_eq!(state.trust, TrustState::Unattached);
     }
 
     /// A refusal reaching an entry whose release is already under way leaves
