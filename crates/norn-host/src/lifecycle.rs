@@ -1083,6 +1083,17 @@ impl<O: EntryOps> Drop for Host<O> {
                 self.shared.ops.detach(&name, attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // Coverage still out with a leg is that leg's to give back, and the
+            // window stays open for it: the leg reaches the same release every
+            // other one does and publishes there, once the resources are back.
+            // The joins above are what leaves nothing out on the ordinary path
+            // — a leg that has ended holds nothing — so what stands here is a
+            // leg destruction cannot wait for, which is destruction re-entered
+            // from an [`EntryOps`] callback on the very thread that leg runs
+            // on.
+            if state.coverage.out_with_leg() {
+                continue;
+            }
             state.detach_in_flight = false;
             state.trust = TrustState::Unattached;
         }
@@ -4016,6 +4027,55 @@ mod tests {
             .gate
             .lock()
             .unwrap();
+        assert_eq!(state.trust, TrustState::Unattached);
+        assert!(!state.detach_in_flight, "the release window is still open");
+        assert!(!state.coverage.in_hand());
+    }
+
+    /// Destruction leaves coverage still out with a leg to that leg, and the
+    /// window stays open until the leg's own release publishes.
+    ///
+    /// The joins wait for every leg destruction owns, so a leg still holding
+    /// coverage after them is one destruction cannot wait for — destruction
+    /// re-entered from an [`EntryOps`] callback, on the very thread that leg
+    /// runs on. Unattached is published where the resources are back and
+    /// nowhere else, so it is that leg's release that publishes it.
+    #[test]
+    fn destruction_leaves_coverage_out_with_a_leg_to_that_leg() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let shared = Arc::clone(&host.shared);
+        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state.coverage.take(epoch);
+            assert!(attachment.is_some(), "the entry parked its coverage");
+            (epoch, attachment)
+        };
+
+        drop(host);
+        {
+            let state = entry.gate.lock().unwrap();
+            assert_eq!(
+                state.trust,
+                releasing(),
+                "destruction published released over coverage a leg still held"
+            );
+            assert!(
+                state.detach_in_flight,
+                "the window the leg has to close is not open"
+            );
+        }
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        end_job_leg(&shared, &entry, &name, epoch, attachment);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        let state = entry.gate.lock().unwrap();
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.in_hand());
