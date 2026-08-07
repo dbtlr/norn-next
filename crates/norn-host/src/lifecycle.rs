@@ -2322,7 +2322,7 @@ mod tests {
             }
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
-                wait_for_flag("attach_release", &self.attach_release);
+                wait_for_release("attach_release", &self.attach_release);
             }
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -2345,7 +2345,7 @@ mod tests {
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                wait_for_flag("reconcile_release", &self.reconcile_release);
+                wait_for_release("reconcile_release", &self.reconcile_release);
             }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal(WatchError::Backend(
@@ -2411,7 +2411,7 @@ mod tests {
                 .is_some_and(|gated| gated == name);
             if self.block_poll.load(Ordering::SeqCst) || gated {
                 self.poll_started.store(true, Ordering::SeqCst);
-                wait_for_flag("poll_release", &self.poll_release);
+                wait_for_release("poll_release", &self.poll_release);
             }
             if let Some(error) = self
                 .terminal_poll
@@ -2462,7 +2462,7 @@ mod tests {
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
-                wait_for_flag("maintenance_release", &self.maintenance_release);
+                wait_for_release("maintenance_release", &self.maintenance_release);
             }
             if self.lost_maintenance.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
@@ -2478,7 +2478,7 @@ mod tests {
         fn detach(&self, _: &VaultName, _: ()) {
             if self.block_detach.load(Ordering::SeqCst) {
                 self.detach_started.store(true, Ordering::SeqCst);
-                wait_for_flag("detach_release", &self.detach_release);
+                wait_for_release("detach_release", &self.detach_release);
             }
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
@@ -2637,6 +2637,28 @@ mod tests {
         Budget::new(Duration::from_secs(10), Duration::from_millis(250))
     }
 
+    /// The widest sequence of this suite's own waits that a held-open gate
+    /// brackets.
+    ///
+    /// A case holding a job at a gate runs its own waits while the gate is
+    /// held: the case that proves a blocked maintenance stalls nothing waits
+    /// for another vault to be polled and then for that vault to be reaped,
+    /// and the case that proves two attaches take distinct worker slots waits
+    /// for the second to start and then for its state. Two is what the widest
+    /// of them runs, and the gate's bound is derived over it.
+    const HELD_OPEN_OUTER_WAITS: u32 = 2;
+
+    /// The budget a gate held open across a case's own waits obeys.
+    ///
+    /// It is derived from the budget those waits obey rather than written
+    /// beside it, because the two must move together: a gate that shares one
+    /// flat constant with the sequence it brackets lets go partway through
+    /// that sequence, and the job it was holding resumes under a case still
+    /// asserting it is parked. See [`norn_testkit::wait::Budget::dominating`].
+    fn held_open_wait_budget() -> Budget {
+        lifecycle_wait_budget().dominating(HELD_OPEN_OUTER_WAITS)
+    }
+
     /// Wait for one exact trust state, reporting the last state observed.
     ///
     /// The failure is the testkit's own: which bound it passed, how long it
@@ -2785,7 +2807,40 @@ mod tests {
     /// markers are set by the very job threads the wait is waiting on, and a
     /// spin competes with them for the core that would set the marker.
     fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) {
-        wait_until(label, lifecycle_wait_budget(), || {
+        wait_for_marker(label, flag, lifecycle_wait_budget());
+    }
+
+    /// Hold a fake's job at a gate until the case releases it.
+    ///
+    /// This is the wait a case's own sequence runs inside, so it obeys
+    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
+    /// gate that expired first would let the job run on under a case still
+    /// asserting it is parked, and the failure would land on whatever the job
+    /// touched next rather than here.
+    fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) {
+        wait_for_marker(label, flag, held_open_wait_budget());
+    }
+
+    /// **The bar on the gates here.** A gate a case holds open outlives the
+    /// widest sequence of this suite's own waits it brackets.
+    ///
+    /// The forbidden shape is the two waits sharing one flat constant, which
+    /// is invisible until a case brackets more than one wait: the gate then
+    /// expires inside the sequence, the job it held runs on, and the failure
+    /// lands on whatever that job touched rather than on the gate.
+    #[test]
+    fn a_gate_held_open_outlives_the_waits_it_brackets() {
+        let bracketed = lifecycle_wait_budget().work() * HELD_OPEN_OUTER_WAITS;
+        assert!(
+            held_open_wait_budget().work() > bracketed,
+            "a gate gets {:?}, which does not outlive the {bracketed:?} a case's own \
+             {HELD_OPEN_OUTER_WAITS} waits may take",
+            held_open_wait_budget().work()
+        );
+    }
+
+    fn wait_for_marker(label: &str, flag: &std::sync::atomic::AtomicBool, budget: Budget) {
+        wait_until(label, budget, || {
             if flag.load(Ordering::SeqCst) {
                 Observed::Met(())
             } else {
@@ -5155,7 +5210,7 @@ mod tests {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             if self.hold_reconcile.load(Ordering::SeqCst) {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                wait_for_flag("reconcile_release", &self.reconcile_release);
+                wait_for_release("reconcile_release", &self.reconcile_release);
             }
             healing.report(2, Some(2));
             Ok(())
@@ -5226,7 +5281,7 @@ mod tests {
         ) -> Result<VaultName, JobFailure> {
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
-                wait_for_flag("release_a", &self.release_a);
+                wait_for_release("release_a", &self.release_a);
             } else if name.as_str() == "b" {
                 self.b_started.store(true, Ordering::SeqCst);
             }
