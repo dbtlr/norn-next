@@ -22,7 +22,7 @@ pub struct LifecyclePolicy {
     pub watch_poll_interval: Duration,
 }
 
-/// Work coalesced behind an entry's capacity-one runnable marker.
+/// Work coalesced behind an entry's capacity-one scheduling marker.
 #[derive(Debug, Default)]
 pub struct ReconcileWork {
     pub batch: Batch,
@@ -360,8 +360,15 @@ impl Claim {
 
     /// Move the entry on to the next job its running leg sends itself. The leg
     /// holds the gate across the move, so nothing claims the entry between the
-    /// work it moves on from and the work it moves on to, and no marker stands
-    /// beside a job the leg is about to send.
+    /// work it moves on from and the work it moves on to, and the job it hands
+    /// on gets no marker of its own: the leg sends it, and a marker beside a
+    /// job already sent is one a dispatcher tick sends a second time.
+    ///
+    /// A marker left standing from before the move keeps the gate — it names
+    /// work raised under the epoch this move supersedes, and [`hand_off`] drops
+    /// only a marker naming the job going into the channel.
+    ///
+    /// [`hand_off`]: Claim::hand_off
     fn hand_on(&mut self, next: impl FnOnce(u64) -> Job) -> Job {
         let job = next(self.supersede());
         self.hold();
@@ -394,10 +401,23 @@ impl Claim {
     /// Record the job a claim took the entry from under, where the entry has
     /// nothing else scheduled. The marker holds the gate, so the job the claim
     /// did not take away is one a later tick still reaches.
+    ///
+    /// A job already scheduled against the entry is the newer of the two and
+    /// keeps the gate: the claim is putting back work it interrupted, not work
+    /// the entry has since moved on to.
     fn restore(&mut self, job: Job) {
         if !matches!(self.gate, Gate::Scheduled(_)) {
             self.gate = Gate::Scheduled(job);
         }
+    }
+
+    /// Schedule a job against the entry as it stands, without moving it on.
+    ///
+    /// Whatever holds the gate gives way to this job, a marker included: the
+    /// caller is naming the work the entry owes at the epoch it stands at, and
+    /// a marker it displaces is work raised under an epoch the entry has left.
+    fn mark(&mut self, job: Job) {
+        self.gate = Gate::Scheduled(job);
     }
 
     /// Move the entry on from work an invalidation supersedes. The job it had
@@ -444,7 +464,10 @@ impl Claim {
         self.slot
     }
 
-    /// Take the queue slot for this job.
+    /// Take the queue slot for this job, out from under whatever holds it. The
+    /// caller sends this job under the same lock, so a slot it takes over names
+    /// work the entry has moved on from: that job's arrival answers for itself
+    /// alone, and the slot it no longer holds is one it cannot free.
     fn take_slot(&mut self, epoch: u64) {
         self.slot = Some(epoch);
     }
@@ -477,12 +500,6 @@ impl Claim {
     #[cfg(test)]
     fn stand_at(&mut self, epoch: u64) {
         self.epoch = epoch;
-    }
-
-    /// Schedule a job against the entry as it stands, without moving it on.
-    #[cfg(test)]
-    fn mark(&mut self, job: Job) {
-        self.gate = Gate::Scheduled(job);
     }
 
     /// Hand the entry the next job a leg owes it. The leg's claim ends where the
@@ -759,9 +776,12 @@ fn finish_release<O: EntryOps>(
         let next = state
             .claim
             .hand_on(|epoch| Job::Attach(name.clone(), epoch));
-        // The queue slot goes with the claim: taken under the lock that ends
-        // this leg, so no producer takes it for a newer job in the window
-        // between, and given back below where the send does not happen.
+        // The whole re-arm lands in the critical section that publishes the
+        // state it warms into: the trust write, the entry's move on to this
+        // job, and the slot naming it are one step, so nothing observes a
+        // warming entry with no work coming, and no producer takes the slot
+        // for a newer job in between. The send below gives it back where it
+        // does not happen.
         state.claim.take_slot(next.epoch());
         drop(state);
         dispatch_followup(shared, next);
@@ -1299,7 +1319,7 @@ impl<O: EntryOps> Host<O> {
         self.demand(name)
     }
 
-    /// Merge watcher facts and schedule at most one runnable job for the entry.
+    /// Merge watcher facts and schedule at most one job for the entry.
     pub fn accept_batch(&self, name: &VaultName, batch: Batch) -> Result<(), HostError> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(());
@@ -2147,7 +2167,11 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 state.claim.free_slot(epoch);
                 if state.claim.stands_at(epoch) {
-                    state.claim.restore(job);
+                    // The entry still stands at this job, so this job is the
+                    // work it owes: it takes the marker back whatever else is
+                    // standing there, because anything else was raised under an
+                    // epoch the entry has already left.
+                    state.claim.mark(job);
                 }
             }
         }
@@ -5218,6 +5242,112 @@ mod tests {
         drop(lease);
         drop(reconciling_lease);
         drop(attaching_lease);
+    }
+
+    /// A follow-up a full channel refuses takes the marker at the epoch the
+    /// entry stands at, whatever else is standing there. A marker survives the
+    /// move that hands the follow-up on only by naming work raised under an
+    /// epoch the entry has already left, so an entry that keeps it owes a job
+    /// every arrival discards: the work the entry really owes is dropped, and
+    /// the gate is left to a marker no run gives back.
+    #[test]
+    fn a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left() {
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("a").unwrap();
+        let working = VaultName::new("b").unwrap();
+        let waiting = VaultName::new("c").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &working, &waiting], 1);
+        let lease = host.demand(&subject).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let working_lease = host.demand(&working).unwrap();
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The one worker goes to a vault that is not the one under test, and
+        // the channel's one place goes to a job no worker is left to take:
+        // every send from here is refused.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        host.accept_batch(&working, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let waiting_lease = host.demand(&waiting).unwrap();
+        let waiting_entry = host.shared.entries.get(&waiting).unwrap();
+        assert!(
+            waiting_entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .slot()
+                .is_some(),
+            "the attach that fills the channel never reached it"
+        );
+
+        let entry = host.shared.entries.get(&subject).unwrap();
+        // The epoch the entry's marker was raised under, left behind by the
+        // move that hands the follow-up below on.
+        let superseded = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .claim
+            .epoch();
+        {
+            // The entry as a handoff leaves it: standing at the job the leg is
+            // sending and holding the slot that job took, under a marker the
+            // move left standing because it names another job.
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state
+                .claim
+                .mark(Job::Reconcile(subject.clone(), superseded));
+            state.claim.stand_at(superseded + 1);
+            state.claim.take_slot(superseded + 1);
+        }
+
+        dispatch_followup(
+            &host.shared,
+            Job::Reconcile(subject.clone(), superseded + 1),
+        );
+        let (queued, scheduled) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.claim.slot(), state.claim.marker().map(Job::epoch))
+        };
+        assert_eq!(queued, None, "a refused send kept the queue slot it took");
+        assert_eq!(
+            scheduled,
+            Some(superseded + 1),
+            "a refused follow-up left the entry owing work it has moved past"
+        );
+
+        // The channel drains, and the tick that follows sends the entry the
+        // job it owes.
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &waiting, TrustState::Ready);
+        retry_pending_dispatches(&host.shared);
+        wait_until(
+            "the refused follow-up to reach a worker",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                if reconciles == 2 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        settle();
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "the follow-up the entry took its marker back for ran more than once"
+        );
+        drop(lease);
+        drop(working_lease);
+        drop(waiting_lease);
     }
 
     /// A leg holds its claim on the entry until the job it hands off is in the
