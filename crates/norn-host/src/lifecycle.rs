@@ -439,6 +439,75 @@ fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
     }
 }
 
+/// The work a demand lease is owed, read off what the entry holds.
+///
+/// The job follows what the entry needs rather than which door the demand came
+/// through, which is why one choice serves [`Host::demand`] and
+/// [`schedule_demanded_work`] alike: two spellings of it are two predicates to
+/// keep in step, and an entry answered one way at one door and another way at
+/// the next is the divergence itself.
+///
+/// Coverage the entry holds is coverage its work runs against. A lease raised
+/// over facts such an entry is holding is owed the reconcile that derives
+/// them: the watcher, the store, the maintainer lock and the progress counted
+/// against them all stand while it runs, and the reconcile is what drains the
+/// entry's pending facts. Coverage the entry does not hold is what an attach
+/// installs. Coverage a recovery is owed over is coverage the entry holds and
+/// cannot trust, and a recover is what makes it trustworthy again — it is the
+/// leg that restarts coverage the ops report terminally lost.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DemandedWork {
+    Attach,
+    Recover,
+    Reconcile,
+}
+
+impl DemandedWork {
+    /// The work this entry owes a demand lease.
+    fn owed_by<A>(state: &EntryState<A>) -> Self {
+        if !state.coverage.in_hand() {
+            Self::Attach
+        } else if state.recovery_required {
+            Self::Recover
+        } else {
+            Self::Reconcile
+        }
+    }
+
+    fn job(self, name: &VaultName, epoch: u64) -> Job {
+        match self {
+            Self::Attach => Job::Attach(name.clone(), epoch),
+            Self::Recover => Job::Recover(name.clone(), epoch),
+            Self::Reconcile => Job::Reconcile(name.clone(), epoch),
+        }
+    }
+
+    /// What the entry publishes while this work is scheduled and running.
+    ///
+    /// An attach and a recover both establish coverage before they read a
+    /// document, so the phase they warm under is the prologue that counts
+    /// nothing. A reconcile runs against coverage that is already installed and
+    /// reads documents from the first instant, so what it warms out of is the
+    /// facts standing in the entry — an overflow until the rescan among them is
+    /// reread, and the document side of the ladder otherwise.
+    fn scheduled_state(self, pending: &Batch) -> TrustState {
+        match self {
+            Self::Attach | Self::Recover => {
+                TrustState::warming(WarmingPhase::InstallingCoverage, 0, None)
+            }
+            Self::Reconcile => trust_for_pending_reconcile(pending),
+        }
+    }
+}
+
+/// Schedule the work a demand lease is owed against an entry free to run it,
+/// publishing the state that work warms under.
+fn schedule_demand<A>(state: &mut EntryState<A>, name: &VaultName) -> Job {
+    let work = DemandedWork::owed_by(state);
+    state.trust = work.scheduled_state(&state.pending);
+    state.claim.schedule(|epoch| work.job(name, epoch))
+}
+
 fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
     if state.detach_due
         && state.coverage.in_hand()
@@ -464,8 +533,8 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
 /// against a claimed entry records its lease and schedules nothing. Every path
 /// that ends a claim answers those leases here, which is what makes the claim's
 /// own completion the moment the demand is honored rather than some later one.
-/// The attachment in hand picks the job exactly as [`Host::demand`] does:
-/// coverage still held is recovered, coverage that is gone is attached again.
+/// The job is [`DemandedWork::owed_by`]'s, which is the one [`Host::demand`]
+/// schedules too: what the entry needs is the same fact at either door.
 ///
 /// An entry that is serving, already working, giving its resources back,
 /// parked, or owed a recovery no live lease has demanded owes an outstanding
@@ -486,17 +555,7 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
     {
         return None;
     }
-    // The job below is an attach or a recover, and both establish coverage
-    // before a document is read.
-    state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-    let attached = state.coverage.in_hand();
-    Some(state.claim.schedule(|epoch| {
-        if attached {
-            Job::Recover(name.clone(), epoch)
-        } else {
-            Job::Attach(name.clone(), epoch)
-        }
-    }))
+    Some(schedule_demand(state, name))
 }
 
 /// Enter the window in which an entry's resources are going back.
@@ -1098,17 +1157,10 @@ impl<O: EntryOps> Host<O> {
         ) && !state.claim.is_held()
             && !state.detach_in_flight;
         if schedule {
-            // The job below is an attach or a recover, and both establish
-            // coverage before a document is read.
-            state.trust = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
-            let attached = state.coverage.in_hand();
-            state.claim.schedule(|epoch| {
-                if attached {
-                    Job::Recover(name.clone(), epoch)
-                } else {
-                    Job::Attach(name.clone(), epoch)
-                }
-            });
+            // The job is the one `DemandedWork::owed_by` names, and
+            // `schedule_demanded_work` schedules that same job: what the entry
+            // needs is one fact, read the same way at either door.
+            schedule_demand(&mut state, name);
             let answer = Demand::State(state.trust.clone());
             drop(state);
             dispatch_pending(&self.shared, entry)?;
@@ -5911,6 +5963,242 @@ mod tests {
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 1);
+    }
+
+    /// The work a scheduled job names, for cases whose subject is which of the
+    /// three a demand site chose.
+    fn scheduled_work(job: &Job) -> Option<DemandedWork> {
+        match job {
+            Job::Attach(..) => Some(DemandedWork::Attach),
+            Job::Recover(..) => Some(DemandedWork::Recover),
+            Job::Reconcile(..) => Some(DemandedWork::Reconcile),
+            Job::Maintenance(..) | Job::Detach(..) => None,
+        }
+    }
+
+    /// The work an entry has scheduled against it and not yet begun.
+    fn marked_work<O: EntryOps>(host: &Host<O>, name: &VaultName) -> Option<DemandedWork> {
+        let entry = host
+            .shared
+            .entries
+            .get(name)
+            .expect("the vault is registered");
+        let state = entry.gate.lock().expect("entry gate poisoned");
+        state.claim.marker().and_then(scheduled_work)
+    }
+
+    /// Wait for the entry to hold a detach it has not yet handed to a worker.
+    fn wait_for_a_scheduled_detach<O: EntryOps>(host: &Host<O>, name: &VaultName) {
+        let entry = host
+            .shared
+            .entries
+            .get(name)
+            .expect("the vault is registered");
+        wait_until(
+            "a detach scheduled against the idle entry",
+            lifecycle_wait_budget(),
+            || {
+                let state = entry.gate.lock().expect("entry gate poisoned");
+                if state.detach_scheduled && matches!(state.claim.marker(), Some(Job::Detach(..))) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "the entry holds {:?}",
+                        state.claim.marker().and_then(scheduled_work)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// A demand that finds an entry holding its coverage, with an overflow
+    /// standing and no recovery owed, schedules the reconcile those facts are
+    /// owed.
+    ///
+    /// The coverage, the maintainer lock and the counted progress all stand
+    /// through it: nothing is torn down and nothing re-installed, and what the
+    /// lease is answered with is the overflow itself rather than a coverage
+    /// installation over coverage the entry never lost. The rescan the entry is
+    /// holding is drained by the reconcile that owns it.
+    ///
+    /// A queued detach is what opens the window: a reconcile ending against an
+    /// idle entry schedules the detach, the demand takes that scheduling back,
+    /// and the entry it then reads is attached, unclaimed and untrusted with no
+    /// recovery owed.
+    #[test]
+    fn a_demand_over_a_cancelled_detach_reconciles_the_facts_the_entry_holds() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("working").unwrap();
+        let occupied = VaultName::new("occupied").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        drop(host.demand(&working).unwrap());
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The first rescan, held open in the reconcile it schedules: the entry
+        // is claimed for the length of the reap below.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &working, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        // A second rescan, for that reconcile's own handoff drain: it is what
+        // stands in the entry once the claim ends, and what the demand below
+        // finds the entry holding.
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        // The entry falls idle while its reconcile runs, so the detach is
+        // scheduled by the leg that ends rather than by a reap over a free
+        // entry.
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+
+        // The one queue slot, taken for a vault that is not the one under
+        // test: the detach the reconcile schedules is refused the channel and
+        // stays a marker on the entry, and the worker that then takes this
+        // attach is held in it while the demand below runs.
+        ops.block_attach.store(true, Ordering::SeqCst);
+        ops.attach_started.store(false, Ordering::SeqCst);
+        let occupier = host.demand(&occupied).unwrap();
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("attach_started", &ops.attach_started);
+        wait_for_a_scheduled_detach(&host, &working);
+        assert_eq!(
+            host.state(&working),
+            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+            "the entry the demand below reads is not holding an overflow"
+        );
+
+        let lease = host.demand(&working).unwrap();
+        assert_eq!(
+            lease.outcome(),
+            &Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+            "the demand published a coverage installation over coverage the entry still holds"
+        );
+        assert_eq!(
+            marked_work(&host, &working),
+            Some(DemandedWork::Reconcile),
+            "the demand scheduled something other than the reconcile the facts are owed"
+        );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &working, TrustState::Ready);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the demand recovered coverage the entry had never lost"
+        );
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the demand gave back coverage the entry was serving from"
+        );
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "the rescan standing in the entry reached no reconcile of its own"
+        );
+        drop(lease);
+        drop(occupier);
+    }
+
+    /// Put an entry in the shape a demand site reads, and take its queue slot
+    /// so the job a site schedules stays a marker: nothing dispatches it, and
+    /// no worker begins the leg that would clear it.
+    ///
+    /// The untrusted state is the one both sites schedule against, and it is
+    /// written here whatever the coverage, so the two inputs the choice reads
+    /// are the only two a case varies.
+    fn entry_awaiting_demand(
+        ops: &Arc<FakeOps>,
+        coverage: bool,
+        recovery: bool,
+    ) -> (Host<Arc<FakeOps>>, VaultName) {
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(ops));
+        if coverage {
+            drop(host.demand(&name).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+        }
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            assert_eq!(
+                state.coverage.in_hand(),
+                coverage,
+                "the entry does not hold the coverage this shape is about"
+            );
+            state.trust = TrustState::untrusted(UntrustedReason::WatcherOverflow);
+            state.pending = Batch::rescan(RescanScope::Vault);
+            if recovery {
+                state.require_recovery();
+            }
+            let epoch = state.claim.epoch();
+            state.claim.take_slot(epoch);
+        }
+        (host, name)
+    }
+
+    /// The work a client demand schedules against an entry in this shape.
+    fn work_scheduled_by_demand(coverage: bool, recovery: bool) -> Option<DemandedWork> {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = entry_awaiting_demand(&ops, coverage, recovery);
+        let lease = host.demand(&name).unwrap();
+        let work = marked_work(&host, &name);
+        drop(lease);
+        work
+    }
+
+    /// The work the poll seam schedules for a lease already standing against an
+    /// entry in this shape — the answer a claim's own end owes it.
+    fn work_scheduled_by_the_poll_seam(coverage: bool, recovery: bool) -> Option<DemandedWork> {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = entry_awaiting_demand(&ops, coverage, recovery);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        // The lease a claim's end answers: recorded while the claim held the
+        // entry, and asking for whatever recovery the entry owes.
+        state.demand_leases += 1;
+        state.demand_recovery();
+        schedule_demanded_work(&mut state, &name);
+        state.claim.marker().and_then(scheduled_work)
+    }
+
+    /// One choice serves both demand sites. The job follows what the entry
+    /// needs rather than which door the demand came through, so an entry
+    /// admitted at one and answered at the other gets the same job — and a
+    /// shape either site reads differently is the divergence itself.
+    #[test]
+    fn both_demand_sites_schedule_the_work_the_entry_needs() {
+        for (shape, coverage, recovery, expected) in [
+            ("no coverage in hand", false, false, DemandedWork::Attach),
+            (
+                "no coverage in hand and a recovery owed",
+                false,
+                true,
+                DemandedWork::Attach,
+            ),
+            (
+                "coverage in hand and a recovery owed over it",
+                true,
+                true,
+                DemandedWork::Recover,
+            ),
+            (
+                "coverage in hand and no recovery owed",
+                true,
+                false,
+                DemandedWork::Reconcile,
+            ),
+        ] {
+            let by_demand = work_scheduled_by_demand(coverage, recovery);
+            let by_the_poll_seam = work_scheduled_by_the_poll_seam(coverage, recovery);
+            assert_eq!(
+                by_demand,
+                Some(expected),
+                "a client demand over an entry with {shape} scheduled {by_demand:?}"
+            );
+            assert_eq!(
+                by_the_poll_seam, by_demand,
+                "the two demand sites chose differently over an entry with {shape}"
+            );
+        }
     }
 
     #[test]
