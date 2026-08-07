@@ -42,10 +42,27 @@ const DONE: &str = "NORN_FS_MAINTAINER_DONE";
 /// parent's own wait budget rather than racing it.
 const BACKSTOP: Duration = Duration::from_secs(30);
 
+/// How long a child that plays a part and exits may run before it is killed.
+/// Reaching it is a wedged child rather than a slow one.
+const CHILD_DEADLINE: Duration = Duration::from_secs(30);
+
 /// What the parent waits: far above anything the mechanism should approach, so a
 /// failure here is a lock that does not behave rather than a slow machine.
 fn budget() -> Budget {
     Budget::new(Duration::from_secs(30), Duration::from_secs(5))
+}
+
+/// What the parent waits when one evaluation is a whole child run.
+///
+/// The work bound is the suite's. The probe bound is sized for the slowest
+/// evaluation this probe can make — a child that runs to [`CHILD_DEADLINE`] and
+/// still reports — so a spawn competing with the rest of the suite reads as the
+/// slow spawn it is rather than as a structurally expensive probe.
+fn spawn_budget() -> Budget {
+    Budget::new(
+        Duration::from_secs(30),
+        CHILD_DEADLINE + Duration::from_secs(5),
+    )
 }
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -443,12 +460,23 @@ fn a_second_process_is_excluded_and_names_the_incumbent() {
     );
 
     drop(held);
-    run_child(&sandbox, &child, "try", &lock, &answer).assert_success();
-    let said = read_answer(&answer);
-    assert!(
-        said.starts_with("acquired "),
-        "a released lock was not free to a second process: {said}"
-    );
+    // A single-shot attempt here would read this process's own descriptor copy
+    // as an incumbent: the child that takes the attempt is forked from a process
+    // that had the lock open moments ago, and a sibling spawn between the fork
+    // and its `exec` carries a copy of that descriptor. So the attempt is made
+    // under the bound this case declares, one whole child run per look.
+    let said = wait_until(
+        "a released lock to be free to a second process",
+        spawn_budget(),
+        || {
+            run_child(&sandbox, &child, "try", &lock, &answer).assert_success();
+            match read_answer(&answer) {
+                said if said.starts_with("acquired ") => Observed::Met(said),
+                said => Observed::pending(format!("the second process said {said:?}")),
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
     assert_ne!(
         said,
         format!("acquired {}", std::process::id()),
@@ -601,7 +629,7 @@ fn run_child(
         .env(ROLE, role)
         .env(LOCK, lock)
         .env(ANSWER, answer)
-        .deadline(Duration::from_secs(30))
+        .deadline(CHILD_DEADLINE)
         .wait()
         .expect("running the child")
 }
