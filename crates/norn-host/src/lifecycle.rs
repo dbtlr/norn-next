@@ -1110,8 +1110,9 @@ impl<O: EntryOps> Host<O> {
         })
     }
 
-    /// Record client demand and, where necessary, start one asynchronous
-    /// attach/retry. Concurrent callers only observe Warming.
+    /// Record client demand and, where necessary, start one asynchronous job
+    /// against the entry. The call never waits on that job: what it answers
+    /// with is the state the work it started runs under.
     ///
     /// The recheck below runs first and parks the entry on whatever it refuses,
     /// so the park read under the entry lock is the one this call's own read
