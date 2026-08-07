@@ -3426,6 +3426,51 @@ mod tests {
         drop((retried, host));
     }
 
+    /// A conflict is answered by the park it sets, and a lease over a parked
+    /// entry is a lease like any other: it is held against the entry and it
+    /// re-reads the park. So the conflict a demand was refused for is only the
+    /// lease's answer for as long as it stands — once a later recheck has
+    /// retired it, that same lease reports the state the entry is in rather
+    /// than the refusal it was born from.
+    #[cfg(unix)]
+    #[test]
+    fn a_lease_stops_answering_a_conflict_a_later_recheck_retired() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_base("retired-conflict-lease");
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&a, &a_root), (&b, &b_root)], 2);
+
+        // b's root becomes a second name for a's, so b's own demand is the
+        // recheck that refuses it.
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        let lease = host.demand(&b).unwrap();
+        assert!(
+            matches!(lease.completion(), Demand::DuplicateRoot(_)),
+            "a lease over an entry a conflict has parked did not answer the park"
+        );
+
+        // The roots are two again, so the recheck the retry runs is the read
+        // that retires the park.
+        std::fs::remove_file(&b_root).unwrap();
+        std::fs::create_dir(&b_root).unwrap();
+        let retried = host.retry(&b).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+        assert_eq!(
+            lease.completion(),
+            Demand::State(TrustState::Ready),
+            "the lease kept answering a conflict a later recheck retired"
+        );
+
+        drop((lease, retried, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     /// A demand raised while an entry is giving its resources back defers to
     /// the release and is honored by it: the entry is warming, so nothing is
     /// scheduled against resources still on their way out, and the re-attach
