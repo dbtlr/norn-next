@@ -3330,6 +3330,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// One park is answered in one order however many stand at once: a
+    /// maintainer another process holds outranks a root reached under more than
+    /// one name, which outranks a root the registry cannot read.
+    #[test]
+    fn a_lease_answers_the_widest_park_standing_over_the_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let lease = host.demand(&a).unwrap();
+        let entry = Arc::clone(host.shared.entries.get(&a).unwrap());
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.maintainer_contended = Some(MaintainerIdentity::unknown());
+            state.duplicate_root = Some(conflict.clone());
+            state.identity_refused = Some("the root cannot be read".into());
+        }
+        assert_eq!(
+            lease.completion(),
+            Demand::MaintainerContended(MaintainerIdentity::unknown())
+        );
+
+        entry.gate.lock().unwrap().maintainer_contended = None;
+        assert_eq!(lease.completion(), Demand::DuplicateRoot(conflict));
+
+        entry.gate.lock().unwrap().duplicate_root = None;
+        assert_eq!(
+            lease.completion(),
+            Demand::IdentityRefused("the root cannot be read".into())
+        );
+
+        drop((lease, host));
+    }
+
+    /// A watcher poll reads the same park the demand path does: an entry
+    /// holding coverage a conflict has refused is one no ambient tick schedules
+    /// against, however long that coverage stays in the entry.
+    #[test]
+    fn a_poll_schedules_no_demanded_work_against_a_parked_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let lease = host.demand(&a).unwrap();
+
+        // The entry a refusal leaves behind where a leg is registered: the
+        // coverage stays parked in the entry, the conflict park stands, and
+        // Unattached is published over both.
+        {
+            let entry = host.shared.entries.get(&a).unwrap();
+            let mut state = entry.gate.lock().unwrap();
+            state.duplicate_root = Some(AliasConflict {
+                aliases: vec![a.clone(), b.clone()],
+            });
+            state.trust = TrustState::Unattached;
+        }
+
+        poll_watchers(&host.shared);
+        settle();
+
+        {
+            let entry = host.shared.entries.get(&a).unwrap();
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                !state.claim.is_held(),
+                "a poll scheduled work against an entry a conflict has parked"
+            );
+        }
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
+        drop((lease, host));
+    }
+
+    /// A retry recovers an entry from a conflict the registry no longer
+    /// reports, and it recovers it through the recheck the demand runs: the
+    /// registry's parks are retired by the read that adjudicates them, not by
+    /// the caller asking again.
+    #[test]
+    fn a_retry_over_a_resolved_conflict_reaches_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![a.clone(), b.clone()],
+            },
+        );
+        wait_for_state(&host, &a, TrustState::Unattached);
+
+        let retried = host.retry(&a).unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 3);
+        drop((retried, host));
+    }
+
     /// A demand raised while an entry is giving its resources back defers to
     /// the release and is honored by it: the entry is warming, so nothing is
     /// scheduled against resources still on their way out, and the re-attach
