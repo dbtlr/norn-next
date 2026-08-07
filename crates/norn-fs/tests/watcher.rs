@@ -7,15 +7,21 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use norn_fs::{Batch, CaseSensitivity, PathNormalizer, WatchError, watch};
+use norn_fs::{
+    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
+};
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The vault-relative path a collector writes to prove the backend is
+/// reporting. Not a Markdown document, and named so a reader of a leftover
+/// scratch tree knows what put it there.
+const CANARY: &str = "watch-canary";
 
 fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
@@ -55,9 +61,17 @@ impl Drop for Scratch {
     }
 }
 
+/// Every fact taken off one subscription, accumulated across batches.
+///
+/// The rescans are kept because they are how the backend reports that a
+/// partition's exact path set was lost: [`RescanScope::Vault`] clears the dirty
+/// roots of the batch carrying it and no root enters that batch afterwards. A
+/// collector that dropped them would read the widening as paths going missing,
+/// which is the opposite of what it means.
 #[derive(Default)]
 struct Seen {
     roots: BTreeSet<PathBuf>,
+    rescans: BTreeSet<RescanScope>,
     schema_dirty: bool,
     terminal: Option<WatchError>,
 }
@@ -70,76 +84,135 @@ impl Seen {
                 .iter()
                 .map(|path| path.as_path().to_owned()),
         );
+        self.rescans.extend(batch.rescans().iter().copied());
         self.schema_dirty |= batch.schema_dirty();
+    }
+
+    /// Whether some reported invalidation makes `path` invalid: an
+    /// invalidation root at or above it, or a [`RescanScope::Vault`] rescan,
+    /// which is the widest invalidation the backend has and therefore covers
+    /// every vault path.
+    fn covers(&self, path: &Path) -> bool {
+        self.rescans.contains(&RescanScope::Vault)
+            || self.roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// What the collector has taken so far, for a wait that is about to fail.
+    fn state(&self) -> String {
+        format!(
+            "roots: {:?}; rescans: {:?}; schema_dirty: {}; terminal: {:?}",
+            self.roots, self.rescans, self.schema_dirty, self.terminal
+        )
     }
 }
 
+/// One subscription and everything taken off it so far.
+///
+/// The subscription hands facts over one settled batch at a time and only to a
+/// caller that asks, so the asking happens inside the wait: every probe drains
+/// what has settled since the last one and then reads the accumulated state.
+/// A batch that arrives while nothing is asking waits in the delivery slot and
+/// the coalescer keeps merging behind it, so a probe that runs late sees wider
+/// batches rather than fewer facts.
 struct Collector {
-    seen: Arc<Mutex<Seen>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+    subscription: Subscription,
+    seen: Seen,
 }
 
 impl Collector {
+    /// Watch `vault`, and hand back a collector the backend is already
+    /// reporting to, whose coverage state is empty.
+    ///
+    /// **Coverage is installed before [`watch`] returns; the platform stream
+    /// behind it starts reporting a moment later.** A change made in that window
+    /// is never reported at all, because what a stream carries is what happened
+    /// after it started — so a case that writes the instant `watch` returns is
+    /// asserting on facts the backend was never asked for. The collector
+    /// therefore writes a canary of its own and waits for it to come back, which
+    /// is the one observation that separates a live stream from a slow machine.
+    /// The canary is rewritten on every look, so a write that lands in the dead
+    /// window costs a retry rather than the whole wait; it stays where it is
+    /// afterwards, an extra reported path no case asserts the absence of.
     fn start(vault: &Path, schema: &Path) -> Self {
         let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let captured = seen.clone();
-        let stopping = stop.clone();
-        let thread = thread::spawn(move || {
-            while !stopping.load(Ordering::Acquire) {
-                match subscription.recv_timeout(Duration::from_millis(20)) {
-                    Ok(Some(batch)) => captured.lock().expect("captured state").add(batch),
-                    Ok(None) => {}
-                    Err(error) => {
-                        captured.lock().expect("captured state").terminal = Some(error);
-                        return;
-                    }
-                }
+        let mut collector = Self {
+            subscription,
+            seen: Seen::default(),
+        };
+        let canary = vault.join(CANARY);
+        wait_until("the backend to report a canary write", budget(), || {
+            std::fs::write(&canary, b"canary\n").expect("the canary write");
+            collector.drain();
+            if collector.seen.covers(Path::new(CANARY)) {
+                Observed::Met(())
+            } else {
+                Observed::Pending(format!(
+                    "the canary is covered by no invalidation the backend reported; {}",
+                    collector.seen.state()
+                ))
             }
-        });
-        Self {
-            seen,
-            stop,
-            thread: Some(thread),
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        // The canary proves the stream is live and nothing else, so the case
+        // starts from empty coverage. What settling coverage reports alongside
+        // the canary is not the case's own action, and a `RescanScope::Vault`
+        // rescan among it covers every vault path — a later wait would then be
+        // met by the readiness phase rather than by the change the case made.
+        // A terminal error survives the reset: it is
+        // the last fact the subscription carries, and a case waiting for one
+        // still has to see it.
+        let terminal = collector.seen.terminal.take();
+        collector.seen = Seen {
+            terminal,
+            ..Seen::default()
+        };
+        collector
+    }
+
+    /// Take every settled batch the subscription is holding, and stop at the
+    /// first terminal error — which is the last thing it ever reports.
+    fn drain(&mut self) {
+        while self.seen.terminal.is_none() {
+            match self.subscription.try_recv() {
+                Ok(Some(batch)) => self.seen.add(batch),
+                Ok(None) => return,
+                Err(error) => self.seen.terminal = Some(error),
+            }
         }
     }
 
-    fn wait_for_roots(&self, expected: &BTreeSet<PathBuf>, description: &'static str) {
+    /// Drain and judge until the condition holds over what has been seen.
+    fn wait_for(&mut self, description: &str, mut condition: impl FnMut(&Seen) -> Observed<()>) {
         wait_until(description, budget(), || {
-            let seen = self.seen.lock().expect("captured state");
+            self.drain();
+            condition(&self.seen)
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    fn wait_for_roots(&mut self, expected: &BTreeSet<PathBuf>, description: &'static str) {
+        self.wait_for(description, |seen| {
             let missing: Vec<_> = expected
                 .iter()
-                .filter(|path| !seen.roots.iter().any(|root| path.starts_with(root)))
+                .filter(|path| !seen.covers(path))
                 .cloned()
                 .collect();
             if missing.is_empty() {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!(
-                    "changed paths not covered by any invalidation root: {missing:?}; roots: {:?}",
-                    seen.roots
+                    "changed paths covered by no reported invalidation: {missing:?}; {}",
+                    seen.state()
                 ))
             }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
-    }
-}
-
-impl Drop for Collector {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("watch collector");
-        }
+        });
     }
 }
 
 #[test]
 fn a_burst_covers_every_changed_path_including_non_markdown_files() {
     let scratch = Scratch::new("burst");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
     let expected = BTreeSet::from([
         PathBuf::from("nested/one.md"),
         PathBuf::from("nested/two.txt"),
@@ -161,7 +234,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
     let destination = scratch.vault().join("notes/document.md");
     std::fs::create_dir_all(destination.parent().expect("a parent")).expect("a directory");
     std::fs::write(&destination, b"old\n").expect("the original document");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
 
     let temporary = scratch.vault().join("notes/.document.md.swp");
     std::fs::write(&temporary, b"new\n").expect("the editor temporary");
@@ -176,7 +249,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 #[test]
 fn a_sync_catch_up_covers_every_path_across_settled_batches() {
     let scratch = Scratch::new("sync-catch-up");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
     let mut expected = BTreeSet::new();
 
     for index in 0..128 {
@@ -205,39 +278,26 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
         CaseSensitivity::Insensitive => schema_parent.join("SCHEMA.TOML"),
         CaseSensitivity::Sensitive => schema.clone(),
     };
-    let collector = Collector::start(&scratch.vault(), &watched_schema);
+    let mut collector = Collector::start(&scratch.vault(), &watched_schema);
 
     let replacement = scratch.root.join("schema/.schema.toml.new");
     std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
     std::fs::rename(&replacement, scratch.schema()).expect("the schema replacement");
-    wait_until(
-        "the external schema replacement to be reported",
-        budget(),
-        || {
-            let seen = collector.seen.lock().expect("captured state");
-            if seen.schema_dirty {
-                Observed::Met(())
-            } else {
-                Observed::Pending("schema_dirty is false".to_owned())
-            }
-        },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"));
+    collector.wait_for("the external schema replacement to be reported", |seen| {
+        if seen.schema_dirty {
+            Observed::Met(())
+        } else {
+            Observed::Pending(seen.state())
+        }
+    });
 
     let canonical_vault = std::fs::canonicalize(scratch.vault()).expect("the canonical vault root");
     std::fs::remove_dir_all(scratch.vault()).expect("removing the watched root");
-    wait_until(
+    collector.wait_for(
         "vault root loss to terminate the subscription",
-        budget(),
-        || {
-            let seen = collector.seen.lock().expect("captured state");
-            match &seen.terminal {
-                Some(WatchError::CoverageLost(path)) if path == &canonical_vault => {
-                    Observed::Met(())
-                }
-                terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
-            }
+        |seen| match &seen.terminal {
+            Some(WatchError::CoverageLost(path)) if path == &canonical_vault => Observed::Met(()),
+            terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
         },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"));
+    );
 }

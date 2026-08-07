@@ -281,19 +281,27 @@ fn ascii_fold(path: &OsStr) -> OsString {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::AtomicU64;
 
     fn normalizer(sensitivity: CaseSensitivity) -> PathNormalizer {
         PathNormalizer { sensitivity }
     }
 
+    /// Distinguishes two scratch roots taken in the same process. A clock
+    /// reading does not: two cases running on two threads read the same
+    /// nanosecond often enough to collide, and the loser meets a directory that
+    /// already exists. A run that reuses a process id meets whatever the
+    /// previous one left behind, which is why the name is cleared first.
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: creating the root under inspection.
     fn scratch() -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("norn-path-{}-{nonce}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "norn-path-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&path);
         fs::create_dir(&path).expect("scratch directory");
         path
     }

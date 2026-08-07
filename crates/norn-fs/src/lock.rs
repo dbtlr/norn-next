@@ -455,6 +455,13 @@ fn parse_body(text: &str) -> Incumbent {
 mod tests {
     use super::*;
     use crate::scratch::Scratch;
+    use norn_testkit::wait::{Budget, Observed, wait_until};
+
+    /// What a take here waits: far above anything the mechanism should approach,
+    /// so a failure is a lock that never comes free rather than a slow machine.
+    fn budget() -> Budget {
+        Budget::new(Duration::from_secs(30), Duration::from_secs(5))
+    }
 
     /// The lock file a case works over: inside the norn data directory, keyed by
     /// the vault.
@@ -464,11 +471,29 @@ mod tests {
 
     /// The guard, or a panic naming who has it. Callers of the real surface match
     /// on the outcome; a case that only ever wants the guard says so once.
+    ///
+    /// **The wait is what this binary costs, not slack in the lock.** Cases in
+    /// this crate's own suite spawn child processes, and a child holds a copy of
+    /// every descriptor this process had open when it was forked until it
+    /// reaches its `exec` — a lock descriptor another case holds or has just
+    /// dropped included. Release waits for the last descriptor to close, so for
+    /// the length of somebody else's spawn a lock nothing in this process holds
+    /// still reads as held, by this process. Every case here works over its own
+    /// lock file and none of them contends through this helper — the cases whose
+    /// subject is contention call [`try_acquire`] directly — so waiting is the
+    /// honest shape, and it is what the try-only surface asks of a caller with a
+    /// reason to wait: declare a bound. A lock that never comes free still
+    /// fails.
     fn take(path: &Path) -> Maintainership {
-        match try_acquire(path).expect("an acquisition") {
-            Acquisition::Acquired(held) => held,
-            Acquisition::Contended { incumbent } => panic!("the lock is held by {incumbent}"),
-        }
+        wait_until("the lock to be free", budget(), || {
+            match try_acquire(path).expect("an acquisition") {
+                Acquisition::Acquired(held) => Observed::Met(held),
+                Acquisition::Contended { incumbent } => {
+                    Observed::pending(format!("the lock is held by {incumbent}"))
+                }
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"))
     }
 
     /// **The bar on the dead-inode hazard.** A lock file replaced between the

@@ -1386,13 +1386,7 @@ mod tests {
             .unwrap()
             .generation;
         fs::write(f.vault().join("note.md"), "after").unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .expect("watch batch");
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         let row = attachment
@@ -1462,13 +1456,7 @@ mod tests {
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::remove_file(&note).unwrap();
         symlink("missing-target", &note).unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .expect("replacement watcher batch");
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         assert!(
@@ -2581,13 +2569,7 @@ mod tests {
             .generation;
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         assert!(
@@ -2601,23 +2583,11 @@ mod tests {
 
         fs::create_dir_all(f.vault().join("source")).unwrap();
         fs::write(f.vault().join("source/b.md"), "b").unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         fs::rename(f.vault().join("source"), f.vault().join("renamed")).unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         assert!(
@@ -2658,13 +2628,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         assert!(
@@ -2692,13 +2656,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::write(&schema, "version: two").unwrap();
-        let batch = attachment
-            .subscription
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap();
+        let batch = settled_batch(&mut attachment);
         ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
             .unwrap();
         assert!(
@@ -3133,6 +3091,27 @@ mod tests {
     /// state that never arrives is reported rather than waited on.
     fn lifecycle_budget() -> Budget {
         Budget::new(Duration::from_secs(15), Duration::from_millis(250))
+    }
+
+    /// The next settled batch, taken through the seam the host itself polls.
+    ///
+    /// A case that edited the vault and wants the reconcile for that edit asks
+    /// the subscription the way [`poll_subscription`] does — one nonblocking
+    /// take per look — under the budget the conditions here declare. A terminal
+    /// watch error ends the wait rather than being polled for again, because it
+    /// takes the subscription with it and every look after it reports no facts.
+    fn settled_batch(attachment: &mut ProductionAttachment) -> norn_fs::Batch {
+        wait_until(
+            "the vault change to settle into a watcher batch",
+            lifecycle_budget(),
+            || match poll_subscription(attachment) {
+                Ok(Some(batch)) => Observed::Met(Ok(batch)),
+                Ok(None) => Observed::Pending("the subscription has no batch".to_owned()),
+                Err(failure) => Observed::Met(Err(failure)),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"))
+        .unwrap_or_else(|failure| panic!("the watcher reported {failure:?}"))
     }
 
     /// Wait for one exact trust state, reporting the last state observed.
