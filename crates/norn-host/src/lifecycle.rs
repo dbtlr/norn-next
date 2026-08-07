@@ -3898,9 +3898,12 @@ mod tests {
     }
 
     /// A terminal poll failure publishes its cause once, and the dispatcher
-    /// keeps polling the attachment it kept. Those later ticks report no facts,
-    /// so the state a client reads long after the loss is still the cause that
-    /// ended coverage rather than something minted on top of it.
+    /// keeps polling the attachment it kept. Neither a tick that reports
+    /// nothing nor one that reports a vault-wide rescan replaces that cause:
+    /// the entry owes a recovery, and what a rescan says about an entry whose
+    /// coverage is gone is nothing the loss did not already say. The state a
+    /// client reads long after the loss is the cause that ended coverage rather
+    /// than something minted on top of it.
     #[test]
     fn a_published_watcher_cause_outlives_the_ticks_that_follow_it() {
         let ops = Arc::new(FakeOps::default());
@@ -3938,7 +3941,20 @@ mod tests {
             ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4,
             "the dispatcher stopped polling the entry"
         );
-        assert_eq!(host.state(&name), Some(expected));
+        assert_eq!(host.state(&name), Some(expected.clone()));
+
+        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        settle();
+        assert_eq!(
+            host.state(&name),
+            Some(expected),
+            "a rescan replaced the cause that ended coverage"
+        );
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "a rescan scheduled work against coverage the entry no longer has"
+        );
         drop(held);
     }
 
