@@ -126,11 +126,14 @@ impl std::error::Error for WatchError {}
 /// receive that parked it would spend the whole scan on whichever vault is
 /// quietest.
 ///
-/// One delivered batch is the whole queue. A consumer that polls slowly holds
-/// the coalescer at that delivery slot, and everything arriving meanwhile
-/// merges into the batch it is still building — so slow polling widens batches
-/// rather than dropping facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens
-/// to a [`RescanScope::Vault`] rescan instead of growing.
+/// A delivered batch is closed, and the delivery slot holds one. A consumer
+/// that polls slowly therefore holds the coalescer at its next send, and
+/// everything arriving meanwhile merges into the batch still pending behind
+/// it — so slow polling widens the batches yet to come rather than dropping
+/// facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens to a
+/// [`RescanScope::Vault`] rescan instead of growing. More than one batch can
+/// be waiting, so a consumer that wants everything settled receives until
+/// `try_recv` reports no batch.
 ///
 /// A terminal [`WatchError`] is the last fact a subscription carries: it is
 /// delivered once, no batch follows it, and a receive after it reports either
@@ -289,9 +292,10 @@ pub fn watch(
         ledger.clone(),
     )));
     let (wake_tx, wake_rx) = mpsc::sync_channel(1);
-    // One delivered batch plus the bounded shared pending state is the whole
-    // queue. A stalled consumer backpressures only this worker; callbacks keep
-    // merging into State and widen to Rescan at the authored cap.
+    // The queue is one delivered batch, the one the worker is handing over
+    // behind it, and the bounded shared pending state. A stalled consumer
+    // backpressures only this worker; callbacks keep merging into State and
+    // widen to Rescan at the authored cap.
     let (batch_tx, batch_rx) = mpsc::sync_channel(1);
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();

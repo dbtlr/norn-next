@@ -121,7 +121,7 @@ struct Collector {
 
 impl Collector {
     /// Watch `vault`, and hand back a collector the backend is already
-    /// reporting to.
+    /// reporting to, whose coverage state is empty.
     ///
     /// **Coverage is installed before [`watch`] returns; the platform stream
     /// behind it starts reporting a moment later.** A change made in that window
@@ -153,6 +153,19 @@ impl Collector {
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
+        // The canary proves the stream is live and nothing else, so the case
+        // starts from empty coverage. What settling coverage reports alongside
+        // the canary is not the case's own action, and a `RescanScope::Vault`
+        // rescan among it covers every vault path — a later wait would then be
+        // met by the readiness phase rather than by the change the case made.
+        // A terminal error survives the reset: it is
+        // the last fact the subscription carries, and a case waiting for one
+        // still has to see it.
+        let terminal = collector.seen.terminal.take();
+        collector.seen = Seen {
+            terminal,
+            ..Seen::default()
+        };
         collector
     }
 
