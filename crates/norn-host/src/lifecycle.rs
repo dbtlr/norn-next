@@ -595,7 +595,10 @@ impl<A> EntryState<A> {
     /// The order below is the precedence: a maintainer another process holds
     /// outranks a root reached under more than one name, which outranks a root
     /// the registry cannot read. Each is a fact about a wider thing than the
-    /// one after it.
+    /// one after it, and a wider fact is one the narrower read cannot answer:
+    /// a root the registry cannot read is a root it cannot classify either, so
+    /// a conflict raised over that root is unanswered rather than retired and
+    /// keeps its place above the refusal.
     fn parked(&self) -> Option<Demand> {
         self.maintainer_contended
             .clone()
@@ -945,6 +948,14 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     }
 }
 
+/// Park an entry on the registry's own account of a root it cannot read, and
+/// give back whatever coverage the entry is still holding.
+///
+/// A conflict park standing over the entry stands through this one. The read
+/// that reaches here classified nothing — it failed on this root before it
+/// could say what any root resolves to — so it neither confirms nor contradicts
+/// a conflict, and [`EntryState::parked`] ranks the conflict first for exactly
+/// that reason. A read that can reach the root again is what retires it.
 fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
     let Some(entry) = shared.entries.get(name) else {
         return;
