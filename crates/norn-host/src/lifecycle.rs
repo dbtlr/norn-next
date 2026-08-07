@@ -2655,10 +2655,10 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
-    /// Wait for the fake to have entered `expected` attaches, on the one
+    /// Wait for the fake to have entered `expected` reconciles, on the one
     /// budget, reporting how many it had entered when the wait gave up. The
-    /// count rises before an attach that blocks starts waiting, so a case that
-    /// wants its workers occupied waits here.
+    /// count rises before a reconcile that blocks starts waiting, so a case
+    /// that wants its workers occupied waits here.
     fn wait_for_reconciles(ops: &FakeOps, expected: usize, what: &str) {
         wait_until(what, lifecycle_wait_budget(), || {
             let reconciles = ops.reconciles.load(Ordering::SeqCst);
