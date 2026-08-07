@@ -907,13 +907,15 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 /// reported back: the caller reads [`EntryState::parked`] like every other
 /// reader does, and one park is answered by one predicate.
 fn recheck_and_refuse<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
-    if let Ok(None) = shared.registry.recheck(name) {
+    if let Ok(reading) = shared.registry.recheck(name)
+        && reading.conflict.is_none()
+    {
         clear_registry_parks(shared, name);
         return;
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
     let conflict = match shared.registry.recheck(name) {
-        Ok(conflict) => conflict,
+        Ok(reading) => reading.conflict,
         Err(refusal) => {
             refuse_identity_error(shared, name, refusal.to_string());
             return;
@@ -1630,34 +1632,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             // deliberately outside this gate so unrelated vaults can attach in
             // parallel. Publication revalidates under the same gate.
             let mut attach_claims = shared.attach_gate.lock().expect("attach gate poisoned");
-            match shared.registry.recheck(&name) {
-                Ok(Some(conflict)) => {
-                    refuse_conflict(shared, &conflict);
-                    let mut state = entry.gate.lock().expect("entry gate poisoned");
-                    if state.claim.stands_at(epoch) {
-                        state.claim.release();
-                        state.duplicate_root = Some(conflict);
-                        // The refusal precedes the attach, so this entry holds
-                        // nothing to give back and Unattached is true as it is
-                        // published.
-                        state.trust = TrustState::Unattached;
-                    }
-                    return None;
-                }
-                Err(refusal) => {
-                    let mut state = entry.gate.lock().expect("entry gate poisoned");
-                    if state.claim.stands_at(epoch) {
-                        state.claim.release();
-                        state.trust = TrustState::untrusted(
-                            UntrustedReason::environmental_refusal(refusal.to_string()),
-                        );
-                    }
-                    return None;
-                }
-                Ok(None) => {}
-            }
-            let claim_identity = match shared.registry.identity(&name) {
-                Ok(identity) => identity,
+            // One read of the root answers both questions the acquisition asks
+            // of it: whether another name reaches it, and which root it is. The
+            // identity the claim below is filed under is the one this recheck
+            // resolved, so the two facts cannot disagree and one refusal covers
+            // them.
+            let reading = match shared.registry.recheck(&name) {
+                Ok(reading) => reading,
                 Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
@@ -1669,6 +1650,20 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 }
             };
+            if let Some(conflict) = reading.conflict {
+                refuse_conflict(shared, &conflict);
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if state.claim.stands_at(epoch) {
+                    state.claim.release();
+                    state.duplicate_root = Some(conflict);
+                    // The refusal precedes the attach, so this entry holds
+                    // nothing to give back and Unattached is true as it is
+                    // published.
+                    state.trust = TrustState::Unattached;
+                }
+                return None;
+            }
+            let claim_identity = reading.identity;
             if let Some(identity) = claim_identity {
                 if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
                     let mut aliases = vec![owner.clone(), name.clone()];
@@ -1709,8 +1704,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             {
                 attach_claims.remove(&identity);
             }
-            let mut post_conflict = match shared.registry.recheck(&name) {
-                Ok(conflict) => conflict,
+            let post_reading = match shared.registry.recheck(&name) {
+                Ok(reading) => reading,
                 Err(refusal) => {
                     drop(attach_claims);
                     if let Ok((attachment, _, _)) = result {
@@ -1726,8 +1721,9 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     return None;
                 }
             };
+            let mut post_conflict = post_reading.conflict;
             if post_conflict.is_none()
-                && let Ok(Some(identity)) = shared.registry.identity(&name)
+                && let Some(identity) = post_reading.identity
                 && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
             {
                 let mut aliases = vec![owner.clone(), name.clone()];
@@ -5662,10 +5658,10 @@ mod tests {
     /// attach, so the job scheduled for the entry under test waits in the
     /// channel while its root is retargeted.
     ///
-    /// The recheck is the arm every refusing root reaches: it and the identity
-    /// read beside it ask the filesystem the same question about the same root,
-    /// and the recheck asks first. The identity arm answers a root whose
-    /// identity stops resolving between those two reads.
+    /// The recheck is the arm every refusing root reaches before the
+    /// acquisition: it is the only read the attach makes of the root's identity
+    /// on this side of the heal, and the claim the attach files is filed under
+    /// what it resolved.
     #[cfg(unix)]
     #[test]
     fn an_attach_time_registry_refusal_acquires_nothing_and_says_why() {
