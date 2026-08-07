@@ -400,10 +400,11 @@ impl Store {
 
     /// What store schema this database records having been written under.
     ///
-    /// The values an open compares against this build: the pinned version, the
-    /// fingerprint of the statement list, and the digest of the schema the
-    /// database held when it was created. A doctor reports them; the open path
-    /// reads them before it trusts any other table.
+    /// The three values every open compares against this build: the pinned
+    /// version, the fingerprint of the statement list, and the digest of the
+    /// schema the database held when it was created. Open reads those rows for
+    /// itself and rebuilds from zero where any of them disagrees, so this
+    /// reports what an already-open store settled on rather than deciding it.
     pub fn recorded_store_schema(&self) -> Result<RecordedStoreSchema, StoreError> {
         Ok(RecordedStoreSchema {
             version: get_meta(&self.connection, ddl::meta::STORE_SCHEMA_VERSION)?,
