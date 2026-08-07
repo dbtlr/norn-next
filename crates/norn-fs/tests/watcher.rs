@@ -16,6 +16,11 @@ use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
+/// The vault-relative path a collector writes to prove the backend is
+/// reporting. Not a Markdown document, and named so a reader of a leftover
+/// scratch tree knows what put it there.
+const CANARY: &str = "watch-canary";
+
 fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
 }
@@ -87,12 +92,45 @@ struct Collector {
 }
 
 impl Collector {
+    /// Watch `vault`, and hand back a collector the backend is already
+    /// reporting to.
+    ///
+    /// **Coverage is installed before [`watch`] returns; the platform stream
+    /// behind it starts reporting a moment later.** A change made in that window
+    /// is never reported at all, because what a stream carries is what happened
+    /// after it started — so a case that writes the instant `watch` returns is
+    /// asserting on facts the backend was never asked for. The collector
+    /// therefore writes a canary of its own and waits for it to come back, which
+    /// is the one observation that separates a live stream from a slow machine.
+    /// The canary is rewritten on every look, so a write that lands in the dead
+    /// window costs a retry rather than the whole wait; it stays where it is
+    /// afterwards, an extra reported path no case asserts the absence of.
     fn start(vault: &Path, schema: &Path) -> Self {
         let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
-        Self {
+        let mut collector = Self {
             subscription,
             seen: Seen::default(),
-        }
+        };
+        let canary = vault.join(CANARY);
+        wait_until("the backend to report a canary write", budget(), || {
+            std::fs::write(&canary, b"canary\n").expect("the canary write");
+            collector.drain();
+            if collector
+                .seen
+                .roots
+                .iter()
+                .any(|root| Path::new(CANARY).starts_with(root))
+            {
+                Observed::Met(())
+            } else {
+                Observed::Pending(format!(
+                    "the canary is covered by no invalidation root; roots: {:?}, terminal: {:?}",
+                    collector.seen.roots, collector.seen.terminal
+                ))
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        collector
     }
 
     /// Take every settled batch the subscription is holding, and stop at the
