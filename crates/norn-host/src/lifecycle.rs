@@ -762,6 +762,14 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
 ///
 /// A release already in flight is left alone: it has published the phase that
 /// names it and publishes Unattached itself once the resources are back.
+///
+/// A window opened over a leg is closed by the leg it was opened over, so
+/// opening one where no leg is registered would leave a window nothing can
+/// close. Coverage out with a leg stands under that leg's own registration:
+/// every taker registers one under the lock it takes the coverage under, and
+/// the two releases that take coverage without registering — the first route
+/// above and [`Job::Detach`] — set the flag this pass has already returned on.
+/// The assertion below is where that invariant is stated.
 fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
     let entries = conflict
         .aliases
@@ -788,6 +796,10 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         // no later dispatch reaches.
         state.claim.open();
         let epoch = state.claim.epoch();
+        debug_assert!(
+            !state.coverage.out_with_leg() || state.claim.leg().is_some(),
+            "coverage out with a leg no registration names, so no leg closes the window below"
+        );
         match state.coverage.take(epoch) {
             // The entry holds the coverage the conflict invalidates, so this is
             // a teardown like any other: the release below is what holds it
@@ -3307,6 +3319,173 @@ mod tests {
             "a leg holding none of the entry's coverage is still registered as what holds it"
         );
         assert_eq!(state.trust, TrustState::Unattached);
+    }
+
+    /// A refusal reaching an entry whose registered leg holds none of its
+    /// coverage opens the window all the same, and that leg's end closes it on
+    /// nothing.
+    ///
+    /// This is the window every attach-time refusal opens: the attach's own leg
+    /// is registered and the coverage it would install is not there to give
+    /// back. The window is what keeps anything from re-arming while the leg is
+    /// still entitled to install coverage, and Unattached is published where
+    /// the leg ends holding none.
+    #[test]
+    fn a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        let epoch = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            let attachment = state.coverage.give_up();
+            assert!(attachment.is_some(), "the entry parked its coverage");
+            state.claim.begin_job_leg(epoch);
+            drop(state);
+            if let Some(attachment) = attachment {
+                ops.detach(&name, attachment);
+            }
+            epoch
+        };
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![name.clone()],
+            },
+        );
+
+        {
+            let state = entry.gate.lock().unwrap();
+            assert_eq!(
+                state.trust,
+                releasing(),
+                "the refusal published released over a leg that could still install coverage"
+            );
+            assert!(state.detach_in_flight, "no window is open over the leg");
+        }
+
+        end_job_leg(&host.shared, &entry, &name, epoch, None);
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            !state.detach_in_flight,
+            "the window the refusal opened outlived the leg it was opened over"
+        );
+        assert_eq!(state.trust, TrustState::Unattached);
+        assert!(state.claim.leg().is_none());
+    }
+
+    /// The refusal lands while a stale watcher poll's coverage is already on its
+    /// way back to the ops: the window opens over a leg holding coverage the
+    /// ops have, so it closes on nothing, and the release is still what
+    /// publishes.
+    #[test]
+    fn a_window_opened_over_a_stale_poll_already_detaching_closes_on_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        *ops.poll_gate.lock().unwrap() = Some(name.clone());
+        let polling = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&polling));
+        wait_for_flag("poll_started", &ops.poll_started);
+        // The entry moves on under the poll with no window open, so the poll is
+        // stale and gives its coverage straight back to the ops.
+        entry.gate.lock().unwrap().claim.supersede();
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        *ops.poll_gate.lock().unwrap() = None;
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![name.clone()],
+            },
+        );
+        assert_eq!(host.state(&name), Some(releasing()));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the coverage went back twice"
+        );
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            !state.detach_in_flight,
+            "the window opened over a detach already under way never closed"
+        );
+        assert!(!state.coverage.in_hand());
+        assert!(state.claim.leg().is_none());
+    }
+
+    /// The same instant on the job epilogue: a stale job leg is already handing
+    /// its coverage to the ops when the refusal opens the window over it.
+    #[test]
+    fn a_window_opened_over_a_stale_job_leg_already_detaching_closes_on_nothing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_for_reconciles(&ops, 1, "the reconcile leg to take the coverage");
+        // The entry moves on under the leg with no window open, so the leg is
+        // stale and its coverage goes straight back to the ops.
+        entry.gate.lock().unwrap().claim.supersede();
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![name.clone()],
+            },
+        );
+        assert_eq!(host.state(&name), Some(releasing()));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the coverage went back twice"
+        );
+        let state = entry.gate.lock().unwrap();
+        assert!(
+            !state.detach_in_flight,
+            "the window opened over a detach already under way never closed"
+        );
+        assert!(!state.coverage.in_hand());
+        assert!(state.claim.leg().is_none());
     }
 
     /// A refusal reaching an alias whose coverage is out with a watcher poll
