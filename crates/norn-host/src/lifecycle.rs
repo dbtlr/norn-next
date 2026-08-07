@@ -968,18 +968,24 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
     }
 }
 
+/// Re-read the registry over one entry and park it on whatever the read
+/// refuses.
+///
+/// A recheck that passes is the answer to both of the parks a recheck can
+/// raise: it read this root and classified it against every other registered
+/// root, so neither the refusal nor the conflict it once raised still stands.
+/// Clearing both here is what makes the demand this recheck admits a demand the
+/// paths behind it honor — a park left standing over a passing recheck is an
+/// entry admitted at one predicate and refused at the next.
+///
+/// Maintainer contention is untouched: the registry says nothing about another
+/// process's lock, so nothing read here can retire it.
 fn recheck_and_refuse<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     name: &VaultName,
 ) -> Result<Option<AliasConflict>, HostError> {
     if let Ok(None) = shared.registry.recheck(name) {
-        if let Some(entry) = shared.entries.get(name) {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .identity_refused = None;
-        }
+        clear_registry_parks(shared, name);
         return Ok(None);
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
@@ -992,14 +998,20 @@ fn recheck_and_refuse<O: EntryOps>(
     };
     if let Some(conflict) = &conflict {
         refuse_conflict(shared, conflict);
-    } else if let Some(entry) = shared.entries.get(name) {
-        entry
-            .gate
-            .lock()
-            .expect("entry gate poisoned")
-            .identity_refused = None;
+    } else {
+        clear_registry_parks(shared, name);
     }
     Ok(conflict)
+}
+
+/// Retire the parks a passing registry recheck has answered for.
+fn clear_registry_parks<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
+    let Some(entry) = shared.entries.get(name) else {
+        return;
+    };
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    state.identity_refused = None;
+    state.duplicate_root = None;
 }
 
 struct Shared<O: EntryOps> {
@@ -3177,6 +3189,77 @@ mod tests {
         wait_for_state(&host, &a, TrustState::Unattached);
         wait_for_state(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+    }
+
+    /// The recheck that admits a demand is what clears the conflict park, so
+    /// the release the lease is recorded behind honors it. One predicate reads
+    /// the park on both sides of the window: a lease the demand path admitted
+    /// is never a lease the release path refuses.
+    #[test]
+    fn a_lease_admitted_by_a_passing_recheck_is_honored_by_the_release() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        // The refusal runs off the test thread because it releases both
+        // aliases inline, and this test demands from inside that release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        // The registry reports no conflict over these roots, so the recheck
+        // this demand runs passes and the lease is recorded against an entry
+        // whose release is still in flight.
+        let lease = host.demand(&a).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(releasing()));
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+        assert_eq!(lease.completion(), Demand::State(TrustState::Ready));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            3,
+            "the release refused the re-arm for a conflict the recheck had cleared"
+        );
+        drop((lease, host));
+    }
+
+    /// The answer a lease reports is the answer the demand that raised it acted
+    /// on: the recheck clears the conflict park before the demand schedules
+    /// against it, so no lease reports a conflict for the length of the work
+    /// that was scheduled over one.
+    #[test]
+    fn a_demand_scheduled_over_a_cleared_conflict_answers_the_work_it_scheduled() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        refuse_conflict(&host.shared, &conflict);
+        wait_for_state(&host, &a, TrustState::Unattached);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&a).unwrap();
+        let installing = Demand::State(TrustState::warming(
+            WarmingPhase::InstallingCoverage,
+            0,
+            None,
+        ));
+        assert_eq!(*lease.outcome(), installing);
+        wait_for_flag("attach_started", &ops.attach_started);
+        assert_eq!(
+            lease.completion(),
+            installing,
+            "the lease reported a conflict against the work the same demand scheduled"
+        );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &a, TrustState::Ready);
+        drop((lease, host));
     }
 
     /// A park outlives the release that publishes over it. The release says
