@@ -1230,6 +1230,7 @@ fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
 #[allow(clippy::disallowed_methods)] // test fixtures impersonate external editors and cleanup.
 mod tests {
     use super::*;
+    use crate::AttachMode;
     use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
@@ -2345,11 +2346,11 @@ mod tests {
         )
         .unwrap();
 
-        drop(host.demand(&name).unwrap());
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         // A demand against a ready entry schedules nothing, which is the whole
         // difference from an entry left untrusted by one bad document.
-        let second = host.demand(&name).unwrap();
+        let second = host.demand(&name, AttachMode::Durable).unwrap();
         assert!(matches!(
             second.outcome(),
             crate::Demand::State(norn_wire::TrustState::Ready)
@@ -2791,7 +2792,7 @@ mod tests {
             },
         )
         .unwrap();
-        let _ = host.demand(&name).unwrap();
+        let _ = host.demand(&name, AttachMode::Durable).unwrap();
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         // Armed before the edit, so the reconcile the watcher schedules for it
         // is held at its entry and the in-flight leg it published on the way in
@@ -2850,7 +2851,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name).unwrap());
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         fs::remove_file(&lock).unwrap();
         fs::write(&lock, "replacement").unwrap();
@@ -3039,7 +3040,7 @@ mod tests {
             },
         )
         .unwrap();
-        drop(host.demand(&name).unwrap());
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_state(&host, &name, norn_wire::TrustState::Ready);
         lose_coverage.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_until(
@@ -3056,7 +3057,7 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         // The recovery runs for a demand that is still outstanding, so the
         // lease lives until the entry is serving again.
-        let demand = host.demand(&name).unwrap();
+        let demand = host.demand(&name, AttachMode::Durable).unwrap();
         wait_until(
             "the recovery to reach its block",
             lifecycle_budget(),

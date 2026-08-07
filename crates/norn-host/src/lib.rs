@@ -11,8 +11,8 @@ mod production;
 mod registry;
 
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
-    ProgressReporter, ReconcileWork,
+    AttachMode, Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure,
+    LifecyclePolicy, ProgressReporter, ReconcileWork,
 };
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,

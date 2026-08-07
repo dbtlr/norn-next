@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
-use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
+use norn_host::{
+    AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
+};
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
@@ -130,7 +132,8 @@ fn tear_increment() -> ! {
 }
 
 fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
-    host.demand(name).expect("request production attachment");
+    host.demand(name, AttachMode::Durable)
+        .expect("request production attachment");
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let observed = host.state(name).expect("registered vault state");
