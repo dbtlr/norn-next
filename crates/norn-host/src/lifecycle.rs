@@ -5432,7 +5432,9 @@ mod tests {
 
         // The recorded job goes into the queue behind a worker occupied by
         // the other vault, which is the window a claim taken here would leave
-        // it stranded in.
+        // it stranded in. The entry under test is holding its own gate for the
+        // job recorded above, so the tick below passes it over and the facts
+        // land on the other vault.
         ops.block_reconcile.store(true, Ordering::SeqCst);
         report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
