@@ -5244,6 +5244,112 @@ mod tests {
         drop(attaching_lease);
     }
 
+    /// A follow-up a full channel refuses takes the marker at the epoch the
+    /// entry stands at, whatever else is standing there. A marker survives the
+    /// move that hands the follow-up on only by naming work raised under an
+    /// epoch the entry has already left, so an entry that keeps it owes a job
+    /// every arrival discards: the work the entry really owes is dropped, and
+    /// the gate is left to a marker no run gives back.
+    #[test]
+    fn a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left() {
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("a").unwrap();
+        let working = VaultName::new("b").unwrap();
+        let waiting = VaultName::new("c").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), &[&subject, &working, &waiting], 1);
+        let lease = host.demand(&subject).unwrap();
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let working_lease = host.demand(&working).unwrap();
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The one worker goes to a vault that is not the one under test, and
+        // the channel's one place goes to a job no worker is left to take:
+        // every send from here is refused.
+        ops.block_reconcile_at.store(1, Ordering::SeqCst);
+        host.accept_batch(&working, Batch::rescan(RescanScope::Vault))
+            .unwrap();
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let waiting_lease = host.demand(&waiting).unwrap();
+        let waiting_entry = host.shared.entries.get(&waiting).unwrap();
+        assert!(
+            waiting_entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .slot()
+                .is_some(),
+            "the attach that fills the channel never reached it"
+        );
+
+        let entry = host.shared.entries.get(&subject).unwrap();
+        // The epoch the entry's marker was raised under, left behind by the
+        // move that hands the follow-up below on.
+        let superseded = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .claim
+            .epoch();
+        {
+            // The entry as a handoff leaves it: standing at the job the leg is
+            // sending and holding the slot that job took, under a marker the
+            // move left standing because it names another job.
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state
+                .claim
+                .mark(Job::Reconcile(subject.clone(), superseded));
+            state.claim.stand_at(superseded + 1);
+            state.claim.take_slot(superseded + 1);
+        }
+
+        dispatch_followup(
+            &host.shared,
+            Job::Reconcile(subject.clone(), superseded + 1),
+        );
+        let (queued, scheduled) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.claim.slot(), state.claim.marker().map(Job::epoch))
+        };
+        assert_eq!(queued, None, "a refused send kept the queue slot it took");
+        assert_eq!(
+            scheduled,
+            Some(superseded + 1),
+            "a refused follow-up left the entry owing work it has moved past"
+        );
+
+        // The channel drains, and the tick that follows sends the entry the
+        // job it owes.
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &waiting, TrustState::Ready);
+        retry_pending_dispatches(&host.shared);
+        wait_until(
+            "the refused follow-up to reach a worker",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                if reconciles == 2 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        settle();
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            2,
+            "the follow-up the entry took its marker back for ran more than once"
+        );
+        drop(lease);
+        drop(working_lease);
+        drop(waiting_lease);
+    }
+
     /// A leg holds its claim on the entry until the job it hands off is in the
     /// queue, so there is no instant between the two at which the entry looks
     /// idle. A dispatcher tick arriving in that window finds an entry it
