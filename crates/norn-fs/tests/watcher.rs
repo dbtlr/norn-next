@@ -14,9 +14,19 @@ use std::time::Duration;
 use norn_fs::{
     Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
 };
+use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The real-watcher holders that can be queued ahead of a case here.
+///
+/// The runner starts several binaries and several threads in each, and every
+/// case in this target and in the host's production suite is a holder. The
+/// number is what the lease's bound is derived over, and it is a queue depth
+/// rather than a measurement: waiting behind holders that are working is what
+/// the lease is for, and the bound is there to name a holder that is stuck.
+const QUEUED_HOLDERS: u32 = 32;
 
 /// The vault-relative path a collector writes to prove the backend is
 /// reporting. Not a Markdown document, and named so a reader of a leftover
@@ -25,6 +35,12 @@ const CANARY: &str = "watch-canary";
 
 fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
+}
+
+/// The bound on taking the real-watcher lease: one hold window per holder that
+/// can be queued ahead, derived from the window a case here holds it for.
+fn lease_budget() -> Budget {
+    budget().dominating(QUEUED_HOLDERS)
 }
 
 struct Scratch {
@@ -68,6 +84,13 @@ impl Drop for Scratch {
 /// roots of the batch carrying it and no root enters that batch afterwards. A
 /// collector that dropped them would read the widening as paths going missing,
 /// which is the opposite of what it means.
+///
+/// That makes a rescan an answer to one question and not the other, and the
+/// two questions are separate methods. [`Seen::covers`] asks whether a path
+/// was invalidated, which a rescan answers for every path at once.
+/// [`Seen::reported`] asks whether the backend delivered an event for the path
+/// itself, which a rescan answers for none: it says the path set was lost, so
+/// it is precisely the report that carries no per-path fact.
 #[derive(Default)]
 struct Seen {
     roots: BTreeSet<PathBuf>,
@@ -93,8 +116,18 @@ impl Seen {
     /// which is the widest invalidation the backend has and therefore covers
     /// every vault path.
     fn covers(&self, path: &Path) -> bool {
-        self.rescans.contains(&RescanScope::Vault)
-            || self.roots.iter().any(|root| path.starts_with(root))
+        self.rescans.contains(&RescanScope::Vault) || self.reported(path)
+    }
+
+    /// Whether the backend reported an invalidation root at or above `path` —
+    /// a per-path delivery, with no rescan standing in for it.
+    ///
+    /// This is what readiness asks. A stream that is live reports the path
+    /// that changed; a stream the platform has starved reports nothing, and a
+    /// rescan admitting that the path set was lost is the one report that
+    /// proves neither.
+    fn reported(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| path.starts_with(root))
     }
 
     /// What the collector has taken so far, for a wait that is about to fail.
@@ -117,6 +150,11 @@ impl Seen {
 struct Collector {
     subscription: Subscription,
     seen: Seen,
+    // The platform serves every watcher on the machine from one service, and
+    // the lease is what keeps this case's watcher the only live one. It is
+    // held for as long as the subscription is, so the field outlives nothing
+    // and is dropped with it.
+    _watcher_lease: Lease,
 }
 
 impl Collector {
@@ -133,34 +171,47 @@ impl Collector {
     /// The canary is rewritten on every look, so a write that lands in the dead
     /// window costs a retry rather than the whole wait; it stays where it is
     /// afterwards, an extra reported path no case asserts the absence of.
+    ///
+    /// **Readiness is a per-path report and nothing else.** A
+    /// [`RescanScope::Vault`] rescan covers the canary the way it covers every
+    /// vault path, and it is the report the backend makes when the platform
+    /// lost the path set — so a readiness check that accepted one would call a
+    /// stream live on the strength of the one fact that says nothing came
+    /// through it, and every later wait would be met by that rescan rather
+    /// than by the change the case made.
     fn start(vault: &Path, schema: &Path) -> Self {
+        let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
         let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
         let mut collector = Self {
             subscription,
             seen: Seen::default(),
+            _watcher_lease: lease,
         };
         let canary = vault.join(CANARY);
         wait_until("the backend to report a canary write", budget(), || {
             std::fs::write(&canary, b"canary\n").expect("the canary write");
             collector.drain();
-            if collector.seen.covers(Path::new(CANARY)) {
+            if collector.seen.reported(Path::new(CANARY)) {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!(
-                    "the canary is covered by no invalidation the backend reported; {}",
+                    "the backend reported no event for the canary itself; {}",
                     collector.seen.state()
                 ))
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
         // The canary proves the stream is live and nothing else, so the case
-        // starts from empty coverage. What settling coverage reports alongside
-        // the canary is not the case's own action, and a `RescanScope::Vault`
-        // rescan among it covers every vault path — a later wait would then be
-        // met by the readiness phase rather than by the change the case made.
-        // A terminal error survives the reset: it is
-        // the last fact the subscription carries, and a case waiting for one
-        // still has to see it.
+        // starts from empty coverage: the canary's own root is not the case's
+        // action, and neither is anything settling coverage reported beside
+        // it. The rescans go with them, and that is the same rule the case's
+        // own collection obeys from the other side. A rescan says the path set
+        // was lost, and the paths it was lost for are the ones that predate
+        // this line — the case has made no change yet, so there is nothing
+        // here for it to widen. A rescan arriving during the collection below
+        // is kept, because there it widens the very changes the case made.
+        // A terminal error survives the reset: it is the last fact the
+        // subscription carries, and a case waiting for one still has to see it.
         let terminal = collector.seen.terminal.take();
         collector.seen = Seen {
             terminal,
