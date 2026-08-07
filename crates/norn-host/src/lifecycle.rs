@@ -1288,8 +1288,11 @@ impl<O: EntryOps> Host<O> {
     /// reports.
     ///
     /// The mode says how the derived state this demand asks for is held, and it
-    /// is answered before the registry is read: a demand this host has no
-    /// lifecycle for is refused rather than served under another mode.
+    /// is answered before the registry is read and before any lease is
+    /// recorded: a demand this host has no lifecycle for is refused rather than
+    /// served under another mode, and it leaves the entry standing exactly
+    /// where it found it — parks included, since the recheck below is what
+    /// retires those.
     pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
         mode.admitted()?;
         let Some(entry) = self.shared.entries.get(name) else {
@@ -3965,6 +3968,14 @@ mod tests {
         }
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        // The work this entry would be owed: coverage in hand and no recovery
+        // owed is a reconcile, and the park is the whole of why the poll
+        // scheduled none.
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "a poll reconciled an entry a conflict has parked"
+        );
         assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
         drop((lease, host));
     }
@@ -5801,15 +5812,22 @@ mod tests {
     /// lifecycle for is answered at the seam: the call refuses, the entry is
     /// left as it stood, and no lease is handed back for work that cannot run.
     ///
-    /// The contention park below is what says the refusal comes before the
-    /// entry is touched. [`Host::retry`] retires that park on its way to the
-    /// demand behind it, so a park still standing after a refused retry is a
-    /// retry that answered the mode first.
+    /// The parks below are what say the refusal comes before the entry is
+    /// touched, one for each door. The fixture's root is one the registry reads
+    /// without complaint, so the recheck [`Host::demand`] runs retires an
+    /// identity park: a park still standing after a refused demand is a demand
+    /// that answered the mode before it read the registry, and the lease count
+    /// beside it says the same about the entry's own state. [`Host::retry`]
+    /// retires the contention park on its way to the demand behind it, so a
+    /// park still standing after a refused retry is a retry that answered the
+    /// mode first.
     #[test]
     fn a_throwaway_demand_is_refused_before_the_entry_is_touched() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let entry = Arc::clone(host.shared.entries.get(&name).unwrap());
 
+        entry.gate.lock().unwrap().identity_refused = Some("the root cannot be read".into());
         assert!(
             matches!(
                 host.demand(&name, AttachMode::Throwaway),
@@ -5817,6 +5835,18 @@ mod tests {
             ),
             "the seam admitted a mode it holds no lifecycle for"
         );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert_eq!(
+                state.identity_refused.as_deref(),
+                Some("the root cannot be read"),
+                "the refused demand rechecked the registry over the entry"
+            );
+            assert_eq!(
+                state.demand_leases, 0,
+                "the refused demand recorded a lease against the entry"
+            );
+        }
         settle();
         assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(
@@ -5825,14 +5855,11 @@ mod tests {
             "the refused mode scheduled work against the entry"
         );
 
-        host.shared
-            .entries
-            .get(&name)
-            .unwrap()
-            .gate
-            .lock()
-            .unwrap()
-            .maintainer_contended = Some(MaintainerIdentity::unknown());
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.identity_refused = None;
+            state.maintainer_contended = Some(MaintainerIdentity::unknown());
+        }
         assert!(
             matches!(
                 host.retry(&name, AttachMode::Throwaway),
@@ -5939,6 +5966,21 @@ mod tests {
             1,
             "an ambient tick armed the attach again over the park"
         );
+        {
+            // The refused attach gave the gate back and left nothing armed
+            // behind it: an entry standing still under the park is one no
+            // dispatch reaches, and a claim or a marker left here is work the
+            // park was supposed to have ended.
+            let state = host.shared.entries.get(&name).unwrap().gate.lock().unwrap();
+            assert!(
+                !state.claim.is_held(),
+                "the refused attach left the entry claimed under the park"
+            );
+            assert!(
+                state.claim.marker().is_none(),
+                "the refused attach left a job armed under the park"
+            );
+        }
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);

@@ -180,6 +180,50 @@ mod tests {
         );
     }
 
+    /// A recheck classifies every registered root, and the identity it answers
+    /// with is the requested name's own. The other roots are read for the
+    /// conflict alone: a reading that carried one of them would file the
+    /// acquisition claim under a root the caller never asked about.
+    #[test]
+    fn a_recheck_resolves_the_requested_root_among_several() {
+        let base = std::env::temp_dir().join(format!(
+            "norn-host-registry-requested-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let alpha_root = base.join("alpha");
+        let beta_root = base.join("beta");
+        std::fs::create_dir_all(&alpha_root).unwrap();
+        std::fs::create_dir_all(&beta_root).unwrap();
+        let alpha = VaultName::new("alpha").unwrap();
+        let beta = VaultName::new("beta").unwrap();
+        let registry = ServingRegistry::from_entries([
+            Entry::new(alpha.clone(), VaultRoot::new(&alpha_root).unwrap()),
+            Entry::new(beta.clone(), VaultRoot::new(&beta_root).unwrap()),
+        ])
+        .unwrap();
+
+        let alpha_identity = path_identity(&alpha_root).unwrap();
+        let beta_identity = path_identity(&beta_root).unwrap();
+        assert!(
+            alpha_identity.is_some() && alpha_identity != beta_identity,
+            "the two roots are one root, so nothing here can tell them apart"
+        );
+
+        for (requested, expected) in [(&alpha, alpha_identity), (&beta, beta_identity)] {
+            assert_eq!(
+                registry.recheck(requested).unwrap().identity,
+                expected,
+                "the recheck over {requested:?} resolved another registered root"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[cfg(unix)]
     #[test]
     fn recheck_of_a_healthy_entry_ignores_an_unrelated_identity_refusal() {
