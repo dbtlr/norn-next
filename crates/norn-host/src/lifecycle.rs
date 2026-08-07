@@ -1355,21 +1355,6 @@ impl<O: EntryOps> Host<O> {
         Ok(())
     }
 
-    /// A terminal watcher failure does not autonomously restart coverage.
-    pub fn watcher_failed(&self, name: &VaultName, error: WatchError) {
-        if let Some(entry) = self.shared.entries.get(name) {
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.require_recovery();
-            state.pending.merge(Batch::rescan(RescanScope::Vault));
-            state.claim.supersede();
-            if state.claim.leg().is_none() {
-                state.claim.abandon_slot();
-                state.claim.open();
-            }
-            state.trust = TrustState::untrusted(watcher_lost(error));
-        }
-    }
-
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
     /// finish; its release performs the expired detach immediately.
     pub fn reap_idle(&self, now: Instant) -> Result<(), HostError> {
@@ -2515,6 +2500,66 @@ mod tests {
         .unwrap()
     }
 
+    /// A directory under the system temp directory, named uniquely to this
+    /// process and instant so cases running beside each other never share one.
+    ///
+    /// The roots the fixtures above name resolve to nothing, which the registry
+    /// reads as a root that is registrable and not yet present. A case whose
+    /// subject is what the registry reads off a root needs a root the
+    /// filesystem answers for, and this is where those live.
+    fn temp_base(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "norn-host-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// A host over roots the filesystem answers for, with the dispatcher
+    /// ticking. Every root is created before the host reads the registry.
+    fn host_over_roots(
+        ops: Arc<FakeOps>,
+        roots: &[(&VaultName, &std::path::Path)],
+        worker_slots: usize,
+    ) -> Host<Arc<FakeOps>> {
+        for (_, root) in roots {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        let registry = ServingRegistry::from_entries(roots.iter().map(|(name, root)| {
+            RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
+        }))
+        .unwrap();
+        Host::new(
+            registry,
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Retarget a vault root to a symlink that resolves to itself. The identity
+    /// read the registry performs over a root refuses on the cycle, so this is
+    /// the environmental refusal every registry read of that root reports from
+    /// here on.
+    #[cfg(unix)]
+    fn refuse_root_identity(root: &std::path::Path) {
+        use std::os::unix::fs::symlink;
+
+        let target = root
+            .file_name()
+            .expect("the root has a final component")
+            .to_owned();
+        std::fs::remove_dir(root).unwrap();
+        symlink(target, root).unwrap();
+    }
+
     /// The budget every wait in this suite obeys: long enough that a loaded
     /// machine is not the thing under test, and short enough that a state
     /// that never arrives is reported rather than waited on. A 20ms
@@ -2584,6 +2629,27 @@ mod tests {
             "an environmental refusal published no account of itself"
         );
         true
+    }
+
+    /// Wait for the entry to publish an environmental refusal, on the one
+    /// budget, reporting the state it last saw. The refusal's detail is the
+    /// platform's own prose, so what is waited for is the reason — and
+    /// [`refuses_environmentally`] is what holds the account beside it to being
+    /// there at all.
+    fn wait_for_environmental_refusal<O: EntryOps>(host: &Host<O>, name: &VaultName) {
+        wait_until(
+            "the entry to publish an environmental refusal",
+            lifecycle_wait_budget(),
+            || {
+                let state = host.state(name);
+                if refuses_environmentally(state.as_ref()) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("the state is {state:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     /// The state the fake's terminal watch error publishes: a failed backend,
@@ -2831,15 +2897,31 @@ mod tests {
     /// A recovery runs where a lease asks for one, so the lease that asks is
     /// held until the leg it schedules is inside its release.
     ///
-    /// The watcher failure that owes the recovery also invalidates any watcher
-    /// poll in flight, which is why this family runs without ambient polling.
+    /// The recovery is owed by a watcher poll reporting terminal loss, and this
+    /// family runs without ambient polling, so the poll that reports it is the
+    /// one driven here.
     fn by_a_demanded_recovery(
-        _: &Arc<FakeOps>,
+        ops: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        host.watcher_failed(name, WatchError::Backend("gone".into()));
+        lose_coverage_through_a_driven_poll(ops, host, "gone");
         Some(host.demand(name).unwrap())
+    }
+
+    /// Drive one watcher poll that reports terminal loss, leaving the entry
+    /// attached, untrusted, and owing a recovery no lease has asked for yet.
+    ///
+    /// The poll is driven rather than ambient, so the loss lands where the
+    /// caller put it rather than wherever a dispatcher tick arrived first.
+    fn lose_coverage_through_a_driven_poll(
+        ops: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        detail: &str,
+    ) {
+        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
+            Some(WatchError::Backend(detail.into()));
+        poll_watchers(&host.shared);
     }
 
     /// Watcher facts schedule the reconcile that reports the failure, and the
@@ -3087,7 +3169,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.lost_recover.store(true, Ordering::SeqCst);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        lose_coverage_through_a_driven_poll(&ops, &host, "gone");
         let recovering = host.demand(&name).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
 
@@ -3225,9 +3307,14 @@ mod tests {
     }
 
     /// The release window is closed by the release itself, not by the label
-    /// standing in the entry: a writer that overwrites the phase mid-window
-    /// still schedules nothing against resources on their way out, and the
-    /// lease raised there is answered by the release.
+    /// standing in the entry: a phase overwritten mid-window still schedules
+    /// nothing against resources on their way out, and the lease raised there
+    /// is answered by the release.
+    ///
+    /// `detach_in_flight` is the whole of that guard, so the label written
+    /// below is the sharpest one there is: Unattached claims the resources are
+    /// already back, and it is one of the two states `demand` schedules
+    /// against. What refuses the scheduling is the flag beside it.
     #[test]
     fn a_relabelled_release_window_still_schedules_nothing() {
         let ops = Arc::new(FakeOps::default());
@@ -3238,7 +3325,15 @@ mod tests {
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.lost_poll.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        {
+            let entry = host.shared.entries.get(&name).unwrap();
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            assert!(
+                state.detach_in_flight,
+                "the release this test relabels is not in flight"
+            );
+            state.trust = TrustState::Unattached;
+        }
 
         let lease = host.demand(&name).unwrap();
         assert!(
@@ -3353,10 +3448,8 @@ mod tests {
     #[test]
     fn terminal_watcher_failure_recovers_only_on_demand() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let _ = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        let (host, name) = attached_awaiting_recovery(&ops);
+        settle();
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -3391,7 +3484,8 @@ mod tests {
             let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
             let held = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
-            host.watcher_failed(&name, error);
+            *ops.terminal_poll.lock().expect("terminal poll poisoned") = Some(error);
+            wait_for_state(&host, &name, expected.clone());
             assert_eq!(host.state(&name), Some(expected));
             drop(held);
         }
@@ -3474,10 +3568,7 @@ mod tests {
     #[test]
     fn recover_drains_pending_invalidations_before_publishing_ready() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        let (host, name) = attached_awaiting_recovery(&ops);
         // Held across the wait: the recovery this test counts is the one this
         // lease asks for, and a lease dropped before it runs withdraws it.
         let lease = host.demand(&name).unwrap();
@@ -3590,13 +3681,22 @@ mod tests {
         drop(lease);
     }
 
+    /// The recover leg's own terminal failure republishes watcher-untrusted.
+    /// The poll that owed the recovery carried a different account of itself,
+    /// so the state waited for below can only have come from the recover.
     #[test]
     fn terminal_failure_during_recover_stays_watcher_untrusted() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
+            Some(WatchError::Backend("gone".into()));
+        wait_for_state(
+            &host,
+            &name,
+            lost(WatcherLossCause::Backend, "filesystem watcher failed: gone"),
+        );
         ops.terminal_recover.store(true, Ordering::SeqCst);
         // Held across the wait: the recovery that fails below is the one this
         // lease asks for, and a lease dropped before it runs withdraws it.
@@ -3653,10 +3753,7 @@ mod tests {
     #[test]
     fn failed_recover_cannot_be_bypassed_by_a_later_watcher_fact() {
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        host.watcher_failed(&name, WatchError::Backend("gone".into()));
+        let (host, name) = attached_awaiting_recovery(&ops);
         ops.environmental_recover.store(true, Ordering::SeqCst);
         // Held across both waits below: a lease dropped before either state
         // is reached would withdraw the recovery request it raised.
@@ -3683,28 +3780,50 @@ mod tests {
         drop(lease);
     }
 
+    /// An identity refusal found by a demand-time recheck supersedes the
+    /// reconcile in flight against the root it refuses: the entry publishes the
+    /// refusal at once, and the reconcile gives its attachment back rather than
+    /// restoring it into an entry that has moved past it. Nothing re-attaches
+    /// against a root the registry is refusing.
+    #[cfg(unix)]
     #[test]
-    fn watcher_failure_invalidates_an_in_flight_reconcile() {
+    fn an_identity_refusal_invalidates_an_in_flight_reconcile() {
+        let base = temp_base("reconcile-identity-refusal");
+        let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
+
         ops.block_reconcile.store(true, Ordering::SeqCst);
         host.accept_batch(&name, Batch::rescan(RescanScope::Vault))
             .unwrap();
         wait_for_flag("reconcile_started", &ops.reconcile_started);
-        host.watcher_failed(&name, WatchError::Backend("lost".into()));
-        let raced_demand = host.demand(&name).unwrap();
+
+        refuse_root_identity(&root);
+        let refused = host.demand(&name).unwrap();
+        assert!(matches!(
+            refused.completion(),
+            Demand::State(ref state) if refuses_environmentally(Some(state))
+        ));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+
         ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, backend_lost());
+        wait_for_detaches(
+            &ops,
+            1,
+            "the invalidated reconcile to give its attachment back",
+        );
         settle();
-        assert_eq!(host.state(&name), Some(backend_lost()));
-        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
-        drop(raced_demand);
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the entry re-attached against a root the registry refuses"
+        );
+        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        drop((refused, host));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -3740,81 +3859,6 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         drop(host);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
-    }
-
-    /// A demand raised while a job is claimed schedules nothing, and the lease
-    /// it returns is the caller's only handle on the completion — so a caller
-    /// that drops it has asked for nothing and gets nothing until it asks
-    /// again.
-    ///
-    /// The entry is not stuck: it is waiting, which is what lazy attachment
-    /// means. A caller that wants the work either keeps its lease or demands
-    /// again, and both reach `Ready`.
-    #[test]
-    fn a_demand_dropped_during_an_invalidated_poll_leaves_the_entry_waiting() {
-        let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        ops.block_poll.store(true, Ordering::SeqCst);
-        wait_for_flag("poll_started", &ops.poll_started);
-
-        host.watcher_failed(&name, WatchError::Backend("lost".into()));
-        drop(host.demand(&name).unwrap());
-        ops.poll_release.store(true, Ordering::SeqCst);
-        wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
-        settle();
-        assert_eq!(
-            ops.attaches.load(Ordering::SeqCst),
-            1,
-            "a demand nobody was holding restarted the entry on its own"
-        );
-        assert_eq!(host.state(&name), Some(backend_lost()));
-
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn demand_during_invalidated_poll_waits_for_attachment_ownership() {
-        let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        drop(host.demand(&name).unwrap());
-        wait_for_state(&host, &name, TrustState::Ready);
-        ops.block_poll.store(true, Ordering::SeqCst);
-        wait_for_flag("poll_started", &ops.poll_started);
-        host.watcher_failed(&name, WatchError::Backend("lost".into()));
-        let demand = host.demand(&name).unwrap();
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert_eq!(demand.completion(), Demand::State(backend_lost()));
-        ops.poll_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Ready);
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
-        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
-        drop(demand);
-    }
-
-    #[test]
-    fn held_lease_does_not_autonomously_recover_a_terminal_poll_failure() {
-        let ops = Arc::new(FakeOps::default());
-        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let held = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
-        ops.block_poll.store(true, Ordering::SeqCst);
-        wait_for_flag("poll_started", &ops.poll_started);
-
-        host.watcher_failed(&name, WatchError::Backend("lost".into()));
-        ops.poll_release.store(true, Ordering::SeqCst);
-        wait_for_detaches(&ops, 1, "the stale poll to give up its attachment");
-        settle();
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert_eq!(host.state(&name), Some(backend_lost()));
-
-        let retry = host.demand(&name).unwrap();
-        wait_for_state(&host, &name, TrustState::Ready);
-        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
-        drop((held, retry));
     }
 
     /// Leave the entry where a terminal watcher failure leaves it: attached,
