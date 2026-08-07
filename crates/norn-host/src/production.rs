@@ -744,22 +744,6 @@ impl SubtreeScope<'_> {
     }
 }
 
-#[cfg(test)]
-fn prune_subtree(
-    store: &mut Store,
-    root: &DocumentPath,
-    policy: ProductionPolicy,
-    progress: &Healing<'_, ProductionAttachment>,
-) -> Result<(), JobFailure> {
-    prune_subtree_ordered(
-        store,
-        SubtreeScope::Subtree(root),
-        policy,
-        progress,
-        StoredPathOrder::Sensitive,
-    )
-}
-
 fn prune_subtree_ordered(
     store: &mut Store,
     scope: SubtreeScope<'_>,
@@ -2544,11 +2528,13 @@ mod tests {
             .generation;
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
-        prune_subtree(
+        let pruned_root = DocumentPath::new("folder").unwrap();
+        prune_subtree_ordered(
             &mut attachment.store,
-            &DocumentPath::new("folder").unwrap(),
+            SubtreeScope::Subtree(&pruned_root),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
+            StoredPathOrder::Sensitive,
         )
         .unwrap();
         fs::write(f.vault().join("after.md"), "after").unwrap();
