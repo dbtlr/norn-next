@@ -118,9 +118,25 @@ impl fmt::Display for WatchError {
 }
 impl std::error::Error for WatchError {}
 
-/// The single-consumer stream returned by [`watch`].
+/// The single-consumer source of settled batches returned by [`watch`].
 ///
-/// Dropping it tears down the backend. It is intentionally not cloneable.
+/// Delivery is pull-only. [`Subscription::try_recv`] takes at most one settled
+/// batch and returns at once, so a consumer reads on a tick of its own. That is
+/// what the host needs: one thread scans every attachment in turn, and a
+/// receive that parked it would spend the whole scan on whichever vault is
+/// quietest.
+///
+/// One delivered batch is the whole queue. A consumer that polls slowly holds
+/// the coalescer at that delivery slot, and everything arriving meanwhile
+/// merges into the batch it is still building — so slow polling widens batches
+/// rather than dropping facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens
+/// to a [`RescanScope::Vault`] rescan instead of growing.
+///
+/// A terminal [`WatchError`] is delivered once and ends the subscription: every
+/// receive after it reports that the watcher stopped.
+///
+/// It is not cloneable — one subscription, one consumer — and dropping it tears
+/// the backend down and joins the worker.
 pub struct Subscription {
     batches: Option<mpsc::Receiver<Result<Batch, WatchError>>>,
     watcher: Option<RecommendedWatcher>,
@@ -140,32 +156,6 @@ impl Subscription {
             Ok(Err(error)) => Err(error),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
             Err(mpsc::TryRecvError::Disconnected) => {
-                Err(WatchError::Backend("watcher stopped".into()))
-            }
-        }
-    }
-
-    /// Blocks until a settled batch or terminal error is available.
-    pub fn recv(&self) -> Result<Batch, WatchError> {
-        self.batches
-            .as_ref()
-            .expect("subscription receiver present")
-            .recv()
-            .unwrap_or_else(|_| Err(WatchError::Backend("watcher stopped".into())))
-    }
-
-    /// Waits at most `timeout` for a settled batch or terminal error.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<Batch>, WatchError> {
-        match self
-            .batches
-            .as_ref()
-            .expect("subscription receiver present")
-            .recv_timeout(timeout)
-        {
-            Ok(Ok(batch)) => Ok(Some(batch)),
-            Ok(Err(error)) => Err(error),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
                 Err(WatchError::Backend("watcher stopped".into()))
             }
         }

@@ -7,12 +7,11 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use norn_fs::{Batch, CaseSensitivity, PathNormalizer, WatchError, watch};
+use norn_fs::{Batch, CaseSensitivity, PathNormalizer, Subscription, WatchError, watch};
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -74,41 +73,51 @@ impl Seen {
     }
 }
 
+/// One subscription and everything taken off it so far.
+///
+/// The subscription hands facts over one settled batch at a time and only to a
+/// caller that asks, so the asking happens inside the wait: every probe drains
+/// what has settled since the last one and then reads the accumulated state.
+/// A batch that arrives while nothing is asking waits in the delivery slot and
+/// the coalescer keeps merging behind it, so a probe that runs late sees wider
+/// batches rather than fewer facts.
 struct Collector {
-    seen: Arc<Mutex<Seen>>,
-    stop: Arc<AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+    subscription: Subscription,
+    seen: Seen,
 }
 
 impl Collector {
     fn start(vault: &Path, schema: &Path) -> Self {
         let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let captured = seen.clone();
-        let stopping = stop.clone();
-        let thread = thread::spawn(move || {
-            while !stopping.load(Ordering::Acquire) {
-                match subscription.recv_timeout(Duration::from_millis(20)) {
-                    Ok(Some(batch)) => captured.lock().expect("captured state").add(batch),
-                    Ok(None) => {}
-                    Err(error) => {
-                        captured.lock().expect("captured state").terminal = Some(error);
-                        return;
-                    }
-                }
-            }
-        });
         Self {
-            seen,
-            stop,
-            thread: Some(thread),
+            subscription,
+            seen: Seen::default(),
         }
     }
 
-    fn wait_for_roots(&self, expected: &BTreeSet<PathBuf>, description: &'static str) {
+    /// Take every settled batch the subscription is holding, and stop at the
+    /// first terminal error — which is the last thing it ever reports.
+    fn drain(&mut self) {
+        while self.seen.terminal.is_none() {
+            match self.subscription.try_recv() {
+                Ok(Some(batch)) => self.seen.add(batch),
+                Ok(None) => return,
+                Err(error) => self.seen.terminal = Some(error),
+            }
+        }
+    }
+
+    /// Drain and judge until the condition holds over what has been seen.
+    fn wait_for(&mut self, description: &str, mut condition: impl FnMut(&Seen) -> Observed<()>) {
         wait_until(description, budget(), || {
-            let seen = self.seen.lock().expect("captured state");
+            self.drain();
+            condition(&self.seen)
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    fn wait_for_roots(&mut self, expected: &BTreeSet<PathBuf>, description: &'static str) {
+        self.wait_for(description, |seen| {
             let missing: Vec<_> = expected
                 .iter()
                 .filter(|path| !seen.roots.iter().any(|root| path.starts_with(root)))
@@ -122,24 +131,14 @@ impl Collector {
                     seen.roots
                 ))
             }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
-    }
-}
-
-impl Drop for Collector {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("watch collector");
-        }
+        });
     }
 }
 
 #[test]
 fn a_burst_covers_every_changed_path_including_non_markdown_files() {
     let scratch = Scratch::new("burst");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
     let expected = BTreeSet::from([
         PathBuf::from("nested/one.md"),
         PathBuf::from("nested/two.txt"),
@@ -161,7 +160,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
     let destination = scratch.vault().join("notes/document.md");
     std::fs::create_dir_all(destination.parent().expect("a parent")).expect("a directory");
     std::fs::write(&destination, b"old\n").expect("the original document");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
 
     let temporary = scratch.vault().join("notes/.document.md.swp");
     std::fs::write(&temporary, b"new\n").expect("the editor temporary");
@@ -176,7 +175,7 @@ fn an_editor_atomic_save_reports_the_destination_path() {
 #[test]
 fn a_sync_catch_up_covers_every_path_across_settled_batches() {
     let scratch = Scratch::new("sync-catch-up");
-    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+    let mut collector = Collector::start(&scratch.vault(), &scratch.schema());
     let mut expected = BTreeSet::new();
 
     for index in 0..128 {
@@ -205,39 +204,26 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
         CaseSensitivity::Insensitive => schema_parent.join("SCHEMA.TOML"),
         CaseSensitivity::Sensitive => schema.clone(),
     };
-    let collector = Collector::start(&scratch.vault(), &watched_schema);
+    let mut collector = Collector::start(&scratch.vault(), &watched_schema);
 
     let replacement = scratch.root.join("schema/.schema.toml.new");
     std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
     std::fs::rename(&replacement, scratch.schema()).expect("the schema replacement");
-    wait_until(
-        "the external schema replacement to be reported",
-        budget(),
-        || {
-            let seen = collector.seen.lock().expect("captured state");
-            if seen.schema_dirty {
-                Observed::Met(())
-            } else {
-                Observed::Pending("schema_dirty is false".to_owned())
-            }
-        },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"));
+    collector.wait_for("the external schema replacement to be reported", |seen| {
+        if seen.schema_dirty {
+            Observed::Met(())
+        } else {
+            Observed::Pending("schema_dirty is false".to_owned())
+        }
+    });
 
     let canonical_vault = std::fs::canonicalize(scratch.vault()).expect("the canonical vault root");
     std::fs::remove_dir_all(scratch.vault()).expect("removing the watched root");
-    wait_until(
+    collector.wait_for(
         "vault root loss to terminate the subscription",
-        budget(),
-        || {
-            let seen = collector.seen.lock().expect("captured state");
-            match &seen.terminal {
-                Some(WatchError::CoverageLost(path)) if path == &canonical_vault => {
-                    Observed::Met(())
-                }
-                terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
-            }
+        |seen| match &seen.terminal {
+            Some(WatchError::CoverageLost(path)) if path == &canonical_vault => Observed::Met(()),
+            terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
         },
-    )
-    .unwrap_or_else(|failure| panic!("{failure}"));
+    );
 }
