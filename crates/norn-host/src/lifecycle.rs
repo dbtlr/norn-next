@@ -22,7 +22,7 @@ pub struct LifecyclePolicy {
     pub watch_poll_interval: Duration,
 }
 
-/// Work coalesced behind an entry's capacity-one runnable marker.
+/// Work coalesced behind an entry's capacity-one scheduling marker.
 #[derive(Debug, Default)]
 pub struct ReconcileWork {
     pub batch: Batch,
@@ -360,8 +360,15 @@ impl Claim {
 
     /// Move the entry on to the next job its running leg sends itself. The leg
     /// holds the gate across the move, so nothing claims the entry between the
-    /// work it moves on from and the work it moves on to, and no marker stands
-    /// beside a job the leg is about to send.
+    /// work it moves on from and the work it moves on to, and the job it hands
+    /// on gets no marker of its own: the leg sends it, and a marker beside a
+    /// job already sent is one a dispatcher tick sends a second time.
+    ///
+    /// A marker left standing from before the move keeps the gate — it names
+    /// work raised under the epoch this move supersedes, and [`hand_off`] drops
+    /// only a marker naming the job going into the channel.
+    ///
+    /// [`hand_off`]: Claim::hand_off
     fn hand_on(&mut self, next: impl FnOnce(u64) -> Job) -> Job {
         let job = next(self.supersede());
         self.hold();
@@ -457,7 +464,10 @@ impl Claim {
         self.slot
     }
 
-    /// Take the queue slot for this job.
+    /// Take the queue slot for this job, out from under whatever holds it. The
+    /// caller sends this job under the same lock, so a slot it takes over names
+    /// work the entry has moved on from: that job's arrival answers for itself
+    /// alone, and the slot it no longer holds is one it cannot free.
     fn take_slot(&mut self, epoch: u64) {
         self.slot = Some(epoch);
     }
@@ -766,9 +776,12 @@ fn finish_release<O: EntryOps>(
         let next = state
             .claim
             .hand_on(|epoch| Job::Attach(name.clone(), epoch));
-        // The queue slot goes with the claim: taken under the lock that ends
-        // this leg, so no producer takes it for a newer job in the window
-        // between, and given back below where the send does not happen.
+        // The whole re-arm lands in the critical section that publishes the
+        // state it warms into: the trust write, the entry's move on to this
+        // job, and the slot naming it are one step, so nothing observes a
+        // warming entry with no work coming, and no producer takes the slot
+        // for a newer job in between. The send below gives it back where it
+        // does not happen.
         state.claim.take_slot(next.epoch());
         drop(state);
         dispatch_followup(shared, next);
@@ -1306,7 +1319,7 @@ impl<O: EntryOps> Host<O> {
         self.demand(name)
     }
 
-    /// Merge watcher facts and schedule at most one runnable job for the entry.
+    /// Merge watcher facts and schedule at most one job for the entry.
     pub fn accept_batch(&self, name: &VaultName, batch: Batch) -> Result<(), HostError> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(());
