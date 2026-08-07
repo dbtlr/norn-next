@@ -16,14 +16,18 @@ pub struct AliasConflict {
 /// to the conflict, so both come back from the one read: a caller that needs
 /// the identity to claim an acquisition has it without asking the filesystem
 /// the same question twice, and one refusal answers for both facts.
+///
+/// The reading is the host's own: the identity it carries is a `norn-fs` fact,
+/// and the lifecycle inside this crate is the only caller that claims an
+/// acquisition against one.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RootReading {
+pub(crate) struct RootReading {
     /// The filesystem identity the name's root resolves to. A registered root
     /// the filesystem answers for with nothing is registrable rather than
     /// resolved, and resolves to nothing here.
-    pub identity: Option<Identity>,
+    pub(crate) identity: Option<Identity>,
     /// Every registered name that reaches this root, where more than one does.
-    pub conflict: Option<AliasConflict>,
+    pub(crate) conflict: Option<AliasConflict>,
 }
 
 /// The serving set after filesystem aliases have been classified.
@@ -61,7 +65,7 @@ impl ServingRegistry {
     /// Re-evaluate aliases at attach time so roots that appeared since the
     /// registry read cannot bypass the maintainer singleton, and answer with
     /// the identity that classification resolved for this name.
-    pub fn recheck(&self, name: &VaultName) -> Result<RootReading, Refusal> {
+    pub(crate) fn recheck(&self, name: &VaultName) -> Result<RootReading, Refusal> {
         if !self.entries.contains_key(name) {
             return Ok(RootReading::default());
         }

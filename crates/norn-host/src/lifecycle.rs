@@ -865,6 +865,9 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 /// Park an entry on the registry's own account of a root it cannot read, and
 /// give back whatever coverage the entry is still holding.
 ///
+/// The park is [`park_identity_refusal`]'s write, so one fact has one spelling
+/// however it is found; what this path adds around it is the give-back below.
+///
 /// A conflict park standing over the entry stands through this one. The read
 /// that reaches here classified nothing — it failed on this root before it
 /// could say what any root resolves to — so it neither confirms nor contradicts
@@ -896,8 +899,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         state.claim.invalidate();
         state.pending.merge(Batch::rescan(RescanScope::Vault));
         state.require_recovery();
-        state.identity_refused = Some(detail.clone());
-        state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+        park_identity_refusal(&mut state, detail);
         match state.coverage.give_up() {
             // The entry holds its own coverage, whatever leg is registered
             // against it. The refusal gives it back, and the registration ends
