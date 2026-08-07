@@ -31,7 +31,7 @@ use norn_fixtures::Profile;
 use norn_host::{
     DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
 };
-use norn_store::{DocumentPath, Store};
+use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_wire::TrustState;
 
 /// The seed every generated tree is drawn at. One value, so two readings
@@ -263,7 +263,7 @@ pub fn for_each_derived_path(store: &mut Store, mut visit: impl FnMut(&DocumentP
     let mut after: Option<DocumentPath> = None;
     loop {
         let page = request
-            .stored_documents_after(after.as_ref(), PAGE)
+            .stored_documents_after_ordered(after.as_ref(), PAGE, StoredPathOrder::Sensitive)
             .expect("reading a page of derived documents");
         let Some(last) = page.last() else {
             return;

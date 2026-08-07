@@ -49,7 +49,7 @@ fn stored_document_pages_are_bounded_ordered_and_exclusive() {
     );
 
     let first = request
-        .stored_documents_after(None, 2)
+        .stored_documents_after_ordered(None, 2, StoredPathOrder::Sensitive)
         .expect("the first page");
     assert_eq!(
         first
@@ -59,7 +59,7 @@ fn stored_document_pages_are_bounded_ordered_and_exclusive() {
         ["a.md", "b.md"]
     );
     let second = request
-        .stored_documents_after(Some(&first[1].path), 2)
+        .stored_documents_after_ordered(Some(&first[1].path), 2, StoredPathOrder::Sensitive)
         .expect("the second page");
     assert_eq!(
         second
@@ -69,7 +69,7 @@ fn stored_document_pages_are_bounded_ordered_and_exclusive() {
         ["c.md"]
     );
     assert!(matches!(
-        request.stored_documents_after(None, 0),
+        request.stored_documents_after_ordered(None, 0, StoredPathOrder::Sensitive),
         Err(StoreError::Bound { .. })
     ));
 }
@@ -170,7 +170,7 @@ fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
 
     let root = path("a");
     let first = request
-        .stored_documents_in_subtree_after(&root, None, 2)
+        .stored_documents_in_subtree_after_ordered(&root, None, 2, StoredPathOrder::Sensitive)
         .expect("the first subtree page");
     assert_eq!(
         first
@@ -181,7 +181,12 @@ fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
     );
 
     let second = request
-        .stored_documents_in_subtree_after(&root, Some(&first[1].path), 2)
+        .stored_documents_in_subtree_after_ordered(
+            &root,
+            Some(&first[1].path),
+            2,
+            StoredPathOrder::Sensitive,
+        )
         .expect("the second subtree page");
     assert_eq!(
         second
@@ -192,12 +197,22 @@ fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
     );
     assert!(
         request
-            .stored_documents_in_subtree_after(&root, Some(&second[1].path), 2)
+            .stored_documents_in_subtree_after_ordered(
+                &root,
+                Some(&second[1].path),
+                2,
+                StoredPathOrder::Sensitive,
+            )
             .expect("the exhausted subtree page")
             .is_empty()
     );
     assert!(matches!(
-        request.stored_documents_in_subtree_after(&root, None, 1025),
+        request.stored_documents_in_subtree_after_ordered(
+            &root,
+            None,
+            1025,
+            StoredPathOrder::Sensitive
+        ),
         Err(StoreError::Bound { .. })
     ));
 }

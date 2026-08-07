@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use norn_config::VaultName;
 use norn_fs::ContentHash;
 use norn_host::{DemandLease, Host, ProductionEntryOps};
-use norn_store::{DocumentPath, ExplainedStatement, Store, class_probe};
+use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
 use norn_wire::TrustState;
 
@@ -541,7 +541,7 @@ fn churn_name(n: u64) -> String {
 fn a_derived_path(store: &mut Store) -> DocumentPath {
     let request = store.begin_request();
     let page = request
-        .stored_documents_after(None, 1)
+        .stored_documents_after_ordered(None, 1, StoredPathOrder::Sensitive)
         .expect("reading a page of derived documents");
     page.into_iter()
         .next()

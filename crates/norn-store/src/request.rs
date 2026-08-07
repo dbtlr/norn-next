@@ -566,20 +566,13 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of document rows in normalized path order.
+    /// The next bounded page of document rows in `order`.
     ///
     /// `after` is exclusive, so a caller can advance it only after committing
     /// the work derived from the returned page. This is the store half of a
-    /// streaming heal merge: callers never need a vault-sized path map.
-    pub fn stored_documents_after(
-        &self,
-        after: Option<&DocumentPath>,
-        limit: usize,
-    ) -> Result<Vec<StoredDocument>, StoreError> {
-        self.stored_documents_after_ordered(after, limit, StoredPathOrder::Sensitive)
-    }
-
-    /// The next bounded page using the vault root's proven path ordering.
+    /// streaming heal merge: callers never need a vault-sized path map, and a
+    /// caller merging against a walk passes the order that walk proved for the
+    /// vault root so the two sides advance together.
     pub fn stored_documents_after_ordered(
         &self,
         after: Option<&DocumentPath>,
@@ -624,27 +617,12 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page rooted at `root`, in normalized path order.
+    /// The next bounded page rooted at `root`, in `order`.
     ///
     /// The subtree contains the exact root and its segment-aligned descendants.
     /// `after` is exclusive. Both the subtree bounds and cursor are expressed
     /// in [`DocumentPath`] terms, so this never relies on wildcard matching or
     /// admits a textual neighbor such as `ab` while reconciling `a`.
-    pub fn stored_documents_in_subtree_after(
-        &self,
-        root: &DocumentPath,
-        after: Option<&DocumentPath>,
-        limit: usize,
-    ) -> Result<Vec<StoredDocument>, StoreError> {
-        self.stored_documents_in_subtree_after_ordered(
-            root,
-            after,
-            limit,
-            StoredPathOrder::Sensitive,
-        )
-    }
-
-    /// The next bounded subtree page using the vault root's proven ordering.
     pub fn stored_documents_in_subtree_after_ordered(
         &self,
         root: &DocumentPath,
@@ -661,8 +639,7 @@ impl<'a> Request<'a> {
         )
     }
 
-    /// The next bounded page of documents stored beneath `prefix`, in normalized
-    /// path order.
+    /// The next bounded page of documents stored beneath `prefix`, in `order`.
     ///
     /// A directory whose own spelling names no document still holds documents
     /// the store keeps rows for, and this is how those rows are reached: the

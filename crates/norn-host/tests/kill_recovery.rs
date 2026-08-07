@@ -10,7 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
-use norn_store::{Change, DocumentFacts, DocumentPath, IncrementProvenance, Store};
+use norn_store::{
+    Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
+};
 use norn_wire::TrustState;
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
@@ -148,7 +150,7 @@ fn read_rows(database: &Path) -> Vec<norn_store::StoredDocument> {
     let mut store = Store::open(database).expect("open derived store");
     store
         .begin_request()
-        .stored_documents_after(None, 16)
+        .stored_documents_after_ordered(None, 16, StoredPathOrder::Sensitive)
         .expect("read stored documents")
 }
 

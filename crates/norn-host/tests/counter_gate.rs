@@ -31,7 +31,7 @@ use std::path::Path;
 
 use norn_store::{
     Change, DocumentFacts, DocumentPath, ExplainedStatement, IncrementProvenance, Store,
-    StoredDocument, class_probe,
+    StoredDocument, StoredPathOrder, class_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::process::Sandbox;
@@ -216,7 +216,7 @@ fn assert_the_probes_stem_is_the_probes_alone(store: &mut Store) {
 fn a_derived_document(store: &mut Store) -> StoredDocument {
     let request = store.begin_request();
     let page = request
-        .stored_documents_after(None, 1)
+        .stored_documents_after_ordered(None, 1, StoredPathOrder::Sensitive)
         .expect("reading a page of derived documents");
     page.into_iter()
         .next()
