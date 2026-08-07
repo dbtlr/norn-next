@@ -59,6 +59,14 @@ impl<A> Coverage<A> {
         matches!(self.0, Custody::Parked(_))
     }
 
+    /// Whether the entry's coverage is out with a leg. What a leg holds is
+    /// that leg's until it ends, so a teardown reaching an entry here has
+    /// nothing of its own to give back: what the leg holds comes back where
+    /// the leg ends.
+    pub(super) fn out_with_leg(&self) -> bool {
+        matches!(self.0, Custody::OnLeg(_))
+    }
+
     /// Take the coverage the entry holds, for the leg at this epoch. An entry
     /// holding none gives none, and coverage already out with a leg is taken by
     /// no other.
@@ -468,6 +476,17 @@ impl Claim {
         if self.leg.map(Leg::epoch) == Some(epoch) {
             self.leg = None;
         }
+    }
+
+    /// End the leg running against the entry, whatever epoch it stands at.
+    ///
+    /// [`Claim::leg`] is the leg holding the entry's coverage, so a caller that
+    /// takes that coverage out of the entry's own hand takes it out from under
+    /// the registration with it: what would otherwise stand is a leg holding
+    /// none of the entry's coverage, whose own end would put back a gate the
+    /// work that took the coverage is holding.
+    pub(super) fn end_running_leg(&mut self) {
+        self.leg = None;
     }
 
     /// The job waiting in the entry's queue slot, where a job is waiting in it.
