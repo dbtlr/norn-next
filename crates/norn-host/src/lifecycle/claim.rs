@@ -158,7 +158,7 @@ pub(super) enum Leg {
 
 impl Leg {
     /// The epoch the leg was taken at.
-    pub(super) fn epoch(self) -> u64 {
+    fn epoch(self) -> u64 {
         match self {
             Self::Poll(epoch) | Self::Job(epoch) => epoch,
         }
