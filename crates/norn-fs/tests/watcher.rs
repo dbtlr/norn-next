@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use norn_fs::{Batch, CaseSensitivity, PathNormalizer, Subscription, WatchError, watch};
+use norn_fs::{
+    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
+};
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -59,9 +61,17 @@ impl Drop for Scratch {
     }
 }
 
+/// Every fact taken off one subscription, accumulated across batches.
+///
+/// The rescans are kept because they are how the backend reports that a
+/// partition's exact path set was lost: [`RescanScope::Vault`] clears the dirty
+/// roots of the batch carrying it and no root enters that batch afterwards. A
+/// collector that dropped them would read the widening as paths going missing,
+/// which is the opposite of what it means.
 #[derive(Default)]
 struct Seen {
     roots: BTreeSet<PathBuf>,
+    rescans: BTreeSet<RescanScope>,
     schema_dirty: bool,
     terminal: Option<WatchError>,
 }
@@ -74,7 +84,25 @@ impl Seen {
                 .iter()
                 .map(|path| path.as_path().to_owned()),
         );
+        self.rescans.extend(batch.rescans().iter().copied());
         self.schema_dirty |= batch.schema_dirty();
+    }
+
+    /// Whether some reported invalidation makes `path` invalid: an
+    /// invalidation root at or above it, or a [`RescanScope::Vault`] rescan,
+    /// which is the widest invalidation the backend has and therefore covers
+    /// every vault path.
+    fn covers(&self, path: &Path) -> bool {
+        self.rescans.contains(&RescanScope::Vault)
+            || self.roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// What the collector has taken so far, for a wait that is about to fail.
+    fn state(&self) -> String {
+        format!(
+            "roots: {:?}; rescans: {:?}; schema_dirty: {}; terminal: {:?}",
+            self.roots, self.rescans, self.schema_dirty, self.terminal
+        )
     }
 }
 
@@ -115,17 +143,12 @@ impl Collector {
         wait_until("the backend to report a canary write", budget(), || {
             std::fs::write(&canary, b"canary\n").expect("the canary write");
             collector.drain();
-            if collector
-                .seen
-                .roots
-                .iter()
-                .any(|root| Path::new(CANARY).starts_with(root))
-            {
+            if collector.seen.covers(Path::new(CANARY)) {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!(
-                    "the canary is covered by no invalidation root; roots: {:?}, terminal: {:?}",
-                    collector.seen.roots, collector.seen.terminal
+                    "the canary is covered by no invalidation the backend reported; {}",
+                    collector.seen.state()
                 ))
             }
         })
@@ -158,15 +181,15 @@ impl Collector {
         self.wait_for(description, |seen| {
             let missing: Vec<_> = expected
                 .iter()
-                .filter(|path| !seen.roots.iter().any(|root| path.starts_with(root)))
+                .filter(|path| !seen.covers(path))
                 .cloned()
                 .collect();
             if missing.is_empty() {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!(
-                    "changed paths not covered by any invalidation root: {missing:?}; roots: {:?}",
-                    seen.roots
+                    "changed paths covered by no reported invalidation: {missing:?}; {}",
+                    seen.state()
                 ))
             }
         });
@@ -251,7 +274,7 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
         if seen.schema_dirty {
             Observed::Met(())
         } else {
-            Observed::Pending("schema_dirty is false".to_owned())
+            Observed::Pending(seen.state())
         }
     });
 
