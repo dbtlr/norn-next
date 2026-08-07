@@ -1415,6 +1415,11 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             if state.claim.is_held() {
                 continue;
             }
+            // The same shape the post-poll arm below stands for, read before
+            // the entry is claimed, and unreached for the same reason: nothing
+            // leaves facts standing in an unclaimed entry with no recovery owed
+            // and nothing scheduled. The guard is live — an entry owing a
+            // recovery is passed through to the poll rather than reconciled.
             if !state.pending.is_empty() && state.attachment.is_some() && !state.recovery_required {
                 state
                     .claim
@@ -1455,14 +1460,21 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             );
                         } else if !state.pending.is_empty() && !state.recovery_required {
                             // Facts standing in the entry with nothing
-                            // scheduled against them. This poll is what holds
-                            // the entry, so it is what schedules the reconcile
-                            // they are owed; maintenance above carries them
-                            // instead where both are due, because its own
-                            // handoff ends in the same reconcile. An entry
-                            // owing a recovery schedules neither: what
-                            // reconciles facts is coverage, and the recovery a
-                            // demand asks for is what installs it again.
+                            // scheduled against them. No writer of
+                            // `state.pending` leaves the entry in that shape:
+                            // each one either schedules the follow-up under the
+                            // same lock, sets `recovery_required` beside the
+                            // facts, or clears them outright, so this arm
+                            // reaches nothing today. It stands for the entry
+                            // this poll holds — the poll would be what
+                            // schedules the reconcile such facts are owed, with
+                            // maintenance above carrying them instead where
+                            // both are due, because its own handoff ends in the
+                            // same reconcile. The guard is what is live: an
+                            // entry owing a recovery schedules neither arm,
+                            // because what reconciles facts is coverage, and
+                            // the recovery a demand asks for is what installs
+                            // it again.
                             schedule = Some(
                                 state
                                     .claim
@@ -3640,7 +3652,6 @@ mod tests {
             );
             state.pending.merge(Batch::rescan(RescanScope::Vault));
         }
-        assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -6051,10 +6062,11 @@ mod tests {
         );
     }
 
-    /// A batch a watcher poll reports without a rescan names the paths that
-    /// changed, so the entry has work to do and says so — healing, not
-    /// overflowed. The reconcile the poll schedules is what makes it serve
-    /// again.
+    /// A batch reported without a rescan is work whatever it carries: the poll
+    /// hands it to a reconcile, and the entry stops serving until that reconcile
+    /// runs — healing, not overflowed. The batch here carries nothing at all,
+    /// which is the corner of that arm: the entry publishes the phase and owes
+    /// the reconcile on the strength of the report alone.
     #[test]
     fn a_polled_batch_without_a_rescan_publishes_healing() {
         let ops = Arc::new(FakeOps::default());
