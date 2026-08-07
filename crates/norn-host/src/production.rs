@@ -1263,11 +1263,36 @@ mod tests {
         ));
     }
 
+    /// The real-watcher holders that can be queued ahead of a case here.
+    ///
+    /// Every case in this suite and in the filesystem crate's watcher target
+    /// is a holder, and the runner starts several binaries and several threads
+    /// in each. The number is a queue depth rather than a measurement: waiting
+    /// behind holders that are working is what the lease is for, and the bound
+    /// derived from it is there to name a holder that is stuck.
+    const QUEUED_HOLDERS: u32 = 32;
+
+    /// The bound on taking the real-watcher lease: one hold window per holder
+    /// that can be queued ahead, derived from the window a case here holds it
+    /// for.
+    fn lease_budget() -> Budget {
+        lifecycle_budget().dominating(QUEUED_HOLDERS)
+    }
+
     struct Fixture {
         root: PathBuf,
+        // Every case built on a fixture attaches a real vault, and an
+        // attachment installs a real platform watcher. The lease makes this
+        // process's watcher the only live one on the machine, and it is held
+        // for the fixture's whole life because the attachment's is inside it.
+        _watcher_lease: norn_testkit::isolation::Lease,
     }
     impl Fixture {
         fn new(label: &str) -> Self {
+            let lease = norn_testkit::isolation::Lease::hold(
+                norn_testkit::isolation::REAL_WATCHER,
+                lease_budget(),
+            );
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1276,7 +1301,10 @@ mod tests {
                 .join(format!("norn-host-{label}-{}-{nonce}", std::process::id()));
             fs::create_dir_all(root.join("vault/.norn")).unwrap();
             fs::write(root.join("vault/.norn/schema.yaml"), "version: 1\n").unwrap();
-            Self { root }
+            Self {
+                root,
+                _watcher_lease: lease,
+            }
         }
         fn vault(&self) -> PathBuf {
             self.root.join("vault")
@@ -1386,19 +1414,22 @@ mod tests {
             .unwrap()
             .generation;
         fs::write(f.vault().join("note.md"), "after").unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        let row = attachment
-            .store
-            .begin_request()
-            .stored_document(&DocumentPath::new("note.md").unwrap())
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            row.content_hash,
-            norn_fs::ContentHash::of(b"after").to_string()
+        let after = norn_fs::ContentHash::of(b"after").to_string();
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the edited document to converge on its new hash",
+            |attachment, _| match stored(attachment, "note.md") {
+                Some(row) if row.content_hash == after => Observed::Met(()),
+                row => Observed::pending(format!("note.md is {:?}", row.map(|r| r.content_hash))),
+            },
         );
+        // The unrelated document is a negative: nothing may touch it, and
+        // there is no arrival to wait for. The absorption above is the span it
+        // is judged over — every batch the edit produced has been reconciled by
+        // the time this reads the row.
         assert_eq!(
             attachment
                 .store
@@ -1456,16 +1487,16 @@ mod tests {
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::remove_file(&note).unwrap();
         symlink("missing-target", &note).unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new("note.md").unwrap())
-                .unwrap()
-                .is_none()
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the document behind the symlink to lose its row",
+            |attachment, _| match stored(attachment, "note.md") {
+                None => Observed::Met(()),
+                Some(row) => Observed::pending(format!("note.md still stands at {row:?}")),
+            },
         );
         ops.detach(&name, attachment);
     }
@@ -2569,42 +2600,66 @@ mod tests {
             .generation;
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new("folder/a.md").unwrap())
-                .unwrap()
-                .is_none()
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the removed directory's document to be pruned",
+            |attachment, _| match stored(attachment, "folder/a.md") {
+                None => Observed::Met(()),
+                Some(row) => Observed::pending(format!("folder/a.md still stands at {row:?}")),
+            },
         );
 
         fs::create_dir_all(f.vault().join("source")).unwrap();
         fs::write(f.vault().join("source/b.md"), "b").unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        fs::rename(f.vault().join("source"), f.vault().join("renamed")).unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new("source/b.md").unwrap())
-                .unwrap()
-                .is_none()
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the added directory's document to be indexed",
+            |attachment, _| match stored(attachment, "source/b.md") {
+                Some(_) => Observed::Met(()),
+                None => Observed::pending("source/b.md is not stored"),
+            },
         );
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new("renamed/b.md").unwrap())
-                .unwrap()
-                .is_some()
+
+        // A rename reaches the watcher as two facts about two paths, and the
+        // platform is free to report them in two batches in either order. Both
+        // halves are therefore one condition: a wait that took the destination
+        // and asserted the source outside it fails whenever the source's half
+        // lands in the next batch, and a wait that took the source and
+        // asserted the destination fails on the other split.
+        fs::rename(f.vault().join("source"), f.vault().join("renamed")).unwrap();
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "both halves of the rename to land: the source pruned and the destination indexed",
+            |attachment, _| {
+                let source = stored(attachment, "source/b.md");
+                let destination = stored(attachment, "renamed/b.md");
+                if source.is_none() && destination.is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "source/b.md is {}, renamed/b.md is {}",
+                        if source.is_some() {
+                            "still stored"
+                        } else {
+                            "pruned"
+                        },
+                        if destination.is_some() {
+                            "stored"
+                        } else {
+                            "not stored yet"
+                        }
+                    ))
+                }
+            },
         );
         assert_eq!(
             attachment
@@ -2628,16 +2683,18 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new("archive.md/child.md").unwrap())
-                .unwrap()
-                .is_none()
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the removed markdown-suffixed directory's descendant to be pruned",
+            |attachment, _| match stored(attachment, "archive.md/child.md") {
+                None => Observed::Met(()),
+                Some(row) => {
+                    Observed::pending(format!("archive.md/child.md still stands at {row:?}"))
+                }
+            },
         );
         ops.detach(&name, attachment);
     }
@@ -2656,17 +2713,26 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&name, &progress).unwrap();
         fs::write(&schema, "version: two").unwrap();
-        let batch = settled_batch(&mut attachment);
-        ops.reconcile(&name, &mut attachment, ReconcileWork { batch }, &progress)
-            .unwrap();
-        assert!(
-            attachment
-                .store
-                .begin_request()
-                .stored_document(&DocumentPath::new(".norn/schema.md").unwrap())
-                .unwrap()
-                .is_none()
+        // The outcome here is that nothing arrives, so what the wait is for is
+        // the invalidation itself: the schema edit has been reported and
+        // reconciled by the time the row is read. A wait for the store to stay
+        // empty would be met by the first look, before the watcher had
+        // reported anything at all.
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the schema invalidation to be reported and reconciled",
+            |_, absorbed| {
+                if absorbed.schema_dirty {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no batch has carried the schema invalidation")
+                }
+            },
         );
+        assert!(stored(&mut attachment, ".norn/schema.md").is_none());
         ops.detach(&name, attachment);
     }
 
@@ -3093,25 +3159,250 @@ mod tests {
         Budget::new(Duration::from_secs(15), Duration::from_millis(250))
     }
 
-    /// The next settled batch, taken through the seam the host itself polls.
+    /// Everything the pump has taken off the subscription and reconciled.
     ///
-    /// A case that edited the vault and wants the reconcile for that edit asks
-    /// the subscription the way [`poll_subscription`] does — one nonblocking
-    /// take per look — under the budget the conditions here declare. A terminal
-    /// watch error ends the wait rather than being polled for again, because it
-    /// takes the subscription with it and every look after it reports no facts.
-    fn settled_batch(attachment: &mut ProductionAttachment) -> norn_fs::Batch {
-        wait_until(
-            "the vault change to settle into a watcher batch",
-            lifecycle_budget(),
-            || match poll_subscription(attachment) {
-                Ok(Some(batch)) => Observed::Met(Ok(batch)),
-                Ok(None) => Observed::Pending("the subscription has no batch".to_owned()),
-                Err(failure) => Observed::Met(Err(failure)),
+    /// A condition that is about the facts rather than about the store reads
+    /// this: whether the schema invalidation has come through yet, how wide
+    /// the reported roots are, whether the platform gave up on exactness. It
+    /// also renders into every pending observation, so a wait that expires
+    /// says what the watcher had reported by then.
+    #[derive(Default)]
+    struct Absorbed {
+        batches: usize,
+        roots: std::collections::BTreeSet<norn_fs::NormalizedPath>,
+        rescans: std::collections::BTreeSet<RescanScope>,
+        schema_dirty: bool,
+    }
+
+    /// What a batch contributes to [`Absorbed`] when the pump takes it.
+    ///
+    /// The platform's batch contributes the facts it carries. A subject that
+    /// drives its own batches contributes that one arrived, which is what a
+    /// case waiting on the count of them is asking about.
+    trait Absorbable {
+        fn record(&self, absorbed: &mut Absorbed);
+    }
+
+    impl Absorbable for norn_fs::Batch {
+        fn record(&self, absorbed: &mut Absorbed) {
+            absorbed.batches += 1;
+            absorbed.roots.extend(self.vault_roots().iter().cloned());
+            absorbed.rescans.extend(self.rescans().iter().copied());
+            absorbed.schema_dirty |= self.schema_dirty();
+        }
+    }
+
+    impl std::fmt::Display for Absorbed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} batches reconciled; roots: {:?}; rescans: {:?}; schema_dirty: {}",
+                self.batches, self.roots, self.rescans, self.schema_dirty
+            )
+        }
+    }
+
+    /// Reconcile settled batches until `condition` holds, under one budget.
+    ///
+    /// **A watcher batch is not the unit an outcome arrives in.** The platform
+    /// splits one change across as many batches as it likes and in either
+    /// order — a directory rename arrives as the destination appearing in one
+    /// batch and the source disappearing in another — so a case that takes one
+    /// batch, reconciles it, and asserts the outcome outside any wait is
+    /// asserting that the split did not happen. When it does happen the case
+    /// fails against a store the next batch settles, which is a report about
+    /// batch granularity wearing the costume of a reconcile defect.
+    ///
+    /// So the outcome is the condition and the batches are what the wait
+    /// pumps: every look takes at most one settled batch — the same nonblocking
+    /// take [`poll_subscription`] makes, so one look costs one reconcile of
+    /// what the platform actually reported — reconciles it, and asks the
+    /// condition again. A condition that already holds ends the wait without
+    /// pumping anything.
+    ///
+    /// A terminal watch error ends the wait rather than being polled for
+    /// again, because it takes the subscription with it and every look after
+    /// it reports no facts.
+    fn reconcile_until(
+        ops: &ProductionEntryOps,
+        name: &VaultName,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+        what: &str,
+        condition: impl FnMut(&mut ProductionAttachment, &Absorbed) -> Observed<()>,
+    ) {
+        absorb_until(
+            what,
+            attachment,
+            |attachment| match poll_subscription(attachment) {
+                Ok(batch) => batch,
+                Err(failure) => panic!("the watcher reported {failure:?}"),
             },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"))
-        .unwrap_or_else(|failure| panic!("the watcher reported {failure:?}"))
+            |attachment, batch| {
+                ops.reconcile(name, attachment, ReconcileWork { batch }, progress)
+                    .unwrap();
+            },
+            condition,
+        );
+    }
+
+    /// The pump itself, over any subject batches are taken from and applied
+    /// to.
+    ///
+    /// The loop is separate from the reconcile it drives so that what it
+    /// promises — pump, apply, ask again, and stop only on the condition — is
+    /// pinnable against a subject whose splits are chosen rather than
+    /// observed. What a real platform does at its own granularity is then the
+    /// only thing left for a real-watcher case to show.
+    fn absorb_until<S, B: Absorbable>(
+        what: &str,
+        subject: &mut S,
+        mut take: impl FnMut(&mut S) -> Option<B>,
+        mut apply: impl FnMut(&mut S, B),
+        mut condition: impl FnMut(&mut S, &Absorbed) -> Observed<()>,
+    ) {
+        let mut absorbed = Absorbed::default();
+        wait_until(what, lifecycle_budget(), || {
+            // The outcome is asked before anything is taken, so an absorption
+            // whose condition already holds consumes no batch and leaves the
+            // facts for whatever the case does next.
+            if let Observed::Met(()) = condition(subject, &absorbed) {
+                return Observed::Met(());
+            }
+            if let Some(batch) = take(subject) {
+                batch.record(&mut absorbed);
+                apply(subject, batch);
+            }
+            match condition(subject, &absorbed) {
+                Observed::Met(()) => Observed::Met(()),
+                Observed::Pending(state) => Observed::pending(format!("{state}; {absorbed}")),
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// One batch a case chose to report, rather than one the platform
+    /// happened to settle: the invalidated paths, and nothing else.
+    struct DrivenBatch(Vec<&'static str>);
+
+    impl Absorbable for DrivenBatch {
+        fn record(&self, absorbed: &mut Absorbed) {
+            absorbed.batches += 1;
+        }
+    }
+
+    /// A subject whose batches are chosen rather than observed: a queue of
+    /// settled batches, the paths the tree really has, and the paths a
+    /// reconcile of those batches has left stored.
+    ///
+    /// Applying a batch means reading each invalidated path and keeping the
+    /// ones the tree still has, which is what a scoped reconcile does to the
+    /// store for the cases below.
+    #[derive(Default)]
+    struct DrivenBatches {
+        queue: std::collections::VecDeque<DrivenBatch>,
+        tree: std::collections::BTreeSet<&'static str>,
+        stored: std::collections::BTreeSet<&'static str>,
+    }
+
+    impl DrivenBatches {
+        fn take(&mut self) -> Option<DrivenBatch> {
+            self.queue.pop_front()
+        }
+
+        fn apply(&mut self, batch: DrivenBatch) {
+            for path in batch.0 {
+                if self.tree.contains(path) {
+                    self.stored.insert(path);
+                } else {
+                    self.stored.remove(path);
+                }
+            }
+        }
+    }
+
+    /// **The bar the absorbing idiom stands on.** One change reported across
+    /// two batches is one outcome, whichever half the platform reports first.
+    ///
+    /// The forbidden shape is the wait that ends at the first batch and leaves
+    /// the outcome to a bare assertion after it. Under it each split direction
+    /// fails on the half that had not arrived — the destination missing when
+    /// the source's removal came first, the source still stored when the
+    /// destination came first — and both read as a reconcile that dropped a
+    /// path rather than as a report that had not finished arriving.
+    #[test]
+    fn a_split_rename_is_absorbed_whichever_half_arrives_first() {
+        for (label, order) in [
+            ("destination first", ["renamed/b.md", "source/b.md"]),
+            ("source first", ["source/b.md", "renamed/b.md"]),
+        ] {
+            let mut driven = DrivenBatches {
+                queue: order.iter().map(|root| DrivenBatch(vec![root])).collect(),
+                tree: ["renamed/b.md"].into_iter().collect(),
+                stored: ["source/b.md"].into_iter().collect(),
+            };
+            absorb_until(
+                &format!("both halves of a rename split {label}"),
+                &mut driven,
+                DrivenBatches::take,
+                DrivenBatches::apply,
+                |driven, _| {
+                    if !driven.stored.contains("source/b.md")
+                        && driven.stored.contains("renamed/b.md")
+                    {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending(format!("stored: {:?}", driven.stored))
+                    }
+                },
+            );
+            assert_eq!(
+                driven.stored,
+                ["renamed/b.md"].into_iter().collect(),
+                "the {label} split settled on the wrong store"
+            );
+            assert!(
+                driven.queue.is_empty(),
+                "the {label} split left a batch unabsorbed"
+            );
+        }
+    }
+
+    /// An absorption whose outcome already holds takes no batch, so a case's
+    /// next absorption still has the facts its own change produced.
+    #[test]
+    fn an_outcome_that_already_holds_absorbs_nothing() {
+        let mut driven = DrivenBatches {
+            queue: [DrivenBatch(vec!["later.md"])].into_iter().collect(),
+            tree: ["later.md"].into_iter().collect(),
+            stored: ["already.md"].into_iter().collect(),
+        };
+        absorb_until(
+            "an outcome the store already carries",
+            &mut driven,
+            DrivenBatches::take,
+            DrivenBatches::apply,
+            |driven, _| {
+                if driven.stored.contains("already.md") {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("already.md is not stored")
+                }
+            },
+        );
+        assert_eq!(driven.queue.len(), 1, "a settled batch was consumed");
+    }
+
+    /// Whether the store holds a document at `path`, as a condition.
+    ///
+    /// The two shapes every absorption here waits on are a document that must
+    /// arrive and a document that must go, and both read the same row.
+    fn stored(attachment: &mut ProductionAttachment, path: &str) -> Option<StoredDocument> {
+        attachment
+            .store
+            .begin_request()
+            .stored_document(&DocumentPath::new(path).unwrap())
+            .unwrap()
     }
 
     /// Wait for one exact trust state, reporting the last state observed.
