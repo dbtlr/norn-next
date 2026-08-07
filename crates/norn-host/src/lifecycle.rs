@@ -6136,19 +6136,32 @@ mod tests {
         (host, name)
     }
 
-    /// The work a client demand schedules against an entry in this shape.
-    fn work_scheduled_by_demand(coverage: bool, recovery: bool) -> Option<DemandedWork> {
+    /// What a demand site left on an entry: the work it scheduled, and the
+    /// state the entry publishes while that work stands. The two travel
+    /// together because the site chooses them together.
+    #[derive(Debug, Eq, PartialEq)]
+    struct Scheduled {
+        work: Option<DemandedWork>,
+        published: Option<TrustState>,
+    }
+
+    /// What a client demand leaves on an entry in this shape.
+    fn scheduled_by_a_client_demand(coverage: bool, recovery: bool) -> Scheduled {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = entry_awaiting_demand(&ops, coverage, recovery);
         let lease = host.demand(&name).unwrap();
-        let work = marked_work(&host, &name);
+        let scheduled = Scheduled {
+            work: marked_work(&host, &name),
+            published: host.state(&name),
+        };
         drop(lease);
-        work
+        scheduled
     }
 
-    /// The work the poll seam schedules for a lease already standing against an
-    /// entry in this shape — the answer a claim's own end owes it.
-    fn work_scheduled_by_the_poll_seam(coverage: bool, recovery: bool) -> Option<DemandedWork> {
+    /// What [`schedule_demanded_work`] leaves on an entry in this shape for a
+    /// lease already standing against it — the answer a claim's own end owes
+    /// it. The call is direct: no claim ends and no poll runs here.
+    fn scheduled_for_a_standing_lease(coverage: bool, recovery: bool) -> Scheduled {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = entry_awaiting_demand(&ops, coverage, recovery);
         let entry = host.shared.entries.get(&name).unwrap();
@@ -6158,46 +6171,66 @@ mod tests {
         state.demand_leases += 1;
         state.demand_recovery();
         schedule_demanded_work(&mut state, &name);
-        state.claim.marker().and_then(scheduled_work)
+        Scheduled {
+            work: state.claim.marker().and_then(scheduled_work),
+            published: Some(state.trust.clone()),
+        }
     }
 
-    /// One choice serves both demand sites. The job follows what the entry
-    /// needs rather than which door the demand came through, so an entry
-    /// admitted at one and answered at the other gets the same job — and a
-    /// shape either site reads differently is the divergence itself.
+    /// One choice serves both demand sites, and it is a choice of two facts:
+    /// the job scheduled and the state published while it stands. The job
+    /// follows what the entry needs rather than which door the demand came
+    /// through, so an entry admitted at one site and answered at the other is
+    /// left in the same place — and a shape either site reads differently is
+    /// the divergence itself.
     #[test]
-    fn both_demand_sites_schedule_the_work_the_entry_needs() {
-        for (shape, coverage, recovery, expected) in [
-            ("no coverage in hand", false, false, DemandedWork::Attach),
+    fn both_demand_sites_answer_an_entry_the_same_way() {
+        let coverage_prologue = TrustState::warming(WarmingPhase::InstallingCoverage, 0, None);
+        for (shape, coverage, recovery, work, published) in [
+            (
+                "no coverage in hand",
+                false,
+                false,
+                DemandedWork::Attach,
+                coverage_prologue.clone(),
+            ),
             (
                 "no coverage in hand and a recovery owed",
                 false,
                 true,
                 DemandedWork::Attach,
+                coverage_prologue.clone(),
             ),
             (
                 "coverage in hand and a recovery owed over it",
                 true,
                 true,
                 DemandedWork::Recover,
+                coverage_prologue.clone(),
             ),
             (
+                // The entry holds a rescan in every shape, so the state a
+                // reconcile warms out of is the overflow those facts are.
                 "coverage in hand and no recovery owed",
                 true,
                 false,
                 DemandedWork::Reconcile,
+                TrustState::untrusted(UntrustedReason::WatcherOverflow),
             ),
         ] {
-            let by_demand = work_scheduled_by_demand(coverage, recovery);
-            let by_the_poll_seam = work_scheduled_by_the_poll_seam(coverage, recovery);
+            let expected = Scheduled {
+                work: Some(work),
+                published: Some(published),
+            };
+            let by_demand = scheduled_by_a_client_demand(coverage, recovery);
+            let for_a_standing_lease = scheduled_for_a_standing_lease(coverage, recovery);
             assert_eq!(
-                by_demand,
-                Some(expected),
-                "a client demand over an entry with {shape} scheduled {by_demand:?}"
+                by_demand, expected,
+                "a client demand over an entry with {shape} left it {by_demand:?}"
             );
             assert_eq!(
-                by_the_poll_seam, by_demand,
-                "the two demand sites chose differently over an entry with {shape}"
+                for_a_standing_lease, by_demand,
+                "the two demand sites answered an entry with {shape} differently"
             );
         }
     }
