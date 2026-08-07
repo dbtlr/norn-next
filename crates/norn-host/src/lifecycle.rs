@@ -980,20 +980,21 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 ///
 /// Maintainer contention is untouched: the registry says nothing about another
 /// process's lock, so nothing read here can retire it.
-fn recheck_and_refuse<O: EntryOps>(
-    shared: &Arc<Shared<O>>,
-    name: &VaultName,
-) -> Result<Option<AliasConflict>, HostError> {
+///
+/// The park this leaves behind is the whole of the answer, so nothing is
+/// reported back: the caller reads [`EntryState::parked`] like every other
+/// reader does, and one park is answered by one predicate.
+fn recheck_and_refuse<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
     if let Ok(None) = shared.registry.recheck(name) {
         clear_registry_parks(shared, name);
-        return Ok(None);
+        return;
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
     let conflict = match shared.registry.recheck(name) {
         Ok(conflict) => conflict,
         Err(refusal) => {
             refuse_identity_error(shared, name, refusal.to_string());
-            return Ok(None);
+            return;
         }
     };
     if let Some(conflict) = &conflict {
@@ -1001,7 +1002,6 @@ fn recheck_and_refuse<O: EntryOps>(
     } else {
         clear_registry_parks(shared, name);
     }
-    Ok(conflict)
 }
 
 /// Retire the parks a passing registry recheck has answered for.
@@ -1275,6 +1275,12 @@ impl<O: EntryOps> Host<O> {
 
     /// Record client demand and, where necessary, start one asynchronous
     /// attach/retry. Concurrent callers only observe Warming.
+    ///
+    /// The recheck below runs first and parks the entry on whatever it refuses,
+    /// so the park read under the entry lock is the one this call's own read
+    /// established. Every demand takes the same route to its answer: the lease
+    /// is recorded, and the park — this call's or an older one's — is what it
+    /// reports.
     pub fn demand(&self, name: &VaultName) -> Result<DemandLease<O>, HostError> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(DemandLease {
@@ -1283,13 +1289,7 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand: None,
             });
         };
-        if let Some(conflict) = recheck_and_refuse(&self.shared, name)? {
-            return Ok(DemandLease {
-                outcome: Demand::DuplicateRoot(conflict),
-                held: None,
-                recovery_demand: None,
-            });
-        }
+        recheck_and_refuse(&self.shared, name);
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.demand_leases += 1;
         let recovery_demand = state.demand_recovery();
