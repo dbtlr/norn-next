@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
 use norn_fs::ContentHash;
-use norn_host::{DemandLease, Host, ProductionEntryOps};
+use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
 use norn_wire::TrustState;
@@ -453,7 +453,9 @@ fn recovered(
 ) -> DemandLease<ProductionEntryOps> {
     let mut last = observed.clone();
     for _ in 0..RECOVERY_ATTEMPTS {
-        let lease = host.retry(name).expect("re-requesting the attachment");
+        let lease = host
+            .retry(name, AttachMode::Durable)
+            .expect("re-requesting the attachment");
         let deadline = Instant::now() + RECOVERY_LIMIT;
         loop {
             last = host.state(name).expect("registered vault state");

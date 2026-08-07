@@ -29,7 +29,8 @@ use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_fixtures::Profile;
 use norn_host::{
-    DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
+    AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
+    ServingRegistry,
 };
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_wire::TrustState;
@@ -229,7 +230,9 @@ pub fn attach_and_wait(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
 ) -> DemandLease<ProductionEntryOps> {
-    let lease = host.demand(name).expect("request attachment");
+    let lease = host
+        .demand(name, AttachMode::Durable)
+        .expect("request attachment");
     let deadline = Instant::now() + READY_LIMIT;
     loop {
         let observed = host.state(name).expect("registered vault state");
