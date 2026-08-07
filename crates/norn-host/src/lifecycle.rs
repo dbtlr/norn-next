@@ -2897,6 +2897,17 @@ mod tests {
         *ops.terminal_poll.lock().expect("terminal poll poisoned") =
             Some(WatchError::Backend(detail.into()));
         poll_watchers(&host.shared);
+        // A poll skips an entry whose claim is held or whose attachment is
+        // out, and the error stays armed for whichever poll runs next. The
+        // caller is naming this poll as the one that reports it, so the error
+        // being gone is what says the caller got the poll it named.
+        assert!(
+            ops.terminal_poll
+                .lock()
+                .expect("terminal poll poisoned")
+                .is_none(),
+            "the driven poll did not reach the entry"
+        );
     }
 
     /// The dispatcher's own watcher poll reaches the entry unprompted, so the
@@ -4574,6 +4585,58 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(refuses_environmentally(host.state(&name).as_ref()));
         drop((demand, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A poll the entry has moved past gives back everything it took: the
+    /// attachment goes to [`EntryOps::detach`], and the claim and the marker go
+    /// back to the entry. The lease standing against the entry by then is
+    /// scheduled there, because the poll is the last thing holding the entry
+    /// and the dispatcher reaches an entry holding no attachment for nothing.
+    ///
+    /// The invalidator is an identity refusal, which parks the entry against
+    /// its own root. The root answering again is what unparks it, and the
+    /// recheck a demand runs is what reads that — so the lease below is raised
+    /// against an entry that owes work and has a poll in flight over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_superseded_poll_gives_the_entry_back_and_schedules_the_lease_on_it() {
+        let base = temp_base("superseded-poll-give-back");
+        let root = base.join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        wait_for_flag("poll_started", &ops.poll_started);
+        refuse_root_identity(&root);
+        drop(host.demand(&name).unwrap());
+        assert!(refuses_environmentally(host.state(&name).as_ref()));
+
+        // The root answers again. The poll still holds the entry, so the lease
+        // the demand below returns is recorded against an entry nothing can
+        // schedule against yet.
+        std::fs::remove_file(&root).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let lease = host.demand(&name).unwrap();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "a lease raised under a live poll claim scheduled work against it"
+        );
+
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the superseded poll kept the attachment it took"
+        );
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+
+        drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
     }
 
