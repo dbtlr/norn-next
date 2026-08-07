@@ -375,8 +375,8 @@
       "name": "harness-condition-waits-have-deadlines",
       "kind": "defect-class",
       "venue": 0,
-      "property": "A harness wait on a condition carries a deadline the call site declared, over two bounds: the work bound the condition has to become true, and the probe bound one evaluation of it may take. The wait either observes the condition or fails naming the bound it passed and the last state it saw, rather than polling for as long as the run lasts. A slow evaluation is reported as a slow probe rather than as a condition that never held, and neither bound preempts an evaluation already in flight.",
-      "sources": ["NRN-324"],
+      "property": "A harness wait on a condition carries a deadline the call site declared, over two bounds: the work bound the condition has to become true, and the probe bound one evaluation of it may take. The wait either observes the condition or fails naming the bound it passed and the last state it saw, rather than polling for as long as the run lasts. A slow evaluation is reported as a slow probe rather than as a condition that never held, and neither bound preempts an evaluation already in flight. The deadlines are also sized against each other, not only present: a wait held open across a sequence of other waits carries a budget strictly dominating the sum of the waits it brackets, derived from the budget those waits obey. No nested wait shares a flat constant with a sequence it must outlive — under one shared number the hold expires inside the sequence it was opened to bracket, the subject it parked runs on, and the failure lands wherever that subject went next rather than at the gate.",
+      "sources": ["NRN-324", "NORN-94"],
       "binding": {
         "status": "bound",
         "tests": [
@@ -386,6 +386,8 @@
           "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_began_inside_the_bound_is_honored",
           "crates/norn-testkit/src/wait.rs::a_condition_observed_by_a_probe_that_passed_the_probe_bound_is_honored",
           "crates/norn-testkit/src/wait.rs::a_condition_that_becomes_true_in_the_last_gap_is_observed_at_the_bound",
+          "crates/norn-testkit/src/wait.rs::a_held_open_budget_outlives_every_sequence_of_outer_waits_it_brackets",
+          "crates/norn-testkit/src/wait.rs::a_held_open_budget_saturates_rather_than_wrapping",
           "crates/norn-fs/tests/watcher.rs::a_burst_covers_every_changed_path_including_non_markdown_files",
           "crates/norn-fs/tests/watcher.rs::an_editor_atomic_save_reports_the_destination_path",
           "crates/norn-fs/tests/watcher.rs::a_sync_catch_up_covers_every_path_across_settled_batches",
