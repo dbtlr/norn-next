@@ -285,6 +285,61 @@ enum Gate {
     Scheduled(Job),
 }
 
+/// The one job an entry is waiting on in the job channel.
+///
+/// The slot names its occupant, so only that job's own arrival gives it back:
+/// an arrival at a superseded epoch answers for itself alone, and a slot freed
+/// under the job that replaced it is that job sent into the channel a second
+/// time. Every move the slot makes names the job making it, so a job can neither
+/// free a slot it does not hold nor read one it does.
+#[derive(Default)]
+struct Slot(Option<u64>);
+
+impl Slot {
+    /// Whether a job is waiting in the slot.
+    fn taken(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The job waiting in the slot, where one is waiting in it. Nothing the
+    /// entry does turns on which job that is — every move the slot makes names
+    /// the job making it — so this reads the slot for tests alone.
+    #[cfg(test)]
+    fn job(&self) -> Option<u64> {
+        self.0
+    }
+
+    /// Whether this job is the one waiting in the slot.
+    fn holds(&self, job: u64) -> bool {
+        self.0 == Some(job)
+    }
+
+    /// Take the slot for this job, out from under whatever holds it. The caller
+    /// sends this job under the same lock, so a slot it takes over names work
+    /// the entry has moved on from: that job's arrival answers for itself alone,
+    /// and the slot it no longer holds is one it cannot free.
+    fn take(&mut self, job: u64) {
+        self.0 = Some(job);
+    }
+
+    /// Give back the slot a send took, where this job is what holds it. A slot
+    /// standing for a job no channel holds is an entry every later dispatch
+    /// refuses; a slot standing for another job is that job's own occupancy, and
+    /// taking it away is what sends that job twice.
+    fn free(&mut self, job: u64) {
+        if self.holds(job) {
+            self.0 = None;
+        }
+    }
+
+    /// Stop waiting on the job holding the slot. What that job's arrival finds
+    /// is an entry that has moved past it, and the work that replaced it is not
+    /// held behind a job with nothing left to do.
+    fn abandon(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// An entry's claim on itself.
 ///
 /// The epoch is what every leg carries and rechecks: an entry that has moved on
@@ -296,19 +351,7 @@ struct Claim {
     gate: Gate,
     /// The epoch of the leg holding the entry's attachment, where one holds it.
     leg: Option<u64>,
-    /// The epoch of the job this entry is waiting on in the job channel, where
-    /// it is waiting on one.
-    ///
-    /// The slot names its occupant, so only that job's own arrival gives it
-    /// back: an arrival at a superseded epoch answers for itself alone, and a
-    /// slot freed under the job that replaced it is that job sent into the
-    /// channel a second time.
-    ///
-    /// An entry that supersedes the job holding its slot stops waiting on it
-    /// and gives the slot up there and then: what that job's arrival finds is
-    /// an entry that has moved past it, and the work that replaced it is not
-    /// held behind a job with nothing left to do.
-    slot: Option<u64>,
+    slot: Slot,
 }
 
 impl Default for Claim {
@@ -317,7 +360,7 @@ impl Default for Claim {
             epoch: 0,
             gate: Gate::Open,
             leg: None,
-            slot: None,
+            slot: Slot::default(),
         }
     }
 }
@@ -441,11 +484,9 @@ impl Claim {
         self.drop_marker();
     }
 
-    /// Stop waiting on the job holding the queue slot. What that job's arrival
-    /// finds is an entry that has moved past it, and the work that replaced it
-    /// is not held behind a job with nothing left to do.
+    /// Stop waiting on the job holding the queue slot.
     fn abandon_slot(&mut self) {
-        self.slot = None;
+        self.slot.abandon();
     }
 
     /// The leg holding the entry, where one holds it.
@@ -470,27 +511,21 @@ impl Claim {
         }
     }
 
-    /// The job holding the entry's queue slot, where a job holds it.
+    /// The job waiting in the entry's queue slot, where a job is waiting in it.
+    #[cfg(test)]
     fn slot(&self) -> Option<u64> {
-        self.slot
+        self.slot.job()
     }
 
-    /// Take the queue slot for this job, out from under whatever holds it. The
-    /// caller sends this job under the same lock, so a slot it takes over names
-    /// work the entry has moved on from: that job's arrival answers for itself
-    /// alone, and the slot it no longer holds is one it cannot free.
+    /// Take the queue slot for this job, out from under whatever holds it.
     fn take_slot(&mut self, epoch: u64) {
-        self.slot = Some(epoch);
+        self.slot.take(epoch);
     }
 
     /// Give back the queue slot a send took, where the entry still holds it for
-    /// that send. A slot standing for a job no channel holds is an entry every
-    /// later dispatch refuses; a slot standing for another job is that job's own
-    /// occupancy, and taking it away is what sends that job twice.
+    /// that send.
     fn free_slot(&mut self, epoch: u64) {
-        if self.slot == Some(epoch) {
-            self.slot = None;
-        }
+        self.slot.free(epoch);
     }
 
     /// Take the queue slot for the job the entry has scheduled, where no job
@@ -498,7 +533,7 @@ impl Claim {
     /// lock that reads the marker, so the job in the channel and the slot naming
     /// it are installed together.
     fn take_slot_for_marked(&mut self) -> Option<Job> {
-        if self.slot().is_some() || self.leg().is_some() {
+        if self.slot.taken() || self.leg().is_some() {
             return None;
         }
         let job = self.marker()?.clone();
