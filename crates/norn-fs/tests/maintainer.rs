@@ -54,13 +54,16 @@ fn budget() -> Budget {
 
 /// What the parent waits when one evaluation is a whole child run.
 ///
-/// The work bound is the suite's. The probe bound is sized for the slowest
-/// evaluation this probe can make — a child that runs to [`CHILD_DEADLINE`] and
-/// still reports — so a spawn competing with the rest of the suite reads as the
-/// slow spawn it is rather than as a structurally expensive probe.
+/// The probe bound is sized for the slowest evaluation this probe can make — a
+/// child that runs to [`CHILD_DEADLINE`] and still reports — so a spawn
+/// competing with the rest of the suite reads as the slow spawn it is rather
+/// than as a structurally expensive probe. The work bound then has to leave
+/// room for such an evaluation *and* for the retries the wait exists to make:
+/// a work bound at or below the probe bound spends itself on one wedged child
+/// and reports an elapsed wait that never got a second look.
 fn spawn_budget() -> Budget {
     Budget::new(
-        Duration::from_secs(30),
+        CHILD_DEADLINE + Duration::from_secs(60),
         CHILD_DEADLINE + Duration::from_secs(5),
     )
 }
