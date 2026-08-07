@@ -2216,6 +2216,10 @@ mod tests {
         reconcile_started: std::sync::atomic::AtomicBool,
         reconcile_release: std::sync::atomic::AtomicBool,
         block_poll: std::sync::atomic::AtomicBool,
+        /// The one vault whose poll blocks, where `block_poll` blocks every
+        /// vault's. A case holding one alias inside a poll while it drives the
+        /// entry beside it needs the block to name which alias it is on.
+        poll_gate: Mutex<Option<VaultName>>,
         poll_started: std::sync::atomic::AtomicBool,
         poll_release: std::sync::atomic::AtomicBool,
         maintenance_due: std::sync::atomic::AtomicBool,
@@ -2344,7 +2348,13 @@ mod tests {
                 .expect("poll counts poisoned")
                 .entry(name.clone())
                 .or_default() += 1;
-            if self.block_poll.load(Ordering::SeqCst) {
+            let gated = self
+                .poll_gate
+                .lock()
+                .expect("poll gate poisoned")
+                .as_ref()
+                .is_some_and(|gated| gated == name);
+            if self.block_poll.load(Ordering::SeqCst) || gated {
                 self.poll_started.store(true, Ordering::SeqCst);
                 wait_for_flag("poll_release", &self.poll_release);
             }
@@ -3147,10 +3157,9 @@ mod tests {
     /// Two attached aliases of one vault, ready to be refused as a duplicate
     /// root.
     ///
-    /// Without ambient polling: a dispatcher tick holding either alias in a
-    /// watcher poll makes a refusal take the in-flight route, where the release
-    /// belongs to the job that holds it rather than to the refusal these tests
-    /// are about.
+    /// Without ambient polling: a dispatcher tick arriving on its own is a
+    /// second leg over the entries these cases hold themselves, and which of
+    /// the two reaches an alias first is what a case here is pinning.
     fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
@@ -3255,6 +3264,127 @@ mod tests {
             "a leg holding none of the entry's coverage is still registered as what holds it"
         );
         assert_eq!(state.trust, TrustState::Unattached);
+    }
+
+    /// A refusal reaching an alias whose coverage is out with a watcher poll
+    /// opens the release window and leaves the giving back to that poll, while
+    /// the alias beside it is released inline. Neither says released before its
+    /// own resources are, and the lease held across the window reads the
+    /// conflict throughout.
+    #[test]
+    fn a_refused_alias_held_in_a_poll_releases_through_the_poll_that_holds_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+
+        // One alias is held inside a watcher poll, which is what puts its
+        // coverage out with a leg while the refusal lands.
+        *ops.poll_gate.lock().unwrap() = Some(a.clone());
+        let polling = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&polling));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let lease = host.demand(&a).unwrap();
+        assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        // The refusal runs off the test thread because it releases the alias it
+        // finds idle inline, and this test reads both entries from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+        assert_eq!(
+            (host.state(&a), host.state(&b)),
+            (Some(releasing()), Some(releasing())),
+            "a refused alias published released over resources that were still out"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
+
+        // The poll finds the entry moved on and hands its coverage to the
+        // release the refusal opened, which is what publishes.
+        ops.poll_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the poll to give the entry's claim back",
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().pinned() {
+                    Observed::pending("the poll still holds the entry".to_string())
+                } else {
+                    Observed::Met(())
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            host.state(&a),
+            Some(releasing()),
+            "the refused alias published released while its poll's coverage was still out"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        refusal.join().unwrap();
+        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_state(&host, &b, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the release re-armed over a conflict that still parks the entry"
+        );
+        assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
+        drop((lease, host));
+    }
+
+    /// A refused entry holds nothing, so nothing takes anything from it: the
+    /// ambient scan that reads parked coverage passes over it, and the facts it
+    /// was holding went back with the refusal.
+    #[test]
+    fn a_refused_entry_is_polled_by_nothing_afterwards() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        {
+            // A leg registered over parked coverage, with facts standing
+            // beside it: the shape a refusal has to leave holding neither.
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+        }
+        let conflict = AliasConflict {
+            aliases: vec![a.clone(), b.clone()],
+        };
+        refuse_conflict(&host.shared, &conflict);
+        let polls = ops.polls.lock().unwrap().get(&a).copied().unwrap_or(0);
+
+        poll_watchers(&host.shared);
+        poll_watchers(&host.shared);
+
+        assert_eq!(
+            ops.polls.lock().unwrap().get(&a).copied().unwrap_or(0),
+            polls,
+            "a refused entry served its coverage to a watcher poll"
+        );
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "a refused entry scheduled work against the coverage it was refused over"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "a refused entry re-attached"
+        );
+        assert_eq!(host.state(&a), Some(TrustState::Unattached));
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.coverage.in_hand());
+        assert!(state.pending.is_empty());
     }
 
     /// A refusal reaching an entry whose release is already under way leaves
@@ -3729,6 +3859,62 @@ mod tests {
         destruction.join().unwrap();
         assert_eq!(lease.completion(), Demand::State(TrustState::Unattached));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// Destruction and the leg it waits for converge on one release window:
+    /// destruction opens it over a leg holding the entry's coverage, the leg's
+    /// own end closes it through the release, and the pass after the joins
+    /// finds nothing left to give back. Two writers, one release.
+    #[test]
+    fn destruction_and_the_leg_it_waits_for_converge_on_one_release() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        // A reconcile leg holding the entry's coverage, blocked inside the ops
+        // so destruction reaches the entry while the leg still holds it.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_for_reconciles(&ops, 1, "the reconcile leg to take the entry's coverage");
+
+        let shared = Arc::clone(&host.shared);
+        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+        let released = Arc::clone(&ops);
+        let unblock = thread::spawn(move || {
+            wait_until(
+                "destruction to open the release window over the leg",
+                lifecycle_wait_budget(),
+                || {
+                    if entry.gate.lock().unwrap().detach_in_flight {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no window is open yet".to_string())
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            released.reconcile_release.store(true, Ordering::SeqCst);
+        });
+        drop(host);
+        unblock.join().unwrap();
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the entry's coverage went back twice, or not at all"
+        );
+        let state = shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .unwrap();
+        assert_eq!(state.trust, TrustState::Unattached);
+        assert!(!state.detach_in_flight, "the release window is still open");
+        assert!(!state.coverage.in_hand());
     }
 
     /// A job the joins wait for may have given its attachment back to the entry
