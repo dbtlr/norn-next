@@ -132,8 +132,9 @@ impl std::error::Error for WatchError {}
 /// rather than dropping facts, and a dirty set past [`DIRTY_ROOT_CAP`] widens
 /// to a [`RescanScope::Vault`] rescan instead of growing.
 ///
-/// A terminal [`WatchError`] is delivered once and ends the subscription: every
-/// receive after it reports that the watcher stopped.
+/// A terminal [`WatchError`] is the last fact a subscription carries: it is
+/// delivered once, no batch follows it, and a receive after it reports either
+/// no batch or that the watcher stopped.
 ///
 /// It is not cloneable — one subscription, one consumer — and dropping it tears
 /// the backend down and joins the worker.
