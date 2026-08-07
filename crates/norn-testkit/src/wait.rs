@@ -63,6 +63,27 @@
 //! probe takes a reading and returns. It does not wait inside itself, and
 //! anything it calls that could block carries a bound of its own.
 //!
+//! # A wait that brackets other waits outlives them
+//!
+//! Some waits are held open on purpose. A case that blocks a subject at a gate
+//! — a fake that parks its job thread until the case says go — is waiting
+//! inside the subject while the case runs a sequence of waits of its own
+//! outside it. Those two waits are not peers: **the held-open wait's budget
+//! strictly dominates the sum of the outer waits it brackets.**
+//!
+//! **No nested wait shares a flat constant with a sequence it must outlive.**
+//! A suite with one number for every wait puts the hold and the sequence on
+//! equal budgets, and the hold then lets go partway through the sequence it was
+//! opened to bracket. The subject resumes under a case that is still asserting
+//! the subject is parked, and the failure lands somewhere else entirely — on
+//! the next assertion, on a later case, or nowhere on a machine that happened
+//! to be quick.
+//!
+//! [`Budget::dominating`] is how the two are related: the held-open wait
+//! derives its budget from the same budget the outer waits obey, over the
+//! count of them it brackets. Deriving is the point — a second independent
+//! constant is the same defect with two numbers to keep in step.
+//!
 //! # A failure says what it saw
 //!
 //! [`Observed::Pending`] carries the state that was seen, so a
@@ -141,6 +162,40 @@ impl Budget {
     /// How long one evaluation of the condition may take.
     pub const fn probe(&self) -> Duration {
         self.probe
+    }
+
+    /// A budget that strictly dominates `waits` waits on this one.
+    ///
+    /// A wait held open across a sequence of other waits takes its bound from
+    /// here, so the two are one number apart rather than two numbers to keep
+    /// in step. `waits` of them run for at most `waits` times this work bound,
+    /// and the derived bound is one whole wait wider than that — margin enough
+    /// for what happens between the waits, and strict, so the hold is never
+    /// the thing that expires first.
+    ///
+    /// The probe bound carries over unchanged: what a held-open wait brackets
+    /// says how long it may wait, and nothing about how expensive one look at
+    /// its own gate is.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use norn_testkit::wait::Budget;
+    ///
+    /// let outer = Budget::new(Duration::from_secs(10), Duration::from_millis(250));
+    /// let held_open = outer.dominating(2);
+    /// assert!(held_open.work() > outer.work() * 2);
+    /// assert_eq!(held_open.probe(), outer.probe());
+    /// ```
+    ///
+    /// The multiplication saturates, so an absurd count yields an absurd bound
+    /// rather than a wrapped small one — a hold that expires at once is
+    /// exactly the defect this exists to rule out.
+    pub fn dominating(&self, waits: u32) -> Budget {
+        Budget::new(
+            self.work.saturating_mul(waits.saturating_add(1)),
+            self.probe,
+        )
     }
 }
 
@@ -699,6 +754,45 @@ mod tests {
         assert_eq!(looks, 1);
         assert_eq!(failure.probes, 1);
         assert_eq!(failure.last_state, "empty");
+    }
+
+    /// **The bar on budget composition.** A held-open wait's budget strictly
+    /// dominates the sum of the outer waits it brackets.
+    ///
+    /// The forbidden shape is the flat constant shared between them: under it
+    /// a hold and the sequence it brackets expire together, so the hold lets
+    /// go partway through and the subject resumes under a case still asserting
+    /// it is parked. The comparison here is against the whole sequence, not
+    /// against one of its waits, because a hold that merely outlives a single
+    /// outer wait still lets go inside a sequence of two.
+    #[test]
+    fn a_held_open_budget_outlives_every_sequence_of_outer_waits_it_brackets() {
+        let outer = Budget::new(Duration::from_secs(10), Duration::from_millis(250));
+
+        for bracketed in [0u32, 1, 2, 7] {
+            let held_open = outer.dominating(bracketed);
+            let sequence = outer.work() * bracketed;
+            assert!(
+                held_open.work() > sequence,
+                "a hold bracketing {bracketed} waits gets {:?}, which does not outlive the \
+                 {sequence:?} those waits may take",
+                held_open.work()
+            );
+            assert_eq!(
+                held_open.probe(),
+                outer.probe(),
+                "the derived bound changed how long one look at the gate may take"
+            );
+        }
+    }
+
+    /// A count nothing could bracket still yields a hold wider than the wait it
+    /// derives from. A wrapped one would be narrower, and the hold would be the
+    /// first thing to expire.
+    #[test]
+    fn a_held_open_budget_saturates_rather_than_wrapping() {
+        let outer = Budget::new(Duration::from_secs(3_600), Duration::from_millis(250));
+        assert!(outer.dominating(u32::MAX).work() > outer.work());
     }
 
     /// **The bar on convergence budgets.** The budget grows with the changed

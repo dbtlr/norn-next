@@ -32,6 +32,12 @@
 //! bars that use them land with the subjects they measure, because a bar is
 //! authored against one subject and moves only by a reviewed edit.
 //!
+//! [`isolation`] holds the suites apart where the machine has one of
+//! something. Its leases are cross-process, because the runner's own
+//! parallelism spans processes: a case holding a real platform watcher
+//! contends with every other binary the runner started, not only with its own
+//! threads.
+//!
 //! Two modules bound how long a suite may wait, and they divide by subject:
 //! [`process`] bounds a child process's run, and [`wait`] bounds an
 //! in-process wait for state to converge. They agree on what a bound is worth
@@ -57,6 +63,7 @@ pub mod counters;
 pub mod explain;
 pub mod generated;
 pub mod invariants;
+pub mod isolation;
 mod json;
 pub mod lanes;
 mod poll;
