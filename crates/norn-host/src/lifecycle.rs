@@ -2884,6 +2884,21 @@ mod tests {
         fixture(ops, Duration::from_secs(60))
     }
 
+    /// Drive one watcher poll that reports terminal loss, leaving the entry
+    /// attached, untrusted, and owing a recovery no lease has asked for yet.
+    ///
+    /// The poll is driven rather than ambient, so the loss lands where the
+    /// caller put it rather than wherever a dispatcher tick arrived first.
+    fn lose_coverage_through_a_driven_poll(
+        ops: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        detail: &str,
+    ) {
+        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
+            Some(WatchError::Backend(detail.into()));
+        poll_watchers(&host.shared);
+    }
+
     /// The dispatcher's own watcher poll reaches the entry unprompted, so the
     /// leg needs nothing to provoke it.
     fn by_a_watcher_poll(
@@ -2907,21 +2922,6 @@ mod tests {
     ) -> Option<DemandLease<Arc<FakeOps>>> {
         lose_coverage_through_a_driven_poll(ops, host, "gone");
         Some(host.demand(name).unwrap())
-    }
-
-    /// Drive one watcher poll that reports terminal loss, leaving the entry
-    /// attached, untrusted, and owing a recovery no lease has asked for yet.
-    ///
-    /// The poll is driven rather than ambient, so the loss lands where the
-    /// caller put it rather than wherever a dispatcher tick arrived first.
-    fn lose_coverage_through_a_driven_poll(
-        ops: &Arc<FakeOps>,
-        host: &Host<Arc<FakeOps>>,
-        detail: &str,
-    ) {
-        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
-            Some(WatchError::Backend(detail.into()));
-        poll_watchers(&host.shared);
     }
 
     /// Watcher facts schedule the reconcile that reports the failure, and the
@@ -3485,8 +3485,7 @@ mod tests {
             let held = host.demand(&name).unwrap();
             wait_for_state(&host, &name, TrustState::Ready);
             *ops.terminal_poll.lock().expect("terminal poll poisoned") = Some(error);
-            wait_for_state(&host, &name, expected.clone());
-            assert_eq!(host.state(&name), Some(expected));
+            wait_for_state(&host, &name, expected);
             drop(held);
         }
     }
