@@ -394,10 +394,23 @@ impl Claim {
     /// Record the job a claim took the entry from under, where the entry has
     /// nothing else scheduled. The marker holds the gate, so the job the claim
     /// did not take away is one a later tick still reaches.
+    ///
+    /// A job already scheduled against the entry is the newer of the two and
+    /// keeps the gate: the claim is putting back work it interrupted, not work
+    /// the entry has since moved on to.
     fn restore(&mut self, job: Job) {
         if !matches!(self.gate, Gate::Scheduled(_)) {
             self.gate = Gate::Scheduled(job);
         }
+    }
+
+    /// Schedule a job against the entry as it stands, without moving it on.
+    ///
+    /// Whatever holds the gate gives way to this job, a marker included: the
+    /// caller is naming the work the entry owes at the epoch it stands at, and
+    /// a marker it displaces is work raised under an epoch the entry has left.
+    fn mark(&mut self, job: Job) {
+        self.gate = Gate::Scheduled(job);
     }
 
     /// Move the entry on from work an invalidation supersedes. The job it had
@@ -477,12 +490,6 @@ impl Claim {
     #[cfg(test)]
     fn stand_at(&mut self, epoch: u64) {
         self.epoch = epoch;
-    }
-
-    /// Schedule a job against the entry as it stands, without moving it on.
-    #[cfg(test)]
-    fn mark(&mut self, job: Job) {
-        self.gate = Gate::Scheduled(job);
     }
 
     /// Hand the entry the next job a leg owes it. The leg's claim ends where the
@@ -2147,7 +2154,11 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 state.claim.free_slot(epoch);
                 if state.claim.stands_at(epoch) {
-                    state.claim.restore(job);
+                    // The entry still stands at this job, so this job is the
+                    // work it owes: it takes the marker back whatever else is
+                    // standing there, because anything else was raised under an
+                    // epoch the entry has already left.
+                    state.claim.mark(job);
                 }
             }
         }
