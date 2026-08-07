@@ -890,6 +890,26 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
     }
 }
 
+/// Park an entry on the registry's own account of a root it cannot read, where
+/// the entry holds nothing for the refusal to give back.
+///
+/// One fact takes one park wherever it is found. The detail is what
+/// [`EntryState::parked`] answers with and what the trust state beside it
+/// carries, so a lease reports the refusal the same way whether the read that
+/// found it was a demand's recheck or an attach's. While the park stands
+/// nothing schedules against the entry, so an attach a registry refusal ended
+/// is not one the next ambient poll tick arms again; the demand whose recheck
+/// reaches the root is what retires it.
+///
+/// A leg publishing under its own claim writes the park here rather than
+/// through [`refuse_identity_error`], which invalidates the claim and leaves
+/// the leg's own [`Claim::stands_at`] false for the publication it is in the
+/// middle of.
+fn park_identity_refusal<A>(state: &mut EntryState<A>, detail: String) {
+    state.identity_refused = Some(detail.clone());
+    state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+}
+
 /// Re-read the registry over one entry and park it on whatever the read
 /// refuses.
 ///
@@ -1643,9 +1663,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
                         state.claim.release();
-                        state.trust = TrustState::untrusted(
-                            UntrustedReason::environmental_refusal(refusal.to_string()),
-                        );
+                        park_identity_refusal(&mut state, refusal.to_string());
                     }
                     return None;
                 }
@@ -1714,9 +1732,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
                         state.claim.release();
-                        state.trust = TrustState::untrusted(
-                            UntrustedReason::environmental_refusal(refusal.to_string()),
-                        );
+                        park_identity_refusal(&mut state, refusal.to_string());
                     }
                     return None;
                 }
@@ -5729,6 +5745,101 @@ mod tests {
             "the entry re-attached against a root the registry refuses"
         );
         assert!(refuses_environmentally(host.state(&name).as_ref()));
+
+        drop((lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The registry refusal an attach finds before it acquires anything parks
+    /// the entry on that refusal, and the lease standing over the attach
+    /// reports the park.
+    ///
+    /// A root the registry cannot read is one fact whichever read found it: the
+    /// recheck a demand runs answers it as the identity park, and so does the
+    /// recheck an attach runs. The lease is what says so, because the park is
+    /// what it reports and a trust state beside one says nothing about whether
+    /// anything more is coming.
+    ///
+    /// The window is the queue: the one worker is inside another vault's
+    /// attach, so the job scheduled for the entry under test waits in the
+    /// channel while its root is retargeted.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_time_registry_refusal_parks_the_entry() {
+        let base = temp_base("attach-recheck-park");
+        let subject_root = base.join("subject");
+        let holding_root = base.join("holding");
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("subject").unwrap();
+        let holding = VaultName::new("holding").unwrap();
+        let host = host_over_roots(
+            Arc::clone(&ops),
+            &[(&subject, &subject_root), (&holding, &holding_root)],
+            1,
+        );
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        let lease = host.demand(&subject).unwrap();
+
+        refuse_root_identity(&subject_root);
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_environmental_refusal(&host, &subject);
+        assert!(
+            refuses_identity(&lease.completion()),
+            "the lease over the refused attach reported no park"
+        );
+
+        settle();
+        assert!(
+            refuses_identity(&lease.completion()),
+            "a tick retired the park the refused attach raised"
+        );
+
+        drop((lease, holding_lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The registry refusal an attach finds after its heal parks the entry it
+    /// gave the attachment back from, and the entry stands still under that
+    /// park: the lease answers the refusal rather than the trust state beside
+    /// it, and nothing arms the attach again while the park stands.
+    ///
+    /// The window is the attach itself: the demand is raised, the root is
+    /// retargeted while the heal is blocked inside the fake, and the
+    /// revalidation that runs when the heal is released is what refuses.
+    #[cfg(unix)]
+    #[test]
+    fn a_post_heal_registry_refusal_parks_the_entry_and_arms_nothing() {
+        let base = temp_base("post-heal-recheck-park");
+        let root = base.join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        refuse_root_identity(&root);
+        ops.attach_release.store(true, Ordering::SeqCst);
+
+        wait_for_environmental_refusal(&host, &name);
+        assert!(
+            refuses_identity(&lease.completion()),
+            "the lease over the refused attach reported no park"
+        );
+
+        settle();
+        assert!(
+            refuses_identity(&lease.completion()),
+            "a tick retired the park the refused attach raised"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "an ambient tick armed the attach again over the park"
+        );
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
