@@ -460,11 +460,11 @@ fn a_second_process_is_excluded_and_names_the_incumbent() {
     );
 
     drop(held);
-    // A single-shot attempt here would read this process's own descriptor copy
-    // as an incumbent: the child that takes the attempt is forked from a process
-    // that had the lock open moments ago, and a sibling spawn between the fork
-    // and its `exec` carries a copy of that descriptor. So the attempt is made
-    // under the bound this case declares, one whole child run per look.
+    // A single-shot attempt here would report a copy of this process's own
+    // descriptor as the incumbent: a sibling case that forked while the lock
+    // above was open carries that descriptor until its `exec`, and the lock
+    // stays taken for as long as the copy lives. So the second process asks
+    // again under the bound this case declares, one whole child run per look.
     let said = wait_until(
         "a released lock to be free to a second process",
         spawn_budget(),
