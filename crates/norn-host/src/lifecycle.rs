@@ -2224,9 +2224,9 @@ mod tests {
         /// worker threads, and the dispatcher's own poll never runs on one of
         /// them.
         ///
-        /// This is what gives the dispatcher's ambient poll and a job's own
-        /// handoff drain independent batch sources below: setting one without
-        /// the other no longer depends on which of the two ticks first.
+        /// This is what gives a watcher poll and a job's own handoff drain
+        /// independent batch sources below: setting one without the other no
+        /// longer depends on which of the two ticks first.
         static ON_JOB_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
@@ -2274,18 +2274,18 @@ mod tests {
         maintenance_started: std::sync::atomic::AtomicBool,
         maintenance_release: std::sync::atomic::AtomicBool,
         polls: Mutex<BTreeMap<VaultName, usize>>,
-        /// The batch sources for a poll that runs off a job thread: the
-        /// dispatcher's own unprompted tick, and the tick a case drives itself
-        /// by calling [`poll_watchers`]. Each batch is spent by one poll —
-        /// empty from the first counter, a vault-wide rescan from the second.
-        ambient_poll_batches: AtomicUsize,
-        ambient_rescan_poll_batches: AtomicUsize,
+        /// The batch sources for a poll that runs off a job thread, named for
+        /// the seam rather than for who drives it: the dispatcher's own
+        /// unprompted tick and a tick a case drives itself by calling
+        /// [`poll_watchers`] both arrive here. Each batch is spent by one poll
+        /// — empty from the first counter, a vault-wide rescan from the second.
+        off_thread_poll_batches: AtomicUsize,
+        off_thread_rescan_poll_batches: AtomicUsize,
         /// The batch sources for a job's own handoff drain — the poll loop
         /// `drain_observed` runs after `attach`, `reconcile`, `recover` or
-        /// `maintain` returns, on the same thread. Separate from the ambient
+        /// `maintain` returns, on the same thread. Separate from the off-thread
         /// pair above so a caller that wants a handoff to saturate does not
-        /// race the dispatcher's own ambient tick for the same batches; see
-        /// `ON_JOB_THREAD`.
+        /// race a watcher poll for the same batches; see `ON_JOB_THREAD`.
         handoff_poll_batches: AtomicUsize,
         handoff_rescan_poll_batches: AtomicUsize,
         terminal_poll: Mutex<Option<WatchError>>,
@@ -2425,8 +2425,8 @@ mod tests {
                 )
             } else {
                 (
-                    &self.ambient_poll_batches,
-                    &self.ambient_rescan_poll_batches,
+                    &self.off_thread_poll_batches,
+                    &self.off_thread_rescan_poll_batches,
                 )
             };
             if spend_one(rescans) {
@@ -2659,6 +2659,18 @@ mod tests {
     /// budget, reporting how many it had entered when the wait gave up. The
     /// count rises before an attach that blocks starts waiting, so a case that
     /// wants its workers occupied waits here.
+    fn wait_for_reconciles(ops: &FakeOps, expected: usize, what: &str) {
+        wait_until(what, lifecycle_wait_budget(), || {
+            let reconciles = ops.reconciles.load(Ordering::SeqCst);
+            if reconciles >= expected {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!("{reconciles} reconciles so far"))
+            }
+        })
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
     fn wait_for_attaches(ops: &FakeOps, expected: usize, what: &str) {
         wait_until(what, lifecycle_wait_budget(), || {
             let attaches = ops.attaches.load(Ordering::SeqCst);
@@ -2963,32 +2975,6 @@ mod tests {
         fixture(ops, Duration::from_secs(60))
     }
 
-    /// Drive one watcher poll that reports terminal loss, leaving the entry
-    /// attached, untrusted, and owing a recovery no lease has asked for yet.
-    ///
-    /// The poll is driven rather than ambient, so the loss lands where the
-    /// caller put it rather than wherever a dispatcher tick arrived first.
-    fn lose_coverage_through_a_driven_poll(
-        ops: &Arc<FakeOps>,
-        host: &Host<Arc<FakeOps>>,
-        detail: &str,
-    ) {
-        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
-            Some(WatchError::Backend(detail.into()));
-        poll_watchers(&host.shared);
-        // A poll skips an entry whose claim is held or whose attachment is
-        // out, and the error stays armed for whichever poll runs next. The
-        // caller is naming this poll as the one that reports it, so the error
-        // being gone is what says the caller got the poll it named.
-        assert!(
-            ops.terminal_poll
-                .lock()
-                .expect("terminal poll poisoned")
-                .is_none(),
-            "the driven poll did not reach the entry"
-        );
-    }
-
     /// How many watcher polls have reached the vault.
     fn polls_of(ops: &Arc<FakeOps>, name: &VaultName) -> usize {
         ops.polls
@@ -2999,20 +2985,70 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// Arm one batch on the given source and drive one round of watcher polls.
+    /// Drive one watcher poll that reports terminal loss over the named vault,
+    /// leaving the entry attached, untrusted, and owing a recovery no lease has
+    /// asked for yet.
+    ///
+    /// The poll is driven rather than ambient, so the loss lands where the
+    /// caller put it rather than wherever a dispatcher tick arrived first. A
+    /// round skips an entry whose claim is held or whose attachment is out, and
+    /// the error stays armed for whichever poll runs next, so two facts
+    /// together say the caller got the poll it named: the error is gone, and
+    /// the round polled the vault the caller named.
+    fn lose_coverage_through_a_driven_poll(
+        ops: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+        detail: &str,
+    ) {
+        let polled = polls_of(ops, name);
+        *ops.terminal_poll.lock().expect("terminal poll poisoned") =
+            Some(WatchError::Backend(detail.into()));
+        poll_watchers(&host.shared);
+        assert!(
+            ops.terminal_poll
+                .lock()
+                .expect("terminal poll poisoned")
+                .is_none(),
+            "the driven poll reported no loss"
+        );
+        assert!(
+            polls_of(ops, name) > polled,
+            "the driven poll reported the loss somewhere other than {name}"
+        );
+    }
+
+    /// Arm one batch on the given source and drive one round of watcher polls,
+    /// naming the vault the batch is for.
     ///
     /// The poll is driven rather than ambient, so the facts land in the entry
     /// the caller aimed them at rather than wherever a dispatcher tick arrived
-    /// first. A poll skips an entry whose claim is held, and an unspent batch
-    /// stays armed for whichever poll runs next, so the source being empty is
-    /// what says the caller got the poll it named.
-    fn report_through_a_driven_poll(source: &AtomicUsize, host: &Host<Arc<FakeOps>>) {
+    /// first. A round skips an entry whose claim is held or whose attachment is
+    /// out, and an unspent batch stays armed for whichever poll runs next, so
+    /// two facts together say the caller got the poll it named: the source is
+    /// empty, and the round polled the vault the caller named. Either one alone
+    /// holds while the batch lands on some other entry, which is a premise
+    /// breaking under a case rather than the thing the case is about.
+    ///
+    /// What the entry then published is the caller's own to assert: this says
+    /// the batch reached the poll, not what the poll did with it.
+    fn report_through_a_driven_poll(
+        ops: &Arc<FakeOps>,
+        host: &Host<Arc<FakeOps>>,
+        name: &VaultName,
+        source: &AtomicUsize,
+    ) {
+        let polled = polls_of(ops, name);
         source.store(1, Ordering::SeqCst);
         poll_watchers(&host.shared);
         assert_eq!(
             source.load(Ordering::SeqCst),
             0,
-            "the driven poll did not reach the entry"
+            "the driven poll spent no batch"
+        );
+        assert!(
+            polls_of(ops, name) > polled,
+            "the driven poll reported the batch somewhere other than {name}"
         );
     }
 
@@ -3056,7 +3092,7 @@ mod tests {
         host: &Host<Arc<FakeOps>>,
         name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        lose_coverage_through_a_driven_poll(ops, host, "gone");
+        lose_coverage_through_a_driven_poll(ops, host, name, "gone");
         Some(host.demand(name).unwrap())
     }
 
@@ -3067,9 +3103,9 @@ mod tests {
     fn by_a_reconciled_batch(
         ops: &Arc<FakeOps>,
         host: &Host<Arc<FakeOps>>,
-        _: &VaultName,
+        name: &VaultName,
     ) -> Option<DemandLease<Arc<FakeOps>>> {
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, host);
+        report_through_a_driven_poll(ops, host, name, &ops.off_thread_rescan_poll_batches);
         None
     }
 
@@ -3565,7 +3601,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         ops.lost_recover.store(true, Ordering::SeqCst);
-        lose_coverage_through_a_driven_poll(&ops, &host, "gone");
+        lose_coverage_through_a_driven_poll(&ops, &host, &name, "gone");
         let recovering = host.demand(&name).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
 
@@ -3829,24 +3865,36 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
+    /// An entry whose lease has gone is reaped on a dispatcher tick, and
+    /// watcher facts still arriving on those same ticks do not keep it alive:
+    /// the reap happens anyway, and the resources go back once.
     #[test]
     fn dispatcher_reaps_idle_attachment_despite_watcher_churn() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_millis(20));
         let lease = host.demand(&name).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
+
+        // One batch reported and waited for while the lease still holds the
+        // entry against the reap. It is what says a dispatcher tick carries
+        // this source into this entry at all, so the reconcile below is an
+        // arrival rather than a race with the reap that follows.
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_for_reconciles(&ops, 1, "the reconcile the reported rescan schedules");
+
         drop(lease);
         for _ in 0..3 {
-            ops.ambient_rescan_poll_batches
+            // Churn across the reap window, fed in unwaited: whether a tick
+            // spends each batch before the reap takes the attachment is the
+            // input this test varies, not a fact it asserts. The gap spaces
+            // the batches across several ticks instead of collapsing them
+            // into one.
+            ops.off_thread_rescan_poll_batches
                 .fetch_add(1, Ordering::SeqCst);
-            // Churn is what this test feeds the dispatcher, so the gap is the
-            // input rather than a wait: it spaces the batches across several
-            // dispatcher ticks instead of collapsing them into one.
             thread::sleep(Duration::from_millis(4));
         }
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
-        assert!(ops.reconciles.load(Ordering::SeqCst) > 0);
     }
 
     #[test]
@@ -3954,7 +4002,7 @@ mod tests {
         );
         assert_eq!(host.state(&name), Some(expected.clone()));
 
-        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         settle();
         assert_eq!(
             host.state(&name),
@@ -4066,7 +4114,7 @@ mod tests {
         // supposed to drain it.
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
         wait_for_state(&host, &name, TrustState::Ready);
 
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
@@ -4090,7 +4138,7 @@ mod tests {
         ops.handoff_poll_batches
             .store(HANDOFF_BATCH_LIMIT - 1, Ordering::SeqCst);
         ops.block_reconcile_at.store(2, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops.ambient_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
 
         wait_until(
             "a second reconcile, saturating the handoff",
@@ -4150,7 +4198,7 @@ mod tests {
         // The reconcile is scheduled by a dispatcher tick that finds facts:
         // the subject is the leg's own failure, so the tick that starts it is
         // the ambient one.
-        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         wait_for_state(&host, &name, backend_lost());
     }
 
@@ -4161,7 +4209,7 @@ mod tests {
         drop(host.demand(&name).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         ops.environmental_reconcile.store(true, Ordering::SeqCst);
-        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         wait_for_state(
             &host,
             &name,
@@ -4171,7 +4219,7 @@ mod tests {
         // The later fact reaches the entry through a tick of its own, and the
         // wait for the batch to be spent is what says the tick got there: the
         // entry owes a recovery, so the poll reporting it schedules nothing.
-        report_through_an_ambient_poll(&ops.ambient_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_poll_batches);
         settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), failed_count);
         assert_eq!(
@@ -4205,7 +4253,7 @@ mod tests {
         // The later fact reaches the entry through a tick of its own, and the
         // wait for the batch to be spent is what says the tick got there: the
         // entry owes a recovery, so the poll reporting it schedules nothing.
-        report_through_an_ambient_poll(&ops.ambient_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_poll_batches);
         settle();
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -4241,7 +4289,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         // A dispatcher tick reporting facts is what puts a reconcile in
         // flight; which tick it was is not this case's subject.
-        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
 
         refuse_root_identity(&root);
@@ -4279,7 +4327,7 @@ mod tests {
         ops.block_reconcile.store(true, Ordering::SeqCst);
         // A dispatcher tick reporting facts is what puts a reconcile in
         // flight; which tick it was is not this case's subject.
-        report_through_an_ambient_poll(&ops.ambient_rescan_poll_batches);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let drop_returned = Arc::clone(&returned);
@@ -4371,7 +4419,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = attached_awaiting_recovery(&ops);
         claim_for_a_poll(&ops);
-        ops.ambient_poll_batches.store(1, Ordering::SeqCst);
+        ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
         let lease = demand_inside_a_claim(&host, &name);
 
         ops.poll_release.store(true, Ordering::SeqCst);
@@ -5447,7 +5495,7 @@ mod tests {
         // job recorded above, so the tick below passes it over and the facts
         // land on the other vault.
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &b, &ops.off_thread_rescan_poll_batches);
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         retry_pending_dispatches(&host.shared);
 
@@ -5686,7 +5734,7 @@ mod tests {
         // the occupied slot defers to a later tick. The other vault's claim is
         // held by the attach blocking the worker, so this tick reaches the
         // entry under test alone.
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &subject, &ops.off_thread_rescan_poll_batches);
         let (queued, scheduled) = {
             let state = entry.gate.lock().expect("entry gate poisoned");
             (state.claim.slot(), state.claim.marker().map(Job::epoch))
@@ -5755,7 +5803,7 @@ mod tests {
             .expect("entry gate poisoned")
             .claim
             .epoch();
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &subject, &ops.off_thread_rescan_poll_batches);
         assert_eq!(
             entry.gate.lock().expect("entry gate poisoned").claim.slot(),
             Some(superseded + 1),
@@ -5834,7 +5882,7 @@ mod tests {
             .expect("entry gate poisoned")
             .claim
             .epoch();
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &subject, &ops.off_thread_rescan_poll_batches);
         assert_eq!(
             entry.gate.lock().expect("entry gate poisoned").claim.slot(),
             Some(superseded + 1),
@@ -6045,7 +6093,7 @@ mod tests {
         // The reconcile the poll schedules is blocked, so the state read below
         // is the one the poll published rather than the one that cleared it.
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops.ambient_rescan_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
         assert_eq!(
             host.state(&name),
             Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
@@ -6077,7 +6125,7 @@ mod tests {
         // The reconcile the poll schedules is blocked, so the state read below
         // is the one the poll published rather than the one that cleared it.
         ops.block_reconcile.store(true, Ordering::SeqCst);
-        report_through_a_driven_poll(&ops.ambient_poll_batches, &host);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
         assert_eq!(
             host.state(&name),
             Some(TrustState::warming(WarmingPhase::Healing, 0, None)),
