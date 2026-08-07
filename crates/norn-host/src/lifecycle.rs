@@ -278,11 +278,50 @@ enum Gate {
     /// Nothing holds the entry: a claim may take it, and work may be scheduled
     /// against it.
     Open,
-    /// A claim holds the entry with no job standing behind it — a poll or a job
-    /// leg under way, or a job this entry has already handed to the channel.
-    Held,
+    /// A claim holds the entry with no job standing behind it, and says which
+    /// claim it is.
+    Held(Holder),
     /// The next job the entry owes, waiting on a dispatcher tick to send it.
     Scheduled(Job),
+}
+
+/// A claim running against an entry.
+///
+/// A watcher poll and a job leg both take the entry and both give it back, and
+/// they end at different sites: a poll ends where its own tick ends it, a job
+/// leg where the epilogue that dispatched it does. The kind is carried here so
+/// neither ends the other, at the epoch they may both stand at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leg {
+    /// A watcher poll, at the epoch the entry stood at when it took it.
+    Poll(u64),
+    /// A job leg, at the epoch its job carries.
+    Job(u64),
+}
+
+impl Leg {
+    /// The epoch the leg was taken at.
+    fn epoch(self) -> u64 {
+        match self {
+            Self::Poll(epoch) | Self::Job(epoch) => epoch,
+        }
+    }
+}
+
+/// What holds an entry's gate where no job is scheduled against it.
+#[derive(Clone, Copy)]
+enum Holder {
+    /// The leg running against the entry.
+    Running(Leg),
+    /// A job the entry has handed to the job channel, which the queue slot
+    /// names and no leg has begun.
+    Sent,
+}
+
+impl From<Leg> for Holder {
+    fn from(leg: Leg) -> Self {
+        Self::Running(leg)
+    }
 }
 
 /// The one job an entry is waiting on in the job channel.
@@ -349,8 +388,14 @@ impl Slot {
 struct Claim {
     epoch: u64,
     gate: Gate,
-    /// The epoch of the leg holding the entry's attachment, where one holds it.
-    leg: Option<u64>,
+    /// The leg running against the entry, where one is running.
+    ///
+    /// The leg outlives the gate it took: a leg that gives the gate back before
+    /// it ends is still the leg running, and the work it is about to hand on is
+    /// dispatched by it alone. [`Claim::take_slot_for_marked`] is what that
+    /// outliving is for — a dispatcher tick never sends a job the running leg
+    /// is about to send itself.
+    leg: Option<Leg>,
     slot: Slot,
 }
 
@@ -392,15 +437,27 @@ impl Claim {
     fn marker(&self) -> Option<&Job> {
         match &self.gate {
             Gate::Scheduled(job) => Some(job),
-            Gate::Open | Gate::Held => None,
+            Gate::Open | Gate::Held(_) => None,
         }
     }
 
-    /// Take the gate for a claim, leaving a job already scheduled behind it
-    /// holding the gate in its own right.
+    /// Take the gate for the work the entry has just taken on, leaving a job
+    /// already scheduled behind it holding the gate in its own right.
+    ///
+    /// The leg running against the entry is what holds the gate, and where none
+    /// is running the job the entry is sending holds it: this is reached from
+    /// [`Claim::hand_on`] alone, and what a hand-on sends is in the channel
+    /// before the entry's lock goes back.
     fn hold(&mut self) {
-        if !matches!(self.gate, Gate::Scheduled(_)) {
-            self.gate = Gate::Held;
+        match self.gate {
+            // A marker holds the gate in its own right.
+            Gate::Scheduled(_) => {}
+            // The leg running against the entry keeps the gate across the move
+            // it is making.
+            Gate::Held(Holder::Running(leg)) if self.leg == Some(leg) => {}
+            Gate::Held(_) | Gate::Open => {
+                self.gate = Gate::Held(self.leg.map_or(Holder::Sent, Holder::from));
+            }
         }
     }
 
@@ -444,11 +501,11 @@ impl Claim {
         }
     }
 
-    /// Give up the job scheduled against the entry, leaving the gate held where
-    /// a claim is holding it.
+    /// Give up the job scheduled against the entry, leaving the gate to the leg
+    /// running against it and open where none is running.
     fn drop_marker(&mut self) {
         if matches!(self.gate, Gate::Scheduled(_)) {
-            self.gate = Gate::Held;
+            self.gate = self.leg.map_or(Gate::Open, |leg| Gate::Held(leg.into()));
         }
     }
 
@@ -489,25 +546,61 @@ impl Claim {
         self.slot.abandon();
     }
 
-    /// The leg holding the entry, where one holds it.
-    fn leg(&self) -> Option<u64> {
+    /// The leg running against the entry, where one is running.
+    fn leg(&self) -> Option<Leg> {
         self.leg
     }
 
-    /// Begin the leg that holds the entry.
-    fn begin_leg(&mut self, epoch: u64) {
-        self.leg = Some(epoch);
+    /// Take the entry for a watcher poll: the poll holds the gate and is the leg
+    /// running against the entry until its own tick ends it.
+    fn begin_poll(&mut self, epoch: u64) {
+        let leg = Leg::Poll(epoch);
+        self.leg = Some(leg);
+        self.gate = Gate::Held(leg.into());
     }
 
-    /// End a leg's hold on the entry, where it is still the leg holding it. A
-    /// leg that handed the entry on is no longer the one holding it, and what
-    /// holds it then is that job's own leg.
-    fn end_leg(&mut self, epoch: u64) -> bool {
-        if self.leg == Some(epoch) {
+    /// Take the entry for the job leg a worker has begun. The marker the job
+    /// stood behind goes with the start: the job is off the channel, and a
+    /// marker beside a job already running is one a dispatcher tick sends a
+    /// second time.
+    fn begin_job_leg(&mut self, epoch: u64) {
+        let leg = Leg::Job(epoch);
+        self.leg = Some(leg);
+        self.gate = Gate::Held(leg.into());
+    }
+
+    /// End the claim a watcher poll holds on the entry, where the poll is still
+    /// the leg running. A job leg standing at the same epoch is another claim,
+    /// and a poll ends its own alone.
+    ///
+    /// The gate stands for a claim on the entry and for work scheduled against
+    /// it alike, so a claim gives the gate back only where nothing is scheduled:
+    /// a marker standing holds the gate in its own right.
+    fn end_poll(&mut self, epoch: u64) {
+        if self.leg == Some(Leg::Poll(epoch)) {
+            self.leg = None;
+        }
+        self.release();
+    }
+
+    /// End a job leg's hold on the entry, where it is still the leg running. A
+    /// leg that handed the entry on is no longer the one running, and what runs
+    /// then is that job's own leg.
+    fn end_job_leg(&mut self, epoch: u64) -> bool {
+        if self.leg == Some(Leg::Job(epoch)) {
             self.leg = None;
             true
         } else {
             false
+        }
+    }
+
+    /// End whichever leg is running against the entry at this epoch. The release
+    /// every teardown reaches is the one completion a poll claim and a job leg
+    /// come to alike, and it ends the leg it was handed the resources by.
+    fn end_leg(&mut self, epoch: u64) {
+        if self.leg.map(Leg::epoch) == Some(epoch) {
+            self.leg = None;
         }
     }
 
@@ -548,15 +641,23 @@ impl Claim {
         self.epoch = epoch;
     }
 
-    /// Hand the entry the next job a leg owes it. The leg's claim ends where the
-    /// job enters the channel, and the job takes the queue slot under the same
-    /// lock, so no producer takes it for newer work in the instant between. The
-    /// marker the job stood behind goes with it: a marker beside a job already
-    /// sent is one a dispatcher tick sends a second time, under the same epoch.
+    /// Hand the entry the next job a job leg owes it. The leg's claim ends where
+    /// the job enters the channel, and the job takes the queue slot under the
+    /// same lock, so no producer takes it for newer work in the instant between.
+    ///
+    /// The job itself holds the gate from here. The marker it stood behind goes
+    /// with the send — a marker beside a job already sent is one a dispatcher
+    /// tick sends a second time, under the same epoch — while a marker at
+    /// another epoch is newer work, and keeps the gate for the tick that sends
+    /// it.
     fn hand_off(&mut self, leg: u64, job: &Job) {
-        self.end_leg(leg);
-        if self.marker().map(Job::epoch) == Some(job.epoch()) {
-            self.drop_marker();
+        self.end_job_leg(leg);
+        match self.gate {
+            Gate::Held(_) => self.gate = Gate::Held(Holder::Sent),
+            Gate::Scheduled(ref marker) if marker.epoch() == job.epoch() => {
+                self.gate = Gate::Held(Holder::Sent);
+            }
+            Gate::Open | Gate::Scheduled(_) => {}
         }
         self.take_slot(job.epoch());
     }
@@ -866,24 +967,14 @@ fn finish_release<O: EntryOps>(
 /// coming.
 ///
 /// The marker planted here is the one a claim did not plant itself, which is
-/// why [`end_poll_claim`] leaves it standing: a claim that opened the gate over
-/// it would leave a job no dispatch can reach.
+/// why [`Claim::end_poll`] leaves it standing: a claim that opened the gate
+/// over it would leave a job no dispatch can reach.
 fn restore_lost_claim<A>(state: &mut EntryState<A>, job: Job) {
     if state.safety_pins == 0 {
         state.claim.open();
         return;
     }
     state.claim.restore(job);
-}
-
-/// End the claim a watcher poll holds on an entry.
-///
-/// The gate stands for a claim on the entry and for work scheduled against it
-/// alike, so a claim gives the gate back only where nothing is scheduled: a
-/// marker standing holds the gate in its own right.
-fn end_poll_claim<A>(state: &mut EntryState<A>, epoch: u64) {
-    state.claim.end_leg(epoch);
-    state.claim.release();
 }
 
 /// Give back the queue slot a send took, where the entry still holds it for
@@ -1468,8 +1559,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             };
             state.safety_pins += 1;
             let epoch = state.claim.epoch();
-            state.claim.hold();
-            state.claim.begin_leg(epoch);
+            state.claim.begin_poll(epoch);
             (attachment, epoch)
         };
         let result = shared.ops.poll(name, &mut attachment);
@@ -1485,7 +1575,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             } else {
                 match result {
                     Ok(None) => {
-                        end_poll_claim(&mut state, epoch);
+                        state.claim.end_poll(epoch);
                         state.attachment = Some(attachment);
                         if maintenance_due && !state.recovery_required {
                             schedule = Some(
@@ -1518,7 +1608,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         }
                     }
                     Ok(Some(batch)) => {
-                        end_poll_claim(&mut state, epoch);
+                        state.claim.end_poll(epoch);
                         let rescan = !batch.rescans().is_empty();
                         state.pending.merge(batch);
                         if !state.recovery_required {
@@ -1556,7 +1646,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     // for.
                     Err(JobFailure::WatcherTerminal(error)) => {
                         state.claim.drop_marker();
-                        end_poll_claim(&mut state, epoch);
+                        state.claim.end_poll(epoch);
                         state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust = TrustState::untrusted(watcher_lost(error));
@@ -1564,7 +1654,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     }
                     Err(JobFailure::Environmental(detail)) => {
                         state.claim.drop_marker();
-                        end_poll_claim(&mut state, epoch);
+                        state.claim.end_poll(epoch);
                         state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
                         state.trust =
@@ -1596,7 +1686,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             // already said where the entry stands.
             shared.ops.detach(name, attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
-            if state.claim.leg() == Some(epoch) {
+            if state.claim.leg() == Some(Leg::Poll(epoch)) {
                 // A job that lost the attachment to this poll left its marker
                 // at the poll's own epoch, and the entry has moved past that
                 // epoch: the marker goes back with the claim rather than
@@ -1604,7 +1694,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                 if state.claim.marker().map(Job::epoch) == Some(epoch) {
                     state.claim.drop_marker();
                 }
-                end_poll_claim(&mut state, epoch);
+                state.claim.end_poll(epoch);
             }
             if let Some(job) = schedule_demanded_work(&mut state, name) {
                 schedule = Some(job);
@@ -1636,8 +1726,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
             return;
         }
-        state.claim.drop_marker();
-        state.claim.begin_leg(epoch);
+        state.claim.begin_job_leg(epoch);
     }
     run_job_inner(shared, job);
     // Whatever the leg still holds ends here. A claim it gave up itself —
@@ -1648,7 +1737,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     // invalidated by something that left the scheduling to the leg's end, so
     // the gate goes back with the claim.
     let mut state = entry.gate.lock().expect("entry gate poisoned");
-    if state.claim.end_leg(epoch) && !state.claim.stands_at(epoch) {
+    if state.claim.end_job_leg(epoch) && !state.claim.stands_at(epoch) {
         state.claim.release();
     }
 }
@@ -3653,7 +3742,10 @@ mod tests {
                 state.claim.is_held(),
                 "the release's own re-attach is in flight against an unclaimed entry"
             );
-            assert_eq!(state.claim.leg(), Some(state.claim.epoch()));
+            assert!(
+                state.claim.leg() == Some(Leg::Job(state.claim.epoch())),
+                "the re-attach runs against a leg the entry does not name"
+            );
         }
 
         ops.attach_release.store(true, Ordering::SeqCst);
@@ -3780,11 +3872,12 @@ mod tests {
         {
             let entry = host.shared.entries.get(&name).unwrap();
             let mut state = entry.gate.lock().unwrap();
-            // The instant a leg has re-stored the attachment and has not yet
-            // cleared its claim: destruction reads the entry as busy and takes
-            // nothing from it.
+            // The instant a leg has re-stored the attachment and given the gate
+            // back, and has not yet cleared its claim: destruction reads the
+            // entry as busy and takes nothing from it.
             let epoch = state.claim.epoch();
-            state.claim.begin_leg(epoch);
+            state.claim.begin_job_leg(epoch);
+            state.claim.release();
         }
 
         drop(host);
