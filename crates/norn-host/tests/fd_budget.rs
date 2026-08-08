@@ -12,6 +12,8 @@ use norn_config::{ConfigDirs, VaultName};
 use norn_host::{
     DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
 };
+use norn_testkit::isolation::{self, Lease};
+use norn_testkit::wait::Budget;
 use norn_wire::TrustState;
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
@@ -146,10 +148,22 @@ struct Fixture {
     root: PathBuf,
     vault: PathBuf,
     name: VaultName,
+    // The probe attaches through production entry operations, and an
+    // attachment installs a real platform watcher. The lease makes this
+    // process's the only live one on the machine for as long as the fixture
+    // lasts, which is longer than any host it builds.
+    //
+    // It is taken here rather than around each attach so that the descriptor
+    // it costs is inside the baseline every delta below is measured against.
+    _watcher_lease: Lease,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let lease = Lease::hold(
+            isolation::REAL_WATCHER,
+            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, Duration::from_millis(250))),
+        );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
@@ -165,6 +179,7 @@ impl Fixture {
             root,
             vault,
             name: VaultName::new("notes").expect("vault name"),
+            _watcher_lease: lease,
         }
     }
 

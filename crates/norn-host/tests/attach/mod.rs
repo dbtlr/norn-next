@@ -21,6 +21,7 @@
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 use std::ffi::OsStr;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -32,6 +33,8 @@ use norn_host::{
     DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
 };
 use norn_store::{DocumentPath, Store, StoredPathOrder};
+use norn_testkit::isolation::{self, Lease};
+use norn_testkit::wait::Budget;
 use norn_wire::TrustState;
 
 /// The seed every generated tree is drawn at. One value, so two readings
@@ -185,21 +188,26 @@ impl Vault {
         Store::open(self.database()).expect("open the derived store")
     }
 
-    /// A host serving this vault.
+    /// A host serving this vault, holding the real-watcher lease for as long
+    /// as it serves.
     ///
     /// **The store page and the changeset are bounded well below the smallest
     /// profile these suites attach**, so every scale commits its heal in units
     /// of the same size. A bound a small vault never reaches is a working set
     /// that grows with the vault up to that bound, and a flatness pair drawn
     /// across it would be measuring the bound rather than the invariant.
-    pub fn host(&self) -> Host<ProductionEntryOps> {
+    pub fn host(&self) -> ServingHost {
         let entry = Entry::new(
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
         let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
         let policy = ProductionPolicy::new(128, 128).expect("production policy");
-        Host::new(
+        // Taken before the host exists, because the watcher is installed by
+        // the attach the host runs and there is no later moment that is still
+        // ahead of it.
+        let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        let host = Host::new(
             registry,
             ProductionEntryOps::new([entry], self.dirs(), policy),
             LifecyclePolicy {
@@ -208,7 +216,48 @@ impl Vault {
                 watch_poll_interval: Duration::from_millis(50),
             },
         )
-        .expect("production host")
+        .expect("production host");
+        ServingHost {
+            host,
+            _watcher_lease: lease,
+        }
+    }
+}
+
+/// The bound on taking the real-watcher lease here.
+///
+/// The hold window is a whole attachment rather than one wait: the lease is
+/// taken before the host is built and let go when it drops, and what happens
+/// in between is [`READY_LIMIT`] at its widest. One look at the lock is a
+/// syscall, so the probe bound is the syscall's and not the attachment's.
+fn lease_budget() -> Budget {
+    isolation::acquisition_budget(Budget::new(READY_LIMIT, Duration::from_millis(250)))
+}
+
+/// A host, and the real-watcher lease that covers the watcher it installs.
+///
+/// **Every attachment these suites make installs a real platform watcher**,
+/// because they attach through [`ProductionEntryOps`]; that watcher is a
+/// subscription to the one service the operating system runs for the whole
+/// machine, and past some number of live subscriptions the service reports
+/// nothing at all to some of them. So the lease and the host are one value: a
+/// host cannot be built here without the lease, and the lease cannot be let go
+/// while the host that installed the watcher is still serving.
+///
+/// The lease is not reentrant, so this is the only place these suites take it.
+/// A caller holds what this hands back and takes none of its own.
+pub struct ServingHost {
+    host: Host<ProductionEntryOps>,
+    // Dropped after `host` by declaration order, which is the order that
+    // matters: the watcher goes with the host, and the lease covers it.
+    _watcher_lease: Lease,
+}
+
+impl Deref for ServingHost {
+    type Target = Host<ProductionEntryOps>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.host
     }
 }
 
