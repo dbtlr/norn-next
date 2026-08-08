@@ -143,9 +143,14 @@ enum Gate {
     /// Nothing holds the entry: a claim may take it, and work may be scheduled
     /// against it.
     Open,
-    /// A claim holds the entry with no job standing behind it, and says which
-    /// claim it is.
-    Held(Holder),
+    /// A claim holds the entry with no job standing behind it.
+    ///
+    /// Which claim that is, is read from [`Claim::leg`] rather than carried
+    /// here: every move that leaves the gate held writes the leg registration
+    /// under the same lock, so a holder named here would be a second spelling of
+    /// that one field. A gate held with no leg registered is a job the entry has
+    /// handed to the job channel and no leg has begun.
+    Held,
     /// The next job the entry owes, waiting on a dispatcher tick to send it.
     Scheduled(Job),
 }
@@ -170,26 +175,6 @@ impl Leg {
         match self {
             Self::Poll(epoch) | Self::Job(epoch) => epoch,
         }
-    }
-}
-
-/// What holds an entry's gate where no job is scheduled against it.
-///
-/// A claim writes this from the leg it has registered — [`Claim::holder`] is
-/// where every write of it comes from — so the gate names the leg running
-/// against the entry, and names a job sent into the channel where none is.
-#[derive(Clone, Copy)]
-enum Holder {
-    /// The leg running against the entry.
-    Running(Leg),
-    /// A job the entry has handed to the job channel, which the queue slot
-    /// names and no leg has begun.
-    Sent,
-}
-
-impl From<Leg> for Holder {
-    fn from(leg: Leg) -> Self {
-        Self::Running(leg)
     }
 }
 
@@ -306,7 +291,7 @@ impl Claim {
     pub(super) fn marker(&self) -> Option<&Job> {
         match &self.gate {
             Gate::Scheduled(job) => Some(job),
-            Gate::Open | Gate::Held(_) => None,
+            Gate::Open | Gate::Held => None,
         }
     }
 
@@ -316,23 +301,14 @@ impl Claim {
     /// The leg running against the entry is what holds the gate, and where none
     /// is running the job the entry is sending holds it: this is reached from
     /// [`Claim::hand_on`] alone, and what a hand-on sends is in the channel
-    /// before the entry's lock goes back.
+    /// before the entry's lock goes back. Either way the gate is held across the
+    /// move, so nothing takes the entry between the work it moves on from and
+    /// the work it moves on to.
     fn hold(&mut self) {
-        match self.gate {
-            // A marker holds the gate in its own right.
-            Gate::Scheduled(_) => {}
-            // The leg running against the entry keeps the gate across the move
-            // it is making.
-            Gate::Held(Holder::Running(leg)) if self.leg == Some(leg) => {}
-            Gate::Held(_) | Gate::Open => self.gate = Gate::Held(self.holder()),
+        // A marker holds the gate in its own right.
+        if !matches!(self.gate, Gate::Scheduled(_)) {
+            self.gate = Gate::Held;
         }
-    }
-
-    /// What holds the gate where this claim is what takes it: the leg
-    /// registered against the entry, and where none is, the job the entry is
-    /// sending into the channel.
-    fn holder(&self) -> Holder {
-        self.leg.map_or(Holder::Sent, Holder::from)
     }
 
     /// Schedule the entry's next job: the entry moves on to it, and its marker
@@ -377,9 +353,18 @@ impl Claim {
 
     /// Give up the job scheduled against the entry, leaving the gate to the leg
     /// running against it and open where none is running.
+    ///
+    /// The gate the marker gives back is read off the registration: a leg
+    /// running against the entry is holding the entry across the marker's end,
+    /// and a marker dropped with no leg running is an entry nothing is left
+    /// holding.
     pub(super) fn drop_marker(&mut self) {
         if matches!(self.gate, Gate::Scheduled(_)) {
-            self.gate = self.leg.map_or(Gate::Open, |leg| Gate::Held(leg.into()));
+            self.gate = if self.leg.is_some() {
+                Gate::Held
+            } else {
+                Gate::Open
+            };
         }
     }
 
@@ -428,9 +413,8 @@ impl Claim {
     /// Take the entry for a watcher poll: the poll holds the gate and is the leg
     /// running against the entry until its own tick ends it.
     pub(super) fn begin_poll(&mut self, epoch: u64) {
-        let leg = Leg::Poll(epoch);
-        self.leg = Some(leg);
-        self.gate = Gate::Held(leg.into());
+        self.leg = Some(Leg::Poll(epoch));
+        self.gate = Gate::Held;
     }
 
     /// Take the entry for the job leg a worker has begun. The marker the job
@@ -438,9 +422,8 @@ impl Claim {
     /// marker beside a job already running is one a dispatcher tick sends a
     /// second time.
     pub(super) fn begin_job_leg(&mut self, epoch: u64) {
-        let leg = Leg::Job(epoch);
-        self.leg = Some(leg);
-        self.gate = Gate::Held(leg.into());
+        self.leg = Some(Leg::Job(epoch));
+        self.gate = Gate::Held;
     }
 
     /// End the claim a watcher poll holds on the entry, where the poll is still
@@ -537,11 +520,12 @@ impl Claim {
     /// it.
     pub(super) fn hand_off(&mut self, leg: u64, job: &Job) {
         self.end_job_leg(leg);
-        let holder = self.holder();
         match self.gate {
-            Gate::Held(_) => self.gate = Gate::Held(holder),
+            // The leg held the gate across the hand-on, and the job it is
+            // sending holds it from here.
+            Gate::Held => {}
             Gate::Scheduled(ref marker) if marker.epoch() == job.epoch() => {
-                self.gate = Gate::Held(holder);
+                self.gate = Gate::Held;
             }
             Gate::Open | Gate::Scheduled(_) => {}
         }
