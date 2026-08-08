@@ -290,10 +290,20 @@
 //! coverage as one move, under the lock that publishes the trust label beside
 //! them: an attach that installs nothing mints nothing, and a handle minted
 //! under a later lock is one minted from coverage the entry may have given back
-//! already. Pinned by
-//! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`,
+//! already. The fusion of the two moves is carried by construction rather than
+//! by a test: [`Coverage`] hands out no read of what it holds, so a mint under
+//! a later lock is not expressible without widening that type, and a test that
+//! watched the two land together would pass unchanged over a mint moved to a
+//! lock of its own. What the tests pin is the rest of the row — one mint per
+//! install, published where the entry publishes its trust label and readable
+//! there, by
+//! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`; and no mint
+//! where nothing is installed, by
 //! `an_attach_the_entry_moved_on_from_mints_no_reader` and
-//! `an_attach_that_installs_no_coverage_mints_no_reader`.
+//! `an_attach_that_installs_no_coverage_mints_no_reader`. Coverage that mints
+//! no handle of its own leaves the slot empty and the entry answering no read,
+//! which is the production configuration today and is pinned by
+//! `coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches`.
 //!
 //! *A reader goes back before the store it was minted from closes.* Carried by
 //! `begin_release`, which lets go of the handle at the window's start, so the
@@ -302,10 +312,30 @@
 //! handle itself, on both the routes its coverage takes to the ops. Pinned by
 //! `a_teardown_closes_the_reader_before_the_store_goes_back`,
 //! `a_refusal_over_a_leg_holding_the_coverage_closes_the_reader_at_the_window`
-//! and `an_identity_refusal_closes_the_reader_it_gives_the_coverage_back_with`.
-//! `finish_release` lets go of nothing: every path to it passed through
-//! `begin_release`, and the only mint stands at an epoch a window's opening has
-//! already superseded or under a claim that window's start revoked.
+//! `an_identity_refusal_closes_the_reader_it_gives_the_coverage_back_with` and
+//! `an_identity_refusal_over_a_leg_holding_the_coverage_closes_the_reader`.
+//!
+//! `finish_release` lets go of nothing, and no mint lands inside the window it
+//! ends. Every path to it passed through `begin_release`, which closed the
+//! reader. The one mint site is the attach publication arm, which publishes
+//! under `Claim::stands_at` at its own epoch, and a window is opened in one of
+//! two ways, neither of which leaves such an attach standing. A move that
+//! supersedes first — `refuse_conflict`, `Host::drop`, the `poll_watchers`
+//! failure arms — has taken the entry past every epoch an attach could be
+//! standing at before it opens one. A move that supersedes nothing — the
+//! Recover, Reconcile and Maintenance failure arms, and `Job::Detach` — is the
+//! leg standing at the entry's own current epoch, and one epoch admits one leg,
+//! so there is no attach there to publish. The `debug_assert!` at the top of
+//! `finish_release` is where that argument stops being prose.
+//!
+//! Two sites give coverage to `EntryOps::detach` through neither
+//! `begin_release` nor the route around it: the stale arm of `poll_watchers`
+//! with no window standing, and the non-releasing arm of `end_job_leg`. Neither
+//! closes a reader, and neither has to. The coverage they carry was out with a
+//! leg, and every move that can take an entry past a leg's epoch while that leg
+//! holds coverage — `refuse_conflict`, `refuse_identity_error`, `Host::drop` —
+//! closes the reader before the leg comes back. The `debug_assert!` at each
+//! site is what an epoch-mover added without that close runs into.
 //!
 //! *A read holds the entry's own handle, and holds it beside the entry.*
 //! Carried by `Host::begin_read`, which clones the handle, reads the trust
@@ -313,16 +343,38 @@
 //! the trust row below is the other half of — and by `ReadHold`'s drop, which
 //! gives the pin back. The handle is shared rather than taken out, so a read in
 //! flight leaves the slot where the next read finds it, and the teardown that
-//! empties that slot closes no handle a read is running on. Pinned by
-//! `concurrent_reads_share_the_entrys_one_reader` and
-//! `a_reader_a_read_is_running_on_outlives_the_entrys_own`.
+//! empties that slot closes no handle a read is running on. The sharing is
+//! pinned by `concurrent_reads_share_the_entrys_one_reader`. The outliving is
+//! characterized by `a_reader_a_read_is_running_on_outlives_the_entrys_own`
+//! rather than pinned by it: what that case asserts is what an `Arc` clone
+//! does, so it reddens on a redesign of the slot's type and on no mutation of
+//! the moves around it.
 //!
-//! What a read's pin buys is what a leg's pin buys and no more: the three
-//! readers named above are the whole of it, so a refusal or a destruction tears
-//! an entry down under a read exactly as it does under a leg. That a read in
-//! flight keeps reading there is carried by the handle it holds and by nothing
-//! else — no move states that the file behind that handle outlives the
-//! teardown, and nothing pins one that would.
+//! What a read's pin buys is what a leg's pin buys and no more — the three
+//! readers named above are the whole of it — and under a read it buys strictly
+//! less than under a leg. A leg holds the entry's coverage for as long as its
+//! pin stands, so `refuse_conflict` takes nothing and leaves the give-back to
+//! the leg's own end, and `Host::drop` joins the workers before it gives
+//! anything back. A read holds no coverage: at both those sites the entry is
+//! still holding its own, so the take answers with it and the refusal or the
+//! destruction is itself what reaches `EntryOps::detach` — under the live hold,
+//! rather than at a leg's end.
+//!
+//! Three shapes of teardown reach an entry with no pin read at all, and a read
+//! in flight stops none of them. A refusal or a destruction moves first and
+//! consults no pin. An idle detach already scheduled is the second:
+//! `schedule_due_detach` reads the pin where it schedules and nowhere after, so
+//! a `Job::Detach` scheduled before `Host::begin_read` takes its hold tears the
+//! entry down under that hold — the reap-then-read order, characterized by
+//! `a_detach_scheduled_before_a_read_tears_the_entry_down_under_it`. The third
+//! is a job leg failing its way into a release: the `LostMaintainership` and
+//! `MaintainerContended` arms of `poll_watchers` and their Recover, Reconcile
+//! and Maintenance equivalents run `begin_release` and hand the coverage on
+//! without reading a pin either.
+//!
+//! That a read in flight keeps reading through any of them is carried by the
+//! handle it holds and by nothing else — no move states that the file behind
+//! that handle outlives the teardown, and nothing pins one that would.
 //!
 //! **The trust label and the instant it is a snapshot of.** `EntryState::trust`,
 //! the phases written around it, and the rule that a label is published under

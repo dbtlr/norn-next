@@ -48,6 +48,15 @@ pub trait SnapshotSource: Send + 'static {
 
     /// Open the handle this coverage serves reads from. Coverage that mints
     /// none is coverage no read reaches.
+    ///
+    /// This runs under the entry gate lock, on the attach leg's publication,
+    /// and the lock is what the contract here is about. It blocks on no I/O
+    /// beyond the open the attach has already paid for: every other holder of
+    /// that entry — every demand, every reap, every read — waits behind it. And
+    /// it does not panic: an unwind here poisons the gate, and a poisoned gate
+    /// is an entry whose coverage reaches the ops by `Drop` rather than through
+    /// [`EntryOps::detach`], with the maintainer lock and the watcher given back
+    /// out of order.
     fn open_reader(&self) -> Option<Self::Reader>;
 }
 
@@ -739,6 +748,12 @@ fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
 /// The follow-up is sent from here and left nowhere else. A marker beside a job
 /// this leg has already sent is one a dispatcher tick would send a second time,
 /// under the same epoch.
+///
+/// The reader was let go of at the window's start and nothing minted one inside
+/// it: the one mint site publishes under [`Claim::stands_at`] at its own epoch,
+/// and a window is opened either by a move that superseded every such epoch
+/// first or by the single leg standing at the entry's current one. The
+/// assertion below is where that says itself out loud.
 fn finish_release<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -750,6 +765,10 @@ fn finish_release<O: EntryOps>(
         shared.ops.detach(name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
+    debug_assert!(
+        state.reader.is_none(),
+        "a reader stands over coverage the release has already given back"
+    );
     let reattach_requested = !state.recovery_required || state.recovery_demanded();
     state.claim.end_leg(epoch);
     // The coverage this leg was handed is with the ops now, so the entry holds
@@ -1721,6 +1740,13 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             // already said where the entry stands.
             shared.ops.detach(name, attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // The coverage reached the ops through neither a release window nor
+            // the route around one, so the close it was owed came from whatever
+            // moved the entry past this poll's epoch.
+            debug_assert!(
+                state.reader.is_none(),
+                "a reader stands over coverage a superseded poll has given back"
+            );
             state.coverage.released_by(epoch);
             if state.claim.leg() == Some(Leg::Poll(epoch)) {
                 if state.detach_in_flight {
@@ -1813,10 +1839,18 @@ fn end_job_leg<O: EntryOps>(
         finish_release(shared, entry, name, epoch, held);
         return;
     }
+    let handed_back = held.is_some();
     if let Some(attachment) = held {
         shared.ops.detach(name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
+    // Coverage that reached the ops here reached them through neither a release
+    // window nor the route around one, so the close it was owed came from
+    // whatever moved the entry past this leg's epoch.
+    debug_assert!(
+        !handed_back || state.reader.is_none(),
+        "a reader stands over coverage a superseded leg has given back"
+    );
     if state.claim.end_job_leg(epoch) {
         state.coverage.released_by(epoch);
         if state.detach_in_flight {
@@ -2452,11 +2486,23 @@ mod tests {
     ///
     /// A fake with a subject in the reader keeps the ledger it hands out and
     /// reads both ends of the handle's life off it; a fake with no such
-    /// subject installs a ledger nothing reads. Either way the coverage mints
-    /// a reader, so the slot an entry publishes is occupied wherever a case
-    /// looks at it.
-    #[derive(Default)]
-    struct FakeCoverage(Arc<ReaderLedger>);
+    /// subject installs a ledger nothing reads. Coverage minting a reader is
+    /// the default here, so the slot an entry publishes is occupied wherever a
+    /// case looks at it; `mints` false is the other configuration a coverage
+    /// can be in, and the one production stands in today.
+    struct FakeCoverage {
+        readers: Arc<ReaderLedger>,
+        mints: bool,
+    }
+
+    impl Default for FakeCoverage {
+        fn default() -> Self {
+            Self {
+                readers: Arc::default(),
+                mints: true,
+            }
+        }
+    }
 
     /// What a case reads about an entry's readers: one open counted where the
     /// coverage mints the handle, one close where the last holder of that
@@ -2475,8 +2521,11 @@ mod tests {
         type Reader = FakeReader;
 
         fn open_reader(&self) -> Option<FakeReader> {
-            self.0.opened.fetch_add(1, Ordering::SeqCst);
-            Some(FakeReader(Arc::clone(&self.0)))
+            if !self.mints {
+                return None;
+            }
+            self.readers.opened.fetch_add(1, Ordering::SeqCst);
+            Some(FakeReader(Arc::clone(&self.readers)))
         }
     }
 
@@ -2505,6 +2554,10 @@ mod tests {
         /// through, so a case reads the readers of every entry the fake serves
         /// off one place.
         readers: Arc<ReaderLedger>,
+        /// Install coverage that mints no reader, which is the configuration
+        /// production stands in: a store is attached and the entry beside it
+        /// serves no reads.
+        coverage_mints_no_reader: std::sync::atomic::AtomicBool,
         attaches: AtomicUsize,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
@@ -2601,7 +2654,10 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
-            Ok(FakeCoverage(Arc::clone(&self.readers)))
+            Ok(FakeCoverage {
+                readers: Arc::clone(&self.readers),
+                mints: !self.coverage_mints_no_reader.load(Ordering::SeqCst),
+            })
         }
 
         fn reconcile(
@@ -6687,6 +6743,53 @@ mod tests {
         assert!(!reader_stands(&host, &name));
     }
 
+    /// The refusal's other route: the coverage is out with a leg, so the
+    /// refusal gives back nothing itself and the leg's own end is what reaches
+    /// the ops. The reader is closed at the refusal all the same — the entry
+    /// stops being readable where the refusal lands, and the leg that follows
+    /// hands the store to [`EntryOps::detach`] with no close of its own.
+    #[test]
+    fn an_identity_refusal_over_a_leg_holding_the_coverage_closes_the_reader() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state
+                .coverage
+                .take(epoch)
+                .expect("the entry parked its coverage");
+            (epoch, attachment)
+        };
+        refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the refusal gave back coverage the leg is holding"
+        );
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the entry kept its reader over coverage the leg below gives back"
+        );
+        assert!(!reader_stands(&host, &name));
+        assert!(host.begin_read(&name).is_none());
+
+        end_job_leg(&host.shared, &entry, &name, epoch, Some(attachment));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
     /// An in-flight read holds the entry the way a leg running outside the
     /// entry's lock does: a reap that finds the entry idle schedules no
     /// teardown while the read stands, and the teardown it was owed runs once
@@ -6714,6 +6817,90 @@ mod tests {
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+    }
+
+    /// The other order, and the gap the contract admits. `schedule_due_detach`
+    /// reads the pin where it schedules and nowhere after, so a teardown
+    /// already scheduled is a teardown a later read does not hold back: the
+    /// read is answered, and the entry is torn down while the hold stands.
+    ///
+    /// What the read goes on holding is its own clone of the handle, which is
+    /// the whole of what it has. Nothing here says the store behind that handle
+    /// is still open, and nothing pins that it is.
+    #[test]
+    fn a_detach_scheduled_before_a_read_tears_the_entry_down_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("working").unwrap();
+        let occupied = VaultName::new("occupied").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        drop(host.demand(&working, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The one worker, held inside another vault's attach: the detach the
+        // reap below dispatches sits in the channel while this case reads the
+        // entry it was scheduled against.
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        assert!(
+            !reader_stands(&host, &occupied),
+            "the occupier's attach published before the reap"
+        );
+
+        let hold = host
+            .begin_read(&working)
+            .expect("a scheduled teardown is not what a read consults");
+        assert_eq!(hold.trust(), &TrustState::Ready);
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &working, TrustState::Unattached);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the scheduled teardown did not run"
+        );
+        assert!(!reader_stands(&host, &working));
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            0,
+            "the entry was torn down and the read's own handle went with it"
+        );
+
+        drop(hold);
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+        drop(occupier);
+    }
+
+    /// Coverage that mints no reader leaves the slot empty, and the entry
+    /// beside it answers no read while publishing the trust its coverage earns.
+    ///
+    /// That is the configuration production stands in: `ProductionAttachment`
+    /// mints nothing, so a vault attaches, heals and reports Ready with no
+    /// handle in its slot and every read against it refused for want of one.
+    #[test]
+    fn coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        ops.coverage_mints_no_reader.store(true, Ordering::SeqCst);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "coverage that mints no reader minted one"
+        );
+        assert!(
+            !reader_stands(&host, &name),
+            "an entry over coverage that mints no reader is holding a handle"
+        );
+        assert!(
+            host.begin_read(&name).is_none(),
+            "an entry with an empty slot answered a read"
+        );
     }
 
     /// Every read against one entry runs on that entry's one handle. A read in
@@ -6748,6 +6935,12 @@ mod tests {
     /// The handle a read is running on outlives the entry's own hold on it. A
     /// teardown lets go of the slot; what closes a handle a read still has is
     /// that read ending.
+    ///
+    /// This characterizes the sharing decision rather than pinning a move: the
+    /// entry hands a read a clone at [`Host::begin_read`] instead of a way to
+    /// look the handle up per use, and what the case asserts below follows from
+    /// that choice by [`Arc`]'s own accounting. No mutation of the lifecycle
+    /// reddens it; a redesign of the slot's type is what would.
     #[test]
     fn a_reader_a_read_is_running_on_outlives_the_entrys_own() {
         let ops = Arc::new(FakeOps::default());
