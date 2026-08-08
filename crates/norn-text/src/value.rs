@@ -35,7 +35,9 @@
 //! - **An integer past `i64` but inside `u64`** is carried as a float, with a
 //!   [`FrontmatterIntegerOutOfRange`](crate::DiagnosticCode::FrontmatterIntegerOutOfRange)
 //!   diagnostic. Past `u64`, or below `i64`, the block does not parse at all:
-//!   the refusal is `frontmatter-parse-failed`, and no value exists to carry.
+//!   the refusal is
+//!   [`FrontmatterParseFailed`](crate::DiagnosticCode::FrontmatterParseFailed),
+//!   and no value exists to carry.
 //! - **Anchors and aliases** are expanded by the parser before a value exists,
 //!   so there is nothing here to strip: the model holds the expansion. The
 //!   marker bytes themselves are never rewritten, because the field layer

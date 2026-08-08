@@ -54,8 +54,8 @@ impl Demand {
     /// reads nothing from `name`. A caller holding the entry's lease answers
     /// through [`DemandLease::answer`](crate::DemandLease::answer), which is
     /// the entry point that supplies the name the lease itself holds; this one
-    /// serves the callers that hold no lease, because the vault they asked for
-    /// has no entry to lease.
+    /// is the mapping that entry point renders, taking the name as a parameter
+    /// because a demand carries none of its own.
     pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
             Demand::State(state) => answer_state(state),
@@ -311,8 +311,10 @@ mod tests {
     /// environmental refusal are one fact on the wire. The host reads them at
     /// two doors — a recheck of the registry, a state the entry published —
     /// and a client is told the one thing both mean: the derived state cannot
-    /// be trusted, because the environment refused. Nothing in the envelope
-    /// says which door it came through, and this is where that stays true.
+    /// be trusted, because the environment refused. Nothing a client matches
+    /// on — the code or the detail — says which door it came through, and this
+    /// is where that stays true; the message is prose, and each door has its
+    /// own thing to say to a person.
     #[test]
     fn a_refused_root_and_an_environmental_refusal_are_one_refusal() {
         let account = "the vault root stopped being readable";
