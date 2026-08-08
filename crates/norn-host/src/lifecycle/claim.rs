@@ -5,6 +5,274 @@
 //! invariants, and the fields carrying them are private to this module: every
 //! move any of them makes is a method here, so a caller can neither write a
 //! state no move produces nor read one out of the shape it is stored in.
+//!
+//! # What each piece carries
+//!
+//! Every invariant below names the field or move carrying it and the test
+//! pinning it. A pin is named only where removing the move it names fails that
+//! test. A piece carrying no invariant, and an invariant no test pins, are each
+//! named as such: what the machinery does not carry, and what nothing holds it
+//! to, are as much of the map as what it does.
+//!
+//! Two things are called a gate. `Entry::gate` is the mutex over an entry's
+//! whole state — the entry gate lock every move below is taken under, and the
+//! one the architecture documents name. `Claim::gate` is the scheduling [`Gate`]
+//! inside that state, which is what this section means by "the gate"
+//! throughout. One is nested in the other.
+//!
+//! ## The gate
+//!
+//! **An entry whose gate is taken takes no second claim.** Carried by [`Gate`]
+//! and read through [`Claim::is_held`], which every producer of work tests
+//! before it schedules: [`Claim::begin_poll`] and [`Claim::begin_job_leg`]
+//! write [`Gate::Held`], and a dispatcher tick passes over a held entry. Pinned
+//! by `a_tick_cannot_claim_an_entry_whose_next_job_is_already_in_the_queue` and
+//! `concurrent_demand_is_single_flight`.
+//!
+//! **A marker holds the gate in its own right, so a claim gives the gate back
+//! only where nothing is scheduled.** Two moves carry this and each has its own
+//! pin. The guard in [`Claim::release`] is what leaves the marker standing when
+//! a claim ends over it, pinned by
+//! `a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back`.
+//! [`Claim::is_held`] reading [`Gate::Scheduled`] as taken is what keeps a
+//! producer from claiming the entry the marker holds, pinned by
+//! `a_tick_passes_over_an_entry_a_marker_holds`. Without either, a claimant
+//! takes an entry out from under work already scheduled against it, and the job
+//! that marker stands for is one no dispatch reaches.
+//!
+//! **Work nothing holds the entry for is work no dispatch reaches.** Carried by
+//! [`Claim::drop_marker`] and [`Claim::open`]: a claim losing the coverage its
+//! scheduled job was to run against gives the marker back with the gate. Pinned
+//! by `a_claim_that_loses_coverage_drops_the_job_that_was_waiting_on_it`,
+//! `a_claim_that_refuses_environmentally_drops_the_job_that_was_waiting_on_it`
+//! and `a_release_takes_the_marker_of_the_job_that_was_waiting_on_the_claim`.
+//!
+//! **A marker a claim did not plant outlives the claim standing over it.** Two
+//! moves carry this. [`Claim::restore`] yields to a job already scheduled
+//! because that job is the newer of the two, pinned by
+//! `a_job_that_lost_its_coverage_leaves_a_newer_marker_standing`.
+//! [`Claim::mark`] is how a refused send takes the marker back for the work the
+//! entry owes now, pinned by
+//! `a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left` and
+//! `failed_send_releases_the_marker_after_a_newer_epoch_is_installed`.
+//!
+//! **A gate held across a hand-on is an entry nothing takes between the work it
+//! moves on from and the work it moves on to.** Carried by [`Claim::hold`],
+//! reached from [`Claim::hand_on`] alone, and by [`Claim::hand_off`], which
+//! leaves the gate to the job going into the channel. Pinned by
+//! `a_tick_cannot_claim_an_entry_whose_next_job_is_already_in_the_queue`.
+//!
+//! **A marker dropped under a running leg leaves the gate to that leg.**
+//! Carried by [`Claim::drop_marker`]'s read of [`Claim::leg`]. The derived gate
+//! is what decides the outcome at three sites, where no caller opens the gate
+//! afterwards under the same lock: `refuse_identity_error`'s arm for coverage
+//! out with a leg, which opens the gate only where none is registered;
+//! `run_job`'s superseded-arrival arm, which drops the marker and returns; and
+//! `refuse_conflict`'s in-flight path, where the continue skips the open below
+//! it. Pinned by
+//! `a_stale_arrival_gives_its_marker_back_to_the_leg_running_against_the_entry`.
+//!
+//! ## The epoch
+//!
+//! **A leg answers for itself alone once the entry has moved past its epoch.**
+//! Carried by `epoch`, [`Claim::stands_at`] and [`Claim::supersede`]: every leg
+//! carries the epoch it was taken at and rechecks it under the entry's lock
+//! before it writes anything back. Pinned by
+//! `a_superseded_poll_gives_the_entry_back_and_schedules_the_lease_on_it`,
+//! `an_arrival_at_a_superseded_epoch_leaves_the_slot_of_the_job_that_replaced_it`
+//! and `an_identity_refusal_invalidates_an_in_flight_reconcile`.
+//!
+//! **Work an invalidation supersedes goes with the epoch it was raised under.**
+//! Carried by [`Claim::invalidate`], where the supersession, the abandoned slot
+//! and the dropped marker are one move: an entry left holding any one of them
+//! is one a later dispatch reaches for work it has moved on from. Two of the
+//! three limbs are pinned. The supersession is pinned through
+//! [`Claim::stands_at`] by `an_identity_refusal_invalidates_an_in_flight_reconcile`
+//! and `a_refused_entry_is_polled_by_nothing_afterwards`, and the abandoned
+//! slot by `an_invalidation_stops_the_entry_waiting_on_the_job_it_supersedes`.
+//! The dropped marker is unpinned here: every caller either opens the gate
+//! outright under the same lock or reaches the derived gate the row above
+//! pins, so no case in the suite reads a marker this limb alone gave back.
+//!
+//! ## The leg
+//!
+//! **Coverage out with a leg comes back where that leg ends.** Carried by the
+//! `leg` registration, which the teardowns read to decide whether to publish a
+//! release themselves or open a window the leg's own end closes. Pinned by
+//! `a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg`,
+//! `destruction_leaves_coverage_out_with_a_leg_to_that_leg` and
+//! `a_refused_alias_held_in_a_poll_releases_through_the_poll_that_holds_it`.
+//!
+//! **A leg holding none of the entry's coverage is not what ends it.** Carried
+//! by [`Claim::end_running_leg`], which the refusals that take coverage out of
+//! the entry's own hand pair with the taking. Pinned by
+//! `a_refusal_over_a_leg_standing_at_parked_coverage_releases_it_inline` and
+//! `an_identity_refusal_over_a_leg_standing_at_parked_coverage_releases_it`.
+//!
+//! **One release ends whichever leg reached it.** Carried by
+//! [`Claim::end_leg`], epoch-typed and deliberately blind to the kind, because
+//! a poll claim and a job leg come to that one completion alike. Pinned by
+//! `a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg`,
+//! which is the case that fails where this move ends nothing.
+//!
+//! **A release a demand outlived re-arms under the entry's own claim.** Carried
+//! by the [`Claim::hand_on`] and [`Claim::take_slot`] pair ending the release,
+//! taken under the lock publishing the state it warms into. The hand-on is
+//! pinned by `a_job_leg_release_honors_a_demand_with_a_claimed_re_attach` and
+//! `a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes`.
+//! The slot the pair takes is unpinned: the re-arm plants no marker, so the
+//! only reader that would refuse a second send —
+//! [`Claim::take_slot_for_marked`] — answers None over this entry whether the
+//! slot is taken or not, and no case in the suite reaches the queue pressure
+//! that would tell the two apart.
+//!
+//! **A poll and a job leg do not end each other.** Carried by the [`Leg`] kind
+//! and the equality checks in [`Claim::end_poll`] and [`Claim::end_job_leg`].
+//! The state where the two stand at one epoch is reached on every run: a poll
+//! takes the entry and blocks holding its coverage, a job dispatched at that
+//! same epoch reaches a worker, and `run_job` registers a job leg over the
+//! poll's registration before the poll has returned. A poll returning in that
+//! window ends against a job leg's registration, and the kind check is what
+//! makes it a no-op. An epoch-typed end would clear the running leg's
+//! registration instead, and a release window opened over that leg would then
+//! have nothing left to close it. Pinned by
+//! `a_poll_end_leaves_the_job_leg_a_release_window_waits_on`.
+//!
+//! The guard in [`Claim::end_poll`] is partial by construction: the kind
+//! decides the registration alone, and the [`Claim::release`] beside it runs
+//! whatever leg is registered. A poll ending over another leg therefore gives
+//! the gate back, and what holds the entry from there is the marker or the
+//! leg's own later moves rather than this call.
+//!
+//! **The leg outlives the gate it took.** Carried by the `leg` registration
+//! standing after [`Claim::release`] and read by
+//! [`Claim::take_slot_for_marked`], so a dispatcher tick never sends the job a
+//! running leg is about to send itself. Pinned by
+//! `a_tick_takes_no_slot_for_a_marker_the_running_leg_sends_itself`.
+//!
+//! ## The queue slot
+//!
+//! **The slot names its occupant, so only that job's own arrival frees it.**
+//! Carried by [`Slot`]'s epoch and the equality in [`Slot::free`]: a slot freed
+//! under the job that replaced it is that job sent into the channel a second
+//! time. Pinned by
+//! `an_arrival_at_a_superseded_epoch_leaves_the_slot_of_the_job_that_replaced_it`.
+//!
+//! **The job in the channel and the slot naming it are installed together, and
+//! given back together.** Carried by [`Claim::take_slot_for_marked`], which
+//! takes the slot under the lock that reads the marker, and by
+//! [`Claim::free_slot`] where a full queue refuses the send. Pinned by
+//! `worker_defers_followup_when_a_sibling_fills_its_only_queue_slot`,
+//! `a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left` and
+//! `failed_send_releases_the_marker_after_a_newer_epoch_is_installed`. The slot
+//! [`Claim::hand_off`] takes under the lock ending the claim is unpinned, for
+//! the reason the re-arm's slot above is: a hand-off leaves no marker naming
+//! the job it sends, so the reader that would refuse a second send has nothing
+//! to send twice.
+//!
+//! ## The coverage
+//!
+//! **Coverage has one holder, and custody is read rather than inferred.**
+//! Carried by [`Custody`]: [`Coverage::take`] takes from [`Custody::Parked`]
+//! alone and [`Coverage::give_up`] gives up that alone, each leaving the record
+//! of a leg's hold standing, so coverage already out with a leg is taken by no
+//! other and given up by none. The two limbs stand apart.
+//! [`Coverage::give_up`] leaving the record is pinned by
+//! `destruction_leaves_coverage_out_with_a_leg_to_that_leg`, which is the case
+//! that fails where that record is discarded and a teardown then reads an entry
+//! holding nothing as an entry with nothing out. [`Coverage::take`] leaving it
+//! is unpinned: a non-`Parked` take recording [`Custody::None`] instead leaves
+//! the whole suite standing. The state that would differ is coverage out with a
+//! leg no registration names, which the debug assertion in `refuse_conflict`
+//! says no entry reaches, and the readers that would tell the two apart pair
+//! the record with that registration under an `||`.
+//!
+//! [`Coverage::out_with_leg`] reading that record rather than inferring it from
+//! an empty attachment has four readers. The debug assertion in
+//! `refuse_conflict` states the invariant outright, and
+//! `a_lease_stops_answering_a_conflict_a_later_recheck_retired` is the case
+//! that reaches it. The two release-window arms — `refuse_conflict`'s and the
+//! one in `Host::drop` — read it beside the leg registration under an `||`, so
+//! an entry accounting for no coverage and one whose coverage is out with a leg
+//! take the same route there. `Host::drop`'s post-join pass reads it bare, with
+//! no registration to fall back on, and continues over what it finds still out:
+//! inferred custody puts an entry accounting for no coverage on that continue,
+//! and `TrustState::Unattached` becomes a state destruction never publishes.
+//! Two cases pin that on the production path, debug assertions on or off:
+//! `destruction_releases_before_it_publishes_unattached`, which asserts the
+//! state the destruction publishes, and
+//! `a_lease_stops_answering_a_conflict_a_later_recheck_retired`, whose
+//! `wait_for_state` times out.
+//!
+//! **A leg ends the coverage it took alone.** Carried by [`Custody::OnLeg`]'s
+//! epoch and the equality in [`Coverage::released_by`]: coverage a leg parked
+//! back, or that another leg has since taken, is not that leg's to end. Pinned
+//! by
+//! `a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg`
+//! and `destruction_gives_back_an_attachment_a_finished_job_left_behind`.
+//!
+//! ## The closing path
+//!
+//! Every teardown enters at `begin_release`, which opens the gate
+//! unconditionally and raises the flag saying the entry's resources are going
+//! back, and every teardown ends at `finish_release`, which holds the only call
+//! site of [`Claim::end_leg`]. The lifetime rule lives in that seam rather than
+//! at the sites: a caller decides whether to release, and the seam decides what
+//! a release does to the claim. `finish_release`'s own [`Claim::open`] is the
+//! terminal revocation on that path — the window's start opened the gate
+//! already, and this is the one that stands. What routes around the seam is
+//! `refuse_identity_error`, which gives the entry's coverage to the ops without
+//! opening a window: that is a park with the resources handed back under it,
+//! and the entry stays untrusted and owing a recovery rather than released.
+//!
+//! Two moves revoke a claim blind to the kind and the epoch it stands at:
+//! [`Claim::end_running_leg`], which ends whatever is registered, and the
+//! [`Claim::open`] beside it in `refuse_conflict`, `refuse_identity_error`,
+//! `Host::drop` and the demand that takes back a scheduled teardown. Every one
+//! of those sites is preceded by [`Claim::invalidate`] under the same lock, and
+//! that supersede-first order is what makes the blindness safe: the entry has
+//! moved past every epoch a leg could be standing at before anything is
+//! revoked, so what these end can no longer write anything back.
+//!
+//! The remaining calls to [`Claim::open`] revoke nothing another claim holds.
+//! `begin_release` and `finish_release` open the gate on the entry's own
+//! teardown path, and `restore_lost_claim` opens it over the very job it is
+//! ending, at that job's own epoch.
+//!
+//! ## What carries nothing
+//!
+//! `Claim::slot`, `Slot::job` and `Claim::stand_at` carry no invariant: they
+//! are two test readers and a test writer, and nothing the entry does turns on
+//! them. The gate names no holder of its own, because the leg registration is
+//! what says which claim holds it, and a holder beside it is one fact spelled
+//! twice.
+//!
+//! # What this module is not
+//!
+//! Two facts about an entry sit next to the claim and are carried outside it.
+//! A carve that moves the claim expects to find them here and does not.
+//!
+//! **The pin discipline.** `EntryState::safety_pins`, with `pin`, `unpin` and
+//! `pinned` beside it, lives in the entry state rather than in the claim. It
+//! carries a narrower fact than any field here: that a leg running outside the
+//! entry's lock comes back to a lock of its own, so what it holds is coming
+//! back. Three readers turn on it, and they read it in opposite directions.
+//! `schedule_due_detach` refuses to schedule a teardown while a pin stands, so
+//! nothing tears an entry down under a leg that is coming back to it.
+//! `reap_idle_shared` marks an idle entry due where a pin stands even though its
+//! coverage is out, because the leg holding that coverage is what brings it
+//! back. `restore_lost_claim` decides between [`Claim::open`] and
+//! [`Claim::restore`] on it: a job that lost its coverage records itself for a
+//! later tick where a pin says the coverage is coming back, and ends there where
+//! none does. Pinned by
+//! `a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back`.
+//!
+//! **The trust label and the instant it is a snapshot of.** `EntryState::trust`,
+//! the phases written around it, and the rule that a label is published under
+//! the same lock as the move it names all live in the entry state. The claim
+//! neither reads nor writes a trust state, and no invariant here constrains one:
+//! what couples a label to the instant it describes is the lock the two are
+//! written under, and that coupling is the entry's, not the claim's.
 
 use super::Job;
 
@@ -143,9 +411,20 @@ enum Gate {
     /// Nothing holds the entry: a claim may take it, and work may be scheduled
     /// against it.
     Open,
-    /// A claim holds the entry with no job standing behind it, and says which
-    /// claim it is.
-    Held(Holder),
+    /// A claim holds the entry with no job standing behind it.
+    ///
+    /// Which claim that is, is read from [`Claim::leg`] rather than carried
+    /// here: every move that leaves the gate held writes the leg registration
+    /// under the same lock, so a holder named here would be a second spelling of
+    /// that one field.
+    ///
+    /// A gate held with no leg registered is a job the entry has handed to the
+    /// job channel and no leg has begun — for as long as any reader can see it.
+    /// A teardown that ends the registration before it takes the gate back
+    /// stands in that shape between the two writes, with nothing in the channel
+    /// either; both writes are under one hold of the entry gate lock, so the
+    /// shape never outlives it.
+    Held,
     /// The next job the entry owes, waiting on a dispatcher tick to send it.
     Scheduled(Job),
 }
@@ -170,26 +449,6 @@ impl Leg {
         match self {
             Self::Poll(epoch) | Self::Job(epoch) => epoch,
         }
-    }
-}
-
-/// What holds an entry's gate where no job is scheduled against it.
-///
-/// A claim writes this from the leg it has registered — [`Claim::holder`] is
-/// where every write of it comes from — so the gate names the leg running
-/// against the entry, and names a job sent into the channel where none is.
-#[derive(Clone, Copy)]
-enum Holder {
-    /// The leg running against the entry.
-    Running(Leg),
-    /// A job the entry has handed to the job channel, which the queue slot
-    /// names and no leg has begun.
-    Sent,
-}
-
-impl From<Leg> for Holder {
-    fn from(leg: Leg) -> Self {
-        Self::Running(leg)
     }
 }
 
@@ -306,7 +565,7 @@ impl Claim {
     pub(super) fn marker(&self) -> Option<&Job> {
         match &self.gate {
             Gate::Scheduled(job) => Some(job),
-            Gate::Open | Gate::Held(_) => None,
+            Gate::Open | Gate::Held => None,
         }
     }
 
@@ -316,23 +575,14 @@ impl Claim {
     /// The leg running against the entry is what holds the gate, and where none
     /// is running the job the entry is sending holds it: this is reached from
     /// [`Claim::hand_on`] alone, and what a hand-on sends is in the channel
-    /// before the entry's lock goes back.
+    /// before the entry's lock goes back. Either way the gate is held across the
+    /// move, so nothing takes the entry between the work it moves on from and
+    /// the work it moves on to.
     fn hold(&mut self) {
-        match self.gate {
-            // A marker holds the gate in its own right.
-            Gate::Scheduled(_) => {}
-            // The leg running against the entry keeps the gate across the move
-            // it is making.
-            Gate::Held(Holder::Running(leg)) if self.leg == Some(leg) => {}
-            Gate::Held(_) | Gate::Open => self.gate = Gate::Held(self.holder()),
+        // A marker holds the gate in its own right.
+        if !matches!(self.gate, Gate::Scheduled(_)) {
+            self.gate = Gate::Held;
         }
-    }
-
-    /// What holds the gate where this claim is what takes it: the leg
-    /// registered against the entry, and where none is, the job the entry is
-    /// sending into the channel.
-    fn holder(&self) -> Holder {
-        self.leg.map_or(Holder::Sent, Holder::from)
     }
 
     /// Schedule the entry's next job: the entry moves on to it, and its marker
@@ -377,9 +627,18 @@ impl Claim {
 
     /// Give up the job scheduled against the entry, leaving the gate to the leg
     /// running against it and open where none is running.
+    ///
+    /// The gate the marker gives back is read off the registration: a leg
+    /// running against the entry is holding the entry across the marker's end,
+    /// and a marker dropped with no leg running is an entry nothing is left
+    /// holding.
     pub(super) fn drop_marker(&mut self) {
         if matches!(self.gate, Gate::Scheduled(_)) {
-            self.gate = self.leg.map_or(Gate::Open, |leg| Gate::Held(leg.into()));
+            self.gate = if self.leg.is_some() {
+                Gate::Held
+            } else {
+                Gate::Open
+            };
         }
     }
 
@@ -428,9 +687,8 @@ impl Claim {
     /// Take the entry for a watcher poll: the poll holds the gate and is the leg
     /// running against the entry until its own tick ends it.
     pub(super) fn begin_poll(&mut self, epoch: u64) {
-        let leg = Leg::Poll(epoch);
-        self.leg = Some(leg);
-        self.gate = Gate::Held(leg.into());
+        self.leg = Some(Leg::Poll(epoch));
+        self.gate = Gate::Held;
     }
 
     /// Take the entry for the job leg a worker has begun. The marker the job
@@ -438,9 +696,8 @@ impl Claim {
     /// marker beside a job already running is one a dispatcher tick sends a
     /// second time.
     pub(super) fn begin_job_leg(&mut self, epoch: u64) {
-        let leg = Leg::Job(epoch);
-        self.leg = Some(leg);
-        self.gate = Gate::Held(leg.into());
+        self.leg = Some(Leg::Job(epoch));
+        self.gate = Gate::Held;
     }
 
     /// End the claim a watcher poll holds on the entry, where the poll is still
@@ -537,11 +794,12 @@ impl Claim {
     /// it.
     pub(super) fn hand_off(&mut self, leg: u64, job: &Job) {
         self.end_job_leg(leg);
-        let holder = self.holder();
         match self.gate {
-            Gate::Held(_) => self.gate = Gate::Held(holder),
+            // The leg held the gate across the hand-on, and the job it is
+            // sending holds it from here.
+            Gate::Held => {}
             Gate::Scheduled(ref marker) if marker.epoch() == job.epoch() => {
-                self.gate = Gate::Held(holder);
+                self.gate = Gate::Held;
             }
             Gate::Open | Gate::Scheduled(_) => {}
         }
