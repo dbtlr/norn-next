@@ -905,7 +905,7 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
 /// The assertion below is where that invariant is stated.
 fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
     let entries = conflict
-        .aliases
+        .aliases()
         .iter()
         .filter_map(|name| shared.entries.get(name).map(|entry| (name, entry)))
         .collect::<Vec<_>>();
@@ -1918,9 +1918,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             let claim_identity = reading.identity;
             if let Some(identity) = claim_identity {
                 if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
-                    let mut aliases = vec![owner.clone(), name.clone()];
-                    aliases.sort();
-                    let conflict = AliasConflict { aliases };
+                    let conflict = AliasConflict::new([owner.clone(), name.clone()]);
                     drop(attach_claims);
                     refuse_conflict(shared, &conflict);
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1976,9 +1974,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 && let Some(identity) = post_reading.identity
                 && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
             {
-                let mut aliases = vec![owner.clone(), name.clone()];
-                aliases.sort();
-                post_conflict = Some(AliasConflict { aliases });
+                post_conflict = Some(AliasConflict::new([owner.clone(), name.clone()]));
             }
             if let Some(conflict) = post_conflict {
                 drop(attach_claims);
@@ -3687,9 +3683,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test reads the entries from inside that
         // release.
@@ -3730,9 +3724,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             assert!(state.coverage.in_hand(), "the entry parked its coverage");
         }
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
 
         assert_eq!(
@@ -3786,12 +3778,7 @@ mod tests {
             }
             epoch
         };
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
 
         {
             let state = entry.gate.lock().unwrap();
@@ -3843,12 +3830,7 @@ mod tests {
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -3895,12 +3877,7 @@ mod tests {
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -3941,9 +3918,7 @@ mod tests {
         assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases the alias it
         // finds idle inline, and this test reads both entries from inside that
         // release.
@@ -4010,9 +3985,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             state.pending.merge(Batch::rescan(RescanScope::Vault));
         }
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         let polls = ops.polls.lock().unwrap().get(&a).copied().unwrap_or(0);
 
@@ -4122,9 +4095,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         let second = conflict.clone();
         // The first refusal runs off the test thread because it releases both
         // aliases inline, and the second one below runs from inside that
@@ -4158,9 +4129,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test demands from inside that release.
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
@@ -4192,9 +4161,7 @@ mod tests {
     fn a_demand_scheduled_over_a_cleared_conflict_answers_the_work_it_scheduled() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         wait_for_state(&host, &a, TrustState::Unattached);
 
@@ -4276,9 +4243,7 @@ mod tests {
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
         let entry = Arc::clone(host.shared.entries.get(&a).unwrap());
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
 
         {
             let mut state = entry.gate.lock().unwrap();
@@ -4318,9 +4283,7 @@ mod tests {
         {
             let entry = host.shared.entries.get(&a).unwrap();
             let mut state = entry.gate.lock().unwrap();
-            state.duplicate_root = Some(AliasConflict {
-                aliases: vec![a.clone(), b.clone()],
-            });
+            state.duplicate_root = Some(AliasConflict::new([a.clone(), b.clone()]));
             state.trust = TrustState::Unattached;
         }
 
@@ -4357,12 +4320,7 @@ mod tests {
     fn a_retry_over_a_resolved_conflict_reaches_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![a.clone(), b.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
         wait_for_state(&host, &a, TrustState::Unattached);
 
         let retried = host.retry(&a, AttachMode::Durable).unwrap();
@@ -6619,12 +6577,7 @@ mod tests {
 
         // The refusal moves the entry past the epoch the attach carries, so
         // the publication below finds an entry that has left the work it ran.
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         ops.attach_release.store(true, Ordering::SeqCst);
 
         wait_for_detaches(
@@ -6699,12 +6652,7 @@ mod tests {
                 .expect("the entry parked its coverage");
             (epoch, attachment)
         };
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
 
         {
             let state = entry.gate.lock().unwrap();
