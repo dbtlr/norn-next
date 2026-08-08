@@ -105,12 +105,20 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// A name the set does not serve has no root to read, and classifying the
     /// rest on its behalf would only spend filesystem reads on an answer that
-    /// is about no entry.
+    /// is about no entry. The map itself is what answers that membership, under
+    /// the read guard the roots are cloned out of: an unserved name costs one
+    /// keyed lookup rather than a pass over a snapshot.
+    ///
+    /// The guard goes back before the classification runs, so the filesystem
+    /// reads below stand outside the set's lock like every other read here.
     pub(crate) fn recheck(&self, name: &VaultName) -> Result<RootReading, Refusal> {
-        let entries = self.snapshot();
-        if !entries.iter().any(|entry| &entry.registration.name == name) {
-            return Ok(RootReading::default());
-        }
+        let entries = {
+            let entries = self.entries.read().expect("serving set poisoned");
+            if !entries.contains_key(name) {
+                return Ok(RootReading::default());
+            }
+            entries.values().cloned().collect::<Vec<_>>()
+        };
         recheck(
             entries
                 .iter()
@@ -147,6 +155,11 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// A name the set does not serve is already not served, and removing it
     /// changes nothing.
+    ///
+    /// The entry the set gives up is dropped after the write lock goes back.
+    /// The last handle to an entry runs its state's drop glue — the reader the
+    /// caller's coverage minted among it — and that is work, which is work no
+    /// holder of this lock does.
     // Insertion is on the startup path and removal has no caller in this crate
     // outside its own cases, so the allow is what says the seam is built and
     // waiting for the registration verb that calls it rather than unfinished.
@@ -164,7 +177,9 @@ impl<A: SnapshotSource> ServingSet<A> {
         {
             return Err(ServingRefusal::Held);
         }
-        entries.remove(name);
+        let removed = entries.remove(name);
+        drop(entries);
+        drop(removed);
         Ok(())
     }
 }

@@ -1420,11 +1420,9 @@ impl<O: EntryOps> Host<O> {
         // host runs is served exactly as a vault read at startup is.
         let entries = ServingSet::new();
         for registration in registry.into_entries() {
-            let inserted = entries.insert(registration);
-            debug_assert!(
-                inserted.is_ok(),
-                "the registrations are keyed by name, so no two of them name one entry"
-            );
+            entries
+                .insert(registration)
+                .expect("the registrations are keyed by name, so no two of them name one entry");
         }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
         let receiver = Arc::new(Mutex::new(receiver));
@@ -8631,6 +8629,26 @@ mod tests {
                 ops.attaches.load(Ordering::SeqCst),
                 0,
                 "the demand after the removal attached the vault it removed"
+            );
+        }
+
+        /// A name the set never served is already not served: removing it
+        /// answers the way removing a served name that holds nothing does, and
+        /// takes nothing out from under the names the set does serve.
+        #[test]
+        fn a_name_the_set_never_served_is_removed_by_answering() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, served) = fixture_without_ambient_polling(ops);
+            let absent = VaultName::new("absent").unwrap();
+
+            assert_eq!(
+                host.shared.entries.remove(&absent),
+                Ok(()),
+                "a name the set never served was refused removal"
+            );
+            assert!(
+                host.shared.entries.get(&served).is_some(),
+                "removing a name the set never served took out the one it does"
             );
         }
 
