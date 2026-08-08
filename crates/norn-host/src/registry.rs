@@ -17,6 +17,14 @@ pub struct AliasConflict {
 
 impl AliasConflict {
     /// The conflict the `aliases` name.
+    ///
+    /// The names come out deduplicated and ascending, and the refusal that
+    /// acts on a conflict is what both of those carry. `refuse_conflict` takes
+    /// one entry gate per alias and holds them all at once: a name appearing
+    /// twice would have that one thread wait on a lock it is already holding,
+    /// and ascending order is what makes two concurrent refusals over
+    /// overlapping alias sets take the gates they share in the same order
+    /// rather than in opposite ones.
     pub fn new(aliases: impl IntoIterator<Item = VaultName>) -> Self {
         Self {
             aliases: aliases
