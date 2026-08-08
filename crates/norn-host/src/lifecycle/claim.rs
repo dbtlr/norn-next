@@ -210,7 +210,7 @@
 //! opening a window: that is a park with the resources handed back under it,
 //! and the entry stays untrusted and owing a recovery rather than released.
 //!
-//! Three moves revoke a claim blind to the kind and the epoch it stands at:
+//! Two moves revoke a claim blind to the kind and the epoch it stands at:
 //! [`Claim::end_running_leg`], which ends whatever is registered, and the
 //! [`Claim::open`] beside it in `refuse_conflict`, `refuse_identity_error`,
 //! `Host::drop` and the demand that takes back a scheduled teardown. Every one
@@ -241,11 +241,15 @@
 //! `pinned` beside it, lives in the entry state rather than in the claim. It
 //! carries a narrower fact than any field here: that a leg running outside the
 //! entry's lock comes back to a lock of its own, so what it holds is coming
-//! back. Three readers turn on it — `schedule_due_detach` and `reap_idle_shared`
-//! refuse to tear down an entry a leg will return to, and `restore_lost_claim`
-//! decides between [`Claim::open`] and [`Claim::restore`] on it: a job that lost
-//! its coverage records itself for a later tick where a pin says the coverage is
-//! coming back, and ends there where none does. Pinned by
+//! back. Three readers turn on it, and they read it in opposite directions.
+//! `schedule_due_detach` refuses to schedule a teardown while a pin stands, so
+//! nothing tears an entry down under a leg that is coming back to it.
+//! `reap_idle_shared` marks an idle entry due where a pin stands even though its
+//! coverage is out, because the leg holding that coverage is what brings it
+//! back. `restore_lost_claim` decides between [`Claim::open`] and
+//! [`Claim::restore`] on it: a job that lost its coverage records itself for a
+//! later tick where a pin says the coverage is coming back, and ends there where
+//! none does. Pinned by
 //! `a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back`.
 //!
 //! **The trust label and the instant it is a snapshot of.** `EntryState::trust`,
