@@ -131,17 +131,40 @@ impl fmt::Display for Diagnostic {
 mod tests {
     use super::*;
 
-    /// Every code this crate raises. The walk below reads each one back
-    /// through the wildcard-free matches on [`DiagnosticCode`], so a code
-    /// minted without a spelling or a scope does not compile.
-    const EVERY_CODE: &[DiagnosticCode] = &[
-        DiagnosticCode::FrontmatterUnclosed,
-        DiagnosticCode::FrontmatterParseFailed,
-        DiagnosticCode::FrontmatterNonStringKey,
-        DiagnosticCode::FrontmatterTagStripped,
-        DiagnosticCode::FrontmatterIntegerOutOfRange,
-        DiagnosticCode::FrontmatterNotEditable,
-    ];
+    /// The code after `code`, and nothing at the end of the walk. The match
+    /// carries no wildcard, so a code minted without a place in the walk does
+    /// not compile, and the place it is given is what puts it in the census
+    /// below.
+    const fn after(code: DiagnosticCode) -> Option<DiagnosticCode> {
+        match code {
+            DiagnosticCode::FrontmatterUnclosed => Some(DiagnosticCode::FrontmatterParseFailed),
+            DiagnosticCode::FrontmatterParseFailed => Some(DiagnosticCode::FrontmatterNonStringKey),
+            DiagnosticCode::FrontmatterNonStringKey => Some(DiagnosticCode::FrontmatterTagStripped),
+            DiagnosticCode::FrontmatterTagStripped => {
+                Some(DiagnosticCode::FrontmatterIntegerOutOfRange)
+            }
+            DiagnosticCode::FrontmatterIntegerOutOfRange => {
+                Some(DiagnosticCode::FrontmatterNotEditable)
+            }
+            DiagnosticCode::FrontmatterNotEditable => None,
+        }
+    }
+
+    /// Every code this crate raises, walked from the first. The census is the
+    /// codes' own account of themselves rather than a list kept beside them,
+    /// and each test below reads every code it holds back through the
+    /// wildcard-free matches on [`DiagnosticCode`].
+    fn every_code() -> Vec<DiagnosticCode> {
+        let mut codes = vec![DiagnosticCode::FrontmatterUnclosed];
+        while let Some(next) = after(*codes.last().expect("the walk starts at a code")) {
+            assert!(
+                !codes.contains(&next),
+                "`{next}` is reached twice, so the walk is a cycle rather than a census"
+            );
+            codes.push(next);
+        }
+        codes
+    }
 
     /// A code is spelled the way a text-layer code is spelled and never the
     /// way a wire code is: lowercase kebab-case, and no namespace separator.
@@ -149,8 +172,9 @@ mod tests {
     /// registry entry rather than a string minted here.
     #[test]
     fn no_code_is_spelled_as_a_wire_code() {
-        for code in EVERY_CODE {
+        for code in every_code() {
             let spelling = code.as_str();
+            assert!(!spelling.is_empty(), "{code:?} is spelled with nothing");
             assert!(
                 !spelling.contains('/'),
                 "`{spelling}` carries a namespace separator"
@@ -172,15 +196,15 @@ mod tests {
     #[test]
     fn each_code_is_spelled_once_and_reads_back_in_a_diagnostic() {
         let mut seen = Vec::new();
-        for code in EVERY_CODE {
+        for code in every_code() {
             assert!(
                 !seen.contains(&code.as_str()),
                 "`{}` is spelled by two codes",
                 code.as_str()
             );
             seen.push(code.as_str());
-            let note = Diagnostic::warning(*code, "a note");
-            assert_eq!(note.code, *code);
+            let note = Diagnostic::warning(code, "a note");
+            assert_eq!(note.code, code);
             assert_eq!(note.to_string(), format!("{}: a note", code.as_str()));
         }
     }
@@ -189,7 +213,7 @@ mod tests {
     /// is what makes a count of them the count of the block's own notes.
     #[test]
     fn every_code_names_the_frontmatter_block() {
-        for code in EVERY_CODE {
+        for code in every_code() {
             assert!(
                 code.frontmatter_scoped(),
                 "`{}` is not scoped to the frontmatter block",
