@@ -7234,9 +7234,18 @@ mod tests {
         wait_for_flag("reconcile_started", &ops.reconcile_started);
 
         // The teardown the entry owes once it has gone idle, sent and waiting
-        // in the queue: the slot names it, and the entry is waiting on it.
-        reap_idle_shared(&host.shared, Instant::now() + Duration::from_secs(120)).unwrap();
+        // in the queue: the slot names it, and the entry is waiting on it. Only
+        // this entry is marked due, so a teardown anywhere below is this one.
         let entry = host.shared.entries.get(&working).unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.detach_due = true;
+            assert!(
+                schedule_due_detach(&mut state, &working).is_some(),
+                "the entry scheduled no teardown for this case to supersede"
+            );
+        }
+        dispatch_pending(&host.shared, entry).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_some(),
             "the teardown this case supersedes never reached the queue"
