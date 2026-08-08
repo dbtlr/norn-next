@@ -266,6 +266,14 @@ impl OwnWrites {
 /// the caller heals after this function returns and consumes all resulting
 /// batches before exposing the entry as ready. Later batches remain the same
 /// subscription's warm invalidation stream.
+///
+/// **Returning means coverage is registered, not that the backend is delivering
+/// events yet.** The platform's own stream becomes live some time after
+/// registration, and a change made in that window may reach the subscription
+/// only as a [`RescanScope`] rescan — the backend saying the path set was lost
+/// — or not as an event of its own at all. The heal is what covers that window:
+/// a caller that needs a specific change reported reads the tree rather than
+/// waiting for an event naming it.
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
 pub fn watch(
     vault_root: &Path,

@@ -347,3 +347,64 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
         },
     );
 }
+
+/// **The bar under the readiness check.** A vault-wide rescan covers the canary
+/// and reports nothing about it.
+///
+/// Readiness asks whether the stream delivered an event for the canary itself,
+/// and [`RescanScope::Vault`] is the one report that answers no per-path
+/// question: it says the path set was lost. The forbidden shape is a readiness
+/// check that reads coverage instead — under it a rescan settling before the
+/// case has done anything at all declares the stream live, and every later wait
+/// in the case is met by that rescan rather than by the change the case made.
+///
+/// Nothing here touches a platform: the two predicates are read off a
+/// collector's accumulated facts, so this holds on a machine whose backend is
+/// delivering nothing.
+#[test]
+fn a_vault_rescan_covers_the_canary_without_reporting_it() {
+    let mut seen = Seen::default();
+    seen.rescans.insert(RescanScope::Vault);
+
+    assert!(
+        seen.covers(Path::new(CANARY)),
+        "a vault-wide rescan is the widest invalidation there is and it did not cover the canary"
+    );
+    assert!(
+        !seen.reported(Path::new(CANARY)),
+        "a vault-wide rescan was read as the backend having reported the canary itself"
+    );
+}
+
+/// **The bar on the hold window.** A collector holds the real-watcher lease for
+/// as long as it holds its subscription, and lets go with it.
+///
+/// The forbidden shape is the lease released early — at the end of the
+/// readiness phase, say, or anywhere else before the subscription is dropped.
+/// It costs nothing visible and it speeds this target up, because every case
+/// then runs its watcher beside every sibling's; what it buys is the starvation
+/// the lease exists to prevent, showing up somewhere else as paths that never
+/// arrived.
+///
+/// The exclusion is read from this process, which is where a file lock excludes
+/// per open file description rather than per process. The reacquisition after
+/// the drop takes the ordinary queueing bound, because a sibling case is
+/// entitled to be next in line.
+#[test]
+fn a_collector_holds_the_watcher_lease_until_its_subscription_is_dropped() {
+    let scratch = Scratch::new("lease-window");
+    let collector = Collector::start(&scratch.vault(), &scratch.schema());
+
+    let contested = Lease::try_hold(
+        isolation::REAL_WATCHER,
+        Budget::new(Duration::from_millis(50), Duration::from_millis(250)),
+    );
+    assert!(
+        contested.is_err(),
+        "the lease was free while a collector was watching, so this case's watcher runs beside \
+         every sibling's"
+    );
+
+    drop(collector);
+    drop(Lease::hold(isolation::REAL_WATCHER, lease_budget()));
+}
