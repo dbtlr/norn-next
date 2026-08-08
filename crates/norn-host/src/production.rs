@@ -3270,11 +3270,14 @@ mod tests {
     /// Note what a settled batch says about itself, for the conditions and the
     /// failures that read it.
     ///
-    /// The roots and the rescans are here for the failure rather than for a
-    /// condition: a wait that expires over a change that never arrived reads
-    /// very differently from one that expires over a change reported as a
-    /// rescan, and neither reads at all from a bare count. The schema
-    /// invalidation is the one fact a condition asks for by name.
+    /// Every fact here is read twice over. A condition asks for one by name —
+    /// [`SCHEMA_INVALIDATED`] where the invalidation itself is the outcome, and
+    /// the roots and [`VAULT_RESCAN`] through [`absorbed_covers`] where the
+    /// outcome is that a path was invalidated at all. A failure renders all of
+    /// them, and that is the other half of why they are noted: a wait that
+    /// expires over a change that never arrived reads very differently from one
+    /// that expires over a change reported as a rescan, and neither reads at
+    /// all from a bare count.
     fn note_batch(batch: &norn_fs::Batch, absorbed: &mut norn_testkit::wait::Absorbed) {
         for root in batch.vault_roots() {
             absorbed.note(format!("root {}", root.as_path().display()));
