@@ -196,8 +196,8 @@ pub struct DocumentFacts {
     /// "there was no block", and nonzero is "there was a block and it did not
     /// read". A count over every diagnostic a parse raised could not tell those
     /// apart once one diagnostic came from anywhere else, so the caller counts
-    /// the frontmatter ones — the text layer's diagnostics carry a code, and the
-    /// frontmatter-scoped codes are the ones that name the block.
+    /// the frontmatter ones — a text-layer diagnostic's code says whether the
+    /// note it files names the block.
     pub frontmatter_diagnostic_count: u32,
     /// Links in the text layer's contracted emission order.
     pub links: Vec<LinkFact>,

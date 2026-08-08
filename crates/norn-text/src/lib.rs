@@ -134,7 +134,7 @@ mod tag;
 mod value;
 
 pub use body::BodyScan;
-pub use diagnostic::Diagnostic;
+pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use document::{Document, EditError, FieldText, frontmatter_reads_back};
 pub use frontmatter::{Field, RenderError, ScalarContext, ValueStyle, render_document};
 pub use heading::{Heading, slugify};

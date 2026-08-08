@@ -7,7 +7,7 @@
 
 use std::ops::Range;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::value::{StripReport, Value, from_yaml};
 
 /// The byte length of a UTF-8 byte-order mark.
@@ -74,7 +74,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
             Err(error) => {
                 diagnostics.push(
                     Diagnostic::warning(
-                        "frontmatter-parse-failed",
+                        DiagnosticCode::FrontmatterParseFailed,
                         "frontmatter could not be parsed",
                     )
                     .with_detail(error),
@@ -93,7 +93,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
     }
 
     diagnostics.push(Diagnostic::warning(
-        "frontmatter-unclosed",
+        DiagnosticCode::FrontmatterUnclosed,
         "frontmatter opening delimiter has no closing delimiter",
     ));
     absent()

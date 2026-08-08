@@ -1131,7 +1131,7 @@ fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts,
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
         .iter()
-        .filter(|d| d.code.starts_with("frontmatter-"))
+        .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
     facts.links = document
         .frontmatter_wikilinks()

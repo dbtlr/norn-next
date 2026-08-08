@@ -53,7 +53,7 @@
 
 use std::fmt::{self, Write as _};
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 
 /// A frontmatter value.
 #[derive(Debug, Clone)]
@@ -340,7 +340,7 @@ pub(crate) fn from_yaml(
                     report.dropped_keys += 1;
                     diagnostics.push(
                         Diagnostic::warning(
-                            "frontmatter-non-string-key",
+                            DiagnosticCode::FrontmatterNonStringKey,
                             "an entry keyed by a non-string was dropped; the value model \
                              addresses fields by string key",
                         )
@@ -362,7 +362,7 @@ pub(crate) fn from_yaml(
         serde_yaml::Value::Tagged(tagged) => {
             diagnostics.push(
                 Diagnostic::warning(
-                    "frontmatter-tag-stripped",
+                    DiagnosticCode::FrontmatterTagStripped,
                     "an explicit YAML tag was dropped and its value kept; the value model \
                      carries no tags",
                 )
@@ -393,7 +393,7 @@ fn number_from_yaml(
     if let Some(value) = number.as_u64() {
         diagnostics.push(
             Diagnostic::warning(
-                "frontmatter-integer-out-of-range",
+                DiagnosticCode::FrontmatterIntegerOutOfRange,
                 "an integer outside the range of a 64-bit signed integer is carried as a float",
             )
             .with_detail(format!("`{value}` {}", location(path))),
