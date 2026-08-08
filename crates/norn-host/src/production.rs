@@ -3478,9 +3478,15 @@ mod tests {
     }
 
     /// The count beside an absent frontmatter projection is what tells a
-    /// document with no block apart from one whose block did not read, so the
-    /// mapper counts the notes the text layer scoped to the block and no
-    /// others.
+    /// document with no block apart from one whose block did not read, so what
+    /// the mapper counts is the notes the text layer scoped to the block.
+    ///
+    /// Every code that layer raises is scoped to the block today, so no
+    /// document here is one the filter and a count of every note disagree
+    /// over. What the filter holds is the seam: a note the text layer raises
+    /// about something other than the block leaves this count through it, and
+    /// the scope of a code is that layer's own answer rather than a spelling
+    /// read here.
     #[test]
     fn the_frontmatter_note_count_separates_no_block_from_a_block_that_did_not_read() {
         for (source, projection, notes) in [
