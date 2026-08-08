@@ -6,13 +6,14 @@
 //! fact read from one place — there is no second account of the serving set to
 //! disagree with this one about which names exist or where their roots are.
 //!
-//! # Joining
+//! # Joining and leaving
 //!
-//! [`ServingSet::insert`] is how a vault joins. Startup takes it: [`Host::new`]
-//! inserts one entry per registration it was built from, so a vault gained
-//! later joins the set exactly the way every vault in it joined. The
-//! registration verbs a product surface offers are what call it from anywhere
-//! else, and it is the seam those verbs land on.
+//! [`ServingSet::insert`] and [`ServingSet::remove`] are how a vault joins and
+//! leaves. Startup takes the first: [`Host::new`] inserts one entry per
+//! registration it was built from, so a vault gained later joins the set
+//! exactly the way every vault in it joined. Nothing else in this crate calls
+//! either verb today; the registration verbs a product surface offers are what
+//! call them, and they are the seam those verbs land on.
 //!
 //! [`Host::new`]: crate::Host::new
 
@@ -34,6 +35,14 @@ pub(crate) enum ServingRefusal {
     /// would strand whatever that entry holds under a name nothing reaches it
     /// by any more.
     AlreadyServed,
+    /// The entry holds something, or something holds the entry. Removal is
+    /// refused rather than made to wait or to tear down, because a teardown
+    /// here would run [`EntryOps::detach`] under the set's own lock and race
+    /// every leg standing against the entry. A caller that wants a held entry
+    /// gone lets it fall idle first and removes it after.
+    ///
+    /// [`EntryOps::detach`]: crate::EntryOps::detach
+    Held,
 }
 
 /// Every vault this host serves, keyed by the name it is registered under.
@@ -120,6 +129,34 @@ impl<A: SnapshotSource> ServingSet<A> {
             registration.name.clone(),
             Arc::new(Entry::unattached(registration)),
         );
+        Ok(())
+    }
+
+    /// Stop serving `name`, where the entry serving it holds nothing and
+    /// nothing holds it.
+    ///
+    /// The predicate is read under the entry's own gate and under the set's
+    /// write lock together, so an entry that becomes held between the two is
+    /// not one this removes: a demand reaches the entry through the set, and
+    /// the set is not readable while this decides.
+    ///
+    /// A name the set does not serve is already not served, and removing it
+    /// changes nothing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn remove(&self, name: &VaultName) -> Result<(), ServingRefusal> {
+        let mut entries = self.entries.write().expect("serving set poisoned");
+        let Some(entry) = entries.get(name) else {
+            return Ok(());
+        };
+        if entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .held_by_anything()
+        {
+            return Err(ServingRefusal::Held);
+        }
+        entries.remove(name);
         Ok(())
     }
 }

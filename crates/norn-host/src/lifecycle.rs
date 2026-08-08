@@ -525,6 +525,24 @@ impl<A: SnapshotSource> EntryState<A> {
         self.safety_pins > 0
     }
 
+    /// Whether the entry holds anything, or anything holds the entry.
+    ///
+    /// Every hold either side of the lifecycle can take is named here:
+    /// coverage the entry holds or that is out with a leg, a claim on its
+    /// scheduling gate, a leg registered against it, a release in flight, a
+    /// read pinning it, and a demand lease recorded against it. An entry none
+    /// of these stands over owes nothing and is owed nothing, which is what
+    /// makes it removable from the serving set.
+    fn held_by_anything(&self) -> bool {
+        self.coverage.in_hand()
+            || self.coverage.out_with_leg()
+            || self.claim.is_held()
+            || self.claim.leg().is_some()
+            || self.detach_in_flight
+            || self.pinned()
+            || self.demand_leases > 0
+    }
+
     /// What the entry is parked on, where it is parked.
     ///
     /// A park is the entry standing still: nothing schedules against it,
@@ -8592,6 +8610,94 @@ mod tests {
             assert_eq!(
                 standing.registration.root, entry.registration.root,
                 "the refused insertion moved the served root"
+            );
+        }
+
+        /// A vault removed while it holds nothing is unknown to the demand that
+        /// follows it.
+        #[test]
+        fn a_removed_vault_is_unknown_to_the_next_demand() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+
+            host.shared
+                .entries
+                .remove(&name)
+                .expect("the entry holds nothing");
+
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault
+            );
+            assert_eq!(host.state(&name), None);
+            settle();
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                0,
+                "the demand after the removal attached the vault it removed"
+            );
+        }
+
+        /// An entry holding its coverage stays in the set. Removal refuses
+        /// rather than tearing that coverage down under the set's own lock, and
+        /// the vault goes on being served.
+        ///
+        /// The coverage is the only hold standing here: the lease is withdrawn
+        /// before the removal, and the fixture's dispatcher never ticks, so no
+        /// poll is pinning the entry either.
+        #[test]
+        fn an_attached_vault_is_refused_removal_and_goes_on_being_served() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry holding its coverage left the set"
+            );
+            assert_eq!(host.state(&name), Some(TrustState::Ready));
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::State(TrustState::Ready)
+            );
+        }
+
+        /// A lease recorded against an entry holds it in the set even where the
+        /// entry holds nothing else. The lease is a caller waiting on the
+        /// vault, and a removal under it would leave that caller reading an
+        /// entry the host has stopped serving.
+        #[test]
+        fn a_lease_recorded_against_an_entry_holds_it_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            ops.contend_attach.store(true, Ordering::SeqCst);
+            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_until(
+                "the contended attach to park the entry",
+                lifecycle_wait_budget(),
+                || match lease.completion() {
+                    Demand::MaintainerContended(_) => Observed::Met(()),
+                    other => Observed::pending(format!("the lease reports {other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry a lease is recorded against left the set"
+            );
+            drop(lease);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the withdrawn lease was holding stayed in the set"
+            );
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault
             );
         }
     }
