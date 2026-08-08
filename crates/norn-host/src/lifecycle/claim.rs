@@ -15,10 +15,12 @@
 //! to, are as much of the map as what it does.
 //!
 //! Two things are called a gate. `Entry::gate` is the mutex over an entry's
-//! whole state — the entry gate lock every move below is taken under, and the
-//! one the architecture documents name. `Claim::gate` is the scheduling [`Gate`]
-//! inside that state, which is what this section means by "the gate"
-//! throughout. One is nested in the other.
+//! whole lifecycle state — the entry gate lock every move below is taken under,
+//! and the one the architecture documents name. The entry's registration stands
+//! outside it, unchanging for as long as the serving set serves the entry, so
+//! nothing below reads or writes it. `Claim::gate` is the scheduling [`Gate`]
+//! inside the state, which is what this section means by "the gate" throughout.
+//! One is nested in the other.
 //!
 //! ## The gate
 //!

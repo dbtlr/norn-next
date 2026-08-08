@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use norn_config::VaultName;
 use norn_config::registry::{Entry, Registry};
@@ -41,7 +42,7 @@ impl AliasConflict {
     }
 }
 
-/// What one read of the registry resolved for one registered name.
+/// What one read of the served roots resolved for one registered name.
 ///
 /// The classification a recheck runs resolves the root's identity on its way
 /// to the conflict, so both come back from the one read: a caller that needs
@@ -61,101 +62,79 @@ pub(crate) struct RootReading {
     pub(crate) conflict: Option<AliasConflict>,
 }
 
-/// The serving set after filesystem aliases have been classified.
+/// The registrations a host is built from: one name's root and schema source
+/// per entry, ascending and each name once.
+///
+/// This is a read, not a collection the host keeps. [`Host::new`] turns each
+/// registration here into a served entry and retains no second account of
+/// them, so the roots a running host classifies are the roots its serving set
+/// holds — including any the set has gained since this read.
+///
+/// [`Host::new`]: crate::Host::new
 #[derive(Clone, Debug)]
 pub struct ServingRegistry {
     entries: BTreeMap<VaultName, Entry>,
-    conflicts: BTreeMap<VaultName, AliasConflict>,
 }
 
 impl ServingRegistry {
-    /// Read the serving set without choosing a winner among duplicate roots.
-    /// Missing roots remain registrable and are rechecked on demand.
-    pub fn read(registry: &Registry) -> Result<Self, Refusal> {
+    /// Read the registrations without choosing a winner among duplicate roots.
+    /// Duplicates and missing roots are classified per demand, against the
+    /// roots the host serves at that moment.
+    pub fn read(registry: &Registry) -> Self {
         Self::from_entries(registry.entries().cloned())
     }
 
-    /// Build a serving set from an already-read registry projection.
-    pub fn from_entries(entries: impl IntoIterator<Item = Entry>) -> Result<Self, Refusal> {
-        let entries = entries
-            .into_iter()
-            .map(|entry| (entry.name.clone(), entry))
-            .collect::<BTreeMap<_, _>>();
-        let conflicts = classify(&entries);
-        Ok(Self { entries, conflicts })
-    }
-
-    pub fn entry(&self, name: &VaultName) -> Option<&Entry> {
-        self.entries.get(name)
-    }
-
-    pub fn conflict(&self, name: &VaultName) -> Option<&AliasConflict> {
-        self.conflicts.get(name)
-    }
-
-    /// Re-evaluate aliases at attach time so roots that appeared since the
-    /// registry read cannot bypass the maintainer singleton, and answer with
-    /// the identity that classification resolved for this name.
-    pub(crate) fn recheck(&self, name: &VaultName) -> Result<RootReading, Refusal> {
-        if !self.entries.contains_key(name) {
-            return Ok(RootReading::default());
+    /// Take the registrations from an already-read registry projection.
+    pub fn from_entries(entries: impl IntoIterator<Item = Entry>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|entry| (entry.name.clone(), entry))
+                .collect(),
         }
-        let (identity, mut conflicts) = classify_for(&self.entries, name)?;
-        Ok(RootReading {
-            identity,
-            conflict: conflicts.remove(name),
-        })
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()
     }
+
+    /// The registrations themselves, ascending by name.
+    pub(crate) fn into_entries(self) -> impl Iterator<Item = Entry> {
+        self.entries.into_values()
+    }
 }
 
-/// Classify every registered root against the others, answering with the
-/// identity `requested` resolved to and the conflicts the classification
-/// raised. A refusal over `requested`'s own root is this read's refusal; a
-/// refusal over any other root belongs to that name and is left for the read
-/// that asks about it.
-fn classify_for(
-    entries: &BTreeMap<VaultName, Entry>,
+/// Classify every root the host serves against the others, answering for
+/// `requested` alone: the identity its root resolved to, and the conflict it
+/// stands in where more than one served name reaches that root.
+///
+/// A refusal over `requested`'s own root is this read's refusal; a refusal over
+/// any other root belongs to that name and is left for the read that asks about
+/// it. A root the filesystem answers for with nothing is registrable rather
+/// than resolved, and classifies against nothing.
+pub(crate) fn recheck<'a>(
+    roots: impl IntoIterator<Item = (&'a VaultName, &'a Path)>,
     requested: &VaultName,
-) -> Result<(Option<Identity>, BTreeMap<VaultName, AliasConflict>), Refusal> {
+) -> Result<RootReading, Refusal> {
     let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
     let mut resolved = None;
-    for entry in entries.values() {
-        match path_identity(entry.root.as_path()) {
+    for (name, root) in roots {
+        match path_identity(root) {
             Ok(Some(identity)) => {
-                if &entry.name == requested {
+                if name == requested {
                     resolved = Some(identity);
                 }
-                identities
-                    .entry(identity)
-                    .or_default()
-                    .insert(entry.name.clone());
+                identities.entry(identity).or_default().insert(name.clone());
             }
             Ok(None) => {}
-            Err(refusal) if &entry.name == requested => return Err(refusal),
+            Err(refusal) if name == requested => return Err(refusal),
             Err(_) => {}
         }
     }
-    Ok((resolved, conflicts_from_identities(identities)))
-}
-
-fn classify(entries: &BTreeMap<VaultName, Entry>) -> BTreeMap<VaultName, AliasConflict> {
-    let mut identities = BTreeMap::<Identity, BTreeSet<VaultName>>::new();
-    for entry in entries.values() {
-        // An environmental refusal belongs to this entry, not to the registry
-        // as a whole. Demand rechecks it and reports the refusal for that name.
-        if let Ok(Some(identity)) = path_identity(entry.root.as_path()) {
-            identities
-                .entry(identity)
-                .or_default()
-                .insert(entry.name.clone());
-        }
-    }
-
-    conflicts_from_identities(identities)
+    Ok(RootReading {
+        identity: resolved,
+        conflict: conflicts_from_identities(identities).remove(requested),
+    })
 }
 
 fn conflicts_from_identities(
@@ -181,34 +160,44 @@ mod tests {
         Entry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
     }
 
+    /// Classify `entries` as a host serving exactly those roots would.
+    fn recheck_over(entries: &[Entry], requested: &VaultName) -> Result<RootReading, Refusal> {
+        recheck(
+            entries
+                .iter()
+                .map(|entry| (&entry.name, entry.root.as_path())),
+            requested,
+        )
+    }
+
     #[test]
     fn every_alias_is_refused_and_names_the_whole_conflict() {
-        let registry =
-            ServingRegistry::from_entries([entry("alpha", "/tmp"), entry("beta", "/tmp/.")])
-                .unwrap();
+        let entries = [entry("alpha", "/tmp"), entry("beta", "/tmp/.")];
         let expected = vec![
             VaultName::new("alpha").unwrap(),
             VaultName::new("beta").unwrap(),
         ];
-        assert_eq!(registry.conflict(&expected[0]).unwrap().aliases(), expected);
-        assert_eq!(registry.conflict(&expected[1]).unwrap().aliases(), expected);
+        for requested in &expected {
+            assert_eq!(
+                recheck_over(&entries, requested)
+                    .unwrap()
+                    .conflict
+                    .unwrap()
+                    .aliases(),
+                expected
+            );
+        }
     }
 
     #[test]
     fn a_missing_root_stays_registrable() {
-        let registry = ServingRegistry::from_entries([entry(
-            "later",
-            "/tmp/norn-host-root-that-does-not-exist",
-        )])
-        .unwrap();
-        assert!(
-            registry
-                .conflict(&VaultName::new("later").unwrap())
-                .is_none()
-        );
+        let entries = [entry("later", "/tmp/norn-host-root-that-does-not-exist")];
+        let reading = recheck_over(&entries, &VaultName::new("later").unwrap()).unwrap();
+        assert!(reading.conflict.is_none());
+        assert!(reading.identity.is_none());
     }
 
-    /// A recheck classifies every registered root, and the identity it answers
+    /// A recheck classifies every served root, and the identity it answers
     /// with is the requested name's own. The other roots are read for the
     /// conflict alone: a reading that carried one of them would file the
     /// acquisition claim under a root the caller never asked about.
@@ -228,11 +217,10 @@ mod tests {
         std::fs::create_dir_all(&beta_root).unwrap();
         let alpha = VaultName::new("alpha").unwrap();
         let beta = VaultName::new("beta").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let entries = [
             Entry::new(alpha.clone(), VaultRoot::new(&alpha_root).unwrap()),
             Entry::new(beta.clone(), VaultRoot::new(&beta_root).unwrap()),
-        ])
-        .unwrap();
+        ];
 
         let alpha_identity = path_identity(&alpha_root).unwrap();
         let beta_identity = path_identity(&beta_root).unwrap();
@@ -243,7 +231,7 @@ mod tests {
 
         for (requested, expected) in [(&alpha, alpha_identity), (&beta, beta_identity)] {
             assert_eq!(
-                registry.recheck(requested).unwrap().identity,
+                recheck_over(&entries, requested).unwrap().identity,
                 expected,
                 "the recheck over {requested:?} resolved another registered root"
             );
@@ -269,7 +257,7 @@ mod tests {
         let refused = base.join("refused");
         std::fs::create_dir_all(&healthy).unwrap();
         std::fs::create_dir_all(&refused).unwrap();
-        let registry = ServingRegistry::from_entries([
+        let entries = [
             Entry::new(
                 VaultName::new("healthy").unwrap(),
                 VaultRoot::new(&healthy).unwrap(),
@@ -278,31 +266,25 @@ mod tests {
                 VaultName::new("refused").unwrap(),
                 VaultRoot::new(&refused).unwrap(),
             ),
-        ])
-        .unwrap();
+        ];
         std::fs::remove_dir(&refused).unwrap();
         symlink("refused", &refused).unwrap();
 
-        let healthy_reading = registry
-            .recheck(&VaultName::new("healthy").unwrap())
+        let healthy_reading = recheck_over(&entries, &VaultName::new("healthy").unwrap())
             .expect("the healthy root reads");
         assert!(healthy_reading.conflict.is_none());
         assert!(
             healthy_reading.identity.is_some(),
             "a recheck that passed resolved the root it classified"
         );
-        assert!(
-            registry
-                .recheck(&VaultName::new("refused").unwrap())
-                .is_err()
-        );
+        assert!(recheck_over(&entries, &VaultName::new("refused").unwrap()).is_err());
 
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
     #[test]
-    fn startup_keeps_healthy_entries_serviceable_when_another_identity_refuses() {
+    fn a_recheck_keeps_healthy_entries_serviceable_when_another_identity_refuses() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!(
@@ -323,22 +305,20 @@ mod tests {
         let alias_name = VaultName::new("healthy-alias").unwrap();
         let refused_name = VaultName::new("refused").unwrap();
 
-        let registry = ServingRegistry::from_entries([
+        let entries = [
             Entry::new(healthy_name.clone(), VaultRoot::new(&healthy).unwrap()),
             Entry::new(alias_name.clone(), VaultRoot::new(&healthy_alias).unwrap()),
             Entry::new(refused_name.clone(), VaultRoot::new(&refused).unwrap()),
-        ])
-        .expect("an unrelated refusal must not abort the serving registry");
+        ];
         assert_eq!(
-            registry
-                .recheck(&healthy_name)
-                .unwrap()
+            recheck_over(&entries, &healthy_name)
+                .expect("an unrelated refusal must not reach the healthy root")
                 .conflict
                 .unwrap()
                 .aliases(),
             vec![healthy_name, alias_name]
         );
-        assert!(registry.recheck(&refused_name).is_err());
+        assert!(recheck_over(&entries, &refused_name).is_err());
 
         let _ = std::fs::remove_dir_all(base);
     }
@@ -364,23 +344,21 @@ mod tests {
         std::fs::create_dir_all(&refused).unwrap();
         let alpha = VaultName::new("alpha").unwrap();
         let beta = VaultName::new("beta").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let entries = [
             Entry::new(alpha.clone(), VaultRoot::new(&shared).unwrap()),
             Entry::new(beta.clone(), VaultRoot::new(&alias).unwrap()),
             Entry::new(
                 VaultName::new("refused").unwrap(),
                 VaultRoot::new(&refused).unwrap(),
             ),
-        ])
-        .unwrap();
+        ];
         std::fs::remove_dir(&alias).unwrap();
         symlink(&shared, &alias).unwrap();
         std::fs::remove_dir(&refused).unwrap();
         symlink("refused", &refused).unwrap();
 
         assert_eq!(
-            registry
-                .recheck(&alpha)
+            recheck_over(&entries, &alpha)
                 .unwrap()
                 .conflict
                 .unwrap()

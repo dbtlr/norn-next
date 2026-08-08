@@ -191,10 +191,10 @@ impl Fixture {
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
-        let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
+        let registry = ServingRegistry::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
             .expect("config directories");
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(64, 64).unwrap());
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 64).unwrap());
         Host::new(
             registry,
             ops,

@@ -212,14 +212,14 @@ impl Fixture {
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
-        let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
+        let registry = ServingRegistry::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
             .expect("config directories");
         Host::new(
             registry,
             // Eight exceeds this fixture's three documents, so healing uses
             // one increment and the generation assertion remains exact.
-            ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 8).unwrap()),
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 8).unwrap()),
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,

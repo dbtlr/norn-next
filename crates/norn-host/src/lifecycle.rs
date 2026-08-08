@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
+use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_wire::{
     ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
@@ -15,8 +16,10 @@ use norn_wire::{
 use crate::registry::{AliasConflict, ServingRegistry};
 
 mod claim;
+mod serving;
 
 use claim::{Claim, Coverage, Leg};
+use serving::ServingSet;
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.
@@ -70,9 +73,16 @@ pub trait EntryOps: Send + Sync + 'static {
     /// one full hash-authoritative heal. After this returns, the lifecycle
     /// performs one nonblocking [`EntryOps::poll`] before it may publish Ready;
     /// raced and continuing facts then use ordinary coalesced reconciliation.
+    ///
+    /// The registration is handed down rather than looked up: the vault's name,
+    /// its root and its schema source arrive from the entry the lifecycle is
+    /// attaching, so an implementation keeps no account of the serving set and
+    /// has none to disagree with. What an attachment needs after this call —
+    /// the root a reconcile scopes against, the schema a recheck re-pins — it
+    /// keeps from what it is given here.
     fn attach(
         &self,
-        name: &VaultName,
+        registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure>;
     /// Apply one coalesced envelope. Schema dirtiness dominates document roots;
@@ -297,8 +307,54 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
+/// One vault this host serves.
+///
+/// The registration is the entry's own and never read from anywhere else: what
+/// the host serves, and at which root, is one fact carried beside the state
+/// that serves it. Every effect the entry needs a root for — the attach, the
+/// classification a recheck runs, the refusal that names an alias — reads it
+/// here.
 struct Entry<A: SnapshotSource> {
+    /// The name this entry is served under, the root it serves, and where its
+    /// schema is read from. It stands outside the gate because nothing changes
+    /// it: an entry serves the registration it was inserted with for as long as
+    /// the set serves the entry.
+    registration: Registration,
     gate: Mutex<EntryState<A>>,
+}
+
+impl<A: SnapshotSource> Entry<A> {
+    /// An entry serving `registration` and holding nothing, which is what a
+    /// vault the host has never attached stands at.
+    fn unattached(registration: Registration) -> Self {
+        Self {
+            registration,
+            gate: Mutex::new(EntryState {
+                trust: TrustState::Unattached,
+                coverage: Coverage::none(),
+                reader: None,
+                pending: Batch::default(),
+                recovery_required: false,
+                recovery_demands: 0,
+                recovery_generation: 0,
+                identity_refused: None,
+                claim: Claim::default(),
+                maintainer_contended: None,
+                duplicate_root: None,
+                last_demand: Instant::now(),
+                demand_leases: 0,
+                safety_pins: 0,
+                detach_due: false,
+                detach_scheduled: false,
+                detach_in_flight: false,
+            }),
+        }
+    }
+
+    /// The name this entry is served under.
+    fn name(&self) -> &VaultName {
+        &self.registration.name
+    }
 }
 
 struct EntryState<A: SnapshotSource> {
@@ -872,8 +928,8 @@ fn dispatch_pending<O: EntryOps>(
 }
 
 fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
-    for entry in shared.entries.values() {
-        let _ = dispatch_pending(shared, entry);
+    for entry in shared.entries.snapshot() {
+        let _ = dispatch_pending(shared, &entry);
     }
 }
 
@@ -909,14 +965,14 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     let entries = conflict
         .aliases()
         .iter()
-        .filter_map(|name| shared.entries.get(name).map(|entry| (name, entry)))
+        .filter_map(|name| shared.entries.get(name))
         .collect::<Vec<_>>();
     let mut states = entries
         .iter()
-        .map(|(_, entry)| entry.gate.lock().expect("entry gate poisoned"))
+        .map(|entry| entry.gate.lock().expect("entry gate poisoned"))
         .collect::<Vec<_>>();
     let mut releasing = Vec::new();
-    for ((name, entry), state) in entries.iter().zip(&mut states) {
+    for (entry, state) in entries.iter().zip(&mut states) {
         state.claim.invalidate();
         state.pending = Batch::default();
         state.clear_recovery();
@@ -943,7 +999,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
             Some(attachment) => {
                 state.claim.end_running_leg();
                 begin_release(state);
-                releasing.push(((*name).clone(), *entry, epoch, attachment));
+                releasing.push((Arc::clone(entry), epoch, attachment));
             }
             // The resources are out with a leg, or with one that has yet to
             // take them. The window opens here and the leg's own end closes it,
@@ -957,8 +1013,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         }
     }
     drop(states);
-    for (name, entry, epoch, attachment) in releasing {
-        finish_release(shared, entry, &name, epoch, Some(attachment));
+    for (entry, epoch, attachment) in releasing {
+        finish_release(shared, &entry, entry.name(), epoch, Some(attachment));
     }
 }
 
@@ -1070,14 +1126,14 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
 /// reported back: the caller reads [`EntryState::parked`] like every other
 /// reader does, and one park is answered by one predicate.
 fn recheck_and_refuse<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
-    if let Ok(reading) = shared.registry.recheck(name)
+    if let Ok(reading) = shared.entries.recheck(name)
         && reading.conflict.is_none()
     {
         clear_registry_parks(shared, name);
         return;
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
-    let conflict = match shared.registry.recheck(name) {
+    let conflict = match shared.entries.recheck(name) {
         Ok(reading) => reading.conflict,
         Err(refusal) => {
             refuse_identity_error(shared, name, refusal.to_string());
@@ -1102,8 +1158,10 @@ fn clear_registry_parks<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) 
 }
 
 struct Shared<O: EntryOps> {
-    registry: ServingRegistry,
-    entries: BTreeMap<VaultName, Arc<Entry<O::Attachment>>>,
+    /// The one collection of vaults this host serves. It answers which names
+    /// exist and where their roots are, so nothing here reads a registration
+    /// off a second account that could disagree with it.
+    entries: ServingSet<O::Attachment>,
     ops: Arc<O>,
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
@@ -1250,7 +1308,7 @@ impl<O: EntryOps> Drop for Host<O> {
         // reader — a demand lease holds the shared state itself, so it outlives
         // the host and reads the entry through its own handle.
         let mut releasing = Vec::new();
-        for (name, entry) in &self.shared.entries {
+        for entry in self.shared.entries.snapshot() {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.invalidate();
             state.claim.open();
@@ -1260,7 +1318,7 @@ impl<O: EntryOps> Drop for Host<O> {
                 // The joins below wait for the leg running it, and whatever it
                 // leaves in the entry is given back after them.
                 begin_release(&mut state);
-                releasing.push((name.clone(), None));
+                releasing.push((Arc::clone(&entry), None));
                 continue;
             }
             match state.coverage.give_up() {
@@ -1271,14 +1329,14 @@ impl<O: EntryOps> Drop for Host<O> {
                 Some(attachment) => {
                     state.claim.end_running_leg();
                     begin_release(&mut state);
-                    releasing.push((name.clone(), Some(attachment)));
+                    releasing.push((Arc::clone(&entry), Some(attachment)));
                 }
                 // A leg is holding this entry's resources, or is about to take
                 // them. The joins below wait for it, and whatever it leaves in
                 // the entry is given back after them.
                 None if state.coverage.out_with_leg() || state.claim.leg().is_some() => {
                     begin_release(&mut state);
-                    releasing.push((name.clone(), None));
+                    releasing.push((Arc::clone(&entry), None));
                 }
                 // Nothing is held, so the entry is already released and can
                 // say so.
@@ -1298,10 +1356,7 @@ impl<O: EntryOps> Drop for Host<O> {
                 let _ = worker.join();
             }
         }
-        for (name, attachment) in releasing {
-            let Some(entry) = self.shared.entries.get(&name) else {
-                continue;
-            };
+        for (entry, attachment) in releasing {
             // A leg that ended between the loop above and its join gave its
             // attachment back to the entry rather than to the ops, so the
             // entry is asked again for what it holds.
@@ -1314,7 +1369,7 @@ impl<O: EntryOps> Drop for Host<O> {
                     .give_up()
             });
             if let Some(attachment) = attachment {
-                self.shared.ops.detach(&name, attachment);
+                self.shared.ops.detach(entry.name(), attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             // Coverage still out with a leg is that leg's to give back, and the
@@ -1346,40 +1401,20 @@ impl<O: EntryOps> Host<O> {
         if policy.watch_poll_interval.is_zero() {
             return Err(HostError::ZeroWatchPollInterval);
         }
-        let now = Instant::now();
-        let entries = registry
-            .entries()
-            .map(|entry| {
-                (
-                    entry.name.clone(),
-                    Arc::new(Entry {
-                        gate: Mutex::new(EntryState {
-                            trust: TrustState::Unattached,
-                            coverage: Coverage::none(),
-                            reader: None,
-                            pending: Batch::default(),
-                            recovery_required: false,
-                            recovery_demands: 0,
-                            recovery_generation: 0,
-                            identity_refused: None,
-                            claim: Claim::default(),
-                            maintainer_contended: None,
-                            duplicate_root: None,
-                            last_demand: now,
-                            demand_leases: 0,
-                            safety_pins: 0,
-                            detach_due: false,
-                            detach_scheduled: false,
-                            detach_in_flight: false,
-                        }),
-                    }),
-                )
-            })
-            .collect();
+        // Startup takes the same seam a later registration does: every vault in
+        // the set arrived through one insertion, so a vault gained while the
+        // host runs is served exactly as a vault read at startup is.
+        let entries = ServingSet::new();
+        for registration in registry.into_entries() {
+            let inserted = entries.insert(registration);
+            debug_assert!(
+                inserted.is_ok(),
+                "the registrations are keyed by name, so no two of them name one entry"
+            );
+        }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
         let receiver = Arc::new(Mutex::new(receiver));
         let shared = Arc::new(Shared {
-            registry,
             entries,
             ops: Arc::new(ops),
             jobs: Mutex::new(Some(jobs)),
@@ -1505,7 +1540,7 @@ impl<O: EntryOps> Host<O> {
             schedule_demand(&mut state, name);
             let answer = Demand::State(state.trust.clone());
             drop(state);
-            dispatch_pending(&self.shared, entry)?;
+            dispatch_pending(&self.shared, &entry)?;
             return Ok(DemandLease {
                 outcome: answer,
                 name: name.clone(),
@@ -1561,12 +1596,15 @@ impl<O: EntryOps> Host<O> {
     /// mints no reader.
     pub fn begin_read(&self, name: &VaultName) -> Option<ReadHold<O::Attachment>> {
         let entry = self.shared.entries.get(name)?;
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let reader = Arc::clone(state.reader.as_ref()?);
-        let trust = state.trust.clone();
-        state.pin();
+        let (reader, trust) = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let reader = Arc::clone(state.reader.as_ref()?);
+            let trust = state.trust.clone();
+            state.pin();
+            (reader, trust)
+        };
         Some(ReadHold {
-            entry: Arc::clone(entry),
+            entry,
             reader,
             trust,
         })
@@ -1581,15 +1619,16 @@ impl<O: EntryOps> Host<O> {
 
 fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Result<(), HostError> {
     let mut entries = Vec::new();
-    for (name, entry) in &shared.entries {
+    for entry in shared.entries.snapshot() {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.demand_leases == 0
             && (state.coverage.in_hand() || state.pinned())
             && now.saturating_duration_since(state.last_demand) >= shared.idle_after
         {
             state.detach_due = true;
-            if schedule_due_detach(&mut state, name).is_some() {
-                entries.push(Arc::clone(entry));
+            if schedule_due_detach(&mut state, entry.name()).is_some() {
+                drop(state);
+                entries.push(entry);
             }
         }
     }
@@ -1603,7 +1642,9 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
 /// effect is nonblocking, so one slow vault cannot consume a worker slot or
 /// manufacture a thread per attachment.
 fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
-    for (name, entry) in &shared.entries {
+    for entry in shared.entries.snapshot() {
+        let entry = &entry;
+        let name = entry.name();
         let (mut attachment, epoch) = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.claim.is_held() {
@@ -1825,7 +1866,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         state.claim.begin_job_leg(epoch);
     }
     let held = run_job_inner(shared, job);
-    end_job_leg(shared, entry, &name, epoch, held);
+    end_job_leg(shared, &entry, &name, epoch, held);
 }
 
 /// End the leg a worker ran, and give back whatever it is still holding.
@@ -1905,6 +1946,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
+    let entry = &entry;
     match job {
         Job::Attach(name, epoch) => {
             // Classification and the identity claim are atomic, but the heal is
@@ -1916,7 +1958,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             // identity the claim below is filed under is the one this recheck
             // resolved, so the two facts cannot disagree and one refusal covers
             // them.
-            let reading = match shared.registry.recheck(&name) {
+            let reading = match shared.entries.recheck(&name) {
                 Ok(reading) => reading,
                 Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1960,26 +2002,25 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 attach_claims.insert(identity, name.clone());
             }
             drop(attach_claims);
-            let result =
-                shared
-                    .ops
-                    .attach(&name, &reporter(entry, epoch))
-                    .and_then(|mut attachment| {
-                        match drain_observed(&shared.ops, &name, &mut attachment) {
-                            Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
-                            Err(error) => {
-                                shared.ops.detach(&name, attachment);
-                                Err(error)
-                            }
+            let result = shared
+                .ops
+                .attach(&entry.registration, &reporter(entry, epoch))
+                .and_then(|mut attachment| {
+                    match drain_observed(&shared.ops, &name, &mut attachment) {
+                        Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
+                        Err(error) => {
+                            shared.ops.detach(&name, attachment);
+                            Err(error)
                         }
-                    });
+                    }
+                });
             let mut attach_claims = shared.attach_gate.lock().expect("attach gate poisoned");
             if let Some(identity) = claim_identity
                 && attach_claims.get(&identity) == Some(&name)
             {
                 attach_claims.remove(&identity);
             }
-            let post_reading = match shared.registry.recheck(&name) {
+            let post_reading = match shared.entries.recheck(&name) {
                 Ok(reading) => reading,
                 Err(refusal) => {
                     drop(attach_claims);
@@ -2442,7 +2483,7 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     let epoch = job.epoch();
     let entry = shared.entries.get(job.name());
     if shared.shutting_down.load(Ordering::SeqCst) {
-        if let Some(entry) = entry {
+        if let Some(entry) = &entry {
             release_queue_slot(entry, epoch);
         }
         return;
@@ -2470,7 +2511,7 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
-            if let Some(entry) = entry {
+            if let Some(entry) = &entry {
                 release_queue_slot(entry, epoch);
             }
         }
@@ -2659,7 +2700,7 @@ mod tests {
 
         fn attach(
             &self,
-            _: &VaultName,
+            _: &Registration,
             progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
@@ -2844,7 +2885,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = ServingRegistry::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2876,7 +2917,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = ServingRegistry::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2904,8 +2945,7 @@ mod tests {
                 (*name).clone(),
                 VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         Host::new(
             registry,
             ops,
@@ -2948,8 +2988,7 @@ mod tests {
         }
         let registry = ServingRegistry::from_entries(roots.iter().map(|(name, root)| {
             RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
-        }))
-        .unwrap();
+        }));
         Host::new(
             registry,
             ops,
@@ -3680,8 +3719,7 @@ mod tests {
                 b.clone(),
                 VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
             ),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             ops,
@@ -3740,7 +3778,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
 
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
         {
             // The window between a leg's registration and its taking the
             // entry's coverage, reached under the lock a running leg would
@@ -3785,12 +3823,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let epoch = {
             let mut state = entry.gate.lock().unwrap();
@@ -3836,12 +3873,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         *ops.poll_gate.lock().unwrap() = Some(name.clone());
         let polling = Arc::clone(&host.shared);
@@ -3884,12 +3920,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
@@ -3931,7 +3966,7 @@ mod tests {
     fn a_refused_alias_held_in_a_poll_releases_through_the_poll_that_holds_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
 
         // One alias is held inside a watcher poll, which is what puts its
         // coverage out with a leg while the refusal lands.
@@ -4002,7 +4037,7 @@ mod tests {
     fn a_refused_entry_is_polled_by_nothing_afterwards() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
         {
             // A leg registered over parked coverage, with facts standing
             // beside it: the shape a refusal has to leave holding neither.
@@ -4052,12 +4087,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
         {
             // The window between a leg's registration and its taking the
             // entry's coverage, reached under the lock a running leg would
@@ -4268,7 +4302,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
-        let entry = Arc::clone(host.shared.entries.get(&a).unwrap());
+        let entry = host.shared.entries.get(&a).unwrap();
         let conflict = AliasConflict::new([a.clone(), b.clone()]);
 
         {
@@ -4631,7 +4665,7 @@ mod tests {
         wait_for_reconciles(&ops, 1, "the reconcile leg to take the entry's coverage");
 
         let shared = Arc::clone(&host.shared);
-        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+        let entry = shared.entries.get(&name).expect("the vault is registered");
         let released = Arc::clone(&ops);
         let unblock = thread::spawn(move || {
             wait_until(
@@ -4656,13 +4690,8 @@ mod tests {
             1,
             "the entry's coverage went back twice, or not at all"
         );
-        let state = shared
-            .entries
-            .get(&name)
-            .expect("the vault is registered")
-            .gate
-            .lock()
-            .unwrap();
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+        let state = entry.gate.lock().unwrap();
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.in_hand());
@@ -4683,7 +4712,7 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
-        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+        let entry = shared.entries.get(&name).expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -5599,7 +5628,7 @@ mod tests {
         type Attachment = FakeCoverage;
         fn attach(
             &self,
-            _: &VaultName,
+            _: &Registration,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
             Ok(FakeCoverage::default())
@@ -5652,8 +5681,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-two-batches").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5682,9 +5710,10 @@ mod tests {
         type Attachment = FakeCoverage;
         fn attach(
             &self,
-            name: &VaultName,
+            registration: &Registration,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
+            let name = &registration.name;
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
                 wait_for_release("release_a", &self.release_a);
@@ -5737,8 +5766,7 @@ mod tests {
                 b.clone(),
                 VaultRoot::new("/tmp/norn-host-parallel-b").unwrap(),
             ),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5769,8 +5797,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-queue-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-queue-b").unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5799,8 +5826,7 @@ mod tests {
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-full-queue-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5835,8 +5861,7 @@ mod tests {
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-send-race-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         let mut host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5853,7 +5878,7 @@ mod tests {
         wait_for_flag("a_started", &ops.a_started);
         let b = host.demand(&names[1], AttachMode::Durable).unwrap();
 
-        let entry = Arc::clone(host.shared.entries.get(&names[2]).unwrap());
+        let entry = host.shared.entries.get(&names[2]).unwrap();
         let jobs_guard = host.shared.jobs.lock().unwrap();
         {
             let mut state = entry.gate.lock().unwrap();
@@ -5913,8 +5938,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5973,8 +5997,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6029,8 +6052,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new(&root).unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6220,7 +6242,7 @@ mod tests {
     fn a_throwaway_demand_is_refused_before_the_entry_is_touched() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let entry = Arc::clone(host.shared.entries.get(&name).unwrap());
+        let entry = host.shared.entries.get(&name).unwrap();
 
         entry.gate.lock().unwrap().identity_refused = Some("the root cannot be read".into());
         assert!(
@@ -6366,7 +6388,8 @@ mod tests {
             // behind it: an entry standing still under the park is one no
             // dispatch reaches, and a claim or a marker left here is work the
             // park was supposed to have ended.
-            let state = host.shared.entries.get(&name).unwrap().gate.lock().unwrap();
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
             assert!(
                 !state.claim.is_held(),
                 "the refused attach left the entry claimed under the park"
@@ -6404,8 +6427,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([
             RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
             RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6456,8 +6478,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-poll-fixture").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6493,8 +6514,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-pinned-idle").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6536,7 +6556,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = ServingRegistry::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -6695,12 +6715,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -6762,12 +6781,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -7737,7 +7755,7 @@ mod tests {
             "a poll's end cleared the job leg the release window waits on"
         );
 
-        end_job_leg(&host.shared, entry, &name, epoch, attachment);
+        end_job_leg(&host.shared, &entry, &name, epoch, attachment);
         let state = entry.gate.lock().unwrap();
         assert_eq!(
             state.trust,
@@ -7842,7 +7860,7 @@ mod tests {
             assert!(state.claim.slot().is_none(), "the slot is already taken");
         }
 
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_none(),
             "a tick sent the job the leg running against the entry sends itself"
@@ -7933,7 +7951,7 @@ mod tests {
             newer
         };
 
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         wait_until(
             "the work the entry moved on to to run",
             lifecycle_wait_budget(),
@@ -7992,7 +8010,7 @@ mod tests {
                 "the entry scheduled no teardown for this case to supersede"
             );
         }
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_some(),
             "the teardown this case supersedes never reached the queue"
@@ -8425,8 +8443,7 @@ mod tests {
         let registry = ServingRegistry::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-maint-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-maint-b").unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -8474,5 +8491,108 @@ mod tests {
         ops.maintenance_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
         drop(lease_a);
+    }
+
+    /// A vault the set gains while the host runs, and a vault it loses.
+    ///
+    /// The seam under these cases is [`ServingSet::insert`] and
+    /// [`ServingSet::remove`]. Nothing outside this crate reaches either: what
+    /// a product surface would offer is a registration verb, and these two
+    /// moves are what such a verb lands on.
+    mod serving_set {
+        use super::*;
+        use crate::lifecycle::serving::ServingRefusal;
+
+        fn registration(name: &VaultName, root: &std::path::Path) -> RegistryEntry {
+            RegistryEntry::new(name.clone(), VaultRoot::new(root).unwrap())
+        }
+
+        /// A vault inserted into a running host attaches on the demand that
+        /// follows, the way a vault read at startup does.
+        #[test]
+        fn an_inserted_vault_attaches_like_a_registered_one() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, served) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let joined = VaultName::new("joined").unwrap();
+            assert_eq!(
+                host.demand(&joined, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault,
+                "a name the set does not serve was demandable before it joined"
+            );
+
+            let base = temp_base("serving-set-insert");
+            let root = base.join("joined");
+            std::fs::create_dir_all(&root).unwrap();
+            host.shared
+                .entries
+                .insert(registration(&joined, &root))
+                .expect("the set serves no such name");
+
+            drop(host.demand(&joined, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &joined, TrustState::Ready);
+            assert_eq!(
+                host.state(&served),
+                Some(TrustState::Unattached),
+                "the insertion disturbed the entry that was already served"
+            );
+
+            drop(host);
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        /// An inserted root another served name already reaches is classified
+        /// against that name, because a recheck reads the set rather than the
+        /// registrations the host was built from.
+        #[test]
+        fn an_inserted_alias_of_a_served_root_is_refused_as_a_duplicate() {
+            let ops = Arc::new(FakeOps::default());
+            let base = temp_base("serving-set-alias");
+            let root = base.join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            let served = VaultName::new("served").unwrap();
+            let alias = VaultName::new("alias").unwrap();
+            let host = host_over_roots(Arc::clone(&ops), &[(&served, root.as_path())], 2);
+
+            host.shared
+                .entries
+                .insert(registration(&alias, &root.join(".")))
+                .expect("the set serves no such name");
+
+            let lease = host.demand(&alias, AttachMode::Durable).unwrap();
+            assert_eq!(
+                lease.completion(),
+                Demand::DuplicateRoot(AliasConflict::new([alias.clone(), served.clone()])),
+                "the alias was admitted against a root the host already serves"
+            );
+
+            drop((lease, host));
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        /// A name the set already serves keeps the entry standing under it: the
+        /// insertion is refused rather than replacing that entry.
+        #[test]
+        fn a_name_the_set_serves_is_not_inserted_over() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+
+            assert_eq!(
+                host.shared.entries.insert(registration(
+                    &name,
+                    std::path::Path::new("/tmp/norn-host-elsewhere")
+                )),
+                Err(ServingRefusal::AlreadyServed)
+            );
+            let standing = host.shared.entries.get(&name).expect("the vault is served");
+            assert!(
+                Arc::ptr_eq(&entry, &standing),
+                "the refused insertion replaced the entry standing under the name"
+            );
+            assert_eq!(
+                standing.registration.root, entry.registration.root,
+                "the refused insertion moved the served root"
+            );
+        }
     }
 }
