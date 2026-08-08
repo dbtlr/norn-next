@@ -1,7 +1,8 @@
 //! What a demand is, said in the wire vocabulary.
 //!
-//! [`Demand`] is host-local: it carries this crate's own [`AliasConflict`](crate::AliasConflict) and
-//! the registry's account of a root it cannot read. What leaves the host is
+//! [`Demand`] is host-local: it carries this crate's own
+//! [`AliasConflict`](crate::AliasConflict) and the registry's own account of a
+//! root it cannot read. What leaves the host is
 //! neither — it is `norn-wire`'s [`TrustState`] or its [`ErrorEnvelope`] — so
 //! the translation between the two lives here, on the host side of the seam.
 //! It lives in the host rather than in a serving crate because the vocabulary
@@ -73,9 +74,9 @@ impl Demand {
 /// The state a demand answers with, or the refusal that state is.
 ///
 /// [`TrustState`] grows in `norn-wire`, so the match ends in a wildcard the
-/// four arms above it leave unreached. A state is what crosses unless it says
-/// reads cannot answer from the entry, and the state that says so is refused
-/// above.
+/// named arms leave unreached. A state is what crosses unless it says reads
+/// cannot answer from the entry, and the one state that says so is refused
+/// above it.
 fn answer_state(state: &TrustState) -> Result<TrustState, ErrorEnvelope> {
     match state {
         TrustState::Untrusted { reason, .. } => Err(ErrorEnvelope::new(
