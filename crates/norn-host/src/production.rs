@@ -3477,6 +3477,36 @@ mod tests {
         assert_eq!(facts.tags.len(), 2);
     }
 
+    /// The count beside an absent frontmatter projection is what tells a
+    /// document with no block apart from one whose block did not read, so the
+    /// mapper counts the notes the text layer scoped to the block and no
+    /// others.
+    #[test]
+    fn the_frontmatter_note_count_separates_no_block_from_a_block_that_did_not_read() {
+        for (source, projection, notes) in [
+            (b"# Heading\nbody\n".to_vec(), false, 0),
+            (b"---\ntitle: note\n---\nbody\n".to_vec(), true, 0),
+            (b"---\ntitle: note\nbody\n".to_vec(), false, 1),
+        ] {
+            let facts = map_document(
+                "note.md",
+                &source,
+                norn_fs::ContentHash::of(&source).to_string(),
+            )
+            .unwrap();
+            let read = String::from_utf8(source).unwrap();
+            assert_eq!(
+                facts.frontmatter.is_some(),
+                projection,
+                "the projection of `{read}` is not what the block is"
+            );
+            assert_eq!(
+                facts.frontmatter_diagnostic_count, notes,
+                "`{read}` raised another count of block-scoped notes"
+            );
+        }
+    }
+
     fn dirty_path(
         root: &Path,
         relative: &str,
