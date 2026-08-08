@@ -15,6 +15,8 @@ use norn_host::{
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
+use norn_testkit::isolation::{self, Lease};
+use norn_testkit::wait::Budget;
 use norn_wire::TrustState;
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
@@ -162,10 +164,21 @@ struct Fixture {
     vault: PathBuf,
     database: PathBuf,
     name: VaultName,
+    // Both attaches below go through production entry operations, and each
+    // installs a real platform watcher. The lease covers the fixture's whole
+    // life, which spans both of them and the induced process death between.
+    //
+    // The child this case spawns takes none of its own: it opens the derived
+    // store and dies inside a changeset, and it never attaches.
+    _watcher_lease: Lease,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let lease = Lease::hold(
+            isolation::REAL_WATCHER,
+            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, Duration::from_millis(250))),
+        );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
@@ -186,6 +199,7 @@ impl Fixture {
             vault,
             database,
             name,
+            _watcher_lease: lease,
         }
     }
 

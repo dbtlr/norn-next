@@ -63,6 +63,43 @@
 //! probe takes a reading and returns. It does not wait inside itself, and
 //! anything it calls that could block carries a bound of its own.
 //!
+//! # A wait that brackets other waits outlives them
+//!
+//! Some waits are held open on purpose. A case that blocks a subject at a gate
+//! — a fake that parks its job thread until the case says go — is waiting
+//! inside the subject while the case runs a sequence of waits of its own
+//! outside it. Those two waits are not peers: **the held-open wait's budget
+//! strictly dominates the sum of the outer waits it brackets.**
+//!
+//! **No nested wait shares a flat constant with a sequence it must outlive.**
+//! A suite with one number for every wait puts the hold and the sequence on
+//! equal budgets, and the hold then lets go partway through the sequence it was
+//! opened to bracket. The subject resumes under a case that is still asserting
+//! the subject is parked, and the failure lands somewhere else entirely — on
+//! the next assertion, on a later case, or nowhere on a machine that happened
+//! to be quick.
+//!
+//! [`Budget::dominating`] is how the two are related: the held-open wait
+//! derives its budget from the same budget the outer waits obey, over the
+//! count of them it brackets. Deriving is the point — a second independent
+//! constant is the same defect with two numbers to keep in step.
+//!
+//! # An outcome is the condition; the batches are what a wait pumps
+//!
+//! [`absorb_until`] is [`wait_until`] for a subject that only makes progress
+//! when something is taken off it and applied. **The unit a subject reports in
+//! is not the unit an outcome arrives in**: a source is free to split one
+//! change across as many reports as it likes and in any order, so a wait that
+//! takes one report, applies it, and asserts the outcome after the wait is
+//! asserting that the split did not happen. When it does happen the case fails
+//! against a state the next report settles, which is a statement about
+//! granularity wearing the costume of a defect in the subject.
+//!
+//! So the outcome is the condition and the reports are what the wait pumps.
+//! [`Absorbed`] is what the pump has taken, for the conditions that ask about
+//! the reports rather than about the subject, and it renders into every pending
+//! observation so a wait that expires says what had arrived by then.
+//!
 //! # A failure says what it saw
 //!
 //! [`Observed::Pending`] carries the state that was seen, so a
@@ -80,6 +117,7 @@
 //! failure payload is what this module offers in its place, for every probe
 //! that returns.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -141,6 +179,40 @@ impl Budget {
     /// How long one evaluation of the condition may take.
     pub const fn probe(&self) -> Duration {
         self.probe
+    }
+
+    /// A budget that strictly dominates `waits` waits on this one.
+    ///
+    /// A wait held open across a sequence of other waits takes its bound from
+    /// here, so the two are one number apart rather than two numbers to keep
+    /// in step. `waits` of them run for at most `waits` times this work bound,
+    /// and the derived bound is one whole wait wider than that — margin enough
+    /// for what happens between the waits, and strict, so the hold is never
+    /// the thing that expires first.
+    ///
+    /// The probe bound carries over unchanged: what a held-open wait brackets
+    /// says how long it may wait, and nothing about how expensive one look at
+    /// its own gate is.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use norn_testkit::wait::Budget;
+    ///
+    /// let outer = Budget::new(Duration::from_secs(10), Duration::from_millis(250));
+    /// let held_open = outer.dominating(2);
+    /// assert!(held_open.work() > outer.work() * 2);
+    /// assert_eq!(held_open.probe(), outer.probe());
+    /// ```
+    ///
+    /// The multiplication saturates, so an absurd count yields an absurd bound
+    /// rather than a wrapped small one — a hold that expires at once is
+    /// exactly the defect this exists to rule out.
+    pub fn dominating(&self, waits: u32) -> Budget {
+        Budget::new(
+            self.work.saturating_mul(waits.saturating_add(1)),
+            self.probe,
+        )
     }
 }
 
@@ -403,8 +475,100 @@ pub fn wait_until<T>(
     }
 }
 
+/// Everything an [`absorb_until`] pump has taken and applied so far.
+///
+/// Two things are recorded, and both are read. The **count** is what a
+/// condition asks when the arrival itself is the outcome — a case that wants
+/// one more report and does not care what it said. The **facts** are what the
+/// reports said about themselves, noted by the caller because only the caller
+/// knows the type it took: a condition asks about one by name, and every one
+/// of them renders into a pending observation.
+///
+/// Facts are a set, so a fact ten reports carry is one line in a failure rather
+/// than ten, and a fact is a whole rendering rather than a field, because what
+/// a report carries belongs to the crate that defined it and not to this one.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Absorbed {
+    batches: usize,
+    facts: BTreeSet<String>,
+}
+
+impl Absorbed {
+    /// How many reports the pump has taken and applied.
+    pub fn batches(&self) -> usize {
+        self.batches
+    }
+
+    /// Note what a report said about itself.
+    ///
+    /// The pump counts the reports, because taking them is its job; what one
+    /// said is the caller's to render, because the type is the caller's.
+    pub fn note(&mut self, fact: impl Into<String>) {
+        self.facts.insert(fact.into());
+    }
+
+    /// Whether any report so far carried `fact`.
+    pub fn saw(&self, fact: &str) -> bool {
+        self.facts.contains(fact)
+    }
+}
+
+impl fmt::Display for Absorbed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} absorbed, carrying {:?}", self.batches, self.facts)
+    }
+}
+
+/// Take reports off `subject` and apply them until `condition` holds.
+///
+/// Every look asks the condition, takes at most one report, applies it, and
+/// asks again. **A condition that already holds ends the wait without taking
+/// anything**, so a case's next absorption still has the reports its own change
+/// produced.
+///
+/// The three closures divide by what they know. `take` is the only one that
+/// sees the report's type, so it is what notes onto [`Absorbed`] whatever that
+/// report said about itself. `apply` puts the report into the subject. The
+/// condition reads the subject and the facts together, and it is the only thing
+/// that ends the wait.
+///
+/// `budget`'s probe bound covers one whole take-and-apply rather than one look
+/// at a state, because that is what a probe here does. A caller sizing it from
+/// a wait that only reads state gets [`FailureKind::ProbeOverran`] blaming a
+/// probe for the work this wait exists to drive.
+///
+/// A failure panics with the wait's own diagnostic: an absorption that never
+/// reached its outcome has nothing to hand back but the reports it saw, and
+/// [`Absorbed`] is in the diagnostic already.
+pub fn absorb_until<S, B>(
+    what: &str,
+    budget: Budget,
+    subject: &mut S,
+    mut take: impl FnMut(&mut S, &mut Absorbed) -> Option<B>,
+    mut apply: impl FnMut(&mut S, B),
+    mut condition: impl FnMut(&mut S, &Absorbed) -> Observed<()>,
+) {
+    let mut absorbed = Absorbed::default();
+    wait_until(what, budget, || {
+        if let Observed::Met(()) = condition(subject, &absorbed) {
+            return Observed::Met(());
+        }
+        if let Some(batch) = take(subject, &mut absorbed) {
+            absorbed.batches += 1;
+            apply(subject, batch);
+        }
+        match condition(subject, &absorbed) {
+            Observed::Met(()) => Observed::Met(()),
+            Observed::Pending(state) => Observed::pending(format!("{state}; {absorbed}")),
+        }
+    })
+    .unwrap_or_else(|failure| panic!("{failure}"));
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
 
     /// Budgets small enough to keep the suite quick, and loose enough that
@@ -701,6 +865,45 @@ mod tests {
         assert_eq!(failure.last_state, "empty");
     }
 
+    /// **The bar on budget composition.** A held-open wait's budget strictly
+    /// dominates the sum of the outer waits it brackets.
+    ///
+    /// The forbidden shape is the flat constant shared between them: under it
+    /// a hold and the sequence it brackets expire together, so the hold lets
+    /// go partway through and the subject resumes under a case still asserting
+    /// it is parked. The comparison here is against the whole sequence, not
+    /// against one of its waits, because a hold that merely outlives a single
+    /// outer wait still lets go inside a sequence of two.
+    #[test]
+    fn a_held_open_budget_outlives_every_sequence_of_outer_waits_it_brackets() {
+        let outer = Budget::new(Duration::from_secs(10), Duration::from_millis(250));
+
+        for bracketed in [0u32, 1, 2, 7] {
+            let held_open = outer.dominating(bracketed);
+            let sequence = outer.work() * bracketed;
+            assert!(
+                held_open.work() > sequence,
+                "a hold bracketing {bracketed} waits gets {:?}, which does not outlive the \
+                 {sequence:?} those waits may take",
+                held_open.work()
+            );
+            assert_eq!(
+                held_open.probe(),
+                outer.probe(),
+                "the derived bound changed how long one look at the gate may take"
+            );
+        }
+    }
+
+    /// A count nothing could bracket still yields a hold wider than the wait it
+    /// derives from. A wrapped one would be narrower, and the hold would be the
+    /// first thing to expire.
+    #[test]
+    fn a_held_open_budget_saturates_rather_than_wrapping() {
+        let outer = Budget::new(Duration::from_secs(3_600), Duration::from_millis(250));
+        assert!(outer.dominating(u32::MAX).work() > outer.work());
+    }
+
     /// **The bar on convergence budgets.** The budget grows with the changed
     /// set, from a floor.
     ///
@@ -760,6 +963,176 @@ mod tests {
                 settling.floor()
             );
         }
+    }
+
+    /// One report a case chose to make, rather than one a source happened to
+    /// settle: the paths it invalidated, and nothing else.
+    struct DrivenBatch(Vec<&'static str>);
+
+    /// A subject whose reports are chosen rather than observed: a queue of
+    /// settled reports, the paths that really exist, and the paths applying
+    /// those reports has left stored.
+    ///
+    /// Applying a report means reading each invalidated path and keeping the
+    /// ones that exist, which is what a scoped reconcile does to a store.
+    #[derive(Default)]
+    struct DrivenBatches {
+        queue: VecDeque<DrivenBatch>,
+        tree: BTreeSet<&'static str>,
+        stored: BTreeSet<&'static str>,
+    }
+
+    impl DrivenBatches {
+        fn take(&mut self, absorbed: &mut Absorbed) -> Option<DrivenBatch> {
+            let batch = self.queue.pop_front()?;
+            for path in &batch.0 {
+                absorbed.note(*path);
+            }
+            Some(batch)
+        }
+
+        fn apply(&mut self, batch: DrivenBatch) {
+            for path in batch.0 {
+                if self.tree.contains(path) {
+                    self.stored.insert(path);
+                } else {
+                    self.stored.remove(path);
+                }
+            }
+        }
+    }
+
+    fn absorbing_budget() -> Budget {
+        Budget::new(Duration::from_secs(5), PROBE)
+    }
+
+    /// **The bar the absorbing idiom stands on.** One change reported across
+    /// two reports is one outcome, whichever half arrives first.
+    ///
+    /// The forbidden shape is the wait that ends at the first report and leaves
+    /// the outcome to a bare assertion after it. Under it each split direction
+    /// fails on the half that had not arrived — the destination missing when
+    /// the source's removal came first, the source still stored when the
+    /// destination came first — and both read as an apply that dropped a path
+    /// rather than as a report that had not finished arriving.
+    #[test]
+    fn a_split_rename_is_absorbed_whichever_half_arrives_first() {
+        for (label, order) in [
+            ("destination first", ["renamed/b.md", "source/b.md"]),
+            ("source first", ["source/b.md", "renamed/b.md"]),
+        ] {
+            let mut driven = DrivenBatches {
+                queue: order.iter().map(|root| DrivenBatch(vec![root])).collect(),
+                tree: ["renamed/b.md"].into_iter().collect(),
+                stored: ["source/b.md"].into_iter().collect(),
+            };
+            absorb_until(
+                &format!("both halves of a rename split {label}"),
+                absorbing_budget(),
+                &mut driven,
+                DrivenBatches::take,
+                DrivenBatches::apply,
+                |driven, _| {
+                    if !driven.stored.contains("source/b.md")
+                        && driven.stored.contains("renamed/b.md")
+                    {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending(format!("stored: {:?}", driven.stored))
+                    }
+                },
+            );
+            assert_eq!(
+                driven.stored,
+                ["renamed/b.md"].into_iter().collect(),
+                "the {label} split settled on the wrong store"
+            );
+            assert!(
+                driven.queue.is_empty(),
+                "the {label} split left a report unabsorbed"
+            );
+        }
+    }
+
+    /// An absorption whose outcome already holds takes nothing, so a case's
+    /// next absorption still has the reports its own change produced.
+    #[test]
+    fn an_outcome_that_already_holds_absorbs_nothing() {
+        let mut driven = DrivenBatches {
+            queue: [DrivenBatch(vec!["later.md"])].into_iter().collect(),
+            tree: ["later.md"].into_iter().collect(),
+            stored: ["already.md"].into_iter().collect(),
+        };
+        absorb_until(
+            "an outcome the store already carries",
+            absorbing_budget(),
+            &mut driven,
+            DrivenBatches::take,
+            DrivenBatches::apply,
+            |driven, _| {
+                if driven.stored.contains("already.md") {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("already.md is not stored")
+                }
+            },
+        );
+        assert_eq!(driven.queue.len(), 1, "a settled report was consumed");
+    }
+
+    /// A condition that asks about the reports rather than the subject reads
+    /// what the pump absorbed: how many arrived, and what each said.
+    #[test]
+    fn a_condition_reads_the_count_and_the_facts_the_reports_carried() {
+        let mut driven = DrivenBatches {
+            queue: [DrivenBatch(vec!["a.md"]), DrivenBatch(vec!["b.md"])]
+                .into_iter()
+                .collect(),
+            tree: ["a.md", "b.md"].into_iter().collect(),
+            stored: BTreeSet::new(),
+        };
+        absorb_until(
+            "both reports to arrive, the second naming b.md",
+            absorbing_budget(),
+            &mut driven,
+            DrivenBatches::take,
+            DrivenBatches::apply,
+            |_, absorbed| {
+                if absorbed.batches() == 2 && absorbed.saw("b.md") {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(absorbed.to_string())
+                }
+            },
+        );
+        assert_eq!(driven.stored, ["a.md", "b.md"].into_iter().collect());
+    }
+
+    /// An absorption that never reaches its outcome says what did arrive, so a
+    /// failure separates "nothing was reported" from "the reports did not add
+    /// up to the outcome".
+    #[test]
+    #[should_panic(expected = "carrying {\"a.md\"}")]
+    fn an_absorption_that_expires_names_the_reports_it_took() {
+        let mut driven = DrivenBatches {
+            queue: [DrivenBatch(vec!["a.md"])].into_iter().collect(),
+            tree: ["a.md"].into_iter().collect(),
+            stored: BTreeSet::new(),
+        };
+        absorb_until(
+            "an outcome no report carries",
+            Budget::new(WORK, PROBE),
+            &mut driven,
+            DrivenBatches::take,
+            DrivenBatches::apply,
+            |driven, _| {
+                if driven.stored.contains("never.md") {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("never.md is not stored")
+                }
+            },
+        );
     }
 
     /// Unwrapping a failed wait prints the diagnostic rather than a field

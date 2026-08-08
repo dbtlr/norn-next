@@ -2384,7 +2384,7 @@ mod tests {
             }
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
-                wait_for_flag("attach_release", &self.attach_release);
+                wait_for_release("attach_release", &self.attach_release);
             }
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -2407,7 +2407,7 @@ mod tests {
                 || self.block_reconcile_at.load(Ordering::SeqCst) == reconcile
             {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                wait_for_flag("reconcile_release", &self.reconcile_release);
+                wait_for_release("reconcile_release", &self.reconcile_release);
             }
             if self.terminal_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::WatcherTerminal(WatchError::Backend(
@@ -2473,7 +2473,7 @@ mod tests {
                 .is_some_and(|gated| gated == name);
             if self.block_poll.load(Ordering::SeqCst) || gated {
                 self.poll_started.store(true, Ordering::SeqCst);
-                wait_for_flag("poll_release", &self.poll_release);
+                wait_for_release("poll_release", &self.poll_release);
             }
             if let Some(error) = self
                 .terminal_poll
@@ -2524,7 +2524,7 @@ mod tests {
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
                 self.maintenance_started.store(true, Ordering::SeqCst);
-                wait_for_flag("maintenance_release", &self.maintenance_release);
+                wait_for_release("maintenance_release", &self.maintenance_release);
             }
             if self.lost_maintenance.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
@@ -2540,7 +2540,7 @@ mod tests {
         fn detach(&self, _: &VaultName, _: ()) {
             if self.block_detach.load(Ordering::SeqCst) {
                 self.detach_started.store(true, Ordering::SeqCst);
-                wait_for_flag("detach_release", &self.detach_release);
+                wait_for_release("detach_release", &self.detach_release);
             }
             self.detaches.fetch_add(1, Ordering::SeqCst);
         }
@@ -2699,6 +2699,38 @@ mod tests {
         Budget::new(Duration::from_secs(10), Duration::from_millis(250))
     }
 
+    /// The widest sequence of this suite's own waits that a held-open gate
+    /// brackets.
+    ///
+    /// A case holding a job at a gate runs its own waits while the gate is
+    /// held: the case that proves a blocked maintenance stalls nothing waits
+    /// for another vault to be polled and then for that vault to be reaped,
+    /// and the case that proves two attaches take distinct worker slots waits
+    /// for the second to start and then for its state. Two is what the widest
+    /// of them runs, and the gate's bound is derived over it.
+    ///
+    /// **This is a census, and no test binds it.** Nothing here can read how
+    /// many waits a case runs inside a gate it is holding, so a case that
+    /// grows a third wait makes this number wrong without failing anything.
+    /// The derivation above is what keeps it honest: it names the two cases it
+    /// was counted over, so a reader can recount it, and a case that adds a
+    /// wait inside a gate updates it here. What *is* bound is everything
+    /// downstream of it — that the gate's budget derives from this number
+    /// rather than repeating the flat one, and that the derivation dominates
+    /// the sequence.
+    const HELD_OPEN_OUTER_WAITS: u32 = 2;
+
+    /// The budget a gate held open across a case's own waits obeys.
+    ///
+    /// It is derived from the budget those waits obey rather than written
+    /// beside it, because the two must move together: a gate that shares one
+    /// flat constant with the sequence it brackets lets go partway through
+    /// that sequence, and the job it was holding resumes under a case still
+    /// asserting it is parked. See [`norn_testkit::wait::Budget::dominating`].
+    fn held_open_wait_budget() -> Budget {
+        lifecycle_wait_budget().dominating(HELD_OPEN_OUTER_WAITS)
+    }
+
     /// Wait for one exact trust state, reporting the last state observed.
     ///
     /// The failure is the testkit's own: which bound it passed, how long it
@@ -2846,8 +2878,74 @@ mod tests {
     /// Waiting sleeps between questions rather than yielding: several of these
     /// markers are set by the very job threads the wait is waiting on, and a
     /// spin competes with them for the core that would set the marker.
-    fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) {
-        wait_until(label, lifecycle_wait_budget(), || {
+    fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
+        wait_for_marker(label, flag, lifecycle_wait_budget())
+    }
+
+    /// Hold a fake's job at a gate until the case releases it.
+    ///
+    /// This is the wait a case's own sequence runs inside, so it obeys
+    /// [`held_open_wait_budget`] rather than the budget those waits obey: a
+    /// gate that expired first would let the job run on under a case still
+    /// asserting it is parked, and the failure would land on whatever the job
+    /// touched next rather than here.
+    fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
+        wait_for_marker(label, flag, held_open_wait_budget())
+    }
+
+    /// **The bar on the gates here.** The wait a gate is held open by obeys a
+    /// budget that outlives the sequence of this suite's own waits it brackets,
+    /// and the wait those outer waits obey is the one it dominates.
+    ///
+    /// The forbidden shape is the two wrappers passing the same flat budget,
+    /// which is invisible until a case brackets more than one wait: the gate
+    /// then expires inside the sequence, the job it held runs on, and the
+    /// failure lands on whatever that job touched rather than on the gate.
+    ///
+    /// **What this reads is the budget each wrapper hands to the wait**, not
+    /// the two budget functions side by side. Comparing those would pass
+    /// unchanged while a wrapper quietly took the other one, which is the whole
+    /// defect: the relation between the numbers was never in doubt, the wiring
+    /// was. Both markers are already set, so each wait is met on its first look
+    /// and reports the bound it was obeying without spending any of it.
+    #[test]
+    fn a_gate_held_open_obeys_the_budget_that_outlives_the_waits_it_brackets() {
+        let set = std::sync::atomic::AtomicBool::new(true);
+        let gate = wait_for_release("a gate the case has already released", &set);
+        let outer = wait_for_flag("a marker the fake has already set", &set);
+
+        assert_eq!(
+            gate,
+            held_open_wait_budget(),
+            "a gate is held open under {gate:?}, which is not the budget derived to outlive the \
+             waits it brackets"
+        );
+        assert_eq!(
+            outer,
+            lifecycle_wait_budget(),
+            "an outer wait obeys {outer:?} rather than this suite's own budget"
+        );
+
+        let bracketed = outer.work() * HELD_OPEN_OUTER_WAITS;
+        assert!(
+            gate.work() > bracketed,
+            "a gate gets {:?}, which does not outlive the {bracketed:?} a case's own \
+             {HELD_OPEN_OUTER_WAITS} waits may take",
+            gate.work()
+        );
+    }
+
+    /// Wait for a marker under `budget`, and hand back the budget it obeyed.
+    ///
+    /// The return is what lets a case state which of this suite's two budgets a
+    /// wait actually took, rather than which one a reader of the wrapper
+    /// expects it to take.
+    fn wait_for_marker(
+        label: &str,
+        flag: &std::sync::atomic::AtomicBool,
+        budget: Budget,
+    ) -> Budget {
+        wait_until(label, budget, || {
             if flag.load(Ordering::SeqCst) {
                 Observed::Met(())
             } else {
@@ -2855,6 +2953,7 @@ mod tests {
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
+        budget
     }
 
     /// A demanded entry names the work it is doing before it can count any of
@@ -5225,7 +5324,7 @@ mod tests {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             if self.hold_reconcile.load(Ordering::SeqCst) {
                 self.reconcile_started.store(true, Ordering::SeqCst);
-                wait_for_flag("reconcile_release", &self.reconcile_release);
+                wait_for_release("reconcile_release", &self.reconcile_release);
             }
             healing.report(2, Some(2));
             Ok(())
@@ -5296,7 +5395,7 @@ mod tests {
         ) -> Result<VaultName, JobFailure> {
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
-                wait_for_flag("release_a", &self.release_a);
+                wait_for_release("release_a", &self.release_a);
             } else if name.as_str() == "b" {
                 self.b_started.store(true, Ordering::SeqCst);
             }
