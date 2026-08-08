@@ -7206,6 +7206,76 @@ mod tests {
         drop(lease);
     }
 
+    /// An invalidation stops the entry waiting on the job it supersedes. The
+    /// queue slot that job holds names work the entry has moved on from, and an
+    /// entry still waiting on it is one every later dispatch refuses: the work
+    /// that replaced it never reaches a worker.
+    #[test]
+    fn an_invalidation_stops_the_entry_waiting_on_the_job_it_supersedes() {
+        let ops = Arc::new(FakeOps::default());
+        let first = VaultName::new("a").unwrap();
+        let second = VaultName::new("b").unwrap();
+        let working = VaultName::new("c").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&first, &second, &working], 2);
+        for name in [&first, &second, &working] {
+            drop(host.demand(name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, name, TrustState::Ready);
+        }
+
+        // Both workers, held inside the other vaults' jobs: a job sent against
+        // the entry under test waits in the queue, where the case reads the
+        // entry around it. A tick claims neither of them again while they run,
+        // so the batches below land on the entry the case names.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &first, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.reconcile_started.store(false, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &second, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        // The teardown the entry owes once it has gone idle, sent and waiting
+        // in the queue: the slot names it, and the entry is waiting on it.
+        reap_idle_shared(&host.shared, Instant::now() + Duration::from_secs(120)).unwrap();
+        let entry = host.shared.entries.get(&working).unwrap();
+        assert!(
+            entry.gate.lock().unwrap().claim.slot().is_some(),
+            "the teardown this case supersedes never reached the queue"
+        );
+
+        // A demand takes the teardown back, superseding the job already in the
+        // queue: the entry stops waiting on it here.
+        let lease = host.demand(&working, AttachMode::Durable).unwrap();
+        assert!(
+            entry.gate.lock().unwrap().claim.slot().is_none(),
+            "the entry is still waiting on the job the demand superseded"
+        );
+
+        // The work the entry owes now, which reaches a worker only through the
+        // slot the invalidation gave back.
+        report_through_a_driven_poll(&ops, &host, &working, &ops.off_thread_rescan_poll_batches);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_until(
+            "the work the entry owes after the invalidation to run",
+            lifecycle_wait_budget(),
+            || {
+                let reconciles = ops.reconciles.load(Ordering::SeqCst);
+                if reconciles == 3 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{reconciles} reconciles so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        wait_for_state(&host, &working, TrustState::Ready);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the teardown the demand superseded ran anyway"
+        );
+        drop(lease);
+    }
+
     /// A rescan a watcher poll reports overflowed the watcher, so what the
     /// entry knows about the vault is unreliable until it is reread: the poll
     /// that reports it publishes the overflow before it gives the entry back,
