@@ -101,6 +101,27 @@ impl TrustState {
     pub const fn untrusted(reason: UntrustedReason) -> Self {
         TrustState::Untrusted { reason }
     }
+
+    /// What this state refuses a request with, or `None` where the state
+    /// itself is what the request is answered with.
+    ///
+    /// A state the entry walks out of on its own is answered with: `Warming`
+    /// and `Unattached` are polled — a caller reads how far the entry has come
+    /// and asks again — and `Ready` is read from. Reads answer from none of the
+    /// first two, and that is not what decides the question: a state that
+    /// stands until something other than that polling retires it — a re-heal,
+    /// a client demanding one, an environment that stops refusing — is a
+    /// refusal, and it carries the reason it stands on.
+    ///
+    /// A state minted beside these takes its stance here. The match carries no
+    /// wildcard, so the question is answered where the states are written
+    /// rather than fallen through at whichever caller reads one.
+    pub const fn refusal(&self) -> Option<&UntrustedReason> {
+        match self {
+            TrustState::Unattached | TrustState::Warming { .. } | TrustState::Ready => None,
+            TrustState::Untrusted { reason } => Some(reason),
+        }
+    }
 }
 
 /// The kind of work an entry is doing while it is attached and not readable.

@@ -17,8 +17,11 @@
 //!
 //! **A warming entry is answered rather than refused.** Warming is polled — a
 //! caller reads how far the entry has come and asks again — so it is a state
-//! that crosses, not an envelope. Only a state saying reads cannot answer from
-//! the entry becomes one.
+//! that crosses, not an envelope. What becomes an envelope is a state that
+//! polling does not walk out of: one standing until a re-heal, a client
+//! demanding one, or an environment that stops refusing retires it. Reads
+//! answer from a warming entry no more than from an untrusted one, so what
+//! reads can do with a state is not the line; what retires the state is.
 //!
 //! **Two demands reach `host/entry-untrusted`, and deliberately.** An entry
 //! standing untrusted carries the reason its trust state carries. A root the
@@ -44,15 +47,21 @@ impl Demand {
     /// This demand in the wire vocabulary: the trust state it answers `name`
     /// with, or the refusal it is.
     ///
-    /// The name is taken rather than read off the demand because a demand for
-    /// a vault the registry does not hold has nothing to read it from, and the
-    /// refusal that says so echoes the name that was asked for.
-    pub fn answer(&self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
+    /// `name` is the name that was asked for, and [`Demand::UnknownVault`] is
+    /// the only demand that echoes it: a demand for a vault the registry does
+    /// not hold has no entry to read a name off, so the ask is all the refusal
+    /// has to name. Every other demand answers out of what it carries and
+    /// reads nothing from `name`. A caller holding the entry's lease answers
+    /// through [`DemandLease::answer`](crate::DemandLease::answer), which is
+    /// the entry point that supplies the name the lease itself holds; this one
+    /// serves the callers that hold no lease, because the vault they asked for
+    /// has no entry to lease.
+    pub fn answer(self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
         match self {
             Demand::State(state) => answer_state(state),
             Demand::MaintainerContended(incumbent) => Err(ErrorEnvelope::new(
                 "another process maintains this vault's derived state",
-                ErrorDetail::maintainer_contended(incumbent.clone()),
+                ErrorDetail::maintainer_contended(incumbent),
             )),
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
@@ -73,27 +82,26 @@ impl Demand {
 
 /// The state a demand answers with, or the refusal that state is.
 ///
-/// [`TrustState`] grows in `norn-wire`, so the match ends in a wildcard the
-/// named arms leave unreached. A state is what crosses unless it says reads
-/// cannot answer from the entry, and the one state that says so is refused
-/// above it.
-fn answer_state(state: &TrustState) -> Result<TrustState, ErrorEnvelope> {
-    match state {
-        TrustState::Untrusted { reason, .. } => Err(ErrorEnvelope::new(
+/// [`TrustState`] grows in `norn-wire` and is `#[non_exhaustive]`, so which
+/// states refuse is [`TrustState::refusal`]'s answer, given beside the states
+/// themselves: a state a poll does not walk out of carries a reason there, and
+/// this function is the envelope that reason is spelled in. Nothing here
+/// matches on a state, so a variant minted in that crate cannot cross by
+/// falling through a wildcard the host wrote.
+fn answer_state(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
+    if let Some(reason) = state.refusal() {
+        return Err(ErrorEnvelope::new(
             "this vault's derived state cannot be trusted, so the request is refused rather \
              than answered from it",
             ErrorDetail::entry_untrusted(reason.clone()),
-        )),
-        TrustState::Unattached | TrustState::Warming { .. } | TrustState::Ready => {
-            Ok(state.clone())
-        }
-        _ => Ok(state.clone()),
+        ));
     }
+    Ok(state)
 }
 
 #[cfg(test)]
 mod tests {
-    use norn_wire::{MaintainerIdentity, ReasonCode, WarmingPhase, WatcherLossCause};
+    use norn_wire::{MaintainerIdentity, WarmingPhase, WatcherLossCause};
 
     use crate::registry::AliasConflict;
 
@@ -103,81 +111,168 @@ mod tests {
         VaultName::new(text).expect("a legal vault name")
     }
 
-    /// The demand shape a sample is of. The match carries no wildcard, so a
-    /// demand variant minted without a sample below does not compile.
-    fn shape(demand: &Demand) -> &'static str {
-        match demand {
-            Demand::State(_) => "state",
-            Demand::MaintainerContended(_) => "maintainer-contended",
-            Demand::DuplicateRoot(_) => "duplicate-root",
-            Demand::IdentityRefused(_) => "identity-refused",
-            Demand::UnknownVault => "unknown-vault",
+    /// The name every sample below is answered under, and the name the one
+    /// refusal that echoes a name carries.
+    fn asked() -> VaultName {
+        name("notes")
+    }
+
+    /// What a demand is, apart from what it carries.
+    ///
+    /// The samples below pin what a payload does to an answer; a shape is what
+    /// says a variant is sampled at all.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Shape {
+        State,
+        MaintainerContended,
+        DuplicateRoot,
+        IdentityRefused,
+        UnknownVault,
+    }
+
+    impl Shape {
+        /// The shape after this one, and nothing at the end of the walk. The
+        /// match carries no wildcard, so a shape minted without a place in the
+        /// walk does not compile.
+        const fn after(self) -> Option<Shape> {
+            match self {
+                Shape::State => Some(Shape::MaintainerContended),
+                Shape::MaintainerContended => Some(Shape::DuplicateRoot),
+                Shape::DuplicateRoot => Some(Shape::IdentityRefused),
+                Shape::IdentityRefused => Some(Shape::UnknownVault),
+                Shape::UnknownVault => None,
+            }
         }
     }
 
-    /// Every demand the host answers with, paired with the code it is refused
-    /// under — or `None` where the demand is an answer rather than a refusal.
-    /// Every trust state a demand can carry is sampled, because which of them
-    /// refuses is part of the assignment.
-    fn every_demand() -> Vec<(Demand, Option<ReasonCode>)> {
+    /// Every shape there is, walked from the first. The list is the shapes'
+    /// own account of themselves rather than one written beside them, so a
+    /// shape that reaches the walk without reaching a sample fails the test
+    /// below instead of passing it unexercised.
+    fn every_shape() -> Vec<Shape> {
+        let mut shapes = vec![Shape::State];
+        while let Some(next) = shapes.last().expect("the walk starts at a shape").after() {
+            assert!(
+                !shapes.contains(&next),
+                "{next:?} is reached twice, so the walk is a cycle rather than a census"
+            );
+            shapes.push(next);
+        }
+        shapes
+    }
+
+    /// The shape a sample is of. The match carries no wildcard, so a demand
+    /// variant minted without a shape does not compile.
+    fn shape(demand: &Demand) -> Shape {
+        match demand {
+            Demand::State(_) => Shape::State,
+            Demand::MaintainerContended(_) => Shape::MaintainerContended,
+            Demand::DuplicateRoot(_) => Shape::DuplicateRoot,
+            Demand::IdentityRefused(_) => Shape::IdentityRefused,
+            Demand::UnknownVault => Shape::UnknownVault,
+        }
+    }
+
+    /// Every demand the host answers with, paired with the detail it is
+    /// refused under — or `None` where the demand is an answer rather than a
+    /// refusal. The whole detail is pinned rather than the code alone, because
+    /// what a client reads off a refusal is the payload: a code reached with
+    /// another vault's incumbent, or another root's account of itself, is the
+    /// wrong refusal filed under the right name.
+    ///
+    /// Every trust state a demand can carry is sampled, phases included,
+    /// because which of them refuses is part of the assignment.
+    fn every_demand() -> Vec<(Demand, Option<ErrorDetail>)> {
+        let lost = || {
+            UntrustedReason::watcher_lost(WatcherLossCause::Backend, "the watcher backend stopped")
+        };
+        let refused = || UntrustedReason::environmental_refusal("the vault root stopped reading");
+        let incumbent = || MaintainerIdentity::named(41, "0.1.0", 1_700_000_000);
         vec![
             (Demand::State(TrustState::Ready), None),
             (Demand::State(TrustState::Unattached), None),
+            (
+                Demand::State(TrustState::warming(
+                    WarmingPhase::InstallingCoverage,
+                    0,
+                    None,
+                )),
+                None,
+            ),
             (
                 Demand::State(TrustState::warming(WarmingPhase::Healing, 3, Some(9))),
                 None,
             ),
             (
+                Demand::State(TrustState::warming(
+                    WarmingPhase::ReleasingCoverage,
+                    0,
+                    None,
+                )),
+                None,
+            ),
+            (
                 Demand::State(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
-                Some(ReasonCode::HostEntryUntrusted),
+                Some(ErrorDetail::entry_untrusted(
+                    UntrustedReason::WatcherOverflow,
+                )),
             ),
             (
-                Demand::State(TrustState::untrusted(UntrustedReason::watcher_lost(
-                    WatcherLossCause::Backend,
-                    "the watcher backend stopped",
-                ))),
-                Some(ReasonCode::HostEntryUntrusted),
+                Demand::State(TrustState::untrusted(lost())),
+                Some(ErrorDetail::entry_untrusted(lost())),
             ),
             (
-                Demand::MaintainerContended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
-                Some(ReasonCode::HostMaintainerContended),
+                Demand::State(TrustState::untrusted(refused())),
+                Some(ErrorDetail::entry_untrusted(refused())),
+            ),
+            (
+                Demand::MaintainerContended(incumbent()),
+                Some(ErrorDetail::maintainer_contended(incumbent())),
             ),
             (
                 Demand::MaintainerContended(MaintainerIdentity::unknown()),
-                Some(ReasonCode::HostMaintainerContended),
+                Some(ErrorDetail::maintainer_contended(
+                    MaintainerIdentity::unknown(),
+                )),
             ),
             (
                 Demand::DuplicateRoot(AliasConflict::new([name("alpha"), name("beta")])),
-                Some(ReasonCode::HostDuplicateRoot),
+                Some(ErrorDetail::duplicate_root(["alpha", "beta"])),
             ),
             (
                 Demand::IdentityRefused("the root cannot be read".to_string()),
-                Some(ReasonCode::HostEntryUntrusted),
+                Some(ErrorDetail::entry_untrusted(
+                    UntrustedReason::environmental_refusal("the root cannot be read"),
+                )),
             ),
-            (Demand::UnknownVault, Some(ReasonCode::HostUnknownVault)),
+            (
+                Demand::UnknownVault,
+                Some(ErrorDetail::unknown_vault(asked().as_str())),
+            ),
         ]
     }
 
-    /// Every demand reaches exactly one reason code, and the code it reaches
-    /// is the one pinned beside it. The pairing between a code and its detail
-    /// is the envelope's own, so the detail naming the code back is what says
-    /// the refusal is one refusal rather than two facts side by side.
+    /// Every demand reaches exactly one refusal, carrying the detail pinned
+    /// beside it — payload and all, so a demand answered with another demand's
+    /// account of itself fails here rather than passing on a shared code. The
+    /// code follows from the detail, and the envelope's own code naming it back
+    /// is what says the refusal is one refusal rather than two facts side by
+    /// side.
     #[test]
-    fn every_demand_reaches_exactly_one_reason_code() {
-        let asked = name("notes");
+    fn every_demand_reaches_exactly_one_refusal_detail() {
         for (demand, expected) in every_demand() {
-            let answer = demand.answer(&asked);
+            let answer = demand.clone().answer(&asked());
             match (answer, &expected) {
-                (Err(envelope), Some(code)) => {
+                (Err(envelope), Some(detail)) => {
                     assert_eq!(
-                        envelope.code(),
-                        code,
-                        "{demand:?} is filed under another code"
+                        envelope.detail(),
+                        detail,
+                        "{demand:?} refuses with another detail"
                     );
                     assert_eq!(
-                        envelope.detail().code(),
-                        *code,
-                        "{demand:?} carries a detail that names another code"
+                        envelope.code(),
+                        &detail.code(),
+                        "{demand:?} is filed under a code its detail does not name"
                     );
                     assert!(
                         !envelope.message().is_empty(),
@@ -204,18 +299,37 @@ mod tests {
             .iter()
             .map(|(demand, _)| shape(demand))
             .collect::<Vec<_>>();
-        for expected in [
-            "state",
-            "maintainer-contended",
-            "duplicate-root",
-            "identity-refused",
-            "unknown-vault",
-        ] {
+        for expected in every_shape() {
             assert!(
                 sampled.contains(&expected),
-                "no demand of shape `{expected}` is sampled"
+                "no demand of shape {expected:?} is sampled"
             );
         }
+    }
+
+    /// A root the registry cannot read and an entry untrusted for an
+    /// environmental refusal are one fact on the wire. The host reads them at
+    /// two doors — a recheck of the registry, a state the entry published —
+    /// and a client is told the one thing both mean: the derived state cannot
+    /// be trusted, because the environment refused. Nothing in the envelope
+    /// says which door it came through, and this is where that stays true.
+    #[test]
+    fn a_refused_root_and_an_environmental_refusal_are_one_refusal() {
+        let account = "the vault root stopped being readable";
+        let refused = Demand::IdentityRefused(account.to_string())
+            .answer(&asked())
+            .expect_err("a root the registry cannot read refuses");
+        let untrusted = Demand::State(TrustState::untrusted(
+            UntrustedReason::environmental_refusal(account),
+        ))
+        .answer(&asked())
+        .expect_err("an entry the environment refused refuses");
+
+        assert_eq!(
+            refused.detail(),
+            untrusted.detail(),
+            "the two reads reach details a client can tell apart"
+        );
     }
 
     /// The name the refusal echoes is the name that was asked for, which is
