@@ -48,11 +48,16 @@ pub(crate) enum ServingRefusal {
 /// Every vault this host serves, keyed by the name it is registered under.
 ///
 /// The map is behind a lock because the set is insertable, and every read
-/// clones the entry's handle out and lets the lock go: nothing holds the set
-/// lock across an entry gate, a filesystem read or an [`EntryOps`] call, so the
-/// lock orders only the map itself and the entry a caller holds outlives its
-/// removal from the set. Work standing against an entry therefore ends against
-/// that entry rather than against the map it was reached through.
+/// clones the entry's handle out and lets the lock go: no read holds the set
+/// lock across an entry gate, a filesystem read or an [`EntryOps`] call, and
+/// the entry a caller holds outlives its removal from the set. Work standing
+/// against an entry therefore ends against that entry rather than against the
+/// map it was reached through.
+///
+/// [`ServingSet::remove`] is the one move that holds both locks, and it takes
+/// them in that order — the set, then the entry's gate. Every other holder of
+/// an entry gate reached the entry through a read of the set that has already
+/// let go, so no path takes them the other way round.
 ///
 /// The cost of an insertable set over one frozen at construction is one
 /// uncontended read lock and one refcount per lookup, and one allocation per
@@ -142,6 +147,9 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// A name the set does not serve is already not served, and removing it
     /// changes nothing.
+    // Insertion is on the startup path and removal has no caller in this crate
+    // outside its own cases, so the allow is what says the seam is built and
+    // waiting for the registration verb that calls it rather than unfinished.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove(&self, name: &VaultName) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
