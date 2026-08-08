@@ -6939,8 +6939,10 @@ mod tests {
     /// This characterizes the sharing decision rather than pinning a move: the
     /// entry hands a read a clone at [`Host::begin_read`] instead of a way to
     /// look the handle up per use, and what the case asserts below follows from
-    /// that choice by [`Arc`]'s own accounting. No mutation of the lifecycle
-    /// reddens it; a redesign of the slot's type is what would.
+    /// that choice by [`Arc`]'s own accounting. Its ledger counts redden on no
+    /// mutation of the lifecycle — a redesign of the slot's type is what would
+    /// — while its refusal assertion re-pins a close the identity-refusal row
+    /// already carries.
     #[test]
     fn a_reader_a_read_is_running_on_outlives_the_entrys_own() {
         let ops = Arc::new(FakeOps::default());

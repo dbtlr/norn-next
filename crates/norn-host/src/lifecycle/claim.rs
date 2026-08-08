@@ -291,8 +291,8 @@
 //! them: an attach that installs nothing mints nothing, and a handle minted
 //! under a later lock is one minted from coverage the entry may have given back
 //! already. The fusion of the two moves is carried by construction rather than
-//! by a test: [`Coverage`] hands out no read of what it holds, so a mint under
-//! a later lock is not expressible without widening that type, and a test that
+//! by a test: [`Coverage`] hands out no borrow of what it holds, so no mint
+//! beside the install can read the attachment in place, and a test that
 //! watched the two land together would pass unchanged over a mint moved to a
 //! lock of its own. What the tests pin is the rest of the row — one mint per
 //! install, published where the entry publishes its trust label and readable
@@ -333,9 +333,14 @@
 //! with no window standing, and the non-releasing arm of `end_job_leg`. Neither
 //! closes a reader, and neither has to. The coverage they carry was out with a
 //! leg, and every move that can take an entry past a leg's epoch while that leg
-//! holds coverage — `refuse_conflict`, `refuse_identity_error`, `Host::drop` —
-//! closes the reader before the leg comes back. The `debug_assert!` at each
-//! site is what an epoch-mover added without that close runs into.
+//! holds coverage closes the reader before the leg comes back:
+//! `refuse_conflict`, `refuse_identity_error` and `Host::drop` close it where
+//! they move, and the `poll_watchers` failure arms supersede their own leg's
+//! epoch inside `begin_release`, which closed it already. The one epoch-mover
+//! that closes nothing, `Host::demand`'s invalidate, moves only over a
+//! scheduled detach — a flag set with the coverage in hand and no claim held,
+//! so no leg is out with the coverage it moves past. The `debug_assert!` at
+//! each site is what an epoch-mover added without that close runs into.
 //!
 //! *A read holds the entry's own handle, and holds it beside the entry.*
 //! Carried by `Host::begin_read`, which clones the handle, reads the trust
