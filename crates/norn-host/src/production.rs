@@ -1263,25 +1263,14 @@ mod tests {
         ));
     }
 
-    /// The real-watcher holders that can be queued ahead of a case here.
+    /// The bound on taking the real-watcher lease, derived from the window a
+    /// case here holds it for.
     ///
-    /// Every case in this suite and in the filesystem crate's watcher target
-    /// is a holder — four dozen of them across the workspace — and a soak runs
-    /// several binaries of the same suite at once, so the queue ahead of one
-    /// case is that whole population several times over rather than one
-    /// binary's worth.
-    ///
-    /// The number is a queue depth and not a measurement: queueing behind
-    /// holders that are working is what the lease is for, and the bound
-    /// derived from it is there so that a holder which is stuck rather than
-    /// working is named instead of waited on forever.
-    const QUEUED_HOLDERS: u32 = 192;
-
-    /// The bound on taking the real-watcher lease: one hold window per holder
-    /// that can be queued ahead, derived from the window a case here holds it
-    /// for.
+    /// The queue depth and the wall it is capped against are the isolation
+    /// module's, because they are one machine's and not this suite's: the
+    /// cases queued ahead of one here include another crate's.
     fn lease_budget() -> Budget {
-        lifecycle_budget().dominating(QUEUED_HOLDERS)
+        norn_testkit::isolation::acquisition_budget(lifecycle_budget())
     }
 
     struct Fixture {

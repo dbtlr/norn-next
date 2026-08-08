@@ -19,19 +19,6 @@ use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
-/// The real-watcher holders that can be queued ahead of a case here.
-///
-/// Every case in this target and in the host's production suite is a holder —
-/// four dozen of them across the workspace — and a soak runs several binaries
-/// of the same suite at once, so the queue ahead of one case is that whole
-/// population several times over rather than one binary's worth.
-///
-/// The number is a queue depth and not a measurement: queueing behind holders
-/// that are working is what the lease is for, and the bound derived from it is
-/// there so that a holder which is stuck rather than working is named instead
-/// of waited on forever.
-const QUEUED_HOLDERS: u32 = 192;
-
 /// The vault-relative path a collector writes to prove the backend is
 /// reporting. Not a Markdown document, and named so a reader of a leftover
 /// scratch tree knows what put it there.
@@ -41,10 +28,14 @@ fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
 }
 
-/// The bound on taking the real-watcher lease: one hold window per holder that
-/// can be queued ahead, derived from the window a case here holds it for.
+/// The bound on taking the real-watcher lease, derived from the window a case
+/// here holds it for.
+///
+/// The queue depth and the wall it is capped against are the isolation
+/// module's, because they are one machine's and not this target's: the cases
+/// queued ahead of one here are mostly in another crate.
 fn lease_budget() -> Budget {
-    budget().dominating(QUEUED_HOLDERS)
+    isolation::acquisition_budget(budget())
 }
 
 struct Scratch {

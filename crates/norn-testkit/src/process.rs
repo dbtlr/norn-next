@@ -7,12 +7,24 @@
 //! is the one variable carried over from the parent, because a child that
 //! cannot find a program cannot run at all.
 //!
+//! # Partitioning is this module's isolation; exclusion is the other door
+//!
+//! What a sandbox gives a run is state of its own. The other isolation family
+//! is exclusion — one machine-wide thing used by one holder at a time — and
+//! that is [`crate::isolation`]'s. The two meet in exactly one place, and it is
+//! [`Sandbox::environment`]: the resolved lease root is forwarded to the child
+//! rather than repointed inside the sandbox, because a child that computed a
+//! lease root of its own would queue against nobody and exclude nothing. A
+//! private lease root is isolation in name and an unheld watcher in fact, so
+//! the one variable a run does *not* get a private copy of is that one.
+//!
 //! Four properties are the reason this module exists rather than a bare
 //! [`std::process::Command`] at each call site:
 //!
 //! - **Nothing is shared between concurrent runs.** Each sandbox is named for
 //!   the process that made it and a counter, so two runs in the same suite
-//!   never meet in a cache directory.
+//!   never meet in a cache directory. The lease root above is the stated
+//!   exception, and it is shared on purpose.
 //! - **A build artifact is never executed where it lies.** [`Sandbox::install_binary`]
 //!   copies it to a private path first. A binary that a concurrent build may
 //!   rewrite is not a stable thing to exec, and the failure is a spurious one
@@ -107,7 +119,15 @@ impl Sandbox {
     }
 
     /// The environment a run is given: the allowlist, pointed inside this
-    /// sandbox, plus the parent's `PATH`.
+    /// sandbox, plus the parent's `PATH` and this run's resolved lease root.
+    ///
+    /// **The lease root is resolved here and passed as a value, not left to be
+    /// derived again in the child.** [`crate::isolation::root`] falls back to
+    /// the system temporary directory when nothing names one, and `TMPDIR`
+    /// above points inside this sandbox — so a child left to derive it would
+    /// compute a lease root nobody else has, take every lease uncontended, and
+    /// report nothing about having done so. Forwarding the parent's resolved
+    /// root is what makes a child's real watcher queue behind its parent's.
     pub fn environment(&self) -> BTreeMap<String, OsString> {
         let mut environment: BTreeMap<String, OsString> = BTreeMap::new();
         environment.insert("HOME".to_string(), self.root.join("home").into());
@@ -119,6 +139,10 @@ impl Sandbox {
         );
         environment.insert("XDG_DATA_HOME".to_string(), self.root.join("data").into());
         environment.insert("XDG_STATE_HOME".to_string(), self.root.join("state").into());
+        environment.insert(
+            crate::isolation::ISOLATION_ROOT.to_string(),
+            crate::isolation::root().into(),
+        );
         if let Some(path) = std::env::var_os("PATH") {
             environment.insert("PATH".to_string(), path);
         }
@@ -563,19 +587,63 @@ mod tests {
         );
     }
 
-    /// The allowlist is the contract, so the environment is exactly it plus
-    /// `PATH` — a variable added to one and not the other would make the
-    /// constant a description of nothing.
+    /// The allowlist is the contract, so the environment is exactly it, `PATH`,
+    /// and the lease root — a variable added to one and not the other would
+    /// make the constant a description of nothing.
     #[test]
-    fn a_runs_environment_is_the_allowlist_and_path_and_nothing_else() {
+    fn a_runs_environment_is_the_allowlist_and_path_and_the_lease_root() {
         let sandbox = sandbox("allowlist");
         let environment = sandbox.environment();
         let names: BTreeSet<&str> = environment.keys().map(String::as_str).collect();
         let mut expected: BTreeSet<&str> = ISOLATED_VARIABLES.iter().copied().collect();
+        expected.insert(crate::isolation::ISOLATION_ROOT);
         if std::env::var_os("PATH").is_some() {
             expected.insert("PATH");
         }
         assert_eq!(names, expected);
+    }
+
+    /// **The bar on the one thing a run does not get a private copy of.** A
+    /// child is handed the parent's resolved lease root, and a root inside the
+    /// sandbox is exactly what that forbids.
+    ///
+    /// The forbidden shape is the silent one: `TMPDIR` points inside the
+    /// sandbox and the lease root is derived from it when nothing names one, so
+    /// a child left to derive its own computes a path nobody else has. Every
+    /// lease it takes is then uncontended, its real watcher runs beside every
+    /// sibling's, and nothing anywhere reports that the exclusion stopped
+    /// excluding.
+    #[test]
+    fn a_run_is_handed_the_parents_lease_root_rather_than_one_inside_its_sandbox() {
+        let sandbox = sandbox("lease-root");
+        let forwarded = sandbox
+            .environment()
+            .get(crate::isolation::ISOLATION_ROOT)
+            .cloned()
+            .expect("the lease root is forwarded");
+        assert_eq!(PathBuf::from(&forwarded), crate::isolation::root());
+        assert!(
+            !Path::new(&forwarded).starts_with(sandbox.root()),
+            "the lease root {forwarded:?} is inside the sandbox, so a child queues against nobody"
+        );
+    }
+
+    /// The child derives the same lease root the parent resolved, which is what
+    /// the forwarding is for: the derivation runs in a process whose `TMPDIR`
+    /// is the sandbox's, and it still answers with the parent's root.
+    #[test]
+    fn a_child_of_a_sandbox_resolves_the_parents_lease_root() {
+        let sandbox = sandbox("lease-root-child");
+        let outcome = shell(
+            &sandbox,
+            &format!("echo \"${}\"", crate::isolation::ISOLATION_ROOT),
+        );
+        outcome.assert_success();
+        assert_eq!(
+            PathBuf::from(outcome.stdout_text().trim()),
+            crate::isolation::root(),
+            "a child computed a lease root of its own"
+        );
     }
 
     #[test]
