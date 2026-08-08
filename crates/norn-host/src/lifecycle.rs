@@ -8530,7 +8530,7 @@ mod tests {
         #[test]
         fn an_inserted_vault_attaches_like_a_registered_one() {
             let ops = Arc::new(FakeOps::default());
-            let (host, served) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let (host, served) = fixture_without_ambient_polling(Arc::clone(&ops));
             let joined = VaultName::new("joined").unwrap();
             assert_eq!(
                 host.demand(&joined, AttachMode::Durable).unwrap().outcome(),
@@ -8592,7 +8592,7 @@ mod tests {
         #[test]
         fn a_name_the_set_serves_is_not_inserted_over() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
             let entry = host.shared.entries.get(&name).expect("the vault is served");
 
             assert_eq!(
@@ -8618,7 +8618,7 @@ mod tests {
         #[test]
         fn a_removed_vault_is_unknown_to_the_next_demand() {
             let ops = Arc::new(FakeOps::default());
-            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
 
             host.shared
                 .entries
@@ -8672,7 +8672,7 @@ mod tests {
         fn a_lease_recorded_against_an_entry_holds_it_in_the_set() {
             let ops = Arc::new(FakeOps::default());
             ops.contend_attach.store(true, Ordering::SeqCst);
-            let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
             let lease = host.demand(&name, AttachMode::Durable).unwrap();
             wait_until(
                 "the contended attach to park the entry",
