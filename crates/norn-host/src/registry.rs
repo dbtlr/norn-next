@@ -72,11 +72,11 @@ pub(crate) struct RootReading {
 ///
 /// [`Host::new`]: crate::Host::new
 #[derive(Clone, Debug)]
-pub struct ServingRegistry {
+pub struct RegistryRead {
     entries: BTreeMap<VaultName, Entry>,
 }
 
-impl ServingRegistry {
+impl RegistryRead {
     /// Read the registrations without choosing a winner among duplicate roots.
     /// Duplicates and missing roots are classified per demand, against the
     /// roots the host serves at that moment.
@@ -92,10 +92,6 @@ impl ServingRegistry {
                 .map(|entry| (entry.name.clone(), entry))
                 .collect(),
         }
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
-        self.entries.values()
     }
 
     /// The registrations themselves, ascending by name.

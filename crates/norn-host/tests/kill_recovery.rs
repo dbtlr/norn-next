@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_host::{
-    AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry,
+    AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
 };
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
@@ -212,7 +212,7 @@ impl Fixture {
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
-        let registry = ServingRegistry::from_entries([entry.clone()]);
+        let registry = RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
             .expect("config directories");
         Host::new(

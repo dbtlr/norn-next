@@ -2370,7 +2370,7 @@ mod tests {
         }
         let name = VaultName::new("notes").unwrap();
         let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]);
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let attaches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2850,7 +2850,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), "before").unwrap();
         let name = VaultName::new("notes").unwrap();
         let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]);
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2915,7 +2915,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), "body").unwrap();
         let name = VaultName::new("notes").unwrap();
         let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]);
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let lock = dirs.derived_dir(&name).join("maintainer.lock");
         let host = crate::Host::new(
@@ -3146,7 +3146,7 @@ mod tests {
         fs::write(&note, "before").unwrap();
         let name = VaultName::new("notes").unwrap();
         let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]);
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let lose_coverage = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

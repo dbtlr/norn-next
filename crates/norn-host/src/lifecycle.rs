@@ -13,7 +13,7 @@ use norn_wire::{
     ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 
-use crate::registry::{AliasConflict, ServingRegistry};
+use crate::registry::{AliasConflict, RegistryRead};
 
 mod claim;
 mod serving;
@@ -1408,11 +1408,7 @@ impl<O: EntryOps> Drop for Host<O> {
 }
 
 impl<O: EntryOps> Host<O> {
-    pub fn new(
-        registry: ServingRegistry,
-        ops: O,
-        policy: LifecyclePolicy,
-    ) -> Result<Self, HostError> {
+    pub fn new(registry: RegistryRead, ops: O, policy: LifecyclePolicy) -> Result<Self, HostError> {
         if policy.worker_slots == 0 {
             return Err(HostError::NoWorkerSlots);
         }
@@ -2903,7 +2899,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]);
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2935,7 +2931,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]);
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2958,7 +2954,7 @@ mod tests {
         names: &[&VaultName],
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 (*name).clone(),
                 VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
@@ -3004,7 +3000,7 @@ mod tests {
         for (_, root) in roots {
             std::fs::create_dir_all(root).unwrap();
         }
-        let registry = ServingRegistry::from_entries(roots.iter().map(|(name, root)| {
+        let registry = RegistryRead::from_entries(roots.iter().map(|(name, root)| {
             RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
         }));
         Host::new(
@@ -3728,7 +3724,7 @@ mod tests {
     fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(
                 a.clone(),
                 VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
@@ -5696,7 +5692,7 @@ mod tests {
         let ops = Arc::new(PollingOps::default());
         ops.queued.store(2, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-two-batches").unwrap(),
         )]);
@@ -5775,7 +5771,7 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(
                 a.clone(),
                 VaultRoot::new("/tmp/norn-host-parallel-a").unwrap(),
@@ -5812,7 +5808,7 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-queue-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-queue-b").unwrap()),
         ]);
@@ -5839,7 +5835,7 @@ mod tests {
     fn public_demand_returns_warming_when_the_bounded_queue_is_full() {
         let ops = Arc::new(QueueFullOps::default());
         let names = ["a", "b", "c"].map(|name| VaultName::new(name).unwrap());
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-full-queue-{name}")).unwrap(),
@@ -5874,7 +5870,7 @@ mod tests {
     fn failed_send_releases_the_marker_after_a_newer_epoch_is_installed() {
         let ops = Arc::new(QueueFullOps::default());
         let names = ["a", "b", "c"].map(|name| VaultName::new(name).unwrap());
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-send-race-{name}")).unwrap(),
@@ -5953,7 +5949,7 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
         ]);
@@ -6012,7 +6008,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
         ]);
@@ -6067,7 +6063,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new(&root).unwrap(),
         )]);
@@ -6442,7 +6438,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let healthy = VaultName::new("healthy").unwrap();
         let refused = VaultName::new("refused").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
             RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
         ]);
@@ -6493,7 +6489,7 @@ mod tests {
     fn dispatcher_closes_ready_before_reconciling_a_polled_batch() {
         let ops = Arc::new(PollingOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-poll-fixture").unwrap(),
         )]);
@@ -6529,7 +6525,7 @@ mod tests {
     fn idle_expiry_during_safety_pin_detaches_when_work_releases_it() {
         let ops = Arc::new(PollingOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-pinned-idle").unwrap(),
         )]);
@@ -6574,7 +6570,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]);
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -8458,7 +8454,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-maint-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-maint-b").unwrap()),
         ]);

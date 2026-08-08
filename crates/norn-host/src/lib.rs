@@ -18,7 +18,7 @@ pub use lifecycle::{
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
 };
-pub use registry::{AliasConflict, ServingRegistry};
+pub use registry::{AliasConflict, RegistryRead};
 
 // `norn-embed` is a declared architecture edge that no module consumes yet.
 // The witness keeps the dependency allowlist and manifest in agreement.
