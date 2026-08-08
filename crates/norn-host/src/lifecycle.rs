@@ -2646,6 +2646,16 @@ mod tests {
     /// and the case that proves two attaches take distinct worker slots waits
     /// for the second to start and then for its state. Two is what the widest
     /// of them runs, and the gate's bound is derived over it.
+    ///
+    /// **This is a census, and no test binds it.** Nothing here can read how
+    /// many waits a case runs inside a gate it is holding, so a case that
+    /// grows a third wait makes this number wrong without failing anything.
+    /// The derivation above is what keeps it honest: it names the two cases it
+    /// was counted over, so a reader can recount it, and a case that adds a
+    /// wait inside a gate updates it here. What *is* bound is everything
+    /// downstream of it — that the gate's budget derives from this number
+    /// rather than repeating the flat one, and that the derivation dominates
+    /// the sequence.
     const HELD_OPEN_OUTER_WAITS: u32 = 2;
 
     /// The budget a gate held open across a case's own waits obeys.
@@ -2806,8 +2816,8 @@ mod tests {
     /// Waiting sleeps between questions rather than yielding: several of these
     /// markers are set by the very job threads the wait is waiting on, and a
     /// spin competes with them for the core that would set the marker.
-    fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) {
-        wait_for_marker(label, flag, lifecycle_wait_budget());
+    fn wait_for_flag(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
+        wait_for_marker(label, flag, lifecycle_wait_budget())
     }
 
     /// Hold a fake's job at a gate until the case releases it.
@@ -2817,29 +2827,62 @@ mod tests {
     /// gate that expired first would let the job run on under a case still
     /// asserting it is parked, and the failure would land on whatever the job
     /// touched next rather than here.
-    fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) {
-        wait_for_marker(label, flag, held_open_wait_budget());
+    fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
+        wait_for_marker(label, flag, held_open_wait_budget())
     }
 
-    /// **The bar on the gates here.** A gate a case holds open outlives the
-    /// widest sequence of this suite's own waits it brackets.
+    /// **The bar on the gates here.** The wait a gate is held open by obeys a
+    /// budget that outlives the sequence of this suite's own waits it brackets,
+    /// and the wait those outer waits obey is the one it dominates.
     ///
-    /// The forbidden shape is the two waits sharing one flat constant, which
-    /// is invisible until a case brackets more than one wait: the gate then
-    /// expires inside the sequence, the job it held runs on, and the failure
-    /// lands on whatever that job touched rather than on the gate.
+    /// The forbidden shape is the two wrappers passing the same flat budget,
+    /// which is invisible until a case brackets more than one wait: the gate
+    /// then expires inside the sequence, the job it held runs on, and the
+    /// failure lands on whatever that job touched rather than on the gate.
+    ///
+    /// **What this reads is the budget each wrapper hands to the wait**, not
+    /// the two budget functions side by side. Comparing those would pass
+    /// unchanged while a wrapper quietly took the other one, which is the whole
+    /// defect: the relation between the numbers was never in doubt, the wiring
+    /// was. Both markers are already set, so each wait is met on its first look
+    /// and reports the bound it was obeying without spending any of it.
     #[test]
-    fn a_gate_held_open_outlives_the_waits_it_brackets() {
-        let bracketed = lifecycle_wait_budget().work() * HELD_OPEN_OUTER_WAITS;
+    fn a_gate_held_open_obeys_the_budget_that_outlives_the_waits_it_brackets() {
+        let set = std::sync::atomic::AtomicBool::new(true);
+        let gate = wait_for_release("a gate the case has already released", &set);
+        let outer = wait_for_flag("a marker the fake has already set", &set);
+
+        assert_eq!(
+            gate,
+            held_open_wait_budget(),
+            "a gate is held open under {gate:?}, which is not the budget derived to outlive the \
+             waits it brackets"
+        );
+        assert_eq!(
+            outer,
+            lifecycle_wait_budget(),
+            "an outer wait obeys {outer:?} rather than this suite's own budget"
+        );
+
+        let bracketed = outer.work() * HELD_OPEN_OUTER_WAITS;
         assert!(
-            held_open_wait_budget().work() > bracketed,
+            gate.work() > bracketed,
             "a gate gets {:?}, which does not outlive the {bracketed:?} a case's own \
              {HELD_OPEN_OUTER_WAITS} waits may take",
-            held_open_wait_budget().work()
+            gate.work()
         );
     }
 
-    fn wait_for_marker(label: &str, flag: &std::sync::atomic::AtomicBool, budget: Budget) {
+    /// Wait for a marker under `budget`, and hand back the budget it obeyed.
+    ///
+    /// The return is what lets a case state which of this suite's two budgets a
+    /// wait actually took, rather than which one a reader of the wrapper
+    /// expects it to take.
+    fn wait_for_marker(
+        label: &str,
+        flag: &std::sync::atomic::AtomicBool,
+        budget: Budget,
+    ) -> Budget {
         wait_until(label, budget, || {
             if flag.load(Ordering::SeqCst) {
                 Observed::Met(())
@@ -2848,6 +2891,7 @@ mod tests {
             }
         })
         .unwrap_or_else(|failure| panic!("{failure}"));
+        budget
     }
 
     /// A demanded entry names the work it is doing before it can count any of

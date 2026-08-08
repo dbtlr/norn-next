@@ -10,11 +10,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_host::{Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, ServingRegistry};
-use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::Budget;
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
+use norn_testkit::isolation::{self, Lease};
+use norn_testkit::wait::Budget;
 use norn_wire::TrustState;
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
