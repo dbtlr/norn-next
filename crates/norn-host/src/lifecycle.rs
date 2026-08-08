@@ -32,9 +32,37 @@ pub struct ReconcileWork {
     pub batch: Batch,
 }
 
+/// The coverage a vault entry is served from, and the source of the read-only
+/// snapshot handle its reads run on.
+///
+/// A reader is opened from live coverage and from nothing else, which is what
+/// binds the handle's lifetime to the store behind it: an entry holding no
+/// coverage has no way to make one, and coverage on its way back to
+/// [`EntryOps::detach`] is coverage whose reader the entry has already let go
+/// of.
+pub trait SnapshotSource: Send + 'static {
+    /// The read-only snapshot handle one entry's reads run on. The entry holds
+    /// one and every read against that entry shares it, so what concurrent
+    /// reads serialize against is inside the handle rather than around it.
+    type Reader: Send + Sync + 'static;
+
+    /// Open the handle this coverage serves reads from. Coverage that mints
+    /// none is coverage no read reaches.
+    ///
+    /// This runs under the entry gate lock, on the attach leg's publication,
+    /// and the lock is what the contract here is about. It blocks on no I/O
+    /// beyond the open the attach has already paid for: every other holder of
+    /// that entry — every demand, every reap, every read — waits behind it. And
+    /// it does not panic: an unwind here poisons the gate, and a poisoned gate
+    /// is an entry whose coverage reaches the ops by `Drop` rather than through
+    /// [`EntryOps::detach`], with the maintainer lock and the watcher given back
+    /// out of order.
+    fn open_reader(&self) -> Option<Self::Reader>;
+}
+
 /// The effectful half of an entry lifecycle.
 pub trait EntryOps: Send + Sync + 'static {
-    type Attachment: Send + 'static;
+    type Attachment: SnapshotSource;
 
     /// Acquire maintainership, establish watcher coverage, and only then run
     /// one full hash-authoritative heal. After this returns, the lifecycle
@@ -96,12 +124,12 @@ pub trait EntryOps: Send + Sync + 'static {
 /// heal does. The teardown phase is not offered here at all, because no job
 /// runs it: the lifecycle publishes it directly on the leg that releases an
 /// entry's resources.
-pub struct ProgressReporter<A> {
+pub struct ProgressReporter<A: SnapshotSource> {
     entry: std::sync::Weak<Entry<A>>,
     epoch: u64,
 }
 
-impl<A> ProgressReporter<A> {
+impl<A: SnapshotSource> ProgressReporter<A> {
     #[cfg(test)]
     pub(crate) fn disconnected() -> Self {
         Self {
@@ -157,9 +185,9 @@ impl<A> ProgressReporter<A> {
 /// It borrows the reporter that made it, so it cannot outlive the job whose
 /// progress it publishes, and holding one is the standing evidence that the
 /// counts it publishes belong to the phase it was entered under.
-pub struct Healing<'a, A>(&'a ProgressReporter<A>);
+pub struct Healing<'a, A: SnapshotSource>(&'a ProgressReporter<A>);
 
-impl<A> Healing<'_, A> {
+impl<A: SnapshotSource> Healing<'_, A> {
     /// Publish how far the heal has come, keeping the phase it is running
     /// under.
     pub fn report(&self, healed: u64, total_estimate: Option<u64>) {
@@ -176,7 +204,7 @@ impl<A> Healing<'_, A> {
     }
 }
 
-fn reporter<A>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressReporter<A> {
+fn reporter<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressReporter<A> {
     ProgressReporter {
         entry: Arc::downgrade(entry),
         epoch,
@@ -267,14 +295,32 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
-struct Entry<A> {
+struct Entry<A: SnapshotSource> {
     gate: Mutex<EntryState<A>>,
 }
 
-struct EntryState<A> {
+struct EntryState<A: SnapshotSource> {
     trust: TrustState,
     /// The entry's coverage, and who holds it.
     coverage: Coverage<A>,
+    /// The read-only snapshot handle this entry's reads run on, where its
+    /// coverage minted one.
+    ///
+    /// It sits beside the coverage rather than inside it, so a read proceeds
+    /// while a lifecycle job holds the attachment: a leg takes what
+    /// [`EntryState::coverage`] holds, and the handle here is untouched by
+    /// that taking. What bounds its life instead is the store it was minted
+    /// from — [`EntryState::install_coverage`] mints it under the lock that
+    /// installs that store, and [`EntryState::close_reader`] drops it under
+    /// the lock that starts the store on its way to [`EntryOps::detach`].
+    ///
+    /// The handle is shared rather than owned outright because a read runs
+    /// outside the entry's lock: [`Host::begin_read`] clones it under the
+    /// lock, and the read holds that clone until it ends. A clone in a read's
+    /// hands therefore outlives the entry's own, so a read in flight goes on
+    /// running against the handle it started on; the pin the same hold takes is
+    /// what keeps a teardown from running under it.
+    reader: Option<Arc<A::Reader>>,
     pending: Batch,
     recovery_required: bool,
     /// The live demand leases asking for the recovery the entry currently owes.
@@ -317,7 +363,7 @@ struct EntryState<A> {
     detach_in_flight: bool,
 }
 
-impl<A> EntryState<A> {
+impl<A: SnapshotSource> EntryState<A> {
     /// Owe a recovery no lease has asked for yet.
     ///
     /// The demands standing behind the requirement this one replaces are
@@ -371,6 +417,36 @@ impl<A> EntryState<A> {
     /// Whether a live lease is waiting on the recovery the entry owes.
     fn recovery_demanded(&self) -> bool {
         self.recovery_demands > 0
+    }
+
+    /// Install the coverage an attach acquired, and mint the reader that
+    /// coverage serves reads from.
+    ///
+    /// The mint is this move rather than a step beside it. The lock that
+    /// installs the coverage is the one that publishes the trust label the
+    /// entry answers with, so the handle and the label a read pairs it with
+    /// are installed together: coverage installed with an empty slot is an
+    /// entry publishing a trust label no read can answer under, and a handle
+    /// minted under a later lock is one minted from coverage the entry may
+    /// already have given back.
+    fn install_coverage(&mut self, attachment: A) {
+        debug_assert!(
+            self.reader.is_none(),
+            "a reader stands over coverage the entry never installed"
+        );
+        self.reader = attachment.open_reader().map(Arc::new);
+        self.coverage.install(attachment);
+    }
+
+    /// Let go of the reader this entry's coverage minted, because that
+    /// coverage is on its way to [`EntryOps::detach`]. A handle the entry
+    /// keeps past that is one every later read runs against a closed store.
+    ///
+    /// A read in flight holds its own clone of the handle and the pin that
+    /// says it is running, so what this ends is the entry's hold rather than
+    /// the read's.
+    fn close_reader(&mut self) {
+        self.reader = None;
     }
 
     /// Pin the entry for a leg that is about to run outside its lock. The leg
@@ -507,7 +583,7 @@ impl DemandedWork {
     /// what clears an overflow. The assertion says that invariant out loud, so
     /// a writer that stops pairing the two is caught here rather than by an
     /// entry a reconcile drove to Ready over a cause nothing addressed.
-    fn owed_by<A>(state: &EntryState<A>) -> Self {
+    fn owed_by<A: SnapshotSource>(state: &EntryState<A>) -> Self {
         if !state.coverage.in_hand() {
             Self::Attach
         } else if state.recovery_required {
@@ -555,13 +631,16 @@ impl DemandedWork {
 
 /// Schedule the work a demand lease is owed against an entry free to run it,
 /// publishing the state that work warms under.
-fn schedule_demand<A>(state: &mut EntryState<A>, name: &VaultName) -> Job {
+fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
     state.trust = work.scheduled_state(&state.pending);
     state.claim.schedule(|epoch| work.job(name, epoch))
 }
 
-fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
+fn schedule_due_detach<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
     if state.detach_due
         && state.coverage.in_hand()
         && state.demand_leases == 0
@@ -595,7 +674,10 @@ fn schedule_due_detach<A>(state: &mut EntryState<A>, name: &VaultName) -> Option
 /// terminal failure does not autonomously restart coverage. A release in flight
 /// owes the lease the re-attach [`finish_release`] ends with, which is why
 /// nothing is scheduled here against one.
-fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Option<Job> {
+fn schedule_demanded_work<A: SnapshotSource>(
+    state: &mut EntryState<A>,
+    name: &VaultName,
+) -> Option<Job> {
     if state.demand_leases == 0
         || !matches!(
             state.trust,
@@ -627,12 +709,18 @@ fn schedule_demanded_work<A>(state: &mut EntryState<A>, name: &VaultName) -> Opt
 /// records itself and is answered by [`finish_release`] rather than racing the
 /// publication that ends it — and it stays answered there even where another
 /// writer overwrites the phase mid-window.
-fn begin_release<A>(state: &mut EntryState<A>) {
+///
+/// The reader goes here, at the start of the window, rather than where the
+/// resources reach the ops: this is the instant the entry stops being readable,
+/// and the store the handle was minted from closes inside the window. Every
+/// teardown enters here, so one site is what carries the rule for all of them.
+fn begin_release<A: SnapshotSource>(state: &mut EntryState<A>) {
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against are going back:
     // the marker ends with the gate, because a job nothing holds the entry for
     // is one no dispatch reaches.
     state.claim.open();
+    state.close_reader();
     state.detach_in_flight = true;
     state.trust = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
 }
@@ -660,6 +748,12 @@ fn begin_release<A>(state: &mut EntryState<A>) {
 /// The follow-up is sent from here and left nowhere else. A marker beside a job
 /// this leg has already sent is one a dispatcher tick would send a second time,
 /// under the same epoch.
+///
+/// The reader was let go of at the window's start and nothing minted one inside
+/// it: the one mint site publishes under [`Claim::stands_at`] at its own epoch,
+/// and a window is opened either by a move that superseded every such epoch
+/// first or by the single leg standing at the entry's current one. The
+/// assertion below is where that says itself out loud.
 fn finish_release<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -671,6 +765,10 @@ fn finish_release<O: EntryOps>(
         shared.ops.detach(name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
+    debug_assert!(
+        state.reader.is_none(),
+        "a reader stands over coverage the release has already given back"
+    );
     let reattach_requested = !state.recovery_required || state.recovery_demanded();
     state.claim.end_leg(epoch);
     // The coverage this leg was handed is with the ops now, so the entry holds
@@ -722,7 +820,7 @@ fn finish_release<O: EntryOps>(
 /// The marker planted here is the one a claim did not plant itself, which is
 /// why [`Claim::end_poll`] leaves it standing: a claim that opened the gate
 /// over it would leave a job no dispatch can reach.
-fn restore_lost_claim<A>(state: &mut EntryState<A>, job: Job) {
+fn restore_lost_claim<A: SnapshotSource>(state: &mut EntryState<A>, job: Job) {
     if !state.pinned() {
         state.claim.open();
         return;
@@ -732,7 +830,7 @@ fn restore_lost_claim<A>(state: &mut EntryState<A>, job: Job) {
 
 /// Give back the queue slot a send took, where the entry still holds it for
 /// that send.
-fn release_queue_slot<A>(entry: &Arc<Entry<A>>, epoch: u64) {
+fn release_queue_slot<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) {
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     state.claim.free_slot(epoch);
 }
@@ -900,6 +998,12 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         state.pending.merge(Batch::rescan(RescanScope::Vault));
         state.require_recovery();
         park_identity_refusal(&mut state, detail);
+        // The refusal opens no release window, so the reader is let go of
+        // here: the coverage reaches the ops on both routes below — given up
+        // to them under this lock, or handed to them where the leg holding it
+        // ends — and a handle the entry kept would outlast the store either
+        // way.
+        state.close_reader();
         match state.coverage.give_up() {
             // The entry holds its own coverage, whatever leg is registered
             // against it. The refusal gives it back, and the registration ends
@@ -942,7 +1046,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 /// through [`refuse_identity_error`], which invalidates the claim and leaves
 /// the leg's own [`Claim::stands_at`] false for the publication it is in the
 /// middle of.
-fn park_identity_refusal<A>(state: &mut EntryState<A>, detail: String) {
+fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: String) {
     state.identity_refused = Some(detail.clone());
     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
 }
@@ -1010,6 +1114,44 @@ pub struct Host<O: EntryOps> {
     workers: Vec<thread::JoinHandle<()>>,
     dispatcher_stop: mpsc::Sender<()>,
     dispatcher: Option<thread::JoinHandle<()>>,
+}
+
+/// One read's hold on a vault entry.
+///
+/// The handle and the trust label come out of one hold of the entry gate lock,
+/// which is what makes the label a read answers under and the snapshot it
+/// answers from describe the same instant — trust state, not the handle, is
+/// what buys the right to answer.
+///
+/// The hold pins the entry the way a leg running outside the lock does, so a
+/// teardown that reads the pin schedules nothing while a read is in flight, and
+/// the pin goes back where the hold is dropped — a read that ends, and a read
+/// that unwinds, end their hold on the entry alike.
+pub struct ReadHold<A: SnapshotSource> {
+    entry: Arc<Entry<A>>,
+    reader: Arc<A::Reader>,
+    trust: TrustState,
+}
+
+impl<A: SnapshotSource> ReadHold<A> {
+    /// The trust label the entry stood at when this read took its hold.
+    pub fn trust(&self) -> &TrustState {
+        &self.trust
+    }
+
+    /// The handle this read runs on. It is the entry's own, shared with every
+    /// other read against that entry, and it stays open for as long as this
+    /// hold does.
+    pub fn reader(&self) -> &A::Reader {
+        &self.reader
+    }
+}
+
+impl<A: SnapshotSource> Drop for ReadHold<A> {
+    fn drop(&mut self) {
+        let mut state = self.entry.gate.lock().expect("entry gate poisoned");
+        state.unpin();
+    }
 }
 
 /// One client operation's lifecycle guard and immediate trust answer.
@@ -1193,6 +1335,7 @@ impl<O: EntryOps> Host<O> {
                         gate: Mutex::new(EntryState {
                             trust: TrustState::Unattached,
                             coverage: Coverage::none(),
+                            reader: None,
                             pending: Batch::default(),
                             recovery_required: false,
                             recovery_demands: 0,
@@ -1376,6 +1519,32 @@ impl<O: EntryOps> Host<O> {
                 .maintainer_contended = None;
         }
         self.demand(name, mode)
+    }
+
+    /// Take one read's hold on an entry: the handle its reads run on, the
+    /// trust label it answers under, and the pin that keeps the entry standing
+    /// while it runs.
+    ///
+    /// All three come out of one hold of the entry gate lock. That is what
+    /// couples the label to the handle — a label read under a second lock
+    /// describes a different instant from the snapshot beside it — and what
+    /// makes the pin cover the whole of the read: the hold is taken before the
+    /// lock goes back, so no teardown reads an unpinned entry between the two.
+    ///
+    /// An entry with no handle in its slot answers none. It is holding no
+    /// coverage, its coverage is on its way back, or the coverage it holds
+    /// mints no reader.
+    pub fn begin_read(&self, name: &VaultName) -> Option<ReadHold<O::Attachment>> {
+        let entry = self.shared.entries.get(name)?;
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        let reader = Arc::clone(state.reader.as_ref()?);
+        let trust = state.trust.clone();
+        state.pin();
+        Some(ReadHold {
+            entry: Arc::clone(entry),
+            reader,
+            trust,
+        })
     }
 
     /// Schedule expired entries for teardown. Safety-pinned work is allowed to
@@ -1571,6 +1740,13 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             // already said where the entry stands.
             shared.ops.detach(name, attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
+            // The coverage reached the ops through neither a release window nor
+            // the route around one, so the close it was owed came from whatever
+            // moved the entry past this poll's epoch.
+            debug_assert!(
+                state.reader.is_none(),
+                "a reader stands over coverage a superseded poll has given back"
+            );
             state.coverage.released_by(epoch);
             if state.claim.leg() == Some(Leg::Poll(epoch)) {
                 if state.detach_in_flight {
@@ -1663,10 +1839,18 @@ fn end_job_leg<O: EntryOps>(
         finish_release(shared, entry, name, epoch, held);
         return;
     }
+    let handed_back = held.is_some();
     if let Some(attachment) = held {
         shared.ops.detach(name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
+    // Coverage that reached the ops here reached them through neither a release
+    // window nor the route around one, so the close it was owed came from
+    // whatever moved the entry past this leg's epoch.
+    debug_assert!(
+        !handed_back || state.reader.is_none(),
+        "a reader stands over coverage a superseded leg has given back"
+    );
     if state.claim.end_job_leg(epoch) {
         state.coverage.released_by(epoch);
         if state.detach_in_flight {
@@ -1823,7 +2007,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
-                    state.coverage.install(attachment);
+                    state.install_coverage(attachment);
                     state.clear_recovery();
                     state.identity_refused = None;
                     state.maintainer_contended = None;
@@ -2297,8 +2481,83 @@ mod tests {
         static ON_JOB_THREAD: Cell<bool> = const { Cell::new(false) };
     }
 
+    /// The coverage every fake in this suite installs, and the ledger the
+    /// reader it mints reports itself through.
+    ///
+    /// A fake with a subject in the reader keeps the ledger it hands out and
+    /// reads both ends of the handle's life off it; a fake with no such
+    /// subject installs a ledger nothing reads. Coverage minting a reader is
+    /// the default here, so the slot an entry publishes is occupied wherever a
+    /// case looks at it; `mints` false is the other configuration a coverage
+    /// can be in, and the one production stands in today.
+    struct FakeCoverage {
+        readers: Arc<ReaderLedger>,
+        mints: bool,
+    }
+
+    impl Default for FakeCoverage {
+        fn default() -> Self {
+            Self {
+                readers: Arc::default(),
+                mints: true,
+            }
+        }
+    }
+
+    /// What a case reads about an entry's readers: one open counted where the
+    /// coverage mints the handle, one close where the last holder of that
+    /// handle drops it.
+    #[derive(Default)]
+    struct ReaderLedger {
+        opened: AtomicUsize,
+        closed: AtomicUsize,
+    }
+
+    /// The snapshot handle a fake coverage mints. It reads nothing; what it
+    /// carries is its own open and close.
+    struct FakeReader(Arc<ReaderLedger>);
+
+    impl SnapshotSource for FakeCoverage {
+        type Reader = FakeReader;
+
+        fn open_reader(&self) -> Option<FakeReader> {
+            if !self.mints {
+                return None;
+            }
+            self.readers.opened.fetch_add(1, Ordering::SeqCst);
+            Some(FakeReader(Arc::clone(&self.readers)))
+        }
+    }
+
+    impl Drop for FakeReader {
+        fn drop(&mut self) {
+            self.0.closed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The reader slot an entry is holding, where it is holding one.
+    fn reader_stands<O: EntryOps>(host: &Host<O>, name: &VaultName) -> bool {
+        host.shared
+            .entries
+            .get(name)
+            .expect("the vault is registered")
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .reader
+            .is_some()
+    }
+
     #[derive(Default)]
     struct FakeOps {
+        /// The ledger every coverage this fake installs mints its reader
+        /// through, so a case reads the readers of every entry the fake serves
+        /// off one place.
+        readers: Arc<ReaderLedger>,
+        /// Install coverage that mints no reader, which is the configuration
+        /// production stands in: a store is attached and the entry beside it
+        /// serves no reads.
+        coverage_mints_no_reader: std::sync::atomic::AtomicBool,
         attaches: AtomicUsize,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
@@ -2374,9 +2633,13 @@ mod tests {
     }
 
     impl EntryOps for Arc<FakeOps> {
-        type Attachment = ();
+        type Attachment = FakeCoverage;
 
-        fn attach(&self, _: &VaultName, progress: &ProgressReporter<()>) -> Result<(), JobFailure> {
+        fn attach(
+            &self,
+            _: &VaultName,
+            progress: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.attaches.fetch_add(1, Ordering::SeqCst);
             if self.heal_in_attach.load(Ordering::SeqCst) {
@@ -2391,15 +2654,18 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
-            Ok(())
+            Ok(FakeCoverage {
+                readers: Arc::clone(&self.readers),
+                mints: !self.coverage_mints_no_reader.load(Ordering::SeqCst),
+            })
         }
 
         fn reconcile(
             &self,
             _: &VaultName,
-            _: &mut (),
+            _: &mut FakeCoverage,
             _: ReconcileWork,
-            _: &ProgressReporter<()>,
+            _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             let reconcile = self.reconciles.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2431,8 +2697,8 @@ mod tests {
         fn recover(
             &self,
             _: &VaultName,
-            _: &mut (),
-            _: &ProgressReporter<()>,
+            _: &mut FakeCoverage,
+            _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.recovers.fetch_add(1, Ordering::SeqCst);
@@ -2458,7 +2724,11 @@ mod tests {
             Ok(())
         }
 
-        fn poll(&self, name: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+        fn poll(
+            &self,
+            name: &VaultName,
+            _: &mut FakeCoverage,
+        ) -> Result<Option<Batch>, JobFailure> {
             *self
                 .polls
                 .lock()
@@ -2515,11 +2785,11 @@ mod tests {
             Ok(None)
         }
 
-        fn maintenance_due(&self, _: &VaultName, _: &()) -> bool {
+        fn maintenance_due(&self, _: &VaultName, _: &FakeCoverage) -> bool {
             self.maintenance_due.swap(false, Ordering::SeqCst)
         }
 
-        fn maintain(&self, _: &VaultName, _: &mut ()) -> Result<(), JobFailure> {
+        fn maintain(&self, _: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
@@ -2537,7 +2807,7 @@ mod tests {
             Ok(())
         }
 
-        fn detach(&self, _: &VaultName, _: ()) {
+        fn detach(&self, _: &VaultName, _: FakeCoverage) {
             if self.block_detach.load(Ordering::SeqCst) {
                 self.detach_started.store(true, Ordering::SeqCst);
                 wait_for_release("detach_release", &self.detach_release);
@@ -5308,16 +5578,20 @@ mod tests {
     }
 
     impl EntryOps for Arc<PollingOps> {
-        type Attachment = ();
-        fn attach(&self, _: &VaultName, _: &ProgressReporter<()>) -> Result<(), JobFailure> {
-            Ok(())
+        type Attachment = FakeCoverage;
+        fn attach(
+            &self,
+            _: &VaultName,
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
+            Ok(FakeCoverage::default())
         }
         fn reconcile(
             &self,
             _: &VaultName,
-            _: &mut (),
+            _: &mut FakeCoverage,
             _: ReconcileWork,
-            progress: &ProgressReporter<()>,
+            progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             let healing = progress.healing();
             healing.report(1, Some(2));
@@ -5332,12 +5606,12 @@ mod tests {
         fn recover(
             &self,
             _: &VaultName,
-            _: &mut (),
-            _: &ProgressReporter<()>,
+            _: &mut FakeCoverage,
+            _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             Ok(())
         }
-        fn poll(&self, _: &VaultName, _: &mut ()) -> Result<Option<Batch>, JobFailure> {
+        fn poll(&self, _: &VaultName, _: &mut FakeCoverage) -> Result<Option<Batch>, JobFailure> {
             if self
                 .queued
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
@@ -5349,7 +5623,7 @@ mod tests {
             }
             Ok(self.emit.swap(false, Ordering::SeqCst).then(Batch::default))
         }
-        fn detach(&self, _: &VaultName, _: ()) {}
+        fn detach(&self, _: &VaultName, _: FakeCoverage) {}
     }
 
     #[test]
@@ -5387,44 +5661,48 @@ mod tests {
         a_polled: std::sync::atomic::AtomicBool,
     }
     impl EntryOps for Arc<QueueFullOps> {
-        type Attachment = VaultName;
+        type Attachment = FakeCoverage;
         fn attach(
             &self,
             name: &VaultName,
-            _: &ProgressReporter<VaultName>,
-        ) -> Result<VaultName, JobFailure> {
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
                 wait_for_release("release_a", &self.release_a);
             } else if name.as_str() == "b" {
                 self.b_started.store(true, Ordering::SeqCst);
             }
-            Ok(name.clone())
+            Ok(FakeCoverage::default())
         }
         fn reconcile(
             &self,
             _: &VaultName,
-            _: &mut VaultName,
+            _: &mut FakeCoverage,
             _: ReconcileWork,
-            _: &ProgressReporter<VaultName>,
+            _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             Ok(())
         }
         fn recover(
             &self,
             _: &VaultName,
-            _: &mut VaultName,
-            _: &ProgressReporter<VaultName>,
+            _: &mut FakeCoverage,
+            _: &ProgressReporter<FakeCoverage>,
         ) -> Result<(), JobFailure> {
             Ok(())
         }
-        fn poll(&self, name: &VaultName, _: &mut VaultName) -> Result<Option<Batch>, JobFailure> {
+        fn poll(
+            &self,
+            name: &VaultName,
+            _: &mut FakeCoverage,
+        ) -> Result<Option<Batch>, JobFailure> {
             Ok(
                 (name.as_str() == "a" && !self.a_polled.swap(true, Ordering::SeqCst))
                     .then(|| Batch::rescan(RescanScope::Vault)),
             )
         }
-        fn detach(&self, _: &VaultName, _: VaultName) {}
+        fn detach(&self, _: &VaultName, _: FakeCoverage) {}
     }
 
     #[test]
@@ -6229,6 +6507,467 @@ mod tests {
         host.reap_idle(Instant::now()).unwrap();
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Unattached);
+    }
+
+    /// A fixture whose entries fall idle the instant their last lease ends,
+    /// and whose dispatcher never ticks inside a case's own run: the reap
+    /// under test is the one the case calls, at the moment it calls it.
+    fn fixture_reaped_on_demand(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName) {
+        let name = VaultName::new("notes").unwrap();
+        let entry = RegistryEntry::new(
+            name.clone(),
+            VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
+        );
+        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let host = Host::new(
+            registry,
+            ops,
+            LifecyclePolicy {
+                idle_after: Duration::ZERO,
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        (host, name)
+    }
+
+    /// The reader an entry serves reads from is minted where its coverage is
+    /// installed, so the handle and the trust label the entry publishes over
+    /// that coverage land under one lock. A read takes both out of one lock
+    /// too, which is what makes the label it answers under and the handle it
+    /// answers from describe the same instant.
+    #[test]
+    fn an_attach_publishes_a_reader_beside_the_coverage_it_installs() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            1,
+            "the coverage the attach installed minted no reader"
+        );
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 0);
+        assert!(
+            reader_stands(&host, &name),
+            "an entry publishing Ready holds no reader for a read to run on"
+        );
+
+        let hold = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        assert_eq!(
+            hold.trust(),
+            &TrustState::Ready,
+            "the hold reports a label the entry does not stand at"
+        );
+        assert!(
+            Arc::ptr_eq(&hold.reader().0, &ops.readers),
+            "the read runs on a handle the entry's own coverage did not mint"
+        );
+    }
+
+    /// An attach that installs no coverage mints no reader. The mint is a limb
+    /// of the install rather than a step beside it, so an attach that acquired
+    /// resources and gave them back leaves the slot exactly as it found it.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_that_installs_no_coverage_mints_no_reader() {
+        let base = temp_base("reader-slot-uninstalled-coverage");
+        let root = base.join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = host_over_roots(Arc::clone(&ops), &[(&name, &root)], 1);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        refuse_root_identity(&root);
+        ops.attach_release.store(true, Ordering::SeqCst);
+
+        wait_for_environmental_refusal(&host, &name);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the refused attach kept the resources its heal acquired"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "an attach that installed no coverage minted a reader from it"
+        );
+        assert!(!reader_stands(&host, &name));
+        assert!(host.begin_read(&name).is_none());
+
+        drop((lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// An attach the entry moved on from installs nothing, so it mints
+    /// nothing. What that attach acquired goes back where its leg ends, and a
+    /// handle minted from it would be one the entry answers reads on over a
+    /// store already on its way to the ops.
+    #[test]
+    fn an_attach_the_entry_moved_on_from_mints_no_reader() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        // The refusal moves the entry past the epoch the attach carries, so
+        // the publication below finds an entry that has left the work it ran.
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![name.clone()],
+            },
+        );
+        ops.attach_release.store(true, Ordering::SeqCst);
+
+        wait_for_detaches(
+            &ops,
+            1,
+            "the attach to give back the coverage the entry moved on from",
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "an attach the entry moved on from minted a reader from what it acquired"
+        );
+        assert!(!reader_stands(&host, &name));
+
+        drop(lease);
+    }
+
+    /// The reader is let go of at the start of the release window rather than
+    /// at its end: the store the handle was minted from closes inside that
+    /// window, and an entry still holding the handle when it does is one every
+    /// later read runs against a closed store.
+    #[test]
+    fn a_teardown_closes_the_reader_before_the_store_goes_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the entry was still holding its reader while the store went back"
+        );
+        assert!(!reader_stands(&host, &name));
+        assert!(
+            host.begin_read(&name).is_none(),
+            "an entry whose coverage is going back answered a read"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Unattached);
+    }
+
+    /// A refusal that opens a release window over the leg holding the entry's
+    /// coverage closes the reader at the window, not at the leg's own end. The
+    /// window is where the entry stops being readable, and every teardown
+    /// enters there.
+    #[test]
+    fn a_refusal_over_a_leg_holding_the_coverage_closes_the_reader_at_the_window() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state
+                .coverage
+                .take(epoch)
+                .expect("the entry parked its coverage");
+            (epoch, attachment)
+        };
+        refuse_conflict(
+            &host.shared,
+            &AliasConflict {
+                aliases: vec![name.clone()],
+            },
+        );
+
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(state.detach_in_flight, "no window is open over the leg");
+            assert!(
+                state.reader.is_none(),
+                "a refused entry is still serving reads from a store the leg is taking back"
+            );
+        }
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+
+        end_job_leg(&host.shared, &entry, &name, epoch, Some(attachment));
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// The identity refusal opens no release window, and closes the reader all
+    /// the same. Both routes it takes end with the coverage at the ops — given
+    /// up under its own lock, or handed up where the leg holding it ends — so
+    /// a handle the entry kept would outlast the store on either.
+    #[test]
+    fn an_identity_refusal_closes_the_reader_it_gives_the_coverage_back_with() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "a refused entry kept the reader minted from the store it gave back"
+        );
+        assert!(!reader_stands(&host, &name));
+    }
+
+    /// The refusal's other route: the coverage is out with a leg, so the
+    /// refusal gives back nothing itself and the leg's own end is what reaches
+    /// the ops. The reader is closed at the refusal all the same — the entry
+    /// stops being readable where the refusal lands, and the leg that follows
+    /// hands the store to [`EntryOps::detach`] with no close of its own.
+    #[test]
+    fn an_identity_refusal_over_a_leg_holding_the_coverage_closes_the_reader() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = Arc::clone(
+            host.shared
+                .entries
+                .get(&name)
+                .expect("the vault is registered"),
+        );
+
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state
+                .coverage
+                .take(epoch)
+                .expect("the entry parked its coverage");
+            (epoch, attachment)
+        };
+        refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the refusal gave back coverage the leg is holding"
+        );
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the entry kept its reader over coverage the leg below gives back"
+        );
+        assert!(!reader_stands(&host, &name));
+        assert!(host.begin_read(&name).is_none());
+
+        end_job_leg(&host.shared, &entry, &name, epoch, Some(attachment));
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// An in-flight read holds the entry the way a leg running outside the
+    /// entry's lock does: a reap that finds the entry idle schedules no
+    /// teardown while the read stands, and the teardown it was owed runs once
+    /// the read gives the entry back.
+    #[test]
+    fn a_read_in_flight_holds_the_entry_against_an_idle_teardown() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_reaped_on_demand(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        host.reap_idle(Instant::now()).unwrap();
+        settle();
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "a teardown ran under a read still holding the entry"
+        );
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+
+        drop(hold);
+        host.reap_idle(Instant::now()).unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+    }
+
+    /// The other order, and the gap the contract admits. `schedule_due_detach`
+    /// reads the pin where it schedules and nowhere after, so a teardown
+    /// already scheduled is a teardown a later read does not hold back: the
+    /// read is answered, and the entry is torn down while the hold stands.
+    ///
+    /// What the read goes on holding is its own clone of the handle, which is
+    /// the whole of what it has. Nothing here says the store behind that handle
+    /// is still open, and nothing pins that it is.
+    #[test]
+    fn a_detach_scheduled_before_a_read_tears_the_entry_down_under_it() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("working").unwrap();
+        let occupied = VaultName::new("occupied").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &occupied], 1);
+        drop(host.demand(&working, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        // The one worker, held inside another vault's attach: the detach the
+        // reap below dispatches sits in the channel while this case reads the
+        // entry it was scheduled against.
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        host.reap_idle(Instant::now() + Duration::from_secs(61))
+            .unwrap();
+        assert!(
+            !reader_stands(&host, &occupied),
+            "the occupier's attach published before the reap"
+        );
+
+        let hold = host
+            .begin_read(&working)
+            .expect("a scheduled teardown is not what a read consults");
+        assert_eq!(hold.trust(), &TrustState::Ready);
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &working, TrustState::Unattached);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the scheduled teardown did not run"
+        );
+        assert!(!reader_stands(&host, &working));
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            0,
+            "the entry was torn down and the read's own handle went with it"
+        );
+
+        drop(hold);
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
+        drop(occupier);
+    }
+
+    /// Coverage that mints no reader leaves the slot empty, and the entry
+    /// beside it answers no read while publishing the trust its coverage earns.
+    ///
+    /// That is the configuration production stands in: `ProductionAttachment`
+    /// mints nothing, so a vault attaches, heals and reports Ready with no
+    /// handle in its slot and every read against it refused for want of one.
+    #[test]
+    fn coverage_that_mints_no_reader_leaves_an_entry_no_read_reaches() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        ops.coverage_mints_no_reader.store(true, Ordering::SeqCst);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            0,
+            "coverage that mints no reader minted one"
+        );
+        assert!(
+            !reader_stands(&host, &name),
+            "an entry over coverage that mints no reader is holding a handle"
+        );
+        assert!(
+            host.begin_read(&name).is_none(),
+            "an entry with an empty slot answered a read"
+        );
+    }
+
+    /// Every read against one entry runs on that entry's one handle. A read in
+    /// flight leaves the handle where the next read finds it, so what
+    /// concurrent reads contend for is inside the handle rather than a slot
+    /// they take turns emptying.
+    #[test]
+    fn concurrent_reads_share_the_entrys_one_reader() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let first = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        let second = host
+            .begin_read(&name)
+            .expect("a read in flight left the entry with no reader for the next");
+
+        assert!(
+            std::ptr::eq(first.reader(), second.reader()),
+            "two reads against one entry ran on two handles"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            1,
+            "a read minted a handle of its own rather than taking the entry's"
+        );
+    }
+
+    /// The handle a read is running on outlives the entry's own hold on it. A
+    /// teardown lets go of the slot; what closes a handle a read still has is
+    /// that read ending.
+    ///
+    /// This characterizes the sharing decision rather than pinning a move: the
+    /// entry hands a read a clone at [`Host::begin_read`] instead of a way to
+    /// look the handle up per use, and what the case asserts below follows from
+    /// that choice by [`Arc`]'s own accounting. Its ledger counts redden on no
+    /// mutation of the lifecycle — a redesign of the slot's type is what would
+    /// — while its refusal assertion re-pins a close the identity-refusal row
+    /// already carries.
+    #[test]
+    fn a_reader_a_read_is_running_on_outlives_the_entrys_own() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let hold = host
+            .begin_read(&name)
+            .expect("an entry holding a reader answers a read");
+        refuse_identity_error(&host.shared, &name, "the root cannot be read".into());
+
+        assert!(!reader_stands(&host, &name));
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            0,
+            "the entry closed a handle a read was still running on"
+        );
+
+        drop(hold);
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the handle outlived the read that was running on it"
+        );
     }
 
     #[test]

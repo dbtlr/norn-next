@@ -84,4 +84,6 @@ pub use path::{
 pub use request::{EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
-pub use store::{OpenOutcome, RebuildReason, RecordedStoreSchema, Store, StoreMode};
+pub use store::{
+    OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,
+};

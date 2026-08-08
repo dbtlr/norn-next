@@ -12,7 +12,7 @@ mod registry;
 
 pub use lifecycle::{
     AttachMode, Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure,
-    LifecyclePolicy, ProgressReporter, ReconcileWork,
+    LifecyclePolicy, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
 };
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,

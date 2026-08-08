@@ -16,15 +16,16 @@
 //! a property of the vault rather than of the handle; it is carved and not built
 //! (NORN-33).
 //!
-//! **Reads will run on a separate handle, not on this connection.** That is
-//! recorded here because it is the other half of the writer discipline: when the
-//! read builders arrive, wire reads run on a dedicated read-only snapshot handle
-//! this crate mints from a live store — its own connection, opened inside this
-//! crate so the substrate seam holds — and `&mut` stays what a writer takes. A
-//! shared borrow of the store itself cannot serve reads, because the store lives
-//! inside an attachment that lifecycle jobs hold mutably for their whole
-//! duration (ADR 0014). Nothing implements it yet — every request here is
-//! `&mut`, and this store still holds exactly one connection.
+//! **Reads belong on a separate handle, not on this connection.** That is
+//! recorded here because it is the other half of the writer discipline: a wire
+//! read is answered from a dedicated read-only snapshot handle with its own
+//! connection, opened inside this crate so the substrate seam holds, and `&mut`
+//! stays what a writer takes. A shared borrow of the store itself cannot serve
+//! reads, because the store lives inside an attachment that lifecycle jobs hold
+//! mutably for their whole duration (ADR 0014). [`SnapshotReader`] is that
+//! handle's type and the whole of what stands here: [`Store`] offers no mint,
+//! every request in this crate is `&mut` against the one connection, and no
+//! caller anywhere holds a reader.
 //!
 //! # Write-ahead logging, foreign keys, and why they are set in one place
 //!
@@ -108,6 +109,23 @@ const NOT_A_FILE: &[&str] = &[":memory:", ""];
 /// driver's default of sixteen, which the next statement to join that path would
 /// take the store over.
 const PREPARED_STATEMENT_CACHE: usize = 32;
+
+/// The read-only snapshot handle wire reads run on.
+///
+/// The type is uninhabited and it is the whole of what stands here: [`Store`]
+/// offers no mint, no value of this type exists, and no code path answers a
+/// read from a snapshot. What the type carries is the shape a consumer holds a
+/// reader through — one the entry keeps beside its store and lets go of before
+/// that store closes — so the seam is settled before the connection behind it
+/// is.
+///
+/// The discipline the mint must satisfy when it arrives is the one this shape
+/// was carved for. A reader is made from a live [`Store`], because minting from
+/// a live store is what binds the handle's lifetime and what guarantees the
+/// usable `-shm` a read-only WAL open requires. Its connection is opened
+/// read-only with `query_only` set, so a reader answers from the last committed
+/// increment, never blocks the writer, and derives nothing.
+pub enum SnapshotReader {}
 
 /// Whether the store's file outlives the store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
