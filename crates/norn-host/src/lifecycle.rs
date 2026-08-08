@@ -6953,6 +6953,259 @@ mod tests {
         drop(waiting);
     }
 
+    /// A watcher poll's end reaches an entry a job leg is running against. The
+    /// poll is not the leg registered, so it ends nothing: the registration a
+    /// release window was opened over stands, and the leg's own end is what
+    /// closes that window.
+    ///
+    /// An end blind to the kind would clear the registration here, and the
+    /// window opened over the leg would then close on nothing — the entry would
+    /// stand in the releasing phase with its resources already back.
+    #[test]
+    fn a_poll_end_leaves_the_job_leg_a_release_window_waits_on() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state.coverage.take(epoch);
+            assert!(attachment.is_some(), "the entry parked its coverage");
+            // The window this leg's own end is what closes.
+            begin_release(&mut state);
+            (epoch, attachment)
+        };
+
+        // A poll standing at the same epoch, reaching the end of its own tick.
+        entry.gate.lock().unwrap().claim.end_poll(epoch);
+        assert!(
+            matches!(
+                entry.gate.lock().unwrap().claim.leg(),
+                Some(Leg::Job(held)) if held == epoch
+            ),
+            "a poll's end cleared the job leg the release window waits on"
+        );
+
+        end_job_leg(&host.shared, entry, &name, epoch, attachment);
+        let state = entry.gate.lock().unwrap();
+        assert_eq!(
+            state.trust,
+            TrustState::Unattached,
+            "the release window never closed"
+        );
+        assert!(!state.detach_in_flight, "the release window is still open");
+        assert!(!state.coverage.in_hand());
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+    }
+
+    /// A job arriving at an epoch the entry has left gives back the marker that
+    /// named it, and the gate goes to the leg running against the entry rather
+    /// than open. Nothing else opens the gate on that path, so the derived gate
+    /// is the whole of what a later tick reads: an open one would let the tick
+    /// claim an entry a leg is already running against.
+    #[test]
+    fn a_stale_arrival_gives_its_marker_back_to_the_leg_running_against_the_entry() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let stale = {
+            let mut state = entry.gate.lock().unwrap();
+            let stale = state.claim.epoch();
+            // The job in the channel, the entry moved on from it, and a leg
+            // running against the entry at the epoch it moved on to.
+            state.claim.take_slot(stale);
+            state.claim.supersede();
+            let running = state.claim.epoch();
+            state.claim.begin_job_leg(running);
+            // The marker that job left behind when it lost its coverage.
+            state.claim.restore(Job::Reconcile(name.clone(), stale));
+            stale
+        };
+
+        run_job(&host.shared, Job::Reconcile(name.clone(), stale));
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                state.claim.marker().is_none(),
+                "a job the entry moved past left its marker standing"
+            );
+            assert!(
+                state.claim.is_held(),
+                "the gate went back over a leg still running against the entry"
+            );
+        }
+
+        let polled_before = polls_of(&ops, &name);
+        poll_watchers(&host.shared);
+        assert_eq!(
+            polls_of(&ops, &name),
+            polled_before,
+            "a tick claimed an entry a leg is running against"
+        );
+
+        // The leg the case stood in for, ending.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.end_running_leg();
+            state.claim.open();
+        }
+        drop(lease);
+    }
+
+    /// A dispatcher tick takes no queue slot for the job a running leg is about
+    /// to send itself. The leg gave the gate back with a marker standing, so
+    /// what the tick reads is scheduled work over a free slot, and the
+    /// registration is the whole of what says the send is the leg's.
+    #[test]
+    fn a_tick_takes_no_slot_for_a_marker_the_running_leg_sends_itself() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("a").unwrap();
+        let holding = VaultName::new("b").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding], 1);
+        let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &working, TrustState::Ready);
+        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &holding, TrustState::Ready);
+
+        // The one worker, held inside the other vault's job: a job the tick
+        // below sends stays in the queue, so the slot it took is the whole of
+        // what the tick leaves behind.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &holding, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        let entry = host.shared.entries.get(&working).unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            // A leg whose job lost the coverage it was dispatched against: the
+            // marker it recorded holds the gate, the leg is still registered,
+            // and that leg is what sends the job the marker names.
+            state.claim.begin_job_leg(epoch);
+            state.claim.restore(Job::Reconcile(working.clone(), epoch));
+            state.claim.release();
+            assert!(state.claim.marker().is_some(), "nothing is scheduled");
+            assert!(state.claim.slot().is_none(), "the slot is already taken");
+        }
+
+        dispatch_pending(&host.shared, entry).unwrap();
+        assert!(
+            entry.gate.lock().unwrap().claim.slot().is_none(),
+            "a tick sent the job the leg running against the entry sends itself"
+        );
+
+        // The leg the case stood in for, ending.
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.end_running_leg();
+            state.claim.open();
+        }
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &holding, TrustState::Ready);
+        drop(working_lease);
+        drop(holding_lease);
+    }
+
+    /// A marker holds an entry's gate in its own right, so a tick passes over
+    /// an entry with a job scheduled against it: nothing claims the entry, and
+    /// the job it owes is still the job it owes when the tick has gone by.
+    #[test]
+    fn a_tick_passes_over_an_entry_a_marker_holds() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let scheduled = {
+            let mut state = entry.gate.lock().unwrap();
+            // The entry's next job, waiting on a tick to send it: no leg is
+            // running, so the marker is the whole of what holds the entry.
+            let job = state
+                .claim
+                .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
+            assert!(
+                state.claim.leg().is_none(),
+                "a leg is holding the entry beside the marker"
+            );
+            job.epoch()
+        };
+
+        let polled_before = polls_of(&ops, &name);
+        poll_watchers(&host.shared);
+        assert_eq!(
+            polls_of(&ops, &name),
+            polled_before,
+            "a tick claimed an entry a marker holds"
+        );
+        assert_eq!(
+            entry.gate.lock().unwrap().claim.marker().map(Job::epoch),
+            Some(scheduled),
+            "a tick took the entry out from under the job it owes"
+        );
+        drop(lease);
+    }
+
+    /// A job that lost its coverage records itself for a later tick, and a
+    /// marker already standing keeps the gate: that marker names work raised
+    /// under an epoch the entry moved on to, and the job recording itself is
+    /// putting back work the entry has left.
+    #[test]
+    fn a_job_that_lost_its_coverage_leaves_a_newer_marker_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let newer = {
+            let mut state = entry.gate.lock().unwrap();
+            let stale = Job::Reconcile(name.clone(), state.claim.epoch());
+            // The work the entry moved on to while the job above was in the
+            // channel.
+            let newer = state
+                .claim
+                .schedule(|epoch| Job::Maintenance(name.clone(), epoch));
+            // A claim is holding the coverage the stale job was dispatched
+            // against, so the job records itself rather than ending here.
+            state.pin();
+            restore_lost_claim(&mut state, stale);
+            state.unpin();
+            assert_eq!(
+                state.claim.marker().map(Job::epoch),
+                Some(newer.epoch()),
+                "a job the entry moved past took the marker of the work that replaced it"
+            );
+            newer
+        };
+
+        dispatch_pending(&host.shared, entry).unwrap();
+        wait_until(
+            "the work the entry moved on to to run",
+            lifecycle_wait_budget(),
+            || {
+                let maintenances = ops.maintenances.load(Ordering::SeqCst);
+                if maintenances == 1 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{maintenances} maintenances so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
+        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        let _ = newer;
+        drop(lease);
+    }
+
     /// A rescan a watcher poll reports overflowed the watcher, so what the
     /// entry knows about the vault is unreliable until it is reread: the poll
     /// that reports it publishes the overflow before it gives the entry back,
