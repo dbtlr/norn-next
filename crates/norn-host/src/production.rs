@@ -1422,8 +1422,12 @@ mod tests {
         );
         // The unrelated document is a negative: nothing may touch it, and
         // there is no arrival to wait for. The absorption above is the span it
-        // is judged over — every batch the edit produced has been reconciled by
-        // the time this reads the row.
+        // is judged over, and that span ends at the batch that carried the new
+        // hash — an absorption stops at the first look its condition holds on,
+        // so a later batch the edit also produced may still be settling. What
+        // makes the negative sound is not the span but the subject: a reconcile
+        // of batches naming note.md has no path to this row, and one that
+        // reached it would have reached it inside the span too.
         assert_eq!(
             attachment
                 .store
@@ -2719,7 +2723,7 @@ mod tests {
             &progress,
             "the schema invalidation to be reported and reconciled",
             |_, absorbed| {
-                if absorbed.schema_dirty {
+                if absorbed.saw(SCHEMA_INVALIDATED) {
                     Observed::Met(())
                 } else {
                     Observed::pending("no batch has carried the schema invalidation")
@@ -2969,7 +2973,22 @@ mod tests {
         lose_coverage: std::sync::Arc<std::sync::atomic::AtomicBool>,
         started: std::sync::Arc<std::sync::atomic::AtomicBool>,
         release: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        observed: std::sync::Mutex<Option<norn_fs::Batch>>,
+        /// The document the case edits during the recovery, which is what the
+        /// recovery absorbs for and what every reconcile reports on.
+        subject: DocumentPath,
+        /// The batches the recovery absorbed, waiting to be handed to the
+        /// dispatcher one poll at a time.
+        observed: std::sync::Mutex<std::collections::VecDeque<norn_fs::Batch>>,
+        /// The subject's content hash as of the last reconcile this fake
+        /// delegated, or `None` where the store had no row for it.
+        ///
+        /// **This is how the case watches the store while the host still owns
+        /// it.** An entry reports ready when its recovery returns, and the
+        /// handed-off batches are reconciled by the polls that follow — so a
+        /// case that reads the store the moment the entry says ready is reading
+        /// it before the handoff has landed. A reconcile is where a batch
+        /// becomes a row, and this is written after one.
+        stored: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     }
 
     impl EntryOps for BlockedRecovery {
@@ -2990,7 +3009,14 @@ mod tests {
             work: ReconcileWork,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            self.inner.reconcile(name, attachment, work, progress)
+            self.inner.reconcile(name, attachment, work, progress)?;
+            *self.stored.lock().unwrap() = attachment
+                .store
+                .begin_request()
+                .stored_document(&self.subject)
+                .expect("reading the subject after a reconcile")
+                .map(|row| row.content_hash);
+            Ok(())
         }
 
         fn recover(
@@ -3021,17 +3047,43 @@ mod tests {
                 },
             )
             .map_err(|failure| environmental(failure.to_string()))?;
-            let batch = wait_until(
+
+            // The edit is one change and the platform reports it in as many
+            // batches as it likes — and, where it lost the path set, as a
+            // rescan naming none of them. So what the recovery waits for is the
+            // subject being invalidated rather than a batch arriving. A wait
+            // that took the first batch would hand off whichever fragment came
+            // first, and the ones behind it would reach the dispatcher only as
+            // ordinary warm polls — which is the handoff this case exists to
+            // show, quietly not happening.
+            //
+            // Nothing is reconciled here: the batches are queued for the
+            // dispatcher, because a recovery that reconciled its own handoff
+            // would leave the handoff untested.
+            let subject = self.subject.as_str().to_owned();
+            let mut queued = std::collections::VecDeque::new();
+            norn_testkit::wait::absorb_until(
                 "the edit made during the recovery to be reported",
-                lifecycle_budget(),
-                || match poll_subscription(attachment) {
-                    Ok(Some(batch)) => Observed::Met(Ok(batch)),
-                    Ok(None) => Observed::Pending("the subscription has no batch".to_owned()),
-                    Err(failure) => Observed::Met(Err(failure)),
+                absorbing_budget(),
+                attachment,
+                |attachment, absorbed| match poll_subscription(attachment) {
+                    Ok(Some(batch)) => {
+                        note_batch(&batch, absorbed);
+                        Some(batch)
+                    }
+                    Ok(None) => None,
+                    Err(failure) => panic!("the watcher reported {failure:?}"),
                 },
-            )
-            .map_err(|failure| environmental(failure.to_string()))??;
-            *self.observed.lock().unwrap() = Some(batch);
+                |_, batch| queued.push_back(batch),
+                |_, absorbed| {
+                    if absorbed_covers(absorbed, &subject) {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending("no batch has invalidated the edited document")
+                    }
+                },
+            );
+            *self.observed.lock().unwrap() = queued;
             Ok(())
         }
 
@@ -3051,7 +3103,10 @@ mod tests {
                 attachment.subscription.take();
                 return Err(watcher(WatchError::Backend("test".into())));
             }
-            match self.observed.lock().unwrap().take() {
+            // Every batch the recovery absorbed is handed over before the
+            // ordinary poll resumes, so the handoff carries the whole edit
+            // rather than the fragment that happened to arrive first.
+            match self.observed.lock().unwrap().pop_front() {
                 Some(batch) => Ok(Some(batch)),
                 None => self.inner.poll(name, attachment),
             }
@@ -3083,6 +3138,7 @@ mod tests {
         let lose_coverage = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stored = std::sync::Arc::new(std::sync::Mutex::new(None));
         let host = crate::Host::new(
             registry,
             BlockedRecovery {
@@ -3090,7 +3146,9 @@ mod tests {
                 lose_coverage: std::sync::Arc::clone(&lose_coverage),
                 started: std::sync::Arc::clone(&started),
                 release: std::sync::Arc::clone(&release),
-                observed: std::sync::Mutex::new(None),
+                subject: DocumentPath::new("note.md").unwrap(),
+                observed: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                stored: std::sync::Arc::clone(&stored),
             },
             crate::LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
@@ -3132,6 +3190,24 @@ mod tests {
         fs::write(&note, "during recovery").unwrap();
         release.store(true, std::sync::atomic::Ordering::SeqCst);
         wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        // Ready says the recovery returned; it does not say the batches it
+        // handed off have been reconciled, because those reach the store
+        // through the polls that follow. So the outcome is waited for where it
+        // is visible — after a reconcile, from inside the host that owns the
+        // store — rather than read off disk the moment the entry starts
+        // serving again.
+        let during = norn_fs::ContentHash::of(b"during recovery").to_string();
+        wait_until(
+            "the store to converge on the content written during the recovery",
+            lifecycle_budget(),
+            || match stored.lock().unwrap().clone() {
+                Some(hash) if hash == during => Observed::Met(()),
+                seen => Observed::pending(format!("note.md is {seen:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
         drop(demand);
         drop(host);
         let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
@@ -3140,10 +3216,7 @@ mod tests {
             .stored_document(&DocumentPath::new("note.md").unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(
-            row.content_hash,
-            norn_fs::ContentHash::of(b"during recovery").to_string()
-        );
+        assert_eq!(row.content_hash, during);
     }
 
     /// The budget every lifecycle condition here is given: long enough that a
@@ -3153,47 +3226,80 @@ mod tests {
         Budget::new(Duration::from_secs(15), Duration::from_millis(250))
     }
 
-    /// Everything the pump has taken off the subscription and reconciled.
+    /// The fact a batch carrying a schema invalidation notes about itself.
     ///
-    /// A condition that is about the facts rather than about the store reads
-    /// this: whether the schema invalidation has come through yet, how wide
-    /// the reported roots are, whether the platform gave up on exactness. It
-    /// also renders into every pending observation, so a wait that expires
-    /// says what the watcher had reported by then.
-    #[derive(Default)]
-    struct Absorbed {
-        batches: usize,
-        roots: std::collections::BTreeSet<norn_fs::NormalizedPath>,
-        rescans: std::collections::BTreeSet<RescanScope>,
-        schema_dirty: bool,
+    /// A condition that waits for the invalidation asks for it by this name,
+    /// which is also the line a failing wait renders — so the state a case
+    /// waited for and the state a reader sees are one string.
+    const SCHEMA_INVALIDATED: &str = "the schema was invalidated";
+
+    /// The fact a batch carrying a vault-wide rescan notes about itself.
+    ///
+    /// A rescan is the backend saying the exact path set was lost, so it names
+    /// no path and covers every one of them. It is spelled here rather than
+    /// derived from the variant's debug rendering, because a condition asks for
+    /// it by name.
+    const VAULT_RESCAN: &str = "a vault-wide rescan";
+
+    /// How long one take-and-reconcile may take.
+    ///
+    /// **This is a probe bound over a probe that reconciles**, which is why it
+    /// is not the one the conditions here otherwise obey: a lifecycle probe
+    /// reads a row, and a probe in an absorbing wait takes a settled batch and
+    /// runs a scoped reconcile of every path it named. Sized at the lifecycle
+    /// probe bound, reconciling one wide batch reports
+    /// [`norn_testkit::wait::FailureKind::ProbeOverran`] — a diagnostic that
+    /// says the probe is structurally too expensive, about a probe doing
+    /// exactly the work its wait exists to drive.
+    ///
+    /// It is sized for the slowest plausible reconcile rather than the typical
+    /// one, per the probe bound's own rule: the widest of these is a directory
+    /// removal reported as a rescan, which walks the vault. What it still
+    /// catches is a reconcile whose cost is structurally wrong.
+    const ABSORBING_PROBE: Duration = Duration::from_secs(5);
+
+    /// The budget an absorbing wait obeys.
+    ///
+    /// The work bound is the lifecycle one — how long a change has to come
+    /// through the platform and land in the store is the same question every
+    /// condition here asks — and the probe bound is [`ABSORBING_PROBE`].
+    fn absorbing_budget() -> Budget {
+        Budget::new(lifecycle_budget().work(), ABSORBING_PROBE)
     }
 
-    /// What a batch contributes to [`Absorbed`] when the pump takes it.
+    /// Note what a settled batch says about itself, for the conditions and the
+    /// failures that read it.
     ///
-    /// The platform's batch contributes the facts it carries. A subject that
-    /// drives its own batches contributes that one arrived, which is what a
-    /// case waiting on the count of them is asking about.
-    trait Absorbable {
-        fn record(&self, absorbed: &mut Absorbed);
-    }
-
-    impl Absorbable for norn_fs::Batch {
-        fn record(&self, absorbed: &mut Absorbed) {
-            absorbed.batches += 1;
-            absorbed.roots.extend(self.vault_roots().iter().cloned());
-            absorbed.rescans.extend(self.rescans().iter().copied());
-            absorbed.schema_dirty |= self.schema_dirty();
+    /// The roots and the rescans are here for the failure rather than for a
+    /// condition: a wait that expires over a change that never arrived reads
+    /// very differently from one that expires over a change reported as a
+    /// rescan, and neither reads at all from a bare count. The schema
+    /// invalidation is the one fact a condition asks for by name.
+    fn note_batch(batch: &norn_fs::Batch, absorbed: &mut norn_testkit::wait::Absorbed) {
+        for root in batch.vault_roots() {
+            absorbed.note(format!("root {}", root.as_path().display()));
+        }
+        for rescan in batch.rescans() {
+            absorbed.note(match rescan {
+                RescanScope::Vault => VAULT_RESCAN.to_owned(),
+                RescanScope::Schema => "a schema rescan".to_owned(),
+            });
+        }
+        if batch.schema_dirty() {
+            absorbed.note(SCHEMA_INVALIDATED);
         }
     }
 
-    impl std::fmt::Display for Absorbed {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                f,
-                "{} batches reconciled; roots: {:?}; rescans: {:?}; schema_dirty: {}",
-                self.batches, self.roots, self.rescans, self.schema_dirty
-            )
-        }
+    /// Whether what has been absorbed invalidates `path`.
+    ///
+    /// Two reports answer yes and they are not the same answer. A root at or
+    /// above the path is the backend naming it. A vault-wide rescan names
+    /// nothing and covers everything, because it is the backend saying the
+    /// exact path set was lost — and a case whose outcome is that a reconcile
+    /// happened is answered by either, since a reconcile of a rescan reaches
+    /// the path too.
+    fn absorbed_covers(absorbed: &norn_testkit::wait::Absorbed, path: &str) -> bool {
+        absorbed.saw(VAULT_RESCAN) || absorbed.saw(&format!("root {path}"))
     }
 
     /// Reconcile settled batches until `condition` holds, under one budget.
@@ -3208,11 +3314,10 @@ mod tests {
     /// batch granularity wearing the costume of a reconcile defect.
     ///
     /// So the outcome is the condition and the batches are what the wait
-    /// pumps: every look takes at most one settled batch — the same nonblocking
-    /// take [`poll_subscription`] makes, so one look costs one reconcile of
-    /// what the platform actually reported — reconciles it, and asks the
-    /// condition again. A condition that already holds ends the wait without
-    /// pumping anything.
+    /// pumps. The pump is [`norn_testkit::wait::absorb_until`]; what this adds
+    /// is the two ends that are this crate's — a take that is the same
+    /// nonblocking one [`poll_subscription`] makes, and an apply that is a real
+    /// scoped reconcile.
     ///
     /// A terminal watch error ends the wait rather than being polled for
     /// again, because it takes the subscription with it and every look after
@@ -3223,13 +3328,18 @@ mod tests {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
         what: &str,
-        condition: impl FnMut(&mut ProductionAttachment, &Absorbed) -> Observed<()>,
+        condition: impl FnMut(&mut ProductionAttachment, &norn_testkit::wait::Absorbed) -> Observed<()>,
     ) {
-        absorb_until(
+        norn_testkit::wait::absorb_until(
             what,
+            absorbing_budget(),
             attachment,
-            |attachment| match poll_subscription(attachment) {
-                Ok(batch) => batch,
+            |attachment, absorbed| match poll_subscription(attachment) {
+                Ok(Some(batch)) => {
+                    note_batch(&batch, absorbed);
+                    Some(batch)
+                }
+                Ok(None) => None,
                 Err(failure) => panic!("the watcher reported {failure:?}"),
             },
             |attachment, batch| {
@@ -3240,151 +3350,38 @@ mod tests {
         );
     }
 
-    /// The pump itself, over any subject batches are taken from and applied
-    /// to.
+    /// **The bar on the hold window.** A fixture holds the real-watcher lease
+    /// for its whole life, which is longer than any attachment built on it.
     ///
-    /// The loop is separate from the reconcile it drives so that what it
-    /// promises — pump, apply, ask again, and stop only on the condition — is
-    /// pinnable against a subject whose splits are chosen rather than
-    /// observed. What a real platform does at its own granularity is then the
-    /// only thing left for a real-watcher case to show.
-    fn absorb_until<S, B: Absorbable>(
-        what: &str,
-        subject: &mut S,
-        mut take: impl FnMut(&mut S) -> Option<B>,
-        mut apply: impl FnMut(&mut S, B),
-        mut condition: impl FnMut(&mut S, &Absorbed) -> Observed<()>,
-    ) {
-        let mut absorbed = Absorbed::default();
-        wait_until(what, lifecycle_budget(), || {
-            // The outcome is asked before anything is taken, so an absorption
-            // whose condition already holds consumes no batch and leaves the
-            // facts for whatever the case does next.
-            if let Observed::Met(()) = condition(subject, &absorbed) {
-                return Observed::Met(());
-            }
-            if let Some(batch) = take(subject) {
-                batch.record(&mut absorbed);
-                apply(subject, batch);
-            }
-            match condition(subject, &absorbed) {
-                Observed::Met(()) => Observed::Met(()),
-                Observed::Pending(state) => Observed::pending(format!("{state}; {absorbed}")),
-            }
-        })
-        .unwrap_or_else(|failure| panic!("{failure}"));
-    }
-
-    /// One batch a case chose to report, rather than one the platform
-    /// happened to settle: the invalidated paths, and nothing else.
-    struct DrivenBatch(Vec<&'static str>);
-
-    impl Absorbable for DrivenBatch {
-        fn record(&self, absorbed: &mut Absorbed) {
-            absorbed.batches += 1;
-        }
-    }
-
-    /// A subject whose batches are chosen rather than observed: a queue of
-    /// settled batches, the paths the tree really has, and the paths a
-    /// reconcile of those batches has left stored.
+    /// The forbidden shape is the lease released early — around the attach
+    /// alone, say, rather than around the fixture. It costs nothing visible and
+    /// it speeds this suite up, because every case then runs its watcher beside
+    /// every sibling's; what it buys is the starvation the lease exists to
+    /// prevent, showing up in some other case as changes that never arrived.
     ///
-    /// Applying a batch means reading each invalidated path and keeping the
-    /// ones the tree still has, which is what a scoped reconcile does to the
-    /// store for the cases below.
-    #[derive(Default)]
-    struct DrivenBatches {
-        queue: std::collections::VecDeque<DrivenBatch>,
-        tree: std::collections::BTreeSet<&'static str>,
-        stored: std::collections::BTreeSet<&'static str>,
-    }
-
-    impl DrivenBatches {
-        fn take(&mut self) -> Option<DrivenBatch> {
-            self.queue.pop_front()
-        }
-
-        fn apply(&mut self, batch: DrivenBatch) {
-            for path in batch.0 {
-                if self.tree.contains(path) {
-                    self.stored.insert(path);
-                } else {
-                    self.stored.remove(path);
-                }
-            }
-        }
-    }
-
-    /// **The bar the absorbing idiom stands on.** One change reported across
-    /// two batches is one outcome, whichever half the platform reports first.
-    ///
-    /// The forbidden shape is the wait that ends at the first batch and leaves
-    /// the outcome to a bare assertion after it. Under it each split direction
-    /// fails on the half that had not arrived — the destination missing when
-    /// the source's removal came first, the source still stored when the
-    /// destination came first — and both read as a reconcile that dropped a
-    /// path rather than as a report that had not finished arriving.
+    /// The exclusion is read from this process, which is where a file lock
+    /// excludes per open file description rather than per process. The
+    /// reacquisition after the drop takes the ordinary queueing bound, because
+    /// a sibling case is entitled to be next in line.
     #[test]
-    fn a_split_rename_is_absorbed_whichever_half_arrives_first() {
-        for (label, order) in [
-            ("destination first", ["renamed/b.md", "source/b.md"]),
-            ("source first", ["source/b.md", "renamed/b.md"]),
-        ] {
-            let mut driven = DrivenBatches {
-                queue: order.iter().map(|root| DrivenBatch(vec![root])).collect(),
-                tree: ["renamed/b.md"].into_iter().collect(),
-                stored: ["source/b.md"].into_iter().collect(),
-            };
-            absorb_until(
-                &format!("both halves of a rename split {label}"),
-                &mut driven,
-                DrivenBatches::take,
-                DrivenBatches::apply,
-                |driven, _| {
-                    if !driven.stored.contains("source/b.md")
-                        && driven.stored.contains("renamed/b.md")
-                    {
-                        Observed::Met(())
-                    } else {
-                        Observed::pending(format!("stored: {:?}", driven.stored))
-                    }
-                },
-            );
-            assert_eq!(
-                driven.stored,
-                ["renamed/b.md"].into_iter().collect(),
-                "the {label} split settled on the wrong store"
-            );
-            assert!(
-                driven.queue.is_empty(),
-                "the {label} split left a batch unabsorbed"
-            );
-        }
-    }
+    fn a_fixture_holds_the_watcher_lease_for_as_long_as_it_lives() {
+        let f = Fixture::new("lease-window");
 
-    /// An absorption whose outcome already holds takes no batch, so a case's
-    /// next absorption still has the facts its own change produced.
-    #[test]
-    fn an_outcome_that_already_holds_absorbs_nothing() {
-        let mut driven = DrivenBatches {
-            queue: [DrivenBatch(vec!["later.md"])].into_iter().collect(),
-            tree: ["later.md"].into_iter().collect(),
-            stored: ["already.md"].into_iter().collect(),
-        };
-        absorb_until(
-            "an outcome the store already carries",
-            &mut driven,
-            DrivenBatches::take,
-            DrivenBatches::apply,
-            |driven, _| {
-                if driven.stored.contains("already.md") {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("already.md is not stored")
-                }
-            },
+        let contested = norn_testkit::isolation::Lease::try_hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            Budget::new(Duration::from_millis(50), Duration::from_millis(250)),
         );
-        assert_eq!(driven.queue.len(), 1, "a settled batch was consumed");
+        assert!(
+            contested.is_err(),
+            "the lease was free while a fixture was alive, so any watcher it attaches runs beside \
+             every sibling's"
+        );
+
+        drop(f);
+        drop(norn_testkit::isolation::Lease::hold(
+            norn_testkit::isolation::REAL_WATCHER,
+            lease_budget(),
+        ));
     }
 
     /// Whether the store holds a document at `path`, as a condition.
