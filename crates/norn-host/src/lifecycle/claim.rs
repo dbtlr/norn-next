@@ -176,18 +176,33 @@
 //! Carried by [`Custody`]: [`Coverage::take`] takes from [`Custody::Parked`]
 //! alone and [`Coverage::give_up`] gives up that alone, each leaving the record
 //! of a leg's hold standing, so coverage already out with a leg is taken by no
-//! other and given up by none. Pinned by
+//! other and given up by none. The two limbs stand apart.
+//! [`Coverage::give_up`] leaving the record is pinned by
 //! `destruction_leaves_coverage_out_with_a_leg_to_that_leg`, which is the case
 //! that fails where that record is discarded and a teardown then reads an entry
-//! holding nothing as an entry with nothing out.
+//! holding nothing as an entry with nothing out. [`Coverage::take`] leaving it
+//! is unpinned: a non-`Parked` take recording [`Custody::None`] instead leaves
+//! the whole suite standing. The state that would differ is coverage out with a
+//! leg no registration names, which the debug assertion in `refuse_conflict`
+//! says no entry reaches, and the readers that would tell the two apart pair
+//! the record with that registration under an `||`.
 //!
 //! [`Coverage::out_with_leg`] reading that record rather than inferring it from
-//! an empty attachment is held by the debug assertion in `refuse_conflict`
-//! alone, which `a_lease_stops_answering_a_conflict_a_later_recheck_retired` is
-//! the case that reaches. No assertion outside a debug build covers it: both
-//! release-window arms read it beside the leg registration, under an `||`, so
+//! an empty attachment has four readers. The debug assertion in
+//! `refuse_conflict` states the invariant outright, and
+//! `a_lease_stops_answering_a_conflict_a_later_recheck_retired` is the case
+//! that reaches it. The two release-window arms — `refuse_conflict`'s and the
+//! one in `Host::drop` — read it beside the leg registration under an `||`, so
 //! an entry accounting for no coverage and one whose coverage is out with a leg
-//! take the same route there.
+//! take the same route there. `Host::drop`'s post-join pass reads it bare, with
+//! no registration to fall back on, and continues over what it finds still out:
+//! inferred custody puts an entry accounting for no coverage on that continue,
+//! and `TrustState::Unattached` becomes a state destruction never publishes.
+//! Two cases pin that on the production path, debug assertions on or off:
+//! `destruction_releases_before_it_publishes_unattached`, which asserts the
+//! state the destruction publishes, and
+//! `a_lease_stops_answering_a_conflict_a_later_recheck_retired`, whose
+//! `wait_for_state` times out.
 //!
 //! **A leg ends the coverage it took alone.** Carried by [`Custody::OnLeg`]'s
 //! epoch and the equality in [`Coverage::released_by`]: coverage a leg parked
