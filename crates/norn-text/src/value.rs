@@ -26,14 +26,18 @@
 //!
 //! - **A non-string key** — `1: x`, `true: y`, `[a]: x`, `~: v` — has no
 //!   addressable form, so its entry is dropped with a
-//!   `frontmatter-non-string-key` diagnostic. Coercing it to the string `"1"`
-//!   would invent a field the document does not contain.
+//!   [`FrontmatterNonStringKey`](crate::DiagnosticCode::FrontmatterNonStringKey)
+//!   diagnostic. Coercing it to the string `"1"` would invent a field the
+//!   document does not contain.
 //! - **An explicit tag** — `!foo bar` — is dropped and its value kept, with a
-//!   `frontmatter-tag-stripped` diagnostic.
+//!   [`FrontmatterTagStripped`](crate::DiagnosticCode::FrontmatterTagStripped)
+//!   diagnostic.
 //! - **An integer past `i64` but inside `u64`** is carried as a float, with a
-//!   `frontmatter-integer-out-of-range` diagnostic. Past `u64`, or below
-//!   `i64`, the block does not parse at all: the refusal is
-//!   `frontmatter-parse-failed`, and no value exists to carry.
+//!   [`FrontmatterIntegerOutOfRange`](crate::DiagnosticCode::FrontmatterIntegerOutOfRange)
+//!   diagnostic. Past `u64`, or below `i64`, the block does not parse at all:
+//!   the refusal is
+//!   [`FrontmatterParseFailed`](crate::DiagnosticCode::FrontmatterParseFailed),
+//!   and no value exists to carry.
 //! - **Anchors and aliases** are expanded by the parser before a value exists,
 //!   so there is nothing here to strip: the model holds the expansion. The
 //!   marker bytes themselves are never rewritten, because the field layer
@@ -53,7 +57,7 @@
 
 use std::fmt::{self, Write as _};
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 
 /// A frontmatter value.
 #[derive(Debug, Clone)]
@@ -340,7 +344,7 @@ pub(crate) fn from_yaml(
                     report.dropped_keys += 1;
                     diagnostics.push(
                         Diagnostic::warning(
-                            "frontmatter-non-string-key",
+                            DiagnosticCode::FrontmatterNonStringKey,
                             "an entry keyed by a non-string was dropped; the value model \
                              addresses fields by string key",
                         )
@@ -362,7 +366,7 @@ pub(crate) fn from_yaml(
         serde_yaml::Value::Tagged(tagged) => {
             diagnostics.push(
                 Diagnostic::warning(
-                    "frontmatter-tag-stripped",
+                    DiagnosticCode::FrontmatterTagStripped,
                     "an explicit YAML tag was dropped and its value kept; the value model \
                      carries no tags",
                 )
@@ -393,7 +397,7 @@ fn number_from_yaml(
     if let Some(value) = number.as_u64() {
         diagnostics.push(
             Diagnostic::warning(
-                "frontmatter-integer-out-of-range",
+                DiagnosticCode::FrontmatterIntegerOutOfRange,
                 "an integer outside the range of a 64-bit signed integer is carried as a float",
             )
             .with_detail(format!("`{value}` {}", location(path))),

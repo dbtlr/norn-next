@@ -5,7 +5,7 @@
 //! edited construct do not move.** Comments, blank structure, key order, line
 //! terminators and the quoting of untouched values all survive.
 
-use norn_text::{Document, EditError, LineEnding, Mapping, Value, render_document};
+use norn_text::{DiagnosticCode, Document, EditError, LineEnding, Mapping, Value, render_document};
 
 fn set(source: &str, field: &str, value: Value) -> Result<String, EditError> {
     Document::parse(source).set_field(field, &value)
@@ -379,7 +379,7 @@ fn a_key_the_scanner_decodes_differently_refuses_the_whole_block() {
         document
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "frontmatter-not-editable")
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterNotEditable)
     );
     // The refusal is the block's, not any one field's: the disagreement is
     // about the block's split, and a field-level answer would suggest another
@@ -632,7 +632,7 @@ fn a_tab_indented_sequence_does_not_parse_and_refuses_every_edit() {
         document
             .diagnostics()
             .iter()
-            .any(|d| d.code == "frontmatter-parse-failed")
+            .any(|d| d.code == DiagnosticCode::FrontmatterParseFailed)
     );
     assert_eq!(
         set(source, "title", Value::String("x".into())),

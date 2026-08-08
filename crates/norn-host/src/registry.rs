@@ -5,9 +5,40 @@ use norn_config::registry::{Entry, Registry};
 use norn_fs::{Identity, Refusal, path_identity};
 
 /// Every registry name that resolves to one filesystem root.
+///
+/// The names are ascending and each appears once. [`AliasConflict::new`] is
+/// the one place that order and that uniqueness are established, so a conflict
+/// raised by classifying the whole registry and a conflict raised by one
+/// attach meeting another alias's claim are the same fact in the same shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AliasConflict {
-    pub aliases: Vec<VaultName>,
+    aliases: Vec<VaultName>,
+}
+
+impl AliasConflict {
+    /// The conflict the `aliases` name.
+    ///
+    /// The names come out deduplicated and ascending, and the refusal that
+    /// acts on a conflict is what both of those carry. `refuse_conflict` takes
+    /// one entry gate per alias and holds them all at once: a name appearing
+    /// twice would have that one thread wait on a lock it is already holding,
+    /// and ascending order is what makes two concurrent refusals over
+    /// overlapping alias sets take the gates they share in the same order
+    /// rather than in opposite ones.
+    pub fn new(aliases: impl IntoIterator<Item = VaultName>) -> Self {
+        Self {
+            aliases: aliases
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Every registered name that reaches the one root, ascending.
+    pub fn aliases(&self) -> &[VaultName] {
+        &self.aliases
+    }
 }
 
 /// What one read of the registry resolved for one registered name.
@@ -132,10 +163,7 @@ fn conflicts_from_identities(
 ) -> BTreeMap<VaultName, AliasConflict> {
     let mut conflicts = BTreeMap::new();
     for aliases in identities.into_values().filter(|names| names.len() > 1) {
-        let aliases = aliases.into_iter().collect::<Vec<_>>();
-        let conflict = AliasConflict {
-            aliases: aliases.clone(),
-        };
+        let conflict = AliasConflict::new(aliases.iter().cloned());
         for alias in aliases {
             conflicts.insert(alias, conflict.clone());
         }
@@ -162,8 +190,8 @@ mod tests {
             VaultName::new("alpha").unwrap(),
             VaultName::new("beta").unwrap(),
         ];
-        assert_eq!(registry.conflict(&expected[0]).unwrap().aliases, expected);
-        assert_eq!(registry.conflict(&expected[1]).unwrap().aliases, expected);
+        assert_eq!(registry.conflict(&expected[0]).unwrap().aliases(), expected);
+        assert_eq!(registry.conflict(&expected[1]).unwrap().aliases(), expected);
     }
 
     #[test]
@@ -307,7 +335,7 @@ mod tests {
                 .unwrap()
                 .conflict
                 .unwrap()
-                .aliases,
+                .aliases(),
             vec![healthy_name, alias_name]
         );
         assert!(registry.recheck(&refused_name).is_err());
@@ -351,7 +379,12 @@ mod tests {
         symlink("refused", &refused).unwrap();
 
         assert_eq!(
-            registry.recheck(&alpha).unwrap().conflict.unwrap().aliases,
+            registry
+                .recheck(&alpha)
+                .unwrap()
+                .conflict
+                .unwrap()
+                .aliases(),
             vec![alpha, beta]
         );
 

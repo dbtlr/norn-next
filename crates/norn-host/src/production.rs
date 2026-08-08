@@ -1131,7 +1131,7 @@ fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts,
     facts.frontmatter_diagnostic_count = document
         .diagnostics()
         .iter()
-        .filter(|d| d.code.starts_with("frontmatter-"))
+        .filter(|d| d.code.frontmatter_scoped())
         .count() as u32;
     facts.links = document
         .frontmatter_wikilinks()
@@ -3475,6 +3475,42 @@ mod tests {
         assert_eq!(facts.links.len(), 1);
         assert_eq!(facts.blocks.len(), 1);
         assert_eq!(facts.tags.len(), 2);
+    }
+
+    /// The count beside an absent frontmatter projection is what tells a
+    /// document with no block apart from one whose block did not read, so what
+    /// the mapper counts is the notes the text layer scoped to the block.
+    ///
+    /// Every code that layer raises is scoped to the block today, so no
+    /// document here is one the filter and a count of every note disagree
+    /// over. What the filter holds is the seam: a note the text layer raises
+    /// about something other than the block leaves this count through it, and
+    /// the scope of a code is that layer's own answer rather than a spelling
+    /// read here.
+    #[test]
+    fn the_frontmatter_note_count_separates_no_block_from_a_block_that_did_not_read() {
+        for (source, projection, notes) in [
+            (b"# Heading\nbody\n".to_vec(), false, 0),
+            (b"---\ntitle: note\n---\nbody\n".to_vec(), true, 0),
+            (b"---\ntitle: note\nbody\n".to_vec(), false, 1),
+        ] {
+            let facts = map_document(
+                "note.md",
+                &source,
+                norn_fs::ContentHash::of(&source).to_string(),
+            )
+            .unwrap();
+            let read = String::from_utf8(source).unwrap();
+            assert_eq!(
+                facts.frontmatter.is_some(),
+                projection,
+                "the projection of `{read}` is not what the block is"
+            );
+            assert_eq!(
+                facts.frontmatter_diagnostic_count, notes,
+                "`{read}` raised another count of block-scoped notes"
+            );
+        }
     }
 
     fn dirty_path(

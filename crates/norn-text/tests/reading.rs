@@ -5,7 +5,7 @@
 //! diagnostic and a usable body, never an error return — so most of what this
 //! file states is which diagnostic, and what survives beside it.
 
-use norn_text::{Document, LineEnding, Value, ValueStyle, render_document};
+use norn_text::{DiagnosticCode, Document, LineEnding, Value, ValueStyle, render_document};
 
 fn codes<'a>(document: &'a Document<'a>) -> Vec<&'a str> {
     document
@@ -281,7 +281,7 @@ fn a_sequence_key_and_a_null_key_are_dropped_without_losing_the_rest() {
         document
             .diagnostics()
             .iter()
-            .filter(|d| d.code == "frontmatter-non-string-key")
+            .filter(|d| d.code == DiagnosticCode::FrontmatterNonStringKey)
             .count(),
         2
     );
@@ -537,7 +537,7 @@ fn every_stripped_class_is_both_reported_and_absent() {
         dropped
             .diagnostics()
             .iter()
-            .any(|d| d.code == "frontmatter-non-string-key")
+            .any(|d| d.code == DiagnosticCode::FrontmatterNonStringKey)
     );
     let map = dropped
         .frontmatter()
@@ -552,7 +552,7 @@ fn every_stripped_class_is_both_reported_and_absent() {
         tagged
             .diagnostics()
             .iter()
-            .any(|d| d.code == "frontmatter-tag-stripped")
+            .any(|d| d.code == DiagnosticCode::FrontmatterTagStripped)
     );
     assert_eq!(
         tagged.frontmatter(),
@@ -571,7 +571,7 @@ fn every_stripped_class_is_both_reported_and_absent() {
         merged
             .diagnostics()
             .iter()
-            .any(|d| d.code == "frontmatter-not-editable")
+            .any(|d| d.code == DiagnosticCode::FrontmatterNotEditable)
     );
     assert!(merged.fields().is_empty());
 }

@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
-use norn_wire::{MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
+use norn_wire::{
+    ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
+};
 
 use crate::registry::{AliasConflict, ServingRegistry};
 
@@ -905,7 +907,7 @@ fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
 /// The assertion below is where that invariant is stated.
 fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflict) {
     let entries = conflict
-        .aliases
+        .aliases()
         .iter()
         .filter_map(|name| shared.entries.get(name).map(|entry| (name, entry)))
         .collect::<Vec<_>>();
@@ -1158,7 +1160,14 @@ impl<A: SnapshotSource> Drop for ReadHold<A> {
 /// Dropping it ends the demand lease and starts a fresh idle interval.
 pub struct DemandLease<O: EntryOps> {
     outcome: Demand,
-    held: Option<(Arc<Shared<O>>, VaultName)>,
+    /// The vault this lease was demanded under. It is the lease's own whether
+    /// or not an entry stands behind it, so a refusal answered here names the
+    /// vault that was asked for rather than a name supplied beside it.
+    name: VaultName,
+    /// The host the lease is recorded against, and nothing where the name
+    /// reaches no entry: an unregistered name records no lease and gives none
+    /// back.
+    held: Option<Arc<Shared<O>>>,
     /// The recovery this lease asked the entry for, where it found one owed.
     /// The demand is the lease's own, so dropping withdraws it: a requirement
     /// outliving every lease that asked for it is one nobody is waiting on.
@@ -1185,10 +1194,10 @@ impl<O: EntryOps> DemandLease<O> {
     /// its trust state: the park is what says whether anything more is coming,
     /// and a trust state published over one says nothing about that.
     pub fn completion(&self) -> Demand {
-        let Some((shared, name)) = &self.held else {
+        let Some(shared) = &self.held else {
             return self.outcome.clone();
         };
-        let Some(entry) = shared.entries.get(name) else {
+        let Some(entry) = shared.entries.get(&self.name) else {
             return Demand::UnknownVault;
         };
         let state = entry.gate.lock().expect("entry gate poisoned");
@@ -1196,14 +1205,26 @@ impl<O: EntryOps> DemandLease<O> {
             .parked()
             .unwrap_or_else(|| Demand::State(state.trust.clone()))
     }
+
+    /// This lease's current completion in the wire vocabulary: the trust state
+    /// it answers with, or the refusal it is.
+    ///
+    /// The name a refusal is answered under is the lease's own, so a client
+    /// reading `host/unknown-vault` reads the name this lease was demanded
+    /// under and no other. [`Demand::answer`] takes that name as an argument
+    /// because a demand carries no entry to read it off; a lease does, which is
+    /// why this is the entry point a caller holding one uses.
+    pub fn answer(&self) -> Result<TrustState, ErrorEnvelope> {
+        self.completion().answer(&self.name)
+    }
 }
 
 impl<O: EntryOps> Drop for DemandLease<O> {
     fn drop(&mut self) {
-        let Some((shared, name)) = self.held.take() else {
+        let Some(shared) = self.held.take() else {
             return;
         };
-        let Some(entry) = shared.entries.get(&name) else {
+        let Some(entry) = shared.entries.get(&self.name) else {
             return;
         };
         let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1441,6 +1462,7 @@ impl<O: EntryOps> Host<O> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(DemandLease {
                 outcome: Demand::UnknownVault,
+                name: name.clone(),
                 held: None,
                 recovery_demand: None,
             });
@@ -1462,7 +1484,8 @@ impl<O: EntryOps> Host<O> {
             drop(state);
             return Ok(DemandLease {
                 outcome: park,
-                held: Some((Arc::clone(&self.shared), name.clone())),
+                name: name.clone(),
+                held: Some(Arc::clone(&self.shared)),
                 recovery_demand,
             });
         }
@@ -1485,7 +1508,8 @@ impl<O: EntryOps> Host<O> {
             dispatch_pending(&self.shared, entry)?;
             return Ok(DemandLease {
                 outcome: answer,
-                held: Some((Arc::clone(&self.shared), name.clone())),
+                name: name.clone(),
+                held: Some(Arc::clone(&self.shared)),
                 recovery_demand,
             });
         }
@@ -1493,7 +1517,8 @@ impl<O: EntryOps> Host<O> {
         drop(state);
         Ok(DemandLease {
             outcome: answer,
-            held: Some((Arc::clone(&self.shared), name.clone())),
+            name: name.clone(),
+            held: Some(Arc::clone(&self.shared)),
             recovery_demand,
         })
     }
@@ -1918,9 +1943,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             let claim_identity = reading.identity;
             if let Some(identity) = claim_identity {
                 if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
-                    let mut aliases = vec![owner.clone(), name.clone()];
-                    aliases.sort();
-                    let conflict = AliasConflict { aliases };
+                    let conflict = AliasConflict::new([owner.clone(), name.clone()]);
                     drop(attach_claims);
                     refuse_conflict(shared, &conflict);
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1976,9 +1999,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 && let Some(identity) = post_reading.identity
                 && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
             {
-                let mut aliases = vec![owner.clone(), name.clone()];
-                aliases.sort();
-                post_conflict = Some(AliasConflict { aliases });
+                post_conflict = Some(AliasConflict::new([owner.clone(), name.clone()]));
             }
             if let Some(conflict) = post_conflict {
                 drop(attach_claims);
@@ -2462,6 +2483,7 @@ mod tests {
     use super::*;
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
     use norn_testkit::wait::{Budget, Observed, wait_until};
+    use norn_wire::ErrorDetail;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3687,9 +3709,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test reads the entries from inside that
         // release.
@@ -3730,9 +3750,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             assert!(state.coverage.in_hand(), "the entry parked its coverage");
         }
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
 
         assert_eq!(
@@ -3786,12 +3804,7 @@ mod tests {
             }
             epoch
         };
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
 
         {
             let state = entry.gate.lock().unwrap();
@@ -3843,12 +3856,7 @@ mod tests {
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -3895,12 +3903,7 @@ mod tests {
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_flag("detach_started", &ops.detach_started);
 
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -3941,9 +3944,7 @@ mod tests {
         assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases the alias it
         // finds idle inline, and this test reads both entries from inside that
         // release.
@@ -4010,9 +4011,7 @@ mod tests {
             state.claim.begin_job_leg(epoch);
             state.pending.merge(Batch::rescan(RescanScope::Vault));
         }
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         let polls = ops.polls.lock().unwrap().get(&a).copied().unwrap_or(0);
 
@@ -4122,9 +4121,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         let second = conflict.clone();
         // The first refusal runs off the test thread because it releases both
         // aliases inline, and the second one below runs from inside that
@@ -4158,9 +4155,7 @@ mod tests {
 
         ops.block_detach.store(true, Ordering::SeqCst);
         let shared = Arc::clone(&host.shared);
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         // The refusal runs off the test thread because it releases both
         // aliases inline, and this test demands from inside that release.
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
@@ -4192,9 +4187,7 @@ mod tests {
     fn a_demand_scheduled_over_a_cleared_conflict_answers_the_work_it_scheduled() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
         wait_for_state(&host, &a, TrustState::Unattached);
 
@@ -4276,9 +4269,7 @@ mod tests {
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
         let entry = Arc::clone(host.shared.entries.get(&a).unwrap());
-        let conflict = AliasConflict {
-            aliases: vec![a.clone(), b.clone()],
-        };
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
 
         {
             let mut state = entry.gate.lock().unwrap();
@@ -4318,9 +4309,7 @@ mod tests {
         {
             let entry = host.shared.entries.get(&a).unwrap();
             let mut state = entry.gate.lock().unwrap();
-            state.duplicate_root = Some(AliasConflict {
-                aliases: vec![a.clone(), b.clone()],
-            });
+            state.duplicate_root = Some(AliasConflict::new([a.clone(), b.clone()]));
             state.trust = TrustState::Unattached;
         }
 
@@ -4357,12 +4346,7 @@ mod tests {
     fn a_retry_over_a_resolved_conflict_reaches_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![a.clone(), b.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
         wait_for_state(&host, &a, TrustState::Unattached);
 
         let retried = host.retry(&a, AttachMode::Durable).unwrap();
@@ -4414,6 +4398,40 @@ mod tests {
 
         drop((lease, retried, host));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A lease answers its own completion in the wire vocabulary, under the
+    /// name it was demanded with. The name is the lease's rather than a
+    /// caller's: the one refusal that echoes a name — a vault the registry does
+    /// not hold — names the vault this lease was taken over, so a client
+    /// reading it cannot be told about a vault nobody asked for.
+    #[test]
+    fn a_lease_answers_its_completion_under_the_name_it_holds() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        {
+            let entry = host.shared.entries.get(&a).unwrap();
+            let mut state = entry.gate.lock().unwrap();
+            state.duplicate_root = Some(AliasConflict::new([a.clone(), b.clone()]));
+        }
+        let parked = lease.answer().expect_err("a parked entry refuses");
+        assert_eq!(
+            parked.detail(),
+            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            "the lease answered its park with another refusal"
+        );
+
+        let missing = VaultName::new("ledger").unwrap();
+        let unknown = host.demand(&missing, AttachMode::Durable).unwrap();
+        let refusal = unknown.answer().expect_err("an unregistered vault refuses");
+        assert_eq!(
+            refusal.detail(),
+            &ErrorDetail::unknown_vault(missing.as_str()),
+            "the refusal echoes a name this lease was not demanded under"
+        );
+
+        drop((lease, unknown, host));
     }
 
     /// A demand raised while an entry is giving its resources back defers to
@@ -6619,12 +6637,7 @@ mod tests {
 
         // The refusal moves the entry past the epoch the attach carries, so
         // the publication below finds an entry that has left the work it ran.
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
         ops.attach_release.store(true, Ordering::SeqCst);
 
         wait_for_detaches(
@@ -6699,12 +6712,7 @@ mod tests {
                 .expect("the entry parked its coverage");
             (epoch, attachment)
         };
-        refuse_conflict(
-            &host.shared,
-            &AliasConflict {
-                aliases: vec![name.clone()],
-            },
-        );
+        refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
 
         {
             let state = entry.gate.lock().unwrap();

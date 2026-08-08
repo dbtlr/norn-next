@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::body::BodyScan;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::frontmatter::extract::{BOM, extract};
 use crate::frontmatter::fields::{Field, ValueStyle, classify_value, field_spans, reparse};
 use crate::frontmatter::render::{
@@ -182,7 +182,7 @@ impl<'a> Document<'a> {
         let fields = located.unwrap_or_default();
         if spans_untrusted {
             diagnostics.push(Diagnostic::warning(
-                "frontmatter-not-editable",
+                DiagnosticCode::FrontmatterNotEditable,
                 "the frontmatter block's field spans cannot be trusted, so field edits refuse; \
                  reading is unaffected",
             ));
@@ -614,7 +614,7 @@ impl<'a> Document<'a> {
                 || self
                     .diagnostics
                     .iter()
-                    .any(|diagnostic| diagnostic.code == "frontmatter-unclosed"))
+                    .any(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterUnclosed))
     }
 
     fn absent_or_not_editable(&self, field: &str) -> EditError {

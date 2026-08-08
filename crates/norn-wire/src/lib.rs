@@ -120,6 +120,13 @@
 //! the same way inside [`TrustState`]: a `snake_case` value under `phase`,
 //! read after the `state` tag has been matched.
 //!
+//! **A note a layer raises about its own reading is not a code.** The text
+//! layer files a parse diagnostic under a kebab-case identifier of its own:
+//! it names what a reader worked around inside one document, it carries no
+//! namespace, and it does not cross this seam. What crosses is what a consumer
+//! derives from such notes — a count on a document's row, or a finding — and a
+//! finding is filed under [`FindingKind`] like every other.
+//!
 //! **A `detail` string is prose and never a match target.** Where a payload
 //! carries one — an environmental refusal, a lost watcher — it exists for a
 //! person reading a message or a log. Its wording is not contracted, so a
