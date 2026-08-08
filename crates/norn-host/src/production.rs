@@ -18,7 +18,7 @@ use norn_store::{
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::{FindingKind, MaintainerIdentity};
 
-use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork};
+use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
@@ -88,6 +88,21 @@ pub struct ProductionAttachment {
     subscription: Option<Subscription>,
     _shadows: ShadowHome,
     last_shadow_sweep: Instant,
+}
+
+impl SnapshotSource for ProductionAttachment {
+    /// The store's own read-only handle. `norn-store` is where a connection is
+    /// opened, so the handle a vault's reads run on is the store's type and
+    /// never one composed out here.
+    type Reader = norn_store::SnapshotReader;
+
+    /// [`norn_store::SnapshotReader`] is uninhabited, so an attachment holding
+    /// a live store mints no reader and the entry beside it serves no reads.
+    /// The connection this answers with arrives with the store's read
+    /// builders; what stands here is the seam it arrives through.
+    fn open_reader(&self) -> Option<Self::Reader> {
+        None
+    }
 }
 
 impl ProductionEntryOps {

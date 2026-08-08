@@ -225,6 +225,13 @@
 //! opening a window: that is a park with the resources handed back under it,
 //! and the entry stays untrusted and owing a recovery rather than released.
 //!
+//! One lifetime beside the claim's rides the same seam. The entry's reader goes
+//! back at `begin_release` rather than where the resources reach the ops,
+//! because the window's start is where the entry stops being readable and the
+//! store the handle was minted from closes inside the window; what routes
+//! around the seam lets go of the handle itself. The rows for it are under
+//! *What this module is not*, with the rest of the entry state.
+//!
 //! Two moves revoke a claim blind to the kind and the epoch it stands at:
 //! [`Claim::end_running_leg`], which ends whatever is registered, and the
 //! [`Claim::open`] beside it in `refuse_conflict`, `refuse_identity_error`,
@@ -249,12 +256,12 @@
 //!
 //! # What this module is not
 //!
-//! Two facts about an entry sit next to the claim and are carried outside it.
+//! Three facts about an entry sit next to the claim and are carried outside it.
 //! A carve that moves the claim expects to find them here and does not.
 //!
 //! **The pin discipline.** `EntryState::safety_pins`, with `pin`, `unpin` and
 //! `pinned` beside it, lives in the entry state rather than in the claim. It
-//! carries a narrower fact than any field here: that a leg running outside the
+//! carries a narrower fact than any field here: that work running outside the
 //! entry's lock comes back to a lock of its own, so what it holds is coming
 //! back. Three readers turn on it, and they read it in opposite directions.
 //! `schedule_due_detach` refuses to schedule a teardown while a pin stands, so
@@ -266,6 +273,56 @@
 //! later tick where a pin says the coverage is coming back, and ends there where
 //! none does. Pinned by
 //! `a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back`.
+//!
+//! A read running against the entry takes one too, which is what makes it work
+//! the discipline covers rather than work beside it: `Host::begin_read` takes
+//! the pin under the lock it reads the entry's handle in, and `ReadHold`'s drop
+//! gives it back. Pinned by
+//! `a_read_in_flight_holds_the_entry_against_an_idle_teardown`.
+//!
+//! **The reader slot.** `EntryState::reader`, with `install_coverage`,
+//! `close_reader` and `Host::begin_read` beside it, lives in the entry state
+//! for the reason the pin does: it is a fact about the coverage the entry is
+//! served from, and no move here reads or writes one.
+//!
+//! *A reader is minted where the coverage it reads is installed.* Carried by
+//! `EntryState::install_coverage`, which mints the handle and installs the
+//! coverage as one move, under the lock that publishes the trust label beside
+//! them: an attach that installs nothing mints nothing, and a handle minted
+//! under a later lock is one minted from coverage the entry may have given back
+//! already. Pinned by
+//! `an_attach_publishes_a_reader_beside_the_coverage_it_installs`,
+//! `an_attach_the_entry_moved_on_from_mints_no_reader` and
+//! `an_attach_that_installs_no_coverage_mints_no_reader`.
+//!
+//! *A reader goes back before the store it was minted from closes.* Carried by
+//! `begin_release`, which lets go of the handle at the window's start, so the
+//! one site every teardown enters carries the rule for all of them; and by
+//! `refuse_identity_error`, which routes around that seam and lets go of the
+//! handle itself, on both the routes its coverage takes to the ops. Pinned by
+//! `a_teardown_closes_the_reader_before_the_store_goes_back`,
+//! `a_refusal_over_a_leg_holding_the_coverage_closes_the_reader_at_the_window`
+//! and `an_identity_refusal_closes_the_reader_it_gives_the_coverage_back_with`.
+//! `finish_release` lets go of nothing: every path to it passed through
+//! `begin_release`, and the only mint stands at an epoch a window's opening has
+//! already superseded or under a claim that window's start revoked.
+//!
+//! *A read holds the entry's own handle, and holds it beside the entry.*
+//! Carried by `Host::begin_read`, which clones the handle, reads the trust
+//! label and takes the pin under one hold of the entry gate lock — the coupling
+//! the trust row below is the other half of — and by `ReadHold`'s drop, which
+//! gives the pin back. The handle is shared rather than taken out, so a read in
+//! flight leaves the slot where the next read finds it, and the teardown that
+//! empties that slot closes no handle a read is running on. Pinned by
+//! `concurrent_reads_share_the_entrys_one_reader` and
+//! `a_reader_a_read_is_running_on_outlives_the_entrys_own`.
+//!
+//! What a read's pin buys is what a leg's pin buys and no more: the three
+//! readers named above are the whole of it, so a refusal or a destruction tears
+//! an entry down under a read exactly as it does under a leg. That a read in
+//! flight keeps reading there is carried by the handle it holds and by nothing
+//! else — no move states that the file behind that handle outlives the
+//! teardown, and nothing pins one that would.
 //!
 //! **The trust label and the instant it is a snapshot of.** `EntryState::trust`,
 //! the phases written around it, and the rule that a label is published under
