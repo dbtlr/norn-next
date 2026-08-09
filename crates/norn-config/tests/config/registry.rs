@@ -1,11 +1,9 @@
 //! The registry file: what round-trips, what is refused, and what a read
 //! never does.
-#![allow(clippy::disallowed_methods)] // The registry surface is this crate's own, and this module is what exercises it.
-
 use norn_config::ConfigError;
-use norn_config::registry::{self, Entry, PollBackend, SchemaSource};
+use norn_config::registry::{Entry, PollBackend, SchemaSource};
 
-use crate::common::{Scratch, entry, name, root};
+use crate::common::{Scratch, entry, name, registry, root};
 
 /// A first run and a machine with no vaults are the same reading, and neither
 /// is an error.
