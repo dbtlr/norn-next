@@ -74,12 +74,16 @@ pub(crate) enum ServingRefusal {
 ///
 /// The cost of an insertable set over one frozen at construction is one
 /// uncontended read lock and one refcount per lookup, and per pass over every
-/// entry one allocation plus the refcount traffic of the handles in it — N
-/// increments taking the reading and N decrements dropping it, three readings
-/// per dispatcher tick. That is the price of insertability: a pass over a set
-/// nothing can join borrows its entries in place and pays neither. A scan reads
-/// the set once and works from that reading, so a vault that joins mid-scan is
-/// served from the next pass.
+/// entry one allocation plus whatever that pass copies out of the map. Two
+/// passes exist. [`ServingSet::snapshot`] copies the handles — N refcount
+/// increments taking the reading and N decrements dropping it — and a
+/// dispatcher tick takes three such readings. [`ServingSet::recheck`] copies
+/// the name and root of every entry instead: two allocations each and no
+/// refcount, over a path hotter than the tick, since it runs up to twice per
+/// demand and twice per attach. That is the price of insertability: a pass over
+/// a set nothing can join borrows its entries in place and pays neither. A scan
+/// reads the set once and works from that reading, so a vault that joins
+/// mid-scan is served from the next pass.
 ///
 /// [`EntryOps`]: crate::EntryOps
 pub(crate) struct ServingSet<A: SnapshotSource> {
@@ -128,18 +132,29 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// The guard goes back before the classification runs, so the filesystem
     /// reads below stand outside the set's lock like every other read here.
+    /// What comes out under it is the name and root the classification reads
+    /// and nothing else: a pass carrying entry handles instead would hold every
+    /// entry in the set alive across the filesystem reads, and a removal
+    /// concurrent with one would drop its entry here rather than at the
+    /// removal.
     pub(crate) fn recheck(&self, name: &VaultName) -> Result<RootReading, Refusal> {
-        let entries = {
+        let roots = {
             let entries = self.entries.read().expect("serving set poisoned");
             if !entries.contains_key(name) {
                 return Ok(RootReading::default());
             }
-            entries.values().cloned().collect::<Vec<_>>()
+            entries
+                .values()
+                .map(|entry| {
+                    (
+                        entry.registration.name.clone(),
+                        entry.registration.root.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
         };
         recheck(
-            entries
-                .iter()
-                .map(|entry| (&entry.registration.name, entry.registration.root.as_path())),
+            roots.iter().map(|(name, root)| (name, root.as_path())),
             name,
         )
     }
@@ -175,8 +190,8 @@ impl<A: SnapshotSource> ServingSet<A> {
     ///
     /// The entry the set gives up is dropped after the write lock goes back.
     /// The last handle to an entry runs its state's drop glue — the reader the
-    /// caller's coverage minted among it — and that is work, which is work no
-    /// holder of this lock does.
+    /// caller's coverage minted among it — which is work no holder of this
+    /// lock does.
     // Insertion is on the startup path and removal has no caller in this crate
     // outside its own cases, so the allow is what says the seam is built and
     // waiting for the registration verb that calls it rather than unfinished.
