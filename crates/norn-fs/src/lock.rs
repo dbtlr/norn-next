@@ -233,10 +233,11 @@ impl fmt::Display for Incumbent {
 /// say who has it.
 ///
 /// The parent directory is created if it is not there — the lock lives in the
-/// derived directory it protects, which is Norn's own and which Norn makes. A parent that cannot
-/// be created is an [environmental refusal](Refusal::Environment) carrying the
-/// kind, so a missing path is distinguishable from a denied one and both are
-/// distinguishable from contention.
+/// derived directory it protects, which is Norn's own and which Norn makes. A
+/// parent that cannot be created is an
+/// [environmental refusal](Refusal::Environment) carrying the kind, so a missing
+/// path is distinguishable from a denied one and both are distinguishable from
+/// contention.
 ///
 /// ```
 /// use norn_fs::{Acquisition, try_acquire};

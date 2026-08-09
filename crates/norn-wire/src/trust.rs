@@ -54,8 +54,8 @@ use serde::{Deserialize, Serialize};
 pub enum TrustState {
     /// Registered and holding nothing. There is no derived state to read from
     /// yet, and none out on loan either: change detection over the vault, the
-    /// derived state and sole maintainership of the vault have all been given
-    /// back before an entry publishes this. A caller waiting for it is waiting
+    /// derived state and sole maintainership of that derived state have all
+    /// been given back before an entry publishes this. A caller waiting for it is waiting
     /// for exactly that, on every entry and every path that reaches it.
     Unattached,
     /// Attached and not readable. The entry is either working toward readable
@@ -133,9 +133,9 @@ impl TrustState {
 #[non_exhaustive]
 pub enum WarmingPhase {
     /// The entry is acquiring everything a read runs on, before it reads
-    /// anything: the vault's own working area, sole maintainership of it,
-    /// change detection over the vault tree, and the derived state reads
-    /// answer from. All of it precedes the first document, so the counters
+    /// anything: the vault's own working area, the derived state reads answer
+    /// from, sole maintainership of that derived state, and change detection
+    /// over the vault tree. All of it precedes the first document, so the counters
     /// beside this phase stand at zero against an unknown total, and an entry
     /// may hold here for a while on a loaded machine without anything being
     /// wrong.
@@ -145,7 +145,7 @@ pub enum WarmingPhase {
     Healing,
     /// The entry is giving back everything [`WarmingPhase::InstallingCoverage`]
     /// acquired: change detection over the vault ends, the derived state is
-    /// closed, and sole maintainership of the vault is given up — released
+    /// closed, and sole maintainership of it is given up — released
     /// where the entry still holds it, and put down where the entry has already
     /// lost it to another maintainer. Nothing is counted here, so the counters
     /// beside this phase stand at zero against an unknown total.

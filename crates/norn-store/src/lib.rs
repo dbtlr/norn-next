@@ -14,7 +14,7 @@
 //!
 //! # Where to start
 //!
-//! - [`Store`] — open, create or rebuild a per-vault store, and own its file.
+//! - [`Store`] — open, create or rebuild one derived store, and own its file.
 //! - [`Store::begin_request`] — everything the store does happens inside a
 //!   [`Request`], which is what makes derivation attributable. A request is an
 //!   **attribution scope**: what it groups is the accounting, never the writes.
