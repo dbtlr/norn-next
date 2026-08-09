@@ -50,9 +50,22 @@ pub(crate) enum ServingRefusal {
 /// The map is behind a lock because the set is insertable, and every read
 /// clones the entry's handle out and lets the lock go: no read holds the set
 /// lock across an entry gate, a filesystem read or an [`EntryOps`] call, and
-/// the entry a caller holds outlives its removal from the set. Work standing
-/// against an entry therefore ends against that entry rather than against the
-/// map it was reached through.
+/// the entry a caller holds outlives its removal from the set.
+///
+/// What a caller keeps from that read differs on the two sides of a dispatch,
+/// and both halves carry their own rule. A hold already standing against an
+/// entry — a read's handle, a leg's coverage, a lease — ends against that
+/// entry rather than against the map it was reached through, so a removal
+/// strands nothing that is running. Work in the job channel keeps no handle:
+/// it carries a name and an epoch, and the worker that takes it resolves that
+/// name through the set again, so a job whose name the set no longer serves
+/// reaches no entry and does nothing where it arrives.
+///
+/// That second read is what a removal is admitted under while jobs are in
+/// flight. A job carrying the entry it was scheduled against would spare the
+/// lookup and attach a vault the host has stopped serving, leaving the
+/// maintainer lock and the watcher that attach acquired standing under a name
+/// nothing reaches to give them back.
 ///
 /// [`ServingSet::remove`] is the one move that holds both locks, and it takes
 /// them in that order — the set, then the entry's gate. Every other holder of

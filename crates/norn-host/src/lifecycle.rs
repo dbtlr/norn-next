@@ -8662,6 +8662,130 @@ mod tests {
             );
         }
 
+        /// A job dispatched against a name the set then stops serving does
+        /// nothing when it arrives, and the worker that answered it goes on to
+        /// the next vault's work.
+        ///
+        /// The job in the channel carries a name and an epoch, so the worker
+        /// resolves it through the set again and finds nothing there. That
+        /// second read is what admits a removal while a job stands in the
+        /// channel: a job carrying its entry would attach a vault the host has
+        /// stopped serving.
+        ///
+        /// The refusal is what supersedes the queued job and gives the entry's
+        /// gate back, which is the window the removal is answered in — an
+        /// entry with a job scheduled against it holds its own gate and is
+        /// refused removal.
+        #[test]
+        fn a_job_arriving_for_a_name_the_set_stopped_serving_does_nothing() {
+            let ops = Arc::new(FakeOps::default());
+            let leaving = VaultName::new("leaving").unwrap();
+            let occupied = VaultName::new("occupied").unwrap();
+            let after = VaultName::new("after").unwrap();
+            let host =
+                host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &occupied, &after], 1);
+
+            // The one worker, held inside an attach: the job the demand below
+            // dispatches waits in the channel for the whole of the sequence.
+            ops.block_attach.store(true, Ordering::SeqCst);
+            let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+            wait_for_flag("attach_started", &ops.attach_started);
+
+            drop(host.demand(&leaving, AttachMode::Durable).unwrap());
+            refuse_identity_error(&host.shared, &leaving, "root unreadable".to_string());
+            host.shared
+                .entries
+                .remove(&leaving)
+                .expect("the refused entry holds nothing");
+
+            ops.block_attach.store(false, Ordering::SeqCst);
+            ops.attach_release.store(true, Ordering::SeqCst);
+            wait_for_state(&host, &occupied, TrustState::Ready);
+
+            // The channel holds one job at a time here, so the vault demanded
+            // now reaches it only once the arrival for the removed name has
+            // been taken off. Reaching Ready is therefore both the arrival
+            // having happened and the worker being free to run the job after
+            // it. The retry is the dispatcher's duty, driven here because this
+            // fixture's tick is a minute away.
+            drop(host.demand(&after, AttachMode::Durable).unwrap());
+            wait_until(
+                "the vault demanded after the arrival to attach",
+                lifecycle_wait_budget(),
+                || {
+                    retry_pending_dispatches(&host.shared);
+                    match host.state(&after) {
+                        Some(TrustState::Ready) => Observed::Met(()),
+                        state => Observed::pending(format!("the state is {state:?}")),
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            assert!(
+                !ops.attach_roots.lock().unwrap().contains_key(&leaving),
+                "the job that arrived for the removed name attached it"
+            );
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                2,
+                "the attaches are the two vaults the set still serves and no other"
+            );
+            assert_eq!(
+                host.state(&leaving),
+                None,
+                "the arrival put back the entry the removal took out"
+            );
+            drop(occupier);
+        }
+
+        /// The arrival above with the epoch guard behind it taken away: the job
+        /// stands at the epoch its entry stood at when the set stopped serving
+        /// the name, so the name is the whole of what answers it.
+        ///
+        /// The lifecycle reaches no such arrival on its own — a job in the
+        /// channel holds its entry's gate through its marker, and the gate goes
+        /// back only where something supersedes the job first, so every removal
+        /// a dispatch races is admitted over work already left behind. The
+        /// arrival is driven directly for that reason: what it isolates is the
+        /// resolution by name, and a dispatch that carried its entry instead
+        /// would attach a vault the set no longer serves at an epoch that is
+        /// still current.
+        #[test]
+        fn an_arrival_at_a_current_epoch_for_an_unserved_name_reaches_no_entry() {
+            let ops = Arc::new(FakeOps::default());
+            let leaving = VaultName::new("leaving").unwrap();
+            let bystander = VaultName::new("bystander").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &bystander], 1);
+            let epoch = host
+                .shared
+                .entries
+                .get(&leaving)
+                .expect("the vault is served")
+                .gate
+                .lock()
+                .unwrap()
+                .claim
+                .epoch();
+
+            host.shared
+                .entries
+                .remove(&leaving)
+                .expect("the entry holds nothing");
+            run_job(&host.shared, Job::Attach(leaving.clone(), epoch));
+
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                0,
+                "the arrival for an unserved name reached an entry and attached it"
+            );
+            assert_eq!(
+                host.state(&bystander),
+                Some(TrustState::Unattached),
+                "the arrival for an unserved name ran against the entry beside it"
+            );
+        }
+
         /// A name the set never served is already not served: removing it
         /// answers the way removing a served name that holds nothing does, and
         /// takes nothing out from under the names the set does serve.
