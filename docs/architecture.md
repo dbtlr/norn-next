@@ -654,8 +654,8 @@ blocks the writer (checkpointing stays passive — an aggressive checkpoint mode
 that guarantee away), and may trail in-flight derivation. Concurrent reads serialize against
 each other on the one reader per entry; measured reader contention is what mints more
 through the same seam. The reader is torn down before the store closes on every closing
-path, and an in-flight read pins the entry — which buys the read exactly one thing: **an
-idle reap is not scheduled while a read is running.** It buys no more than that. A refusal,
+path, and an in-flight read pins the entry — which buys the read deferral alone: **no idle
+detach is scheduled while a read is running.** It buys no more than that. A refusal,
 a host destruction, a detach already scheduled when the read began, and a job leg failing
 its way into a release each reach the entry without reading a pin, and a read in flight
 stops none of them. Through such a teardown the read keeps answering from the handle it
