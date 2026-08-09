@@ -35,9 +35,11 @@ We use the `domain-modeling` skill for recording important decisions as well as 
 - Keep a dormant carrier covered at its seam. Its inline documentation must name
   the consuming layer and explain why the current call graph does not yet reach
   it, so implementation and review briefs preserve that context.
-- Read Mimir artifact NORN-a73 before deleting an unreached path. It records
-  carriers removed before this doctrine was explicit; its source commits are
-  re-derivation templates, not reversions to replay.
+- A dormant carrier may be removed only by a new ruling that withdraws its
+  roadmap obligation or establishes a different carrier for it; an empty call
+  graph is not such a ruling. In a NORN-bound work session, consult Mimir
+  artifact NORN-a73 for carriers removed before this doctrine was explicit;
+  its source commits are re-derivation templates, not reversions to replay.
 
 ## How we work
 
