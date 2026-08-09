@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0015-snapshot-reader-lifetime.md
 date: 2026-08-04
 ---
 

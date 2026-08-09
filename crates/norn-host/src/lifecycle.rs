@@ -376,8 +376,9 @@ struct EntryState<A: SnapshotSource> {
     /// outside the entry's lock: [`Host::begin_read`] clones it under the
     /// lock, and the read holds that clone until it ends. A clone in a read's
     /// hands therefore outlives the entry's own, so a read in flight goes on
-    /// running against the handle it started on; the pin the same hold takes is
-    /// what keeps a teardown from running under it.
+    /// running against the handle it started on; the pin the same hold takes
+    /// defers only the scheduling of an idle detach, and a teardown already
+    /// moving runs under the read.
     reader: Option<Arc<A::Reader>>,
     pending: Batch,
     recovery_required: bool,
