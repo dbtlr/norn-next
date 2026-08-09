@@ -223,9 +223,9 @@ impl<'a> Request<'a> {
     /// database proceeds. A heal-scale changeset is therefore **chunked**: each
     /// chunk is its own atomic changeset, which bounds both the lock and the
     /// class set by the chunk rather than by the vault. Serializing writers
-    /// across *processes* is a per-vault file lock that is carved and not built
-    /// (NORN-33); within one process the store's single connection is what
-    /// serializes.
+    /// across *processes* is the maintainer file lock over this derived store,
+    /// which is carved and not built (NORN-33); within one process the store's
+    /// single connection is what serializes.
     ///
     /// `provenance` marks where the post-state came from. It changes no
     /// statement the store runs, and what it binds is how a counter reading is
@@ -727,7 +727,7 @@ impl<'a> Request<'a> {
     ///
     /// **All five reads run inside one `DEFERRED` transaction, so they all see
     /// one WAL snapshot.** Without it, a second `Store` on the same path — the
-    /// per-vault file lock that would rule that out is a later crate's, not
+    /// maintainer file lock that would rule that out is a later crate's, not
     /// this one's (NORN-33) — could commit a re-derivation between the document
     /// read and a fact read, pairing an old document row with the new fact
     /// rows. A snapshot taken once at the first statement is what a torn read

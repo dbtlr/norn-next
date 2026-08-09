@@ -26,10 +26,12 @@
 //!   swap. [`vacate`] and [`move_document`] are the same kernel with different
 //!   endings.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
-//!   why a leaked one is inert, and the [sweep](ShadowHome::sweep) that bounds
-//!   what they cost.
-//! - [`lock`] — the per-vault maintainer lock: at most one host maintains a
-//!   vault's derived state, and that is the *only* thing it decides.
+//!   why a leaked one is inert, and the sweeps that bound what they cost: one
+//!   [per home](ShadowHome::sweep), and two over the
+//!   [fallback root](sweep_fallback_root) and [tree](sweep_fallback_tree) that
+//!   reach what no home's key names.
+//! - [`lock`] — the maintainer lock: at most one host maintains one derived
+//!   store, and that is the *only* thing it decides.
 //! - [`walk`] — the streaming, deterministic filesystem inventory, typed skip
 //!   notations, and the one-open/one-read content observation.
 //! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
@@ -38,12 +40,15 @@
 //!   concludes, the one act that produces one from a file, and the identity a
 //!   landed write reports.
 //!
-//! **A vault's own mechanism files are part of that.** Norn keeps two per vault —
-//! the maintainer lock file and the shadow home — and both live in the machine's
-//! norn data directory rather than among documents, because a mechanism file in
-//! the vault tree gets committed, synced and indexed by tools that cannot know to
-//! ignore it. They are outside the vault and they are still this crate's: no other
-//! crate creates, reads, writes or sweeps them.
+//! **A vault's own mechanism files are part of that.** Norn keeps two per
+//! [maintainership](MaintainershipKey) — the maintainer lock file and the shadow
+//! home — and both live in the machine's norn data directory rather than among
+//! documents, because a mechanism file in the vault tree gets committed, synced
+//! and indexed by tools that cannot know to ignore it. A vault on another
+//! filesystem is where that gives: the home falls back to the maintainership's
+//! own directory under one dot-directory the walk excludes wholesale. Wherever
+//! they sit they are this crate's: no other crate creates, reads, writes or
+//! sweeps them.
 //!
 //! # Two rejected shapes, named so they stay rejected
 //!
@@ -96,7 +101,10 @@ pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
 pub use read::{PathKind, ReadAndHash, path_kind, read_and_hash, read_optional_and_hash};
 pub use refusal::Refusal;
-pub use shadow::{Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept, is_shadow_name};
+pub use shadow::{
+    FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept,
+    is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
+};
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
     WalkFact, walk,

@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0016-maintainer-singleton-per-derived-store.md
 date: 2026-07-31
 ---
 

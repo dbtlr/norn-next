@@ -261,6 +261,96 @@ impl ConfigDirs {
     pub fn derived_dir(&self, name: &VaultName) -> PathBuf {
         self.vaults_dir().join(name.as_str())
     }
+
+    /// The three names one derived store is keyed by, taken from this value.
+    ///
+    /// A pure function of the same [`ConfigDirs`] [`ConfigDirs::derived_dir`]
+    /// is built from, so a mechanism kept somewhere other than that directory
+    /// carries the directory's own identity rather than a second spelling of
+    /// it.
+    pub fn derived_key(&self, name: &VaultName) -> DerivedKey {
+        DerivedKey {
+            channel: Channel::COMPILED.app_directory(),
+            vault: name.as_str().to_owned(),
+            data_base: digest_component(self.data.as_os_str().as_encoded_bytes()),
+        }
+    }
+}
+
+/// The three names one derived store is keyed by: the data base it lives under,
+/// the channel this build is pinned to, and the registered vault name.
+///
+/// These are the three coordinates [`ConfigDirs::derived_dir`]'s path is built
+/// from — the data base and the channel through [`ConfigDirs::new`], the name as
+/// the last component — and therefore the three coordinates the maintainer lock
+/// inside that directory is taken under. Two derived stores are one store
+/// exactly when all three agree; a mechanism kept elsewhere is keyed by all
+/// three or it is keyed by less than the lock is. The digest is 64-bit and not
+/// cryptographic, so two data bases colliding into one key is possible at
+/// roughly 2^-64 — the unsafe direction, costing two locks one shared home —
+/// and that likelihood is the price accepted for a spellable component.
+///
+/// The two spellable coordinates are carried as themselves. The data base is a
+/// whole absolute path and cannot be one component, so it is carried as a
+/// [digest](digest_component) of it — the one part a reader cannot spell back,
+/// which is why the other two are not folded in with it.
+///
+/// Each part is one path component, which is what makes the key spellable as a
+/// directory anywhere: [`Channel::app_directory`] is a fixed name,
+/// [`VaultName`]'s grammar admits no separator, and the digest is hexadecimal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivedKey {
+    channel: &'static str,
+    vault: String,
+    data_base: String,
+}
+
+impl DerivedKey {
+    /// The channel component: the app directory this build's state lives under.
+    pub fn channel(&self) -> &str {
+        self.channel
+    }
+
+    /// The vault component: the registered name the derived directory ends
+    /// with.
+    pub fn vault(&self) -> &str {
+        self.vault.as_str()
+    }
+
+    /// The data-base component: which machine-local data directory this store
+    /// lives under, as a digest of that directory's path.
+    pub fn data_base(&self) -> &str {
+        self.data_base.as_str()
+    }
+}
+
+/// The offset basis of FNV-1a, 64-bit.
+///
+/// FNV-1a is implemented here rather than reached for because the digest it
+/// produces names a directory that outlives the build that made it. The
+/// algorithm is fixed by its definition, so this function computes the same
+/// bytes in every release. `std::hash::DefaultHasher` is the shape to avoid:
+/// its algorithm is explicitly allowed to change between Rust releases, and a
+/// changed algorithm would silently rename every home a previous build staged
+/// into and orphan what is in them.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The prime of FNV-1a, 64-bit. Fixed with [`FNV_OFFSET_BASIS`].
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// `bytes` as one filesystem-safe path component: sixteen lowercase hex digits.
+///
+/// **The bytes are digested as they are held, never canonicalized.** Two
+/// spellings of one directory therefore digest to two components and key two
+/// homes. That is the safe direction: an extra home costs a directory nobody
+/// looks in, where a shared home costs the separation the key exists to buy.
+fn digest_component(bytes: &[u8]) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 /// `path`, if it is a path machine-local state can be expressed over.
@@ -388,6 +478,109 @@ mod tests {
         let error =
             resolve(some("/xdg/config"), None, None).expect_err("no home for the data base");
         assert!(matches!(error, ConfigError::Environment { .. }), "{error}");
+    }
+
+    /// The key and the derived directory are two spellings of one thing, at the
+    /// positions the path actually puts them: the channel is the component
+    /// directly under the data base, and the vault name is the last.
+    ///
+    /// The forbidden shape is asking whether the channel appears *anywhere* in
+    /// the path — that passes on a caller whose data base happens to spell
+    /// `norn-dev` somewhere, and it cannot see a coordinate the key has left
+    /// out.
+    #[test]
+    fn the_derived_key_names_the_derived_directory_at_its_own_positions() {
+        let dirs = ConfigDirs::new("/config", "/data").expect("two bases");
+        let name = VaultName::new("notes").expect("a name");
+        let key = dirs.derived_key(&name);
+        let derived = dirs.derived_dir(&name);
+
+        let components: Vec<_> = derived
+            .components()
+            .map(|component| component.as_os_str().to_owned())
+            .collect();
+        assert_eq!(
+            derived,
+            PathBuf::from("/data")
+                .join(key.channel())
+                .join(VAULTS_DIRECTORY)
+                .join(key.vault()),
+            "the derived directory is not the key's own path arithmetic"
+        );
+        assert_eq!(
+            components[2],
+            key.channel(),
+            "the channel is not the component directly under the data base"
+        );
+        assert_eq!(
+            derived.file_name().expect("a last component"),
+            key.vault(),
+            "the vault name is not the last component"
+        );
+        assert_eq!(
+            key.data_base(),
+            digest_component(dirs.data_dir().as_os_str().as_encoded_bytes()),
+            "the data-base part is not the digest of the data directory"
+        );
+    }
+
+    /// **The bar the third coordinate buys.** Two data bases are two derived
+    /// directories, and therefore two keys — every part of them that a
+    /// mechanism outside the derived directory is placed by.
+    ///
+    /// The forbidden shape is a key of channel and name alone. Two hosts
+    /// running out of two data bases over one channel and one vault name then
+    /// take two locks — one per derived directory — and resolve **one** keyed
+    /// fallback home, which is the exact sharing the key exists to prevent.
+    #[test]
+    fn two_data_bases_key_two_derived_stores() {
+        let name = VaultName::new("notes").expect("a name");
+        let mine = ConfigDirs::new("/config", "/home/mine/.local/share").expect("two bases");
+        let theirs = ConfigDirs::new("/config", "/home/theirs/.local/share").expect("two bases");
+
+        assert_ne!(mine.derived_dir(&name), theirs.derived_dir(&name));
+        assert_ne!(
+            mine.derived_key(&name),
+            theirs.derived_key(&name),
+            "two data bases spell one key"
+        );
+        assert_ne!(
+            mine.derived_key(&name).data_base(),
+            theirs.derived_key(&name).data_base(),
+            "two data bases spell one data-base part"
+        );
+        assert_eq!(
+            mine.derived_key(&name),
+            ConfigDirs::new("/config", "/home/mine/.local/share")
+                .expect("two bases")
+                .derived_key(&name),
+            "one data base spelled two keys across two constructions"
+        );
+    }
+
+    /// The digest is one filesystem-safe component, and it is the digest of the
+    /// path as held: two spellings of one directory yield two components, which
+    /// errs toward two homes rather than one shared one.
+    #[test]
+    fn the_data_base_digest_is_one_hex_component_of_the_path_as_held() {
+        let digest = digest_component(b"/home/person/.local/share/norn-dev");
+        assert_eq!(digest.len(), 16, "{digest} is not sixteen digits");
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "{digest} is not lowercase hexadecimal"
+        );
+        assert_ne!(
+            digest,
+            digest_component(b"/home/person/.local/share/norn-dev/"),
+            "two spellings of one directory digested alike"
+        );
+        // FNV-1a 64 is fixed by its definition, so these are the bytes every
+        // release computes. A change here is a change of algorithm, which
+        // orphans every home a previous build staged into.
+        assert_eq!(digest_component(b""), "cbf29ce484222325");
+        assert_eq!(digest_component(b"a"), "af63dc4c8601ec8c");
     }
 
     /// The whole of channel separation, at the level it is decided: two

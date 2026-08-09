@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use norn_config::registry::Entry as Registration;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
-    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, WatchError, try_acquire,
-    walk, watch,
+    Acquisition, Maintainership, MaintainershipKey, Placement, RescanScope, ShadowHome,
+    Subscription, WatchError, try_acquire, walk, watch,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -165,17 +165,63 @@ impl ProductionEntryOps {
     }
 }
 
+/// The roots inside a vault a walk of it does not read: staged shadows wherever
+/// this entry's placement puts them, and the schema when it is a file in the
+/// vault.
+///
+/// **Which mechanism covers which walk.** A walk rooted at the vault root has a
+/// built-in mechanism root — the fallback dot-directory — and skips it without
+/// being told. That check is relative to the *walk's* root, and so are the
+/// exclusions handed in, so neither fires on its own for a walk rooted deeper: a
+/// watcher event on `<vault>/.norn` is not mechanism-suppressed, and the subtree
+/// heal it schedules is rooted there, where `.norn/tmp` is a plain child. The
+/// fallback-root entry is what cuts that walk, at one node, before it reaches
+/// any maintainership's home. Naming one home instead would let the same walk
+/// descend into every other home over this root.
+///
+/// In [`Placement::DataRoot`] the home is outside the vault entirely and nothing
+/// is excluded for it — unless this vault's root happens to contain the data
+/// directory, which `strip_prefix` is what notices, and then the home is named
+/// by the path it actually has.
 fn exclusions(registration: &Registration, shadows: &ShadowHome) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let root = registration.root.as_path();
-    if let Ok(relative) = shadows.directory().strip_prefix(root) {
-        paths.push(relative.to_owned());
+    if let Some(shadows) = shadow_exclusion(shadows.placement(), shadows.directory(), root) {
+        paths.push(shadows);
     }
     let schema = ProductionEntryOps::schema_path(registration);
     if let Ok(relative) = schema.strip_prefix(root) {
         paths.push(relative.to_owned());
     }
     paths
+}
+
+/// The vault-relative root a walk must not read on account of staged shadows,
+/// or `None` when the placement puts them outside the vault entirely.
+///
+/// The two arms are the two facts a walk can be told. A fallback home is
+/// excluded by its **root** rather than by itself, so one entry cuts the whole
+/// dot-directory whatever key's home is under it and wherever the walk is
+/// rooted. A data-root home is outside the vault, which `strip_prefix` is what
+/// establishes — and where it does not, because this vault's root contains the
+/// data directory, the home is named by the path it actually has.
+fn shadow_exclusion(placement: Placement, home: &Path, root: &Path) -> Option<PathBuf> {
+    match placement {
+        Placement::VaultFallback => Some(PathBuf::from(norn_fs::FALLBACK)),
+        Placement::DataRoot => home.strip_prefix(root).ok().map(Path::to_owned),
+    }
+}
+
+/// The key this entry's maintainer lock and shadow home are both taken under.
+///
+/// One join, in one place, so that the home is keyed by the same three
+/// coordinates the lock is: the lock is keyed by sitting inside
+/// [`ConfigDirs::derived_dir`], and this is what carries that directory's own
+/// identity to a home the device comparison may place anywhere.
+fn maintainership_key(dirs: &ConfigDirs, name: &VaultName) -> MaintainershipKey {
+    let key = dirs.derived_key(name);
+    MaintainershipKey::new(key.channel(), key.vault(), key.data_base())
+        .expect("a channel name, a vault name and a hex digest are each one path component")
 }
 
 impl EntryOps for ProductionEntryOps {
@@ -200,8 +246,24 @@ impl EntryOps for ProductionEntryOps {
                 return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
             }
         };
-        let shadows = ShadowHome::resolve(root, &derived.join("tmp")).map_err(effect)?;
+        // The lock and the shadow home are two mechanisms of one maintainership,
+        // so both are keyed by the coordinates the derived directory is keyed
+        // by: the lock by sitting in that directory, the home by carrying the
+        // key wherever the device comparison places it.
+        let key = maintainership_key(&self.dirs, &registration.name);
+        let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
+        if shadows.placement() == Placement::VaultFallback {
+            // Residue no key's own sweep will ever open again: what a build that
+            // staged before homes were keyed left directly under the fallback
+            // root, and what a home whose key nothing resolves any more still
+            // holds. A failure here is dropped rather than reported: this pass
+            // is over ground no lock covers, so not managing it is no reason to
+            // refuse maintainership of this store, and the next attach comes
+            // round.
+            let _ = norn_fs::sweep_fallback_root(root);
+            let _ = norn_fs::sweep_fallback_tree(root);
+        }
         let schema = Self::schema_path(registration);
         let (subscription, _) = watch(root, &schema).map_err(watcher)?;
         let store = Store::open(derived.join("store.sqlite3")).map_err(effect)?;
@@ -1245,6 +1307,117 @@ mod tests {
     use std::fs;
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// **The bar on what a walk is told about shadows.** A fallback home is
+    /// excluded by the fallback root, so the entry cuts every maintainership's
+    /// home at one node — including for a walk rooted inside `.norn`, where the
+    /// walk's own built-in mechanism root does not fire and this entry is
+    /// stripped to `tmp`.
+    ///
+    /// The forbidden shape is excluding the home itself. A watcher event on
+    /// `<vault>/.norn` is not mechanism-suppressed, so the subtree heal it
+    /// schedules walks from there; an entry naming one home leaves that walk
+    /// free to descend into every other maintainership's home over this root and
+    /// read staged bytes as documents.
+    #[test]
+    fn a_fallback_home_is_excluded_by_its_root_and_a_data_root_home_by_nothing() {
+        let root = Path::new("/vaults/notes");
+        let home = root.join(norn_fs::FALLBACK).join("norn-dev/notes/0f0f0f0f");
+
+        let fallback = shadow_exclusion(Placement::VaultFallback, &home, root)
+            .expect("a fallback home is inside the vault");
+        assert_eq!(fallback, Path::new(norn_fs::FALLBACK));
+        assert_eq!(
+            fallback.strip_prefix(".norn"),
+            Ok(Path::new("tmp")),
+            "a walk rooted at `.norn` is not cut at the fallback root"
+        );
+
+        assert_eq!(
+            shadow_exclusion(
+                Placement::DataRoot,
+                Path::new("/data/norn-dev/vaults/notes/tmp"),
+                root
+            ),
+            None,
+            "a home outside the vault was named to a walk of the vault"
+        );
+        // The one arrangement that puts a data-root home inside the vault: a
+        // vault root that contains the machine's data directory.
+        assert_eq!(
+            shadow_exclusion(
+                Placement::DataRoot,
+                &root.join("share/norn-dev/vaults/notes/tmp"),
+                root
+            ),
+            Some(PathBuf::from("share/norn-dev/vaults/notes/tmp")),
+            "a home the vault root contains was not excluded"
+        );
+    }
+
+    /// **The bar on the join.** The key both mechanisms are taken under carries
+    /// the derived directory's own coordinates, at the positions that directory
+    /// puts them: the channel is the component under the data base, the vault
+    /// name is the directory's last component, and the third part is the digest
+    /// of the data base the whole thing hangs from.
+    ///
+    /// The forbidden shape is a key of fewer parts than the lock's identity has.
+    /// The lock is a file inside the derived directory, so its identity is that
+    /// directory's whole path; a key that dropped the data base would have two
+    /// hosts running out of two data bases take two locks and resolve one
+    /// fallback home — the exact sharing the key exists to prevent.
+    #[test]
+    fn the_maintainership_key_carries_the_derived_directory_s_own_coordinates() {
+        let dirs = ConfigDirs::new("/config", "/data/base").expect("two bases");
+        let name = VaultName::new("notes").expect("a name");
+        let derived = dirs.derived_dir(&name);
+        let expected = dirs.derived_key(&name);
+
+        let key = maintainership_key(&dirs, &name);
+        let parts: Vec<_> = key
+            .as_path()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(parts.len(), 3, "the key is not three components: {parts:?}");
+        assert!(
+            derived.starts_with(dirs.data_dir()),
+            "{} does not hang from the data directory",
+            derived.display()
+        );
+        assert_eq!(
+            parts[0],
+            dirs.data_dir()
+                .file_name()
+                .expect("the channel component")
+                .to_string_lossy(),
+            "the first part is not the channel component {} hangs from",
+            derived.display()
+        );
+        assert_eq!(
+            parts[1],
+            derived
+                .file_name()
+                .expect("a last component")
+                .to_string_lossy(),
+            "the second part is not the last component of {}",
+            derived.display()
+        );
+        assert_eq!(
+            parts[2],
+            expected.data_base(),
+            "the third part is not the digest of the data base"
+        );
+        assert_ne!(
+            key,
+            maintainership_key(
+                &ConfigDirs::new("/config", "/other/base").expect("two bases"),
+                &name
+            ),
+            "two data bases spell one key"
+        );
+    }
 
     #[test]
     fn production_policy_enforces_the_store_page_bound() {

@@ -1600,7 +1600,7 @@ impl<O: EntryOps> Host<O> {
     /// Explicitly retry a demand whose prior completion reported a park.
     ///
     /// Contention is the park nothing else retires: no read this host performs
-    /// says whether another process still holds the vault's maintainer lock, so
+    /// says whether another process still holds this entry's maintainer lock, so
     /// a caller asking again is the whole of the evidence that it may be tried.
     /// The parks the registry raises are left to the recheck the demand below
     /// runs, which is the read that adjudicates them.

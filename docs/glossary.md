@@ -84,7 +84,7 @@ How a boundary invariant is currently carried: by a withheld dependency edge, an
 An invariant carried by an explicit human judgment because no executable rule currently expresses it.
 
 **Maintainer**:
-The single process maintaining a registered vault’s derived state and serving requests against it. Maintainership is exclusive; it never restricts any process’s access to the vault’s files.
+The single process maintaining one registered vault’s derived state and serving requests against it. Maintainership is exclusive over that derived state — one vault reached by two registrations has two of them, each maintaining its own — and it never restricts any process’s access to the vault’s files.
 _Avoid_: Owner, single-owner
 
 **Shadow**:

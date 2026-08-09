@@ -11,9 +11,10 @@
 //! It is **not** one writer per database file. Two `Store` values on one path are
 //! two connections and two writers, serialized by SQLite's own locking rather
 //! than by anything here — which means a host that opens a second store for the
-//! same vault entry gets interleaving, not a refusal. The missing half is a
-//! per-vault file lock taken outside the store, which is what makes "one writer"
-//! a property of the vault rather than of the handle; it is carved and not built
+//! same vault entry gets interleaving, not a refusal. The missing half is the
+//! maintainer file lock taken outside the store, in the derived directory the
+//! store's file sits in, which is what makes "one writer" a property of the
+//! derived store rather than of the handle; it is carved and not built
 //! (NORN-33).
 //!
 //! **Reads belong on a separate handle, not on this connection.** That is
@@ -81,9 +82,11 @@ use crate::request::Request;
 
 /// How long a connection waits on a lock before reporting the database busy.
 ///
-/// Serialization is the host's job, so contention here means two processes hold
-/// the same vault — which the per-vault file lock is what prevents. The timeout
-/// is the backstop that turns a race into a wait rather than an error.
+/// Serialization is the host's job, so contention here means two processes have
+/// the same derived store open — which the maintainer file lock is what
+/// prevents. Two processes holding one *vault* it neither prevents nor needs to:
+/// a vault is multi-writer, and two derived stores over it are two files. The
+/// timeout is the backstop that turns a race into a wait rather than an error.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The flags every connection is opened with.

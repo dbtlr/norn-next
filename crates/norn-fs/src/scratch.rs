@@ -8,10 +8,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::shadow::{Placement, ShadowHome};
+use crate::shadow::{MaintainershipKey, Placement, ShadowHome};
 
 /// Distinguishes two scratch trees taken in the same process.
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The maintainership one scratch tree's home is keyed by. One key per tree is
+/// all a case needs; the cases about two keys spell their own.
+pub(crate) fn key() -> MaintainershipKey {
+    MaintainershipKey::new("norn-dev", "notes", "0123456789abcdef").expect("three path components")
+}
 
 /// A tree under the system temporary directory, removed when this is dropped.
 pub(crate) struct Scratch {
@@ -34,8 +40,12 @@ impl Scratch {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("vault")).expect("a vault root");
-        let shadows = ShadowHome::resolve(&root.join("vault"), &root.join("data/vaults/notes/tmp"))
-            .expect("a shadow home");
+        let shadows = ShadowHome::resolve(
+            &root.join("vault"),
+            &root.join("data/vaults/notes/tmp"),
+            &key(),
+        )
+        .expect("a shadow home");
         assert_eq!(
             shadows.placement(),
             Placement::DataRoot,
