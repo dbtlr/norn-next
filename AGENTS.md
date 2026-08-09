@@ -26,6 +26,21 @@ We use the `domain-modeling` skill for recording important decisions as well as 
 - One ADR or glossary section landing with each task is a review smell. Stop and
   verify that the task actually surfaced a durable decision or reusable term.
 
+## Dormant carriers
+
+- Default-EXCLUDE excludes legacy doctrine, not planned end-state needs. Before
+  calling an unreached path dead, test it against the layer roadmap: a path with
+  a named consuming layer is a **dormant carrier**; a path without one is
+  speculative and remains excluded.
+- Keep a dormant carrier covered at its seam. Its inline documentation must name
+  the consuming layer and explain why the current call graph does not yet reach
+  it, so implementation and review briefs preserve that context.
+- A dormant carrier may be removed only by a new ruling that withdraws its
+  roadmap obligation or establishes a different carrier for it; an empty call
+  graph is not such a ruling. In a NORN-bound work session, consult Mimir
+  artifact NORN-a73 for carriers removed before this doctrine was explicit;
+  its source commits are re-derivation templates, not reversions to replay.
+
 ## How we work
 
 - **No broken windows.** If you find a bug or defect, even if you didn't cause it, it is now *your* responsibility to either fix it or file it. Work with the user to understand which is the right choice.
