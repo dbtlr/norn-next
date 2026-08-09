@@ -10,21 +10,25 @@
 //! The vault tree belongs to every consumer — snapshot automation, sync
 //! clients, editors — and a mechanism file placed among documents gets
 //! committed, synced and indexed by tools that cannot know to ignore it. So a
-//! shadow is never a sibling of its destination. Its home is decided **per
-//! vault** by [`ShadowHome::resolve`], because the atomic publish is a rename
-//! and a rename cannot cross filesystems: a fixed global temporary location is
-//! structurally impossible, not merely inconvenient.
+//! shadow is never a sibling of its destination. Its home is decided by
+//! [`ShadowHome::resolve`] **per vault root and per
+//! [maintainership](MaintainershipKey)**, because the atomic publish is a
+//! rename and a rename cannot cross filesystems: a fixed global temporary
+//! location is structurally impossible, not merely inconvenient.
 //!
 //! Two placements, and the device comparison chooses between them:
 //!
-//! - [`Placement::DataRoot`] — the norn data directory's per-vault temporary
-//!   directory, which is where a shadow belongs: outside the vault entirely.
-//! - [`Placement::VaultFallback`] — [`FALLBACK`] under the vault root, used
-//!   only when the data directory sits on a different filesystem. It is a
-//!   single dot-directory outside the vault-document boundary, excluded from
-//!   the walk wholesale.
+//! - [`Placement::DataRoot`] — the temporary directory inside the derived
+//!   directory the key names, which is where a shadow belongs: outside the
+//!   vault entirely.
+//! - [`Placement::VaultFallback`] — the key's own directory under [`FALLBACK`]
+//!   beneath the vault root, used only when the data directory sits on a
+//!   different filesystem. [`FALLBACK`] is a single dot-directory outside the
+//!   vault-document boundary, excluded from the walk wholesale, and the key
+//!   beneath it is what keeps two maintainerships over one vault root in two
+//!   homes.
 //!
-//! The choice is a fact about a vault and is recorded as one by whoever
+//! The choice is a fact about a vault root and is recorded as one by whoever
 //! resolves it. A rename that reports `EXDEV` later is an
 //! [environmental refusal](crate::Refusal::Environment) — a filesystem
 //! arrangement that changed under a decision already taken, which is a
@@ -59,8 +63,9 @@
 //! host that owns a vault's lifecycle rather than to this kernel:
 //!
 //! - **At attach, under a freshly taken maintainer lock, the sweep is total.**
-//!   Holding the lock means no other Norn host is writing this vault, so every
-//!   shadow in the home is the residue of a write that is already over.
+//!   The home is keyed by the same key the lock is taken under, so holding the
+//!   lock means no other Norn host writes through this home and every shadow in
+//!   it is the residue of a write that is already over.
 //! - **In life, on the host's maintenance schedule, the sweep is bounded by
 //!   [`SHADOW_AGE_THRESHOLD`].** A live write's shadow exists for as long as it
 //!   takes to write and fsync one document, so an age threshold far above that
@@ -78,7 +83,7 @@
 //! is a health finding, never something to steal from.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -93,12 +98,14 @@ use crate::refusal::{Refusal, environment};
 /// document called `norn-shadow-notes.md` for residue.
 pub(crate) const SHADOW_PREFIX: &str = "norn-shadow-";
 
-/// Where shadows go when the norn data directory is on another filesystem,
-/// relative to the vault root.
+/// Where shadow homes go when the norn data directory is on another
+/// filesystem, relative to the vault root.
 ///
 /// One dot-directory rather than a temporary file among documents: the walk
 /// excludes it wholesale, so nothing inside it is ever a candidate for being a
-/// vault document.
+/// vault document. The homes beneath it are one per
+/// [maintainership](MaintainershipKey), so a vault root reached by two of them
+/// holds two homes and neither sweeps the other's.
 pub const FALLBACK: &str = ".norn/tmp";
 
 /// How old a shadow must be before an in-life sweep removes it.
@@ -123,36 +130,99 @@ pub(crate) const NAME_ATTEMPTS: usize = 64;
 /// Distinguishes two shadows staged by the same process.
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Where a vault's shadows are staged, and which of the two placements that
-/// is.
+/// Where one maintainership's shadows are staged, and which of the two
+/// placements that is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ShadowHome {
     directory: PathBuf,
     placement: Placement,
 }
 
-/// Which of the two homes a vault's shadows landed in.
+/// Which of the two homes a maintainership's shadows landed in.
 ///
-/// A typed fact about a vault rather than a detail of one write: it is decided
-/// once, by a device comparison, and recorded by whoever resolved it.
+/// A typed fact about a vault root rather than a detail of one write: it is
+/// decided once, by a device comparison, and recorded by whoever resolved it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Placement {
-    /// The norn data directory's per-vault temporary directory: outside the
-    /// vault entirely, which is where a shadow belongs.
+    /// The temporary directory inside the derived directory the
+    /// [key](MaintainershipKey) names: outside the vault entirely, which is
+    /// where a shadow belongs.
     DataRoot,
-    /// [`FALLBACK`] under the vault root, because the data directory is on a
-    /// different filesystem and a rename cannot cross one.
+    /// The key's own directory under [`FALLBACK`] beneath the vault root,
+    /// because the data directory is on a different filesystem and a rename
+    /// cannot cross one.
     VaultFallback,
 }
 
+/// Which maintainership a shadow home serves: the channel a build keeps its
+/// state under, and the registered name of the vault whose derived state that
+/// maintainership maintains.
+///
+/// **This is the key the maintainer lock is taken under.** The lock sits inside
+/// the derived directory this pair names, so two hosts holding two keys hold
+/// two locks over two derived stores, and two hosts reaching for one key
+/// contend for one lock. A shadow home carries the same key wherever it is
+/// placed, which is what makes "the lock is held" and "nothing else writes
+/// through this home" the same fact — the premise the total attach-time
+/// [sweep](ShadowHome::sweep) rests on.
+///
+/// Each part is one ordinary path component, checked here rather than assumed:
+/// the key becomes a directory under a vault root, and a part carrying a
+/// separator or naming a parent would place a home somewhere else entirely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaintainershipKey(PathBuf);
+
+impl MaintainershipKey {
+    /// The key `channel` and `vault` spell, or `None` when either is not a
+    /// single ordinary path component.
+    ///
+    /// The two parts stay two components rather than being joined into one
+    /// name. A concatenated name is ambiguous wherever a part may contain the
+    /// joiner — a `norn` channel serving `dev-notes` and a `norn-dev` channel
+    /// serving `notes` would spell one name — and two keys sharing one home is
+    /// the exact outcome this key exists to prevent.
+    pub fn new(channel: &str, vault: &str) -> Option<MaintainershipKey> {
+        let channel = component(channel)?;
+        let vault = component(vault)?;
+        Some(MaintainershipKey(Path::new(channel).join(vault)))
+    }
+
+    /// The relative directory this key names.
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// `part`, when it is one ordinary path component and nothing else.
+///
+/// The whole test is that the path `part` spells is one `Normal` component that
+/// reads back as `part` itself: that refuses the empty string, `.`, `..`,
+/// anything holding a separator, and the trailing-separator spellings a plain
+/// character scan would let through.
+fn component(part: &str) -> Option<&OsStr> {
+    let mut components = Path::new(part).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(one)), None) if one == OsStr::new(part) => Some(one),
+        _ => None,
+    }
+}
+
 impl ShadowHome {
-    /// Decide where `vault_root`'s shadows go, given the data directory's
-    /// per-vault temporary directory.
+    /// Decide where `key`'s shadows go under `vault_root`, given the temporary
+    /// directory inside the derived directory `key` names.
     ///
     /// `data_tmp` is created if it is not there — it is norn's own directory,
     /// and its device is what the decision reads. Where the two devices agree
-    /// the answer is `data_tmp`; where they do not, [`FALLBACK`] under the vault
-    /// root is created and returned instead.
+    /// the answer is `data_tmp`; where they do not, `key`'s directory under
+    /// [`FALLBACK`] beneath the vault root is created and returned instead.
+    ///
+    /// **A home's key is the maintainership key.** `data_tmp` sits inside the
+    /// derived directory the key names and is keyed by being there; the vault
+    /// root is shared ground, reachable by every host serving it under any key,
+    /// so the fallback is keyed here. One key resolves to one home every run,
+    /// and two keys resolve to two homes that share no entry — which is what
+    /// makes every shadow a total [sweep](ShadowHome::sweep) finds the residue
+    /// of the lock holder's own writes.
     ///
     /// **The comparison is against the vault root**, so a separate mount
     /// *inside* a vault is not what this decides about. A swap into one reports
@@ -160,11 +230,15 @@ impl ShadowHome {
     /// is made again rather than guessed at, because the alternative — falling
     /// back to copy-then-unlink — publishes bytes without a rename and gives up
     /// atomicity to avoid an error message.
-    pub fn resolve(vault_root: &Path, data_tmp: &Path) -> Result<ShadowHome, Refusal> {
+    pub fn resolve(
+        vault_root: &Path,
+        data_tmp: &Path,
+        key: &MaintainershipKey,
+    ) -> Result<ShadowHome, Refusal> {
         let vault = device_of(vault_root)?;
         make_directory(data_tmp)?;
         let data = device_of(data_tmp)?;
-        Self::resolve_where(vault_root, data_tmp, vault == data)
+        Self::resolve_where(vault_root, data_tmp, key, vault == data)
     }
 
     /// [`ShadowHome::resolve`], with the device comparison's answer passed in
@@ -181,6 +255,7 @@ impl ShadowHome {
     fn resolve_where(
         vault_root: &Path,
         data_tmp: &Path,
+        key: &MaintainershipKey,
         same_device: bool,
     ) -> Result<ShadowHome, Refusal> {
         if same_device {
@@ -189,7 +264,7 @@ impl ShadowHome {
                 placement: Placement::DataRoot,
             });
         }
-        let fallback = vault_root.join(FALLBACK);
+        let fallback = vault_root.join(FALLBACK).join(key.as_path());
         make_directory(&fallback)?;
         Ok(ShadowHome {
             directory: fallback,
@@ -228,9 +303,12 @@ impl ShadowHome {
     ///
     /// - **`Duration::ZERO` is the total attach-time sweep.** Every shadow goes,
     ///   whatever its age. That is only sound under a *freshly taken* maintainer
-    ///   lock: holding it means no other Norn host is writing this vault, so
-    ///   every shadow in the home is residue of a write that is already over. A
-    ///   caller that has not just won the lock must not pass zero.
+    ///   lock: the home is keyed by the same [key](MaintainershipKey) the lock is
+    ///   taken under, so holding the lock means no other Norn host writes
+    ///   through *this home* — not that no other host writes this vault, which a
+    ///   vault served under a second key is a live counterexample to — and every
+    ///   shadow in it is residue of a write that is already over. A caller that
+    ///   has not just won the lock must not pass zero.
     /// - **[`SHADOW_AGE_THRESHOLD`] is the in-life sweep**, on the host's
     ///   maintenance schedule, and its margin is what keeps a live write's shadow
     ///   out of reach.
@@ -356,7 +434,7 @@ fn device_of(path: &Path) -> Result<u64, Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scratch::Scratch;
+    use crate::scratch::{Scratch, key};
 
     /// **The bar on unique-per-attempt naming.** Two shadows taken in one
     /// process never share a name, and neither name mentions a destination.
@@ -449,7 +527,7 @@ mod tests {
         let vault = scratch.directory("other-vault");
         let data_tmp = scratch.path("other-data/vaults/notes/tmp");
 
-        let home = ShadowHome::resolve(&vault, &data_tmp).expect("a shadow home");
+        let home = ShadowHome::resolve(&vault, &data_tmp, &key()).expect("a shadow home");
         assert_eq!(home.placement(), Placement::DataRoot);
         assert_eq!(home.directory(), data_tmp);
         assert!(
@@ -459,7 +537,8 @@ mod tests {
     }
 
     /// **The bar on the fallback.** Two filesystems put shadows under the
-    /// vault's own dot-directory, because a rename cannot cross a filesystem.
+    /// vault's own dot-directory, in the directory this maintainership is keyed
+    /// by, because a rename cannot cross a filesystem.
     ///
     /// The forbidden shape is staging in the data directory regardless: every
     /// swap would then fail `EXDEV`, and a kernel that answered by copying
@@ -470,13 +549,128 @@ mod tests {
         let vault = scratch.directory("other-vault");
         let data_tmp = scratch.path("other-data/vaults/notes/tmp");
 
-        let home = ShadowHome::resolve_where(&vault, &data_tmp, false).expect("a shadow home");
+        let home =
+            ShadowHome::resolve_where(&vault, &data_tmp, &key(), false).expect("a shadow home");
         assert_eq!(home.placement(), Placement::VaultFallback);
-        assert_eq!(home.directory(), vault.join(FALLBACK));
+        assert_eq!(
+            home.directory(),
+            vault.join(FALLBACK).join("norn-dev/notes")
+        );
+        assert!(
+            home.directory().starts_with(vault.join(FALLBACK)),
+            "the keyed home sits outside the dot-directory the walk excludes"
+        );
         assert!(
             scratch.exists(home.directory()),
             "the fallback directory was not created"
         );
+    }
+
+    /// **The bar on the fallback's key.** Two maintainerships over one vault
+    /// root fall back into two homes, and one key names one home every time it
+    /// is resolved.
+    ///
+    /// The forbidden shape is an unkeyed fallback: co-maintainers of two derived
+    /// stores over one root would then stage into one directory, and the sweep
+    /// bar below is what that costs.
+    #[test]
+    fn two_keys_over_one_vault_root_fall_back_into_two_homes() {
+        let scratch = Scratch::new("shadow-two-keys");
+        let vault = scratch.directory("other-vault");
+        let mine = MaintainershipKey::new("norn-dev", "notes").expect("a key");
+        let theirs = MaintainershipKey::new("norn", "notes").expect("a key");
+
+        let home = |key: &MaintainershipKey, tmp: &str| {
+            ShadowHome::resolve_where(&vault, &scratch.path(tmp), key, false)
+                .expect("a shadow home")
+        };
+        let ours = home(&mine, "dev-data/vaults/notes/tmp");
+        let others = home(&theirs, "live-data/vaults/notes/tmp");
+
+        assert_ne!(
+            ours.directory(),
+            others.directory(),
+            "two maintainerships share one fallback home"
+        );
+        assert_eq!(
+            home(&mine, "dev-data/vaults/notes/tmp").directory(),
+            ours.directory(),
+            "one key named two homes across two resolves"
+        );
+    }
+
+    /// **The bar the key buys.** A total sweep of one home leaves a shadow
+    /// standing in another key's home over the same vault root.
+    ///
+    /// The forbidden shape is the attach-time sweep reaching another
+    /// maintainership's live write: `Duration::ZERO` is sound because the lock
+    /// holder is the only writer of *this home*, and an unkeyed fallback would
+    /// make one host's attach delete a shadow another host's write is still
+    /// holding.
+    #[test]
+    fn a_total_sweep_of_one_home_leaves_another_key_s_shadow_standing() {
+        let scratch = Scratch::new("shadow-sweep-two-keys");
+        let vault = scratch.directory("other-vault");
+        let mine = MaintainershipKey::new("norn-dev", "notes").expect("a key");
+        let theirs = MaintainershipKey::new("norn", "notes").expect("a key");
+        let ours = ShadowHome::resolve_where(&vault, &scratch.path("dev/tmp"), &mine, false)
+            .expect("a shadow home");
+        let others = ShadowHome::resolve_where(&vault, &scratch.path("live/tmp"), &theirs, false)
+            .expect("a shadow home");
+
+        let live = others.next_shadow();
+        #[allow(clippy::disallowed_methods)]
+        // Harness scaffolding: another host's write in flight.
+        std::fs::write(&live, b"another maintainer's write in flight").expect("a live shadow");
+        let residue = ours.next_shadow();
+        #[allow(clippy::disallowed_methods)] // Harness scaffolding: our own residue.
+        std::fs::write(&residue, b"our residue").expect("residue");
+
+        let swept = ours.sweep(Duration::ZERO).expect("a total sweep");
+
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                left: 0
+            }
+        );
+        assert!(!scratch.exists(&residue), "our own residue survived");
+        assert!(
+            scratch.exists(&live),
+            "an attach sweep took another maintainership's live shadow"
+        );
+    }
+
+    /// **The bar on what a key admits.** Every part is one ordinary path
+    /// component, so a key can only ever name a directory directly under the
+    /// fallback root.
+    ///
+    /// The forbidden shape is a key that escapes: a part spelling `..` or
+    /// carrying a separator would place a home outside the dot-directory the
+    /// walk excludes, among documents.
+    #[test]
+    fn a_key_part_that_is_not_one_component_spells_no_key() {
+        assert!(MaintainershipKey::new("norn-dev", "notes").is_some());
+        for part in [
+            "",
+            ".",
+            "..",
+            "/",
+            "/notes",
+            "notes/",
+            "notes/deep",
+            "../notes",
+        ] {
+            assert!(
+                MaintainershipKey::new("norn-dev", part).is_none(),
+                "{part:?} was taken for a key part"
+            );
+            assert!(
+                MaintainershipKey::new(part, "notes").is_none(),
+                "{part:?} was taken for a key part"
+            );
+        }
     }
 
     /// The fallback is one dot-directory, so a walk excluding it excludes every

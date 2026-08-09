@@ -1,11 +1,14 @@
-//! The maintainer lock: one host per vault's derived state, and nothing else.
+//! The maintainer lock: one host per derived store, and nothing else.
 //!
 //! # What this lock carries, and what it does not
 //!
-//! One `flock` per vault admits at most one Norn host as the **maintainer** of
-//! that vault's derived state. Two maintainers would corrupt one derived store
-//! and double every filesystem event, which is the entire reason exclusion
-//! exists here.
+//! One `flock`, in the derived directory it protects, admits at most one Norn
+//! host as the **maintainer** of that store. Two maintainers of one store would
+//! corrupt it and double every filesystem event it records, which is the entire
+//! reason exclusion exists here. A vault root that two
+//! [maintainership keys](crate::MaintainershipKey) reach has two derived stores
+//! and two locks, and the hosts holding them are ordinary concurrent writers of
+//! vault files to each other — on exactly the terms below.
 //!
 //! **It restricts nobody's access to vault files** — not another Norn's, not an
 //! editor's, not a sync client's, not a human's. There is no on-disk mutation
@@ -125,7 +128,7 @@ pub enum Acquisition {
     Contended { incumbent: Incumbent },
 }
 
-/// Maintainership of one vault, held for as long as this value lives.
+/// Maintainership of one derived store, held for as long as this value lives.
 ///
 /// Dropping it releases the lock. **It does not remove the lock file**, which is
 /// what keeps the next acquirer's identity recheck a check of a stable name
@@ -226,11 +229,11 @@ impl fmt::Display for Incumbent {
     }
 }
 
-/// Take maintainership of the vault whose lock file is at `path`, or say who
-/// has it.
+/// Take maintainership of the derived store whose lock file is at `path`, or
+/// say who has it.
 ///
-/// The parent directory is created if it is not there — the lock lives in
-/// Norn's own per-vault data directory, which Norn makes. A parent that cannot
+/// The parent directory is created if it is not there — the lock lives in the
+/// derived directory it protects, which is Norn's own and which Norn makes. A parent that cannot
 /// be created is an [environmental refusal](Refusal::Environment) carrying the
 /// kind, so a missing path is distinguishable from a denied one and both are
 /// distinguishable from contention.

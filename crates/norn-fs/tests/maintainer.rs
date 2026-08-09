@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use norn_fs::{
-    Acquisition, ContentHash, Incumbent, Maintainership, Precondition, Refusal, ShadowHome,
-    move_document, try_acquire, vacate, write,
+    Acquisition, ContentHash, Incumbent, Maintainership, MaintainershipKey, Precondition, Refusal,
+    ShadowHome, move_document, try_acquire, vacate, write,
 };
 use norn_testkit::process::{Run, RunStatus, Sandbox};
 use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -325,8 +325,9 @@ fn a_contended_vault_is_fully_workable() {
     let vault = scratch.path("vault");
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the vault this case works over.
     std::fs::create_dir_all(&vault).expect("a vault root");
-    let shadows =
-        ShadowHome::resolve(&vault, &scratch.path("vaults/notes/tmp")).expect("a shadow home");
+    let key = MaintainershipKey::new("norn-dev", "notes").expect("two path components");
+    let shadows = ShadowHome::resolve(&vault, &scratch.path("vaults/notes/tmp"), &key)
+        .expect("a shadow home");
 
     let _held = take(&scratch.lock());
     // And it is genuinely held: a second attempt is contended.

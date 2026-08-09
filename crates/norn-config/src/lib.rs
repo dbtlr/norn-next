@@ -263,6 +263,23 @@ impl ConfigDirs {
     }
 }
 
+/// The two names one vault's derived state is keyed by: the channel this build
+/// is pinned to, and the registered vault name.
+///
+/// These are the two names [`ConfigDirs::derived_dir`]'s path is built from —
+/// the channel through the app directory [`ConfigDirs::new`] appends, the name
+/// as the last component — handed over as parts so that a mechanism kept
+/// somewhere other than that directory is keyed by the same pair rather than by
+/// a second spelling of it. Two registrations differing in either part key two
+/// derived stores; two agreeing in both are one.
+///
+/// Each part is one path component, which is what makes the pair spellable as a
+/// directory anywhere: [`Channel::app_directory`] is a fixed name and
+/// [`VaultName`]'s grammar admits no separator.
+pub fn derived_key(name: &VaultName) -> (&'static str, &str) {
+    (Channel::COMPILED.app_directory(), name.as_str())
+}
+
 /// `path`, if it is a path machine-local state can be expressed over.
 ///
 /// Two demands, and they are one function because every path this crate
@@ -388,6 +405,26 @@ mod tests {
         let error =
             resolve(some("/xdg/config"), None, None).expect_err("no home for the data base");
         assert!(matches!(error, ConfigError::Environment { .. }), "{error}");
+    }
+
+    /// The key and the derived directory are two spellings of one pair: the
+    /// channel names a component of that path and the vault name is its last,
+    /// so a mechanism placed elsewhere under the key lands beside the same
+    /// derived state.
+    #[test]
+    fn the_derived_key_names_the_derived_directory_s_two_parts() {
+        let dirs = ConfigDirs::new("/config", "/data").expect("two bases");
+        let name = VaultName::new("notes").expect("a name");
+        let (channel, vault) = derived_key(&name);
+        let derived = dirs.derived_dir(&name);
+        assert!(
+            derived
+                .components()
+                .any(|component| component.as_os_str() == channel),
+            "{} does not name the channel {channel}",
+            derived.display()
+        );
+        assert_eq!(derived.file_name().expect("a last component"), vault);
     }
 
     /// The whole of channel separation, at the level it is decided: two

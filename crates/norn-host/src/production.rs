@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use norn_config::registry::Entry as Registration;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
-    Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, WatchError, try_acquire,
-    walk, watch,
+    Acquisition, Maintainership, MaintainershipKey, RescanScope, ShadowHome, Subscription,
+    WatchError, try_acquire, walk, watch,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -165,6 +165,13 @@ impl ProductionEntryOps {
     }
 }
 
+/// The roots inside a vault a walk of it does not read: the shadow home when the
+/// device comparison placed it there, and the schema when it is a file in the
+/// vault.
+///
+/// A home under the vault root sits below the fallback dot-directory, which the
+/// walk excludes as its one built-in mechanism root; naming the home itself
+/// excludes it by the path it actually has, whichever placement it took.
 fn exclusions(registration: &Registration, shadows: &ShadowHome) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let root = registration.root.as_path();
@@ -200,7 +207,14 @@ impl EntryOps for ProductionEntryOps {
                 return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
             }
         };
-        let shadows = ShadowHome::resolve(root, &derived.join("tmp")).map_err(effect)?;
+        // The lock and the shadow home are two mechanisms of one maintainership,
+        // so both are keyed by the pair the derived directory is keyed by: the
+        // lock by sitting in that directory, the home by carrying the key
+        // wherever the device comparison places it.
+        let (channel, vault) = norn_config::derived_key(&registration.name);
+        let key = MaintainershipKey::new(channel, vault)
+            .expect("a channel name and a vault name are each one path component");
+        let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
         let schema = Self::schema_path(registration);
         let (subscription, _) = watch(root, &schema).map_err(watcher)?;
