@@ -533,6 +533,22 @@ impl<A: SnapshotSource> EntryState<A> {
     /// read pinning it, and a demand lease recorded against it. An entry none
     /// of these stands over owes nothing and is owed nothing, which is what
     /// makes it removable from the serving set.
+    ///
+    /// Five of the limbs are reachable as the sole hold, and a case reaches
+    /// each: coverage in hand, coverage out with a leg, the gate, the leg
+    /// registration and the lease. [`EntryState::detach_in_flight`] and
+    /// [`EntryState::pinned`] are defence in depth over states the other five
+    /// already answer — a release in flight was begun over coverage the entry
+    /// was holding, and a pin is taken either beside the coverage in the
+    /// entry's own hand or by the leg that took it out — so no state this
+    /// crate reaches turns on either one alone.
+    ///
+    /// The queue slot is named by none of the limbs and needs none: a slot
+    /// taken is a gate held. Every taker takes it under the lock that leaves
+    /// the gate standing — [`Claim::take_slot_for_marked`] over the marker
+    /// holding it, and [`Claim::hand_off`] under a claim that took the gate
+    /// through [`Claim::hold`] — so a slot outliving that gate is a state no
+    /// move here produces.
     fn held_by_anything(&self) -> bool {
         self.coverage.in_hand()
             || self.coverage.out_with_leg()
@@ -8829,6 +8845,110 @@ mod tests {
             assert_eq!(
                 host.demand(&name, AttachMode::Durable).unwrap().outcome(),
                 &Demand::State(TrustState::Ready)
+            );
+        }
+
+        /// An entry holding its scheduling gate for work it has scheduled
+        /// stays in the set: the job the marker stands for is work the entry
+        /// owes, and a removal under it takes the entry out from under a
+        /// dispatch that is still to come.
+        ///
+        /// The marker is planted directly, so the gate is the only hold: no leg
+        /// is registered, no coverage is held and no lease is recorded.
+        #[test]
+        fn an_entry_holding_its_gate_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            {
+                let mut state = entry.gate.lock().unwrap();
+                state
+                    .claim
+                    .schedule(|epoch| Job::Attach(name.clone(), epoch));
+            }
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry holding its gate for a job it has scheduled left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.open();
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the withdrawn job was holding stayed in the set"
+            );
+        }
+
+        /// An entry whose coverage is out with a leg stays in the set. The
+        /// entry holds nothing of its own, and what the leg holds comes back
+        /// where the leg ends — to an entry the set must still be serving.
+        #[test]
+        fn an_entry_whose_coverage_is_out_with_a_leg_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            // The coverage taken out of the entry's hand and no registration
+            // beside it: the one shape that leaves out-with-a-leg as the whole
+            // of what holds the entry.
+            let (coverage, epoch) = {
+                let mut state = entry.gate.lock().unwrap();
+                let epoch = state.claim.epoch();
+                let coverage = state
+                    .coverage
+                    .take(epoch)
+                    .expect("the attached entry holds its coverage");
+                (coverage, epoch)
+            };
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry whose coverage is out with a leg left the set"
+            );
+
+            // The leg ends the coverage it took: the ops have it back, and the
+            // entry accounts for none.
+            host.shared.ops.detach(&name, coverage);
+            entry.gate.lock().unwrap().coverage.released_by(epoch);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the ended leg was holding stayed in the set"
+            );
+        }
+
+        /// A leg registered against an entry holds it in the set with the gate
+        /// already back: the leg outlives the gate it took, and it is the leg
+        /// rather than the gate that says work is still standing against the
+        /// entry.
+        #[test]
+        fn an_entry_a_registered_leg_stands_against_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let epoch = {
+                let mut state = entry.gate.lock().unwrap();
+                let epoch = state.claim.epoch();
+                state.claim.begin_job_leg(epoch);
+                state.claim.release();
+                epoch
+            };
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry a registered leg stands against left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.end_job_leg(epoch);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the ended leg was holding stayed in the set"
             );
         }
 
