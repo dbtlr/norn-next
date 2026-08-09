@@ -22,6 +22,15 @@ const FD_BUDGET: usize = 12;
 const LARGE_VAULT_DOCUMENTS: usize = 2_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
 
+/// The line the probe prints its measurement on, which the parent records.
+///
+/// The probe's own output never reaches a person: it runs as a subprocess whose
+/// streams the parent captures and prints on failure alone. **A bar that passes
+/// says only that the cost fit**, and what the cost was is the reading this
+/// budget exists to hold — so the number crosses back out of the probe and is
+/// recorded beside the budget it was judged against.
+const MEASUREMENT_PREFIX: &str = "fd-budget ";
+
 #[test]
 fn attached_entry_has_a_bounded_vault_size_independent_fd_cost() {
     if std::env::var_os(PROBE_ENV).is_some() {
@@ -46,6 +55,50 @@ fn attached_entry_has_a_bounded_vault_size_independent_fd_cost() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    record_the_measurement(&String::from_utf8_lossy(&output.stdout));
+}
+
+/// Record what the probe measured, off the line it printed.
+///
+/// A probe that passed its bars and printed no measurement is a reading lost
+/// rather than a bar failed, so this fails saying so: the parent has no other
+/// way to learn what the attachment cost.
+fn record_the_measurement(reported: &str) {
+    let measurement = reported
+        .lines()
+        .find_map(|line| line.strip_prefix(MEASUREMENT_PREFIX))
+        .unwrap_or_else(|| {
+            panic!(
+                "the descriptor probe passed its bars and printed no `{MEASUREMENT_PREFIX}` line, \
+                 so what the attachment cost is not recorded anywhere: {reported}"
+            )
+        });
+    let reading = |key: &str| {
+        field(measurement, key)
+            .unwrap_or_else(|| panic!("`{measurement}` does not carry `{key}`"))
+            .to_string()
+    };
+    norn_testkit::readings::record(
+        "attach descriptor cost",
+        &[
+            ("descriptors before attaching", reading("baseline=")),
+            (
+                "descriptors per attachment, 1 document",
+                reading("one_document="),
+            ),
+            (
+                "descriptors per attachment, 2000 documents",
+                reading("large_vault="),
+            ),
+            ("budget", FD_BUDGET.to_string()),
+        ],
+    );
+}
+
+/// The value of `key` in the probe's measurement line, up to the next space.
+fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let (_, rest) = line.split_once(key)?;
+    Some(rest.split_whitespace().next().unwrap_or(rest))
 }
 
 fn run_probe() {
@@ -107,6 +160,20 @@ fn run_probe() {
         open_fd_count(),
         baseline,
         "repeat detach retained descriptors"
+    );
+
+    report_the_measurement(baseline, one_document_delta, large_vault_delta);
+}
+
+/// What the probe hands its parent: the counts behind the bars above.
+///
+/// Printed last, so a line reaching the parent is a measurement of a probe that
+/// ran every one of its assertions rather than of one that stopped part-way.
+#[allow(clippy::disallowed_macros)] // The probe's measurement is a machine-consumed stream its parent reads.
+fn report_the_measurement(baseline: usize, one_document: usize, large_vault: usize) {
+    println!(
+        "{MEASUREMENT_PREFIX}baseline={baseline} one_document={one_document} \
+         large_vault={large_vault} budget={FD_BUDGET}"
     );
 }
 
