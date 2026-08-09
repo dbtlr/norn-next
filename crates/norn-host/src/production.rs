@@ -4,11 +4,11 @@ use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use norn_config::registry::{Entry as Registration, PollBackend};
+use norn_config::registry::Entry as Registration;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
-    Subscription, WatchBackend, WatchError, try_acquire, walk, watch,
+    Subscription, WatchError, try_acquire, walk, watch,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -123,16 +123,6 @@ impl ProductionEntryOps {
 
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
-    }
-
-    /// Registry polling is a Layer 1 degraded-latency choice for filesystems
-    /// whose native notification backend is unreliable; norn-fs still owns
-    /// and erases the concrete backend implementation.
-    fn watch_backend(registration: &Registration) -> WatchBackend {
-        match registration.poll_backend {
-            Some(PollBackend::Poll) => WatchBackend::Poll,
-            None => WatchBackend::Native,
-        }
     }
 
     fn schema_path(registration: &Registration) -> PathBuf {
@@ -279,8 +269,11 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_tree(root);
         }
         let schema = Self::schema_path(registration);
+        // `PollBackend` remains the one selection vocabulary. The fs leaf
+        // receives only whether that option is present, then owns the concrete
+        // notify backend without learning registry types.
         let (subscription, own_writes) =
-            watch(root, &schema, Self::watch_backend(registration)).map_err(watcher)?;
+            watch(root, &schema, registration.poll_backend.is_some()).map_err(watcher)?;
         let store = Store::open(derived.join("store.sqlite3")).map_err(effect)?;
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
@@ -342,7 +335,7 @@ impl EntryOps for ProductionEntryOps {
         let (subscription, own_writes) = watch(
             attachment.registration.root.as_path(),
             &schema,
-            Self::watch_backend(&attachment.registration),
+            attachment.registration.poll_backend.is_some(),
         )
         .map_err(watcher)?;
         attachment.subscription = Some(subscription);
@@ -1652,23 +1645,45 @@ mod tests {
     }
 
     #[test]
-    fn poll_backend_events_reach_the_host_reconcile_path() {
+    fn configured_poll_backend_detects_a_same_stat_content_replacement() {
         let f = Fixture::new("poll-watch-edit");
         fs::write(f.vault().join("note.md"), "before").unwrap();
         let mut registration = f.registration();
-        registration.poll_backend = Some(PollBackend::Poll);
+        registration.poll_backend = Some(norn_config::registry::PollBackend::Poll);
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&registration, &progress).unwrap();
 
-        fs::write(f.vault().join("note.md"), "after polling").unwrap();
-        let after = norn_fs::ContentHash::of(b"after polling").to_string();
+        let note = f.vault().join("note.md");
+        let before = fs::metadata(&note).unwrap();
+        let modified = before.modified().unwrap();
+        fs::write(&note, "after!").unwrap();
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        fs::File::options()
+            .write(true)
+            .open(&note)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let replaced = fs::metadata(&note).unwrap();
+        assert_eq!(
+            replaced.len(),
+            before.len(),
+            "the replacement changed length"
+        );
+        assert_eq!(
+            replaced.modified().unwrap(),
+            modified,
+            "the replacement changed mtime"
+        );
+
+        let after = norn_fs::ContentHash::of(b"after!").to_string();
         reconcile_until(
             &ops,
             &name,
             &mut attachment,
             &progress,
-            "the polling backend event to reach the host reconcile path",
+            "the configured polling backend to hash-detect the same-stat replacement",
             |attachment, _| match stored(attachment, "note.md") {
                 Some(row) if row.content_hash == after => Observed::Met(()),
                 row => {
@@ -3269,7 +3284,7 @@ mod tests {
             let (subscription, own_writes) = watch(
                 attachment.registration.root.as_path(),
                 &schema,
-                ProductionEntryOps::watch_backend(&attachment.registration),
+                attachment.registration.poll_backend.is_some(),
             )
             .map_err(watcher)?;
             attachment.subscription = Some(subscription);

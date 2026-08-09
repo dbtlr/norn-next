@@ -41,20 +41,6 @@ pub const DIRTY_ROOT_CAP: usize = 8192;
 /// the ledger's short lifetime.
 pub const OWN_WRITE_CAP: usize = 4096;
 
-/// The backend family used to establish watch coverage.
-///
-/// Layer 1 host registration selects polling for filesystems whose native
-/// notification stream is unreliable. The concrete notify watcher remains
-/// erased here at the filesystem effect seam.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum WatchBackend {
-    /// The platform-native backend selected by notify.
-    #[default]
-    Native,
-    /// A periodic filesystem scan for mounts without dependable native events.
-    Poll,
-}
-
 /// A coverage partition whose exact changed paths are no longer known.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum RescanScope {
@@ -295,7 +281,7 @@ impl OwnWrites {
 pub fn watch(
     vault_root: &Path,
     schema_source: &Path,
-    backend_choice: WatchBackend,
+    poll: bool,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
     // macOS FSEvents reports the canonical `/private/var/...` spelling even
     // when a caller registered `/var/...`. Keep registration and callback
@@ -329,11 +315,13 @@ pub fn watch(
         ingest(&callback_state, result);
         let _ = callback_wake.try_send(());
     };
-    let mut watcher: Box<dyn notify::Watcher + Send> = match backend_choice {
-        WatchBackend::Native => {
-            Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?)
-        }
-        WatchBackend::Poll => Box::new(
+    // `poll` is deliberately only a bit at this effect seam. The registry's
+    // `PollBackend` is the single public selection vocabulary; duplicating its
+    // variants here would create a second spelling, while depending on config
+    // would violate the leaf-crate boundary.
+    let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
+        false => Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?),
+        true => Box::new(
             PollWatcher::new(
                 handler,
                 Config::default()

@@ -12,8 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use norn_fs::{
-    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchBackend, WatchError,
-    watch,
+    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -178,7 +177,7 @@ impl Collector {
     fn start(vault: &Path, schema: &Path) -> Self {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
         let (subscription, _own_writes) =
-            watch(vault, schema, WatchBackend::Native).expect("watch coverage is active");
+            watch(vault, schema, false).expect("watch coverage is active");
         let mut collector = Self {
             subscription,
             seen: Seen::default(),
