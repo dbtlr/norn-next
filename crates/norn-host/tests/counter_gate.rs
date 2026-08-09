@@ -10,10 +10,19 @@
 //! Two bars, both counts:
 //!
 //! - **Zero on warm.** A request that only reads derives nothing, over the
-//!   ~2k-document `realistic` profile — the scale the gates assert against.
+//!   ~2k-document `realistic` profile — the scale the gates assert against. It
+//!   is asserted twice over, because an attachment that is gone and one that is
+//!   still serving are different subjects: once over the rows an attachment left
+//!   behind, and once with the entry still attached under a held demand, across
+//!   two passes so a cost paid on first touch is separated from the steady state.
 //! - **Size independence.** One bounded write costs the same at 300 documents
 //!   and at 2000. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together.
+//!
+//! **Every reading is recorded, zero included.** A gate that passes says only
+//! that nothing moved; which counters were asked and what each read is the
+//! evidence behind it, and the write's non-zero reading beside them is what says
+//! the instrument moves at all.
 //!
 //! **Every case here is `#[ignore]`d into the `counter-lane` lane**, and the CI
 //! `counter gates` job is the only thing that runs them. Attaching thousands of
@@ -36,6 +45,7 @@ use norn_store::{
 use norn_testkit::counters::CounterSnapshot;
 use norn_testkit::process::Sandbox;
 use norn_testkit::scale::{ScaleObservation, SizeIndependencePair};
+use norn_wire::TrustState;
 
 /// The document the size-independence pair writes at both scales.
 ///
@@ -60,6 +70,73 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
     let mut store = vault.store();
     assert_the_attachment_derived_the_profile(&mut store, &profile);
     let subject = a_derived_document(&mut store);
+
+    let snapshot = a_warm_pass(&mut store, &subject);
+    record_the_counters("a warm request over a detached vault", &snapshot);
+    snapshot.assert_all_zero("a warm request over an attached vault");
+}
+
+/// **The zero-on-warm bar with the host still serving**, and again on a second
+/// pass over the same store.
+///
+/// The case above reads what an attachment left behind: its host is gone by the
+/// time a counter is read, so what it says is that the rows on disk answer
+/// without deriving. This one says the other half — the entry is still
+/// attached, its demand lease is still held, and its watcher is still
+/// subscribed while the request runs. A read path that derived under a live
+/// attachment, or that warmed something on first touch and paid for it, would
+/// move a counter here and nowhere above.
+///
+/// Two passes, and both are judged. A first pass over a store nothing has read
+/// yet is where a lazily-built index or a cache filled on demand would be paid
+/// for; the second is the steady state the claim is about, and the pair is what
+/// separates them.
+#[test]
+#[ignore = "counter-lane case: runs in the ci counter gates job, not the workspace suite"]
+fn warm_requests_under_a_live_attachment_finish_at_zero() {
+    let profile = norn_fixtures::Profile::by_name("realistic").expect("the gate profile");
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "counter-gate-live")
+        .expect("a sandbox");
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile.name);
+
+    // Host and lease are held for the whole case: demand is what keeps the idle
+    // reaper away from the entry, so an entry that is still attached when the
+    // last read finishes is one that was demanded throughout.
+    let host = vault.host();
+    let _lease = attach::attach_and_wait(&host, vault.name());
+
+    let mut store = vault.store();
+    assert_the_attachment_derived_the_profile(&mut store, &profile);
+    let subject = a_derived_document(&mut store);
+
+    let first = a_warm_pass(&mut store, &subject);
+    let second = a_warm_pass(&mut store, &subject);
+    record_the_counters("a warm request under a live attachment, first pass", &first);
+    record_the_counters(
+        "a warm request under a live attachment, second pass",
+        &second,
+    );
+
+    // The entry is still the one the reads ran against, rather than one the
+    // host tore down part-way: a bar over a detached entry is the case above
+    // wearing this one's name.
+    assert_eq!(
+        host.state(vault.name()),
+        Some(TrustState::Ready),
+        "the reads above were meant to run against a live attachment, and the entry is not ready"
+    );
+    first.assert_all_zero("the first warm request under a live attachment");
+    second.assert_all_zero("the second warm request under a live attachment");
+}
+
+/// One warm read-only pass over `store`, and what it derived.
+///
+/// Every reader the store offers is exercised against content that is really
+/// there — the path and the stem come off a row the attach wrote — so the
+/// reading is of readers that found something rather than of lookups that
+/// missed. A reader that returned nothing would count nothing whatever the read
+/// path did.
+fn a_warm_pass(store: &mut Store, subject: &StoredDocument) -> CounterSnapshot {
     let stem = subject.path.stem().to_string();
     let probe = class_probe(&stem).expect("a class stem off a derived path");
 
@@ -92,10 +169,22 @@ fn a_warm_request_over_an_attached_vault_finishes_at_zero() {
     );
     let _ = warm.pillars().expect("a pillar report");
 
-    let reading = warm.finish();
-    let snapshot: CounterSnapshot = reading.readings().collect();
-    assert!(reading.is_all_zero(), "{:?}", snapshot.nonzero());
-    snapshot.assert_all_zero("a warm request over an attached vault");
+    warm.finish().readings().collect()
+}
+
+/// Record a counter reading where a person will find it.
+///
+/// **A gate that passes says only that nothing moved.** Which counters were
+/// asked and what each of them read is the evidence behind that, and a zero
+/// nobody can see is indistinguishable from an instrument that was never
+/// wired — so every counter in the vocabulary is written out by name, at the
+/// value this request finished on.
+fn record_the_counters(heading: &str, snapshot: &CounterSnapshot) {
+    let readings: Vec<(&str, String)> = snapshot
+        .names()
+        .map(|name| (name, snapshot.get(name).to_string()))
+        .collect();
+    norn_testkit::readings::record(heading, &readings);
 }
 
 /// **The size-independence bar.** The vault around a bounded write is not part
@@ -147,7 +236,16 @@ fn one_probe_write(label: &str, profile: &norn_fixtures::Profile) -> CounterSnap
         !reading.is_all_zero(),
         "a write that counted nothing is an instrument that never reached the store"
     );
-    reading.readings().collect()
+    let snapshot: CounterSnapshot = reading.readings().collect();
+    // **The other half of a zero.** The warm bars above read every counter at
+    // zero over the same store type and the same instrument; what says that is
+    // a read path deriving nothing rather than a counter set nothing ever
+    // moves is a derivation, recorded beside them.
+    record_the_counters(
+        &format!("one document upserted over `{}`", profile.name),
+        &snapshot,
+    );
+    snapshot
 }
 
 /// Generate `profile`'s tree in a sandbox of its own, attach it, and hand back
