@@ -15,6 +15,13 @@ pub use lifecycle::{
     AttachMode, Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure,
     LifecyclePolicy, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
 };
+/// One vault's registration: the name it is served under, its root, and where
+/// its schema is read from.
+///
+/// [`EntryOps::attach`] is handed one, so an implementation of that trait names
+/// the type through this crate rather than reaching for the config crate's
+/// spelling of it.
+pub use norn_config::registry::Entry as Registration;
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
 };

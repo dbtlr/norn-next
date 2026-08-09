@@ -73,9 +73,13 @@ pub(crate) enum ServingRefusal {
 /// let go, so no path takes them the other way round.
 ///
 /// The cost of an insertable set over one frozen at construction is one
-/// uncontended read lock and one refcount per lookup, and one allocation per
-/// pass over every entry. A scan reads the set once and works from that
-/// reading, so a vault that joins mid-scan is served from the next pass.
+/// uncontended read lock and one refcount per lookup, and per pass over every
+/// entry one allocation plus the refcount traffic of the handles in it — N
+/// increments taking the reading and N decrements dropping it, three readings
+/// per dispatcher tick. That is the price of insertability: a pass over a set
+/// nothing can join borrows its entries in place and pays neither. A scan reads
+/// the set once and works from that reading, so a vault that joins mid-scan is
+/// served from the next pass.
 ///
 /// [`EntryOps`]: crate::EntryOps
 pub(crate) struct ServingSet<A: SnapshotSource> {

@@ -16,9 +16,9 @@
 //!
 //! Two things are called a gate. `Entry::gate` is the mutex over an entry's
 //! whole lifecycle state — the entry gate lock every move below is taken under,
-//! and the one the architecture documents name. The entry's registration stands
-//! outside it, unchanging for as long as the serving set serves the entry, so
-//! nothing below reads or writes it. `Claim::gate` is the scheduling [`Gate`]
+//! and the one the architecture documents name. The entry's served name and
+//! root stand outside it, unchanging for as long as the serving set serves the
+//! entry, so nothing below reads or writes them. `Claim::gate` is the scheduling [`Gate`]
 //! inside the state, which is what this section means by "the gate" throughout.
 //! One is nested in the other.
 //!

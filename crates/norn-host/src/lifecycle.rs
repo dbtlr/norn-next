@@ -74,11 +74,11 @@ pub trait EntryOps: Send + Sync + 'static {
     /// performs one nonblocking [`EntryOps::poll`] before it may publish Ready;
     /// raced and continuing facts then use ordinary coalesced reconciliation.
     ///
-    /// The registration is handed down rather than looked up: the vault's name,
-    /// its root and its schema source arrive from the entry the lifecycle is
-    /// attaching, so an implementation keeps no account of the serving set and
-    /// has none to disagree with. What an attachment needs after this call —
-    /// the root a reconcile scopes against, the schema a recheck re-pins — it
+    /// The [`Registration`] is handed down rather than looked up: the vault's
+    /// name, its root and its schema source arrive from the entry the lifecycle
+    /// is attaching, so an implementation keeps no account of the serving set
+    /// and has none to disagree with. What an attachment needs after this call
+    /// — the root a reconcile scopes against, the schema a recheck re-pins — it
     /// keeps from what it is given here.
     fn attach(
         &self,
@@ -1195,6 +1195,11 @@ struct Shared<O: EntryOps> {
     /// The one collection of vaults this host serves. It answers which names
     /// exist and where their roots are, so nothing here reads a registration
     /// off a second account that could disagree with it.
+    ///
+    /// The set's lock is never taken while an entry gate is held. Every read
+    /// here clones the entry out and lets the set's lock go before it takes
+    /// that entry's gate, and [`ServingSet::remove`] is the one move that holds
+    /// both — in that order, the set and then the gate.
     entries: ServingSet<O::Attachment>,
     ops: Arc<O>,
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
