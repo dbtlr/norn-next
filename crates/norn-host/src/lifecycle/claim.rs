@@ -15,10 +15,12 @@
 //! to, are as much of the map as what it does.
 //!
 //! Two things are called a gate. `Entry::gate` is the mutex over an entry's
-//! whole state — the entry gate lock every move below is taken under, and the
-//! one the architecture documents name. `Claim::gate` is the scheduling [`Gate`]
-//! inside that state, which is what this section means by "the gate"
-//! throughout. One is nested in the other.
+//! whole lifecycle state — the entry gate lock every move below is taken under,
+//! and the one the architecture documents name. The entry's served name and
+//! root stand outside it, unchanging for as long as the serving set serves the
+//! entry, so nothing below reads or writes them. `Claim::gate` is the scheduling [`Gate`]
+//! inside the state, which is what this section means by "the gate" throughout.
+//! One is nested in the other.
 //!
 //! ## The gate
 //!
@@ -169,6 +171,12 @@
 //! the reason the re-arm's slot above is: a hand-off leaves no marker naming
 //! the job it sends, so the reader that would refuse a second send has nothing
 //! to send twice.
+//!
+//! **A taken slot is a hold on the entry in its own right.** Carried by
+//! [`Claim::slot_taken`], which `EntryState::held_by_anything` reads beside the
+//! gate and the leg registration: a hand-off can take the slot with the gate
+//! already open, so a job entering the channel is held by the slot alone.
+//! Pinned by `an_entry_holding_its_queue_slot_stays_in_the_set`.
 //!
 //! ## The coverage
 //!
@@ -858,6 +866,11 @@ impl Claim {
     /// work that took the coverage is holding.
     pub(super) fn end_running_leg(&mut self) {
         self.leg = None;
+    }
+
+    /// Whether a job the entry sent is waiting in its queue slot.
+    pub(super) fn slot_taken(&self) -> bool {
+        self.slot.taken()
     }
 
     /// The job waiting in the entry's queue slot, where a job is waiting in it.

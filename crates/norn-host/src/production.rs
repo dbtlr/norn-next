@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use norn_config::registry::Entry;
+use norn_config::registry::Entry as Registration;
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
     Acquisition, Maintainership, RescanScope, ShadowHome, Subscription, WatchError, try_acquire,
@@ -75,14 +75,21 @@ impl fmt::Display for ProductionPolicyError {
 impl std::error::Error for ProductionPolicyError {}
 
 /// The production implementation of the lifecycle effect seam.
+///
+/// It keeps no account of the serving set. Every registration it acts on
+/// arrives with the call that acts on it — an attach is handed the entry's own
+/// registration, and what the attachment keeps from it is what the reconciles
+/// and recoveries that follow read. Nothing here can name a vault the host does
+/// not serve, or place a served vault at a root the host does not.
 pub struct ProductionEntryOps {
-    entries: BTreeMap<VaultName, Entry>,
     dirs: ConfigDirs,
     policy: ProductionPolicy,
 }
 
 pub struct ProductionAttachment {
-    entry: Entry,
+    /// The registration this attachment was established from: the root it
+    /// derives, and where its schema is read.
+    registration: Registration,
     maintainership: Maintainership,
     store: Store,
     subscription: Option<Subscription>,
@@ -106,39 +113,24 @@ impl SnapshotSource for ProductionAttachment {
 }
 
 impl ProductionEntryOps {
-    pub fn new(
-        entries: impl IntoIterator<Item = Entry>,
-        dirs: ConfigDirs,
-        policy: ProductionPolicy,
-    ) -> Self {
-        Self {
-            entries: entries.into_iter().map(|e| (e.name.clone(), e)).collect(),
-            dirs,
-            policy,
-        }
-    }
-
-    fn entry(&self, name: &VaultName) -> Result<Entry, JobFailure> {
-        self.entries
-            .get(name)
-            .cloned()
-            .ok_or_else(|| environmental("registry entry disappeared"))
+    pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
+        Self { dirs, policy }
     }
 
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
     }
 
-    fn schema_path(entry: &Entry) -> PathBuf {
-        entry
+    fn schema_path(registration: &Registration) -> PathBuf {
+        registration
             .schema_source
             .as_ref()
             .map(|s| s.as_path().to_owned())
-            .unwrap_or_else(|| entry.root.as_path().join(IN_VAULT_SCHEMA_PATH))
+            .unwrap_or_else(|| registration.root.as_path().join(IN_VAULT_SCHEMA_PATH))
     }
 
-    fn pin_schema(store: &mut Store, entry: &Entry) -> Result<(), JobFailure> {
-        let observed = norn_fs::read_and_hash(&Self::schema_path(entry)).map_err(effect)?;
+    fn pin_schema(store: &mut Store, registration: &Registration) -> Result<(), JobFailure> {
+        let observed = norn_fs::read_and_hash(&Self::schema_path(registration)).map_err(effect)?;
         std::str::from_utf8(observed.bytes())
             .map_err(|e| environmental(format!("schema is not UTF-8: {e}")))?;
         store
@@ -161,11 +153,11 @@ impl ProductionEntryOps {
         // that work counts through, so the three callers never have to
         // remember to announce it.
         let healing = progress.healing();
-        let exclusions = exclusions(&attachment.entry, &attachment._shadows);
-        Self::pin_schema(&mut attachment.store, &attachment.entry)?;
+        let exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        Self::pin_schema(&mut attachment.store, &attachment.registration)?;
         heal_documents(
             &mut attachment.store,
-            attachment.entry.root.as_path(),
+            attachment.registration.root.as_path(),
             &exclusions,
             self.policy,
             &healing,
@@ -173,13 +165,14 @@ impl ProductionEntryOps {
     }
 }
 
-fn exclusions(entry: &Entry, shadows: &ShadowHome) -> Vec<PathBuf> {
+fn exclusions(registration: &Registration, shadows: &ShadowHome) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(relative) = shadows.directory().strip_prefix(entry.root.as_path()) {
+    let root = registration.root.as_path();
+    if let Ok(relative) = shadows.directory().strip_prefix(root) {
         paths.push(relative.to_owned());
     }
-    let schema = ProductionEntryOps::schema_path(entry);
-    if let Ok(relative) = schema.strip_prefix(entry.root.as_path()) {
+    let schema = ProductionEntryOps::schema_path(registration);
+    if let Ok(relative) = schema.strip_prefix(root) {
         paths.push(relative.to_owned());
     }
     paths
@@ -190,7 +183,7 @@ impl EntryOps for ProductionEntryOps {
 
     fn attach(
         &self,
-        name: &VaultName,
+        registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
         // Everything up to the heal takes the maintainer lock, sweeps the
@@ -199,22 +192,21 @@ impl EntryOps for ProductionEntryOps {
         // The phase is entered before it so a caller reading the entry sees
         // what it is waiting on rather than a heal that appears not to start.
         progress.installing_coverage();
-        let entry = self.entry(name)?;
-        let derived = self.derived(name);
+        let root = registration.root.as_path();
+        let derived = self.derived(&registration.name);
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
             Acquisition::Acquired(guard) => guard,
             Acquisition::Contended { incumbent } => {
                 return Err(JobFailure::MaintainerContended(map_incumbent(incumbent)));
             }
         };
-        let shadows =
-            ShadowHome::resolve(entry.root.as_path(), &derived.join("tmp")).map_err(effect)?;
+        let shadows = ShadowHome::resolve(root, &derived.join("tmp")).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
-        let schema = Self::schema_path(&entry);
-        let (subscription, _) = watch(entry.root.as_path(), &schema).map_err(watcher)?;
+        let schema = Self::schema_path(registration);
+        let (subscription, _) = watch(root, &schema).map_err(watcher)?;
         let store = Store::open(derived.join("store.sqlite3")).map_err(effect)?;
         let mut attachment = ProductionAttachment {
-            entry,
+            registration: registration.clone(),
             maintainership,
             store,
             subscription: Some(subscription),
@@ -241,18 +233,18 @@ impl EntryOps for ProductionEntryOps {
         let schema =
             work.batch.schema_dirty() || work.batch.rescans().contains(&RescanScope::Schema);
         if schema {
-            Self::pin_schema(&mut attachment.store, &attachment.entry)?;
+            Self::pin_schema(&mut attachment.store, &attachment.registration)?;
         }
         if work.batch.rescans().contains(&RescanScope::Vault) {
             return self.heal(attachment, progress);
         }
         scoped_increment(
             &mut attachment.store,
-            attachment.entry.root.as_path(),
+            attachment.registration.root.as_path(),
             work.batch.vault_roots(),
             self.policy,
             &healing,
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
     }
 
@@ -268,8 +260,9 @@ impl EntryOps for ProductionEntryOps {
         // Recovery re-installs coverage before it re-heals, so it enters the
         // same prologue phase an attach does.
         progress.installing_coverage();
-        let schema = Self::schema_path(&attachment.entry);
-        let (subscription, _) = watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
+        let schema = Self::schema_path(&attachment.registration);
+        let (subscription, _) =
+            watch(attachment.registration.root.as_path(), &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
         self.heal(attachment, progress)
     }
@@ -1319,13 +1312,18 @@ mod tests {
         fn vault(&self) -> PathBuf {
             self.root.join("vault")
         }
+        /// The registration every attach in these cases is handed.
+        fn registration(&self) -> Registration {
+            Registration::new(
+                VaultName::new("notes").unwrap(),
+                VaultRoot::new(self.vault()).unwrap(),
+            )
+        }
         fn ops(&self, page: usize) -> (ProductionEntryOps, VaultName) {
-            let name = VaultName::new("notes").unwrap();
-            let entry = Entry::new(name.clone(), VaultRoot::new(self.vault()).unwrap());
             let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data")).unwrap();
             (
-                ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(page, 2).unwrap()),
-                name,
+                ProductionEntryOps::new(dirs, ProductionPolicy::new(page, 2).unwrap()),
+                self.registration().name,
             )
         }
     }
@@ -1343,7 +1341,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::remove_file(f.vault().join("a.md")).unwrap();
         fs::remove_file(f.vault().join("e.md")).unwrap();
         fs::write(f.vault().join("b.md"), "b").unwrap();
@@ -1393,9 +1391,9 @@ mod tests {
             return;
         }
 
-        let (ops, name) = f.ops(1);
+        let (ops, _) = f.ops(1);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let rows = attachment
             .store
             .begin_request()
@@ -1414,7 +1412,7 @@ mod tests {
         fs::write(f.vault().join("unrelated.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let unrelated = DocumentPath::new("unrelated.md").unwrap();
         let generation = attachment
             .store
@@ -1464,7 +1462,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), "before").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::remove_file(f.vault().join("note.md")).unwrap();
 
         scoped_increment(
@@ -1473,7 +1471,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -1498,7 +1496,7 @@ mod tests {
         fs::write(&note, "before").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::remove_file(&note).unwrap();
         symlink("missing-target", &note).unwrap();
         reconcile_until(
@@ -1522,7 +1520,7 @@ mod tests {
         fs::write(f.vault().join("archive.md/child.md"), "child").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
         fs::write(f.vault().join("archive.md"), "replacement").unwrap();
@@ -1532,7 +1530,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "archive.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -1583,7 +1581,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         let findings = findings_at(&mut attachment.store, "bad\u{fffd}name.md");
         assert_eq!(findings.len(), 2, "one spelling displaced the other");
@@ -1620,7 +1618,7 @@ mod tests {
         fs::write(f.vault().join("bad.md"), b"ok \xff\xfe first\n").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let first = findings_at(&mut attachment.store, "bad.md");
         assert_eq!(first.len(), 1);
 
@@ -1660,7 +1658,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         assert_eq!(
             stored_paths(&mut attachment.store),
@@ -1721,7 +1719,7 @@ mod tests {
         fs::write(f.vault().join("gamma.md"), "gamma").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         assert_eq!(
             stored_paths(&mut attachment.store),
@@ -1748,7 +1746,7 @@ mod tests {
         fs::write(f.vault().join("ok.md"), "ok").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         ops.reconcile(
             &name,
             &mut attachment,
@@ -1774,7 +1772,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
         let findings = findings_at(&mut attachment.store, "bad\u{fffd}name.md");
@@ -1798,7 +1796,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
         assert_eq!(
@@ -1824,7 +1822,7 @@ mod tests {
         }
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         assert_eq!(stored_paths(&mut attachment.store), ["ok.md"]);
         assert_eq!(
@@ -1844,7 +1842,7 @@ mod tests {
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             stored_paths(&mut attachment.store),
             ["note.md", "steady.md"]
@@ -1892,7 +1890,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), UNDECODABLE).unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
 
         fs::write(f.vault().join("note.md"), "# readable\n").unwrap();
@@ -1902,7 +1900,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "note.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -1918,7 +1916,7 @@ mod tests {
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
         fs::write(f.vault().join("fresh.md"), "fresh").unwrap();
@@ -1930,7 +1928,7 @@ mod tests {
             &dirty,
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -1954,7 +1952,7 @@ mod tests {
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::create_dir_all(f.vault().join("folder")).unwrap();
         fs::write(f.vault().join("folder/ok.md"), "ok").unwrap();
@@ -1965,7 +1963,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -1992,7 +1990,7 @@ mod tests {
         let f = Fixture::new("quarantine-subtree-spelling");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::create_dir_all(f.vault().join("folder")).unwrap();
         fs::write(f.vault().join("folder/ok.md"), "ok").unwrap();
@@ -2005,7 +2003,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "folder"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2030,7 +2028,7 @@ mod tests {
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
             return;
@@ -2041,7 +2039,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2065,7 +2063,7 @@ mod tests {
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         scoped_increment(
             &mut attachment.store,
@@ -2073,7 +2071,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\name.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2092,7 +2090,7 @@ mod tests {
         let f = Fixture::new("quarantine-refused-directory");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         if fs::create_dir_all(f.vault().join("bad\\dir")).is_err() {
             eprintln!("skipped: this filesystem does not create a directory named `bad\\dir`");
@@ -2105,7 +2103,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "bad\\dir"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2143,7 +2141,7 @@ mod tests {
         let f = Fixture::new("quarantine-refused-stem-directory");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::create_dir_all(f.vault().join("..md")).unwrap();
         fs::write(f.vault().join("..md/note.md"), "body").unwrap();
@@ -2153,7 +2151,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2170,7 +2168,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
         assert!(stored_paths(&mut attachment.store).is_empty());
@@ -2194,7 +2192,7 @@ mod tests {
         let f = Fixture::new("quarantine-refused-stem-child-deletion");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::create_dir_all(f.vault().join("..md")).unwrap();
         fs::write(f.vault().join("..md/note.md"), "body").unwrap();
@@ -2223,7 +2221,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2242,7 +2240,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
         assert_eq!(
@@ -2257,7 +2255,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md/second.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
         assert_eq!(
@@ -2278,7 +2276,7 @@ mod tests {
         let f = Fixture::new("quarantine-refused-stem-deletion");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
 
         fs::create_dir_all(f.vault().join("..md")).unwrap();
         fs::write(f.vault().join("..md/note.md"), "body").unwrap();
@@ -2304,7 +2302,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "..md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2323,12 +2321,12 @@ mod tests {
 
         fn attach(
             &self,
-            name: &VaultName,
+            registration: &Registration,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<Self::Attachment, JobFailure> {
             self.attaches
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.attach(name, progress)
+            self.inner.attach(registration, progress)
         }
 
         fn reconcile(
@@ -2371,15 +2369,15 @@ mod tests {
             fs::write(f.vault().join(format!("ok-{index}.md")), "ok").unwrap();
         }
         let name = VaultName::new("notes").unwrap();
-        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let attaches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let host = crate::Host::new(
             registry,
             CountedAttach {
-                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
                 attaches: std::sync::Arc::clone(&attaches),
             },
             crate::LifecyclePolicy {
@@ -2426,7 +2424,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::rename(f.vault().join("note.md"), f.vault().join("NOTE.md")).unwrap();
 
         scoped_increment(
@@ -2435,7 +2433,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "NOTE.md"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2465,7 +2463,7 @@ mod tests {
         fs::write(f.vault().join("folder/note.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
 
         scoped_increment(
@@ -2474,7 +2472,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "FOLDER"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2500,7 +2498,7 @@ mod tests {
         fs::write(f.vault().join("image.bin"), [0xff, 0x00, 0xfe]).unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let rows = attachment
             .store
             .begin_request()
@@ -2518,7 +2516,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "UPPER.MD"),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
         assert!(
@@ -2541,7 +2539,7 @@ mod tests {
         }
         let (ops, name) = f.ops(8);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::write(f.vault().join("before.md"), "before").unwrap();
         scoped_increment(
             &mut attachment.store,
@@ -2549,7 +2547,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "before.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
         let generation_before_prune = attachment
@@ -2577,7 +2575,7 @@ mod tests {
             &dirty_path(f.vault().as_path(), "after.md"),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
-            &exclusions(&attachment.entry, &attachment._shadows),
+            &exclusions(&attachment.registration, &attachment._shadows),
         )
         .unwrap();
 
@@ -2603,7 +2601,7 @@ mod tests {
         fs::write(f.vault().join("unrelated.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let unrelated = DocumentPath::new("unrelated.md").unwrap();
         let generation = attachment
             .store
@@ -2695,7 +2693,7 @@ mod tests {
         fs::write(f.vault().join("archive.md/child.md"), "child").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         fs::remove_dir_all(f.vault().join("archive.md")).unwrap();
         reconcile_until(
             &ops,
@@ -2720,12 +2718,12 @@ mod tests {
         fs::write(&schema, "version: one").unwrap();
         fs::write(f.vault().join("note.md"), "note").unwrap();
         let name = VaultName::new("notes").unwrap();
-        let mut entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        entry.schema_source = Some(SchemaSource::new(&schema).unwrap());
+        let mut registration = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        registration.schema_source = Some(SchemaSource::new(&schema).unwrap());
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap());
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
         fs::write(&schema, "version: two").unwrap();
         // The outcome here is that nothing arrives, so what the wait is for is
         // the invalidation itself: the schema edit has been reported and
@@ -2768,7 +2766,7 @@ mod tests {
         });
         let (ops, name) = f.ops(2);
         let attachment = ops
-            .attach(&name, &ProgressReporter::disconnected())
+            .attach(&f.registration(), &ProgressReporter::disconnected())
             .unwrap();
         running.store(false, std::sync::atomic::Ordering::SeqCst);
         writer.join().unwrap();
@@ -2798,10 +2796,10 @@ mod tests {
         type Attachment = ProductionAttachment;
         fn attach(
             &self,
-            name: &VaultName,
+            registration: &Registration,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<Self::Attachment, JobFailure> {
-            self.inner.attach(name, progress)
+            self.inner.attach(registration, progress)
         }
         fn reconcile(
             &self,
@@ -2851,8 +2849,8 @@ mod tests {
         let f = Fixture::new("host-watch-edit");
         fs::write(f.vault().join("note.md"), "before").unwrap();
         let name = VaultName::new("notes").unwrap();
-        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2860,7 +2858,7 @@ mod tests {
         let host = crate::Host::new(
             registry,
             HeldReconcile {
-                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
                 armed: std::sync::Arc::clone(&armed),
                 released: std::sync::Arc::clone(&released),
             },
@@ -2905,7 +2903,7 @@ mod tests {
         fs::write(f.vault().join("note.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         attachment.subscription.take();
         assert!(matches!(poll_subscription(&mut attachment), Ok(None)));
         assert!(matches!(ops.poll(&name, &mut attachment), Ok(None)));
@@ -2916,13 +2914,13 @@ mod tests {
         let f = Fixture::new("poll-maintainership");
         fs::write(f.vault().join("note.md"), "body").unwrap();
         let name = VaultName::new("notes").unwrap();
-        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let lock = dirs.derived_dir(&name).join("maintainer.lock");
         let host = crate::Host::new(
             registry,
-            ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
             crate::LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots: 1,
@@ -2942,7 +2940,7 @@ mod tests {
         let f = Fixture::new("scheduled-shadow-sweep");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let residue = attachment._shadows.directory().join("norn-shadow-77-3");
         fs::write(&residue, "residue").unwrap();
         let aged =
@@ -2967,7 +2965,7 @@ mod tests {
         let f = Fixture::new("failed-scheduled-shadow-sweep");
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
-        let mut attachment = ops.attach(&name, &progress).unwrap();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let shadow_home = attachment._shadows.directory().to_owned();
         let displaced = shadow_home.with_extension("displaced");
         fs::rename(&shadow_home, &displaced).unwrap();
@@ -3012,10 +3010,10 @@ mod tests {
 
         fn attach(
             &self,
-            name: &VaultName,
+            registration: &Registration,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<Self::Attachment, JobFailure> {
-            self.inner.attach(name, progress)
+            self.inner.attach(registration, progress)
         }
 
         fn reconcile(
@@ -3044,9 +3042,9 @@ mod tests {
             if !attachment.maintainership.still_current() {
                 return Err(JobFailure::LostMaintainership);
             }
-            let schema = ProductionEntryOps::schema_path(&attachment.entry);
+            let schema = ProductionEntryOps::schema_path(&attachment.registration);
             let (subscription, _) =
-                watch(attachment.entry.root.as_path(), &schema).map_err(watcher)?;
+                watch(attachment.registration.root.as_path(), &schema).map_err(watcher)?;
             attachment.subscription = Some(subscription);
             self.inner.heal(attachment, progress)?;
             self.started
@@ -3147,8 +3145,8 @@ mod tests {
         let note = f.vault().join("note.md");
         fs::write(&note, "before").unwrap();
         let name = VaultName::new("notes").unwrap();
-        let entry = Entry::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
-        let registry = crate::ServingRegistry::from_entries([entry.clone()]).unwrap();
+        let entry = Registration::new(name.clone(), VaultRoot::new(f.vault()).unwrap());
+        let registry = crate::RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
         let derived = dirs.derived_dir(&name);
         let lose_coverage = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3158,7 +3156,7 @@ mod tests {
         let host = crate::Host::new(
             registry,
             BlockedRecovery {
-                inner: ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(2, 2).unwrap()),
+                inner: ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
                 lose_coverage: std::sync::Arc::clone(&lose_coverage),
                 started: std::sync::Arc::clone(&started),
                 release: std::sync::Arc::clone(&release),

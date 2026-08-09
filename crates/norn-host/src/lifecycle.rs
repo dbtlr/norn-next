@@ -7,16 +7,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use norn_config::VaultName;
+use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_wire::{
     ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 
-use crate::registry::{AliasConflict, ServingRegistry};
+use crate::registry::{AliasConflict, RegistryRead};
 
 mod claim;
+mod serving;
 
 use claim::{Claim, Coverage, Leg};
+use serving::ServingSet;
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.
@@ -70,9 +73,16 @@ pub trait EntryOps: Send + Sync + 'static {
     /// one full hash-authoritative heal. After this returns, the lifecycle
     /// performs one nonblocking [`EntryOps::poll`] before it may publish Ready;
     /// raced and continuing facts then use ordinary coalesced reconciliation.
+    ///
+    /// The [`Registration`] is handed down rather than looked up: the vault's
+    /// name, its root and its schema source arrive from the entry the lifecycle
+    /// is attaching, so an implementation keeps no account of the serving set
+    /// and has none to disagree with. What an attachment needs after this call
+    /// — the root a reconcile scopes against, the schema a recheck re-pins — it
+    /// keeps from what it is given here.
     fn attach(
         &self,
-        name: &VaultName,
+        registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure>;
     /// Apply one coalesced envelope. Schema dirtiness dominates document roots;
@@ -297,8 +307,54 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
+/// One vault this host serves.
+///
+/// The registration is the entry's own and never read from anywhere else: what
+/// the host serves, and at which root, is one fact carried beside the state
+/// that serves it. Every effect the entry needs a root for — the attach, the
+/// classification a recheck runs, the refusal that names an alias — reads it
+/// here.
 struct Entry<A: SnapshotSource> {
+    /// The name this entry is served under, the root it serves, and where its
+    /// schema is read from. It stands outside the gate because nothing changes
+    /// it: an entry serves the registration it was inserted with for as long as
+    /// the set serves the entry.
+    registration: Registration,
     gate: Mutex<EntryState<A>>,
+}
+
+impl<A: SnapshotSource> Entry<A> {
+    /// An entry serving `registration` and holding nothing, which is what a
+    /// vault the host has never attached stands at.
+    fn unattached(registration: Registration) -> Self {
+        Self {
+            registration,
+            gate: Mutex::new(EntryState {
+                trust: TrustState::Unattached,
+                coverage: Coverage::none(),
+                reader: None,
+                pending: Batch::default(),
+                recovery_required: false,
+                recovery_demands: 0,
+                recovery_generation: 0,
+                identity_refused: None,
+                claim: Claim::default(),
+                maintainer_contended: None,
+                duplicate_root: None,
+                last_demand: Instant::now(),
+                demand_leases: 0,
+                safety_pins: 0,
+                detach_due: false,
+                detach_scheduled: false,
+                detach_in_flight: false,
+            }),
+        }
+    }
+
+    /// The name this entry is served under.
+    fn name(&self) -> &VaultName {
+        &self.registration.name
+    }
 }
 
 struct EntryState<A: SnapshotSource> {
@@ -467,6 +523,45 @@ impl<A: SnapshotSource> EntryState<A> {
     /// its own.
     fn pinned(&self) -> bool {
         self.safety_pins > 0
+    }
+
+    /// Whether the entry holds anything, or anything holds the entry.
+    ///
+    /// Every hold either side of the lifecycle can take is named here:
+    /// coverage the entry holds or that is out with a leg, a claim on its
+    /// scheduling gate, a leg registered against it, a job waiting in its
+    /// queue slot, a release in flight, a read pinning it, and a demand lease
+    /// recorded against it. An entry none of these stands over owes nothing
+    /// and is owed nothing, which is what makes it removable from the serving
+    /// set.
+    ///
+    /// Six of the limbs are reachable as the sole hold, and a case reaches
+    /// each: coverage in hand, coverage out with a leg, the gate, the leg
+    /// registration, the queue slot and the lease.
+    /// [`EntryState::detach_in_flight`] and [`EntryState::pinned`] are defence
+    /// in depth over states the other six already answer — a release in flight
+    /// was begun over coverage the entry was holding, and a pin is taken either
+    /// beside the coverage in the entry's own hand or by the leg that took it
+    /// out — so no state this crate reaches turns on either one alone.
+    ///
+    /// The queue slot is a limb of its own because a slot can outlive the gate
+    /// that stood when it was taken. A job leg makes its next job under
+    /// [`Claim::hand_on`], which holds the gate, and the entry's lock goes back
+    /// before `dispatch_handoff` takes it again for [`Claim::hand_off`]. A
+    /// refusal reaching the entry in that window — `refuse_identity_error`,
+    /// which a caller thread reaches through `Host::demand` and
+    /// `recheck_and_refuse` — opens the gate, so the hand-off takes the slot
+    /// through its open-gate arm and the job entering the channel is held here
+    /// by the slot alone.
+    fn held_by_anything(&self) -> bool {
+        self.coverage.in_hand()
+            || self.coverage.out_with_leg()
+            || self.claim.is_held()
+            || self.claim.leg().is_some()
+            || self.claim.slot_taken()
+            || self.detach_in_flight
+            || self.pinned()
+            || self.demand_leases > 0
     }
 
     /// What the entry is parked on, where it is parked.
@@ -872,8 +967,8 @@ fn dispatch_pending<O: EntryOps>(
 }
 
 fn retry_pending_dispatches<O: EntryOps>(shared: &Arc<Shared<O>>) {
-    for entry in shared.entries.values() {
-        let _ = dispatch_pending(shared, entry);
+    for entry in shared.entries.snapshot() {
+        let _ = dispatch_pending(shared, &entry);
     }
 }
 
@@ -909,14 +1004,14 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     let entries = conflict
         .aliases()
         .iter()
-        .filter_map(|name| shared.entries.get(name).map(|entry| (name, entry)))
+        .filter_map(|name| shared.entries.get(name))
         .collect::<Vec<_>>();
     let mut states = entries
         .iter()
-        .map(|(_, entry)| entry.gate.lock().expect("entry gate poisoned"))
+        .map(|entry| entry.gate.lock().expect("entry gate poisoned"))
         .collect::<Vec<_>>();
     let mut releasing = Vec::new();
-    for ((name, entry), state) in entries.iter().zip(&mut states) {
+    for (entry, state) in entries.iter().zip(&mut states) {
         state.claim.invalidate();
         state.pending = Batch::default();
         state.clear_recovery();
@@ -943,7 +1038,7 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
             Some(attachment) => {
                 state.claim.end_running_leg();
                 begin_release(state);
-                releasing.push(((*name).clone(), *entry, epoch, attachment));
+                releasing.push((Arc::clone(entry), epoch, attachment));
             }
             // The resources are out with a leg, or with one that has yet to
             // take them. The window opens here and the leg's own end closes it,
@@ -957,8 +1052,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
         }
     }
     drop(states);
-    for (name, entry, epoch, attachment) in releasing {
-        finish_release(shared, entry, &name, epoch, Some(attachment));
+    for (entry, epoch, attachment) in releasing {
+        finish_release(shared, &entry, entry.name(), epoch, Some(attachment));
     }
 }
 
@@ -1070,14 +1165,14 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
 /// reported back: the caller reads [`EntryState::parked`] like every other
 /// reader does, and one park is answered by one predicate.
 fn recheck_and_refuse<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
-    if let Ok(reading) = shared.registry.recheck(name)
+    if let Ok(reading) = shared.entries.recheck(name)
         && reading.conflict.is_none()
     {
         clear_registry_parks(shared, name);
         return;
     }
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
-    let conflict = match shared.registry.recheck(name) {
+    let conflict = match shared.entries.recheck(name) {
         Ok(reading) => reading.conflict,
         Err(refusal) => {
             refuse_identity_error(shared, name, refusal.to_string());
@@ -1102,8 +1197,15 @@ fn clear_registry_parks<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) 
 }
 
 struct Shared<O: EntryOps> {
-    registry: ServingRegistry,
-    entries: BTreeMap<VaultName, Arc<Entry<O::Attachment>>>,
+    /// The one collection of vaults this host serves. It answers which names
+    /// exist and where their roots are, so nothing here reads a registration
+    /// off a second account that could disagree with it.
+    ///
+    /// The set's lock is never taken while an entry gate is held. Every read
+    /// here clones the entry out and lets the set's lock go before it takes
+    /// that entry's gate, and [`ServingSet::remove`] is the one move that holds
+    /// both — in that order, the set and then the gate.
+    entries: ServingSet<O::Attachment>,
     ops: Arc<O>,
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
@@ -1250,7 +1352,7 @@ impl<O: EntryOps> Drop for Host<O> {
         // reader — a demand lease holds the shared state itself, so it outlives
         // the host and reads the entry through its own handle.
         let mut releasing = Vec::new();
-        for (name, entry) in &self.shared.entries {
+        for entry in self.shared.entries.snapshot() {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.claim.invalidate();
             state.claim.open();
@@ -1260,7 +1362,7 @@ impl<O: EntryOps> Drop for Host<O> {
                 // The joins below wait for the leg running it, and whatever it
                 // leaves in the entry is given back after them.
                 begin_release(&mut state);
-                releasing.push((name.clone(), None));
+                releasing.push((Arc::clone(&entry), None));
                 continue;
             }
             match state.coverage.give_up() {
@@ -1271,14 +1373,14 @@ impl<O: EntryOps> Drop for Host<O> {
                 Some(attachment) => {
                     state.claim.end_running_leg();
                     begin_release(&mut state);
-                    releasing.push((name.clone(), Some(attachment)));
+                    releasing.push((Arc::clone(&entry), Some(attachment)));
                 }
                 // A leg is holding this entry's resources, or is about to take
                 // them. The joins below wait for it, and whatever it leaves in
                 // the entry is given back after them.
                 None if state.coverage.out_with_leg() || state.claim.leg().is_some() => {
                     begin_release(&mut state);
-                    releasing.push((name.clone(), None));
+                    releasing.push((Arc::clone(&entry), None));
                 }
                 // Nothing is held, so the entry is already released and can
                 // say so.
@@ -1298,10 +1400,7 @@ impl<O: EntryOps> Drop for Host<O> {
                 let _ = worker.join();
             }
         }
-        for (name, attachment) in releasing {
-            let Some(entry) = self.shared.entries.get(&name) else {
-                continue;
-            };
+        for (entry, attachment) in releasing {
             // A leg that ended between the loop above and its join gave its
             // attachment back to the entry rather than to the ops, so the
             // entry is asked again for what it holds.
@@ -1314,7 +1413,7 @@ impl<O: EntryOps> Drop for Host<O> {
                     .give_up()
             });
             if let Some(attachment) = attachment {
-                self.shared.ops.detach(&name, attachment);
+                self.shared.ops.detach(entry.name(), attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             // Coverage still out with a leg is that leg's to give back, and the
@@ -1335,51 +1434,25 @@ impl<O: EntryOps> Drop for Host<O> {
 }
 
 impl<O: EntryOps> Host<O> {
-    pub fn new(
-        registry: ServingRegistry,
-        ops: O,
-        policy: LifecyclePolicy,
-    ) -> Result<Self, HostError> {
+    pub fn new(registry: RegistryRead, ops: O, policy: LifecyclePolicy) -> Result<Self, HostError> {
         if policy.worker_slots == 0 {
             return Err(HostError::NoWorkerSlots);
         }
         if policy.watch_poll_interval.is_zero() {
             return Err(HostError::ZeroWatchPollInterval);
         }
-        let now = Instant::now();
-        let entries = registry
-            .entries()
-            .map(|entry| {
-                (
-                    entry.name.clone(),
-                    Arc::new(Entry {
-                        gate: Mutex::new(EntryState {
-                            trust: TrustState::Unattached,
-                            coverage: Coverage::none(),
-                            reader: None,
-                            pending: Batch::default(),
-                            recovery_required: false,
-                            recovery_demands: 0,
-                            recovery_generation: 0,
-                            identity_refused: None,
-                            claim: Claim::default(),
-                            maintainer_contended: None,
-                            duplicate_root: None,
-                            last_demand: now,
-                            demand_leases: 0,
-                            safety_pins: 0,
-                            detach_due: false,
-                            detach_scheduled: false,
-                            detach_in_flight: false,
-                        }),
-                    }),
-                )
-            })
-            .collect();
+        // Startup takes the same seam a later registration does: every vault in
+        // the set arrived through one insertion, so a vault gained while the
+        // host runs is served exactly as a vault read at startup is.
+        let entries = ServingSet::new();
+        for registration in registry.into_entries() {
+            entries
+                .insert(registration)
+                .expect("the registrations are keyed by name, so no two of them name one entry");
+        }
         let (jobs, receiver) = mpsc::sync_channel(policy.worker_slots);
         let receiver = Arc::new(Mutex::new(receiver));
         let shared = Arc::new(Shared {
-            registry,
             entries,
             ops: Arc::new(ops),
             jobs: Mutex::new(Some(jobs)),
@@ -1505,7 +1578,7 @@ impl<O: EntryOps> Host<O> {
             schedule_demand(&mut state, name);
             let answer = Demand::State(state.trust.clone());
             drop(state);
-            dispatch_pending(&self.shared, entry)?;
+            dispatch_pending(&self.shared, &entry)?;
             return Ok(DemandLease {
                 outcome: answer,
                 name: name.clone(),
@@ -1561,12 +1634,15 @@ impl<O: EntryOps> Host<O> {
     /// mints no reader.
     pub fn begin_read(&self, name: &VaultName) -> Option<ReadHold<O::Attachment>> {
         let entry = self.shared.entries.get(name)?;
-        let mut state = entry.gate.lock().expect("entry gate poisoned");
-        let reader = Arc::clone(state.reader.as_ref()?);
-        let trust = state.trust.clone();
-        state.pin();
+        let (reader, trust) = {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let reader = Arc::clone(state.reader.as_ref()?);
+            let trust = state.trust.clone();
+            state.pin();
+            (reader, trust)
+        };
         Some(ReadHold {
-            entry: Arc::clone(entry),
+            entry,
             reader,
             trust,
         })
@@ -1581,15 +1657,16 @@ impl<O: EntryOps> Host<O> {
 
 fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Result<(), HostError> {
     let mut entries = Vec::new();
-    for (name, entry) in &shared.entries {
+    for entry in shared.entries.snapshot() {
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         if state.demand_leases == 0
             && (state.coverage.in_hand() || state.pinned())
             && now.saturating_duration_since(state.last_demand) >= shared.idle_after
         {
             state.detach_due = true;
-            if schedule_due_detach(&mut state, name).is_some() {
-                entries.push(Arc::clone(entry));
+            if schedule_due_detach(&mut state, entry.name()).is_some() {
+                drop(state);
+                entries.push(entry);
             }
         }
     }
@@ -1603,7 +1680,9 @@ fn reap_idle_shared<O: EntryOps>(shared: &Arc<Shared<O>>, now: Instant) -> Resul
 /// effect is nonblocking, so one slow vault cannot consume a worker slot or
 /// manufacture a thread per attachment.
 fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
-    for (name, entry) in &shared.entries {
+    for entry in shared.entries.snapshot() {
+        let entry = &entry;
+        let name = entry.name();
         let (mut attachment, epoch) = {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if state.claim.is_held() {
@@ -1825,7 +1904,7 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
         state.claim.begin_job_leg(epoch);
     }
     let held = run_job_inner(shared, job);
-    end_job_leg(shared, entry, &name, epoch, held);
+    end_job_leg(shared, &entry, &name, epoch, held);
 }
 
 /// End the leg a worker ran, and give back whatever it is still holding.
@@ -1905,6 +1984,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
+    let entry = &entry;
     match job {
         Job::Attach(name, epoch) => {
             // Classification and the identity claim are atomic, but the heal is
@@ -1916,7 +1996,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             // identity the claim below is filed under is the one this recheck
             // resolved, so the two facts cannot disagree and one refusal covers
             // them.
-            let reading = match shared.registry.recheck(&name) {
+            let reading = match shared.entries.recheck(&name) {
                 Ok(reading) => reading,
                 Err(refusal) => {
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -1960,26 +2040,25 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 attach_claims.insert(identity, name.clone());
             }
             drop(attach_claims);
-            let result =
-                shared
-                    .ops
-                    .attach(&name, &reporter(entry, epoch))
-                    .and_then(|mut attachment| {
-                        match drain_observed(&shared.ops, &name, &mut attachment) {
-                            Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
-                            Err(error) => {
-                                shared.ops.detach(&name, attachment);
-                                Err(error)
-                            }
+            let result = shared
+                .ops
+                .attach(&entry.registration, &reporter(entry, epoch))
+                .and_then(|mut attachment| {
+                    match drain_observed(&shared.ops, &name, &mut attachment) {
+                        Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
+                        Err(error) => {
+                            shared.ops.detach(&name, attachment);
+                            Err(error)
                         }
-                    });
+                    }
+                });
             let mut attach_claims = shared.attach_gate.lock().expect("attach gate poisoned");
             if let Some(identity) = claim_identity
                 && attach_claims.get(&identity) == Some(&name)
             {
                 attach_claims.remove(&identity);
             }
-            let post_reading = match shared.registry.recheck(&name) {
+            let post_reading = match shared.entries.recheck(&name) {
                 Ok(reading) => reading,
                 Err(refusal) => {
                     drop(attach_claims);
@@ -2438,11 +2517,16 @@ fn dispatch_handoff<O: EntryOps>(
 /// naming this job, because a slot at another epoch is that job's own
 /// occupancy and an entry whose slot is free is one a tick sends the job in it
 /// a second time.
+///
+/// The lookup this send opens with is for those three paths alone and gates
+/// nothing: the job goes into the channel whether the set still serves its name
+/// or not, and it is the worker's own re-read of the set in [`run_job`] that
+/// answers a job for a name the set has stopped serving.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     let epoch = job.epoch();
     let entry = shared.entries.get(job.name());
     if shared.shutting_down.load(Ordering::SeqCst) {
-        if let Some(entry) = entry {
+        if let Some(entry) = &entry {
             release_queue_slot(entry, epoch);
         }
         return;
@@ -2470,7 +2554,7 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
-            if let Some(entry) = entry {
+            if let Some(entry) = &entry {
                 release_queue_slot(entry, epoch);
             }
         }
@@ -2581,6 +2665,15 @@ mod tests {
         /// serves no reads.
         coverage_mints_no_reader: std::sync::atomic::AtomicBool,
         attaches: AtomicUsize,
+        /// The root every attach was handed, filed under the name the
+        /// registration it was handed carries.
+        ///
+        /// The fake records what it is given rather than what a case expects it
+        /// to be called for, so an attach handed another entry's registration is
+        /// recorded under that entry's name and root: which registration reached
+        /// the ops is read here rather than inferred from the attach happening
+        /// at all.
+        attach_roots: Mutex<BTreeMap<VaultName, VaultRoot>>,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
         reconciles: AtomicUsize,
@@ -2659,11 +2752,15 @@ mod tests {
 
         fn attach(
             &self,
-            _: &VaultName,
+            registration: &Registration,
             progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.attaches.fetch_add(1, Ordering::SeqCst);
+            self.attach_roots
+                .lock()
+                .expect("attach roots poisoned")
+                .insert(registration.name.clone(), registration.root.clone());
             if self.heal_in_attach.load(Ordering::SeqCst) {
                 progress.healing().report(1, Some(2));
             }
@@ -2844,7 +2941,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2876,7 +2973,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-lifecycle-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -2899,13 +2996,12 @@ mod tests {
         names: &[&VaultName],
         worker_slots: usize,
     ) -> Host<Arc<FakeOps>> {
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 (*name).clone(),
                 VaultRoot::new(format!("/tmp/norn-host-lifecycle-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         Host::new(
             registry,
             ops,
@@ -2946,10 +3042,9 @@ mod tests {
         for (_, root) in roots {
             std::fs::create_dir_all(root).unwrap();
         }
-        let registry = ServingRegistry::from_entries(roots.iter().map(|(name, root)| {
+        let registry = RegistryRead::from_entries(roots.iter().map(|(name, root)| {
             RegistryEntry::new((*name).clone(), VaultRoot::new(root).unwrap())
-        }))
-        .unwrap();
+        }));
         Host::new(
             registry,
             ops,
@@ -3671,7 +3766,7 @@ mod tests {
     fn two_alias_host(ops: Arc<FakeOps>) -> (Host<Arc<FakeOps>>, VaultName, VaultName) {
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(
                 a.clone(),
                 VaultRoot::new("/tmp/norn-host-refused-a").unwrap(),
@@ -3680,8 +3775,7 @@ mod tests {
                 b.clone(),
                 VaultRoot::new("/tmp/norn-host-refused-b").unwrap(),
             ),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             ops,
@@ -3740,7 +3834,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
 
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
         {
             // The window between a leg's registration and its taking the
             // entry's coverage, reached under the lock a running leg would
@@ -3785,12 +3879,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let epoch = {
             let mut state = entry.gate.lock().unwrap();
@@ -3836,12 +3929,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         *ops.poll_gate.lock().unwrap() = Some(name.clone());
         let polling = Arc::clone(&host.shared);
@@ -3884,12 +3976,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         ops.block_reconcile.store(true, Ordering::SeqCst);
         ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
@@ -3931,7 +4022,7 @@ mod tests {
     fn a_refused_alias_held_in_a_poll_releases_through_the_poll_that_holds_it() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
 
         // One alias is held inside a watcher poll, which is what puts its
         // coverage out with a leg while the refusal lands.
@@ -4002,7 +4093,7 @@ mod tests {
     fn a_refused_entry_is_polled_by_nothing_afterwards() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
-        let entry = Arc::clone(host.shared.entries.get(&a).expect("alias a is registered"));
+        let entry = host.shared.entries.get(&a).expect("alias a is registered");
         {
             // A leg registered over parked coverage, with facts standing
             // beside it: the shape a refusal has to leave holding neither.
@@ -4052,12 +4143,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
         {
             // The window between a leg's registration and its taking the
             // entry's coverage, reached under the lock a running leg would
@@ -4268,7 +4358,7 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
-        let entry = Arc::clone(host.shared.entries.get(&a).unwrap());
+        let entry = host.shared.entries.get(&a).unwrap();
         let conflict = AliasConflict::new([a.clone(), b.clone()]);
 
         {
@@ -4631,7 +4721,7 @@ mod tests {
         wait_for_reconciles(&ops, 1, "the reconcile leg to take the entry's coverage");
 
         let shared = Arc::clone(&host.shared);
-        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+        let entry = shared.entries.get(&name).expect("the vault is registered");
         let released = Arc::clone(&ops);
         let unblock = thread::spawn(move || {
             wait_until(
@@ -4656,13 +4746,8 @@ mod tests {
             1,
             "the entry's coverage went back twice, or not at all"
         );
-        let state = shared
-            .entries
-            .get(&name)
-            .expect("the vault is registered")
-            .gate
-            .lock()
-            .unwrap();
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+        let state = entry.gate.lock().unwrap();
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.in_hand());
@@ -4683,7 +4768,7 @@ mod tests {
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
         let shared = Arc::clone(&host.shared);
-        let entry = Arc::clone(shared.entries.get(&name).expect("the vault is registered"));
+        let entry = shared.entries.get(&name).expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -5599,7 +5684,7 @@ mod tests {
         type Attachment = FakeCoverage;
         fn attach(
             &self,
-            _: &VaultName,
+            _: &Registration,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
             Ok(FakeCoverage::default())
@@ -5649,11 +5734,10 @@ mod tests {
         let ops = Arc::new(PollingOps::default());
         ops.queued.store(2, Ordering::SeqCst);
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-two-batches").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5682,9 +5766,10 @@ mod tests {
         type Attachment = FakeCoverage;
         fn attach(
             &self,
-            name: &VaultName,
+            registration: &Registration,
             _: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
+            let name = &registration.name;
             if name.as_str() == "a" {
                 self.a_started.store(true, Ordering::SeqCst);
                 wait_for_release("release_a", &self.release_a);
@@ -5728,7 +5813,7 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(
                 a.clone(),
                 VaultRoot::new("/tmp/norn-host-parallel-a").unwrap(),
@@ -5737,8 +5822,7 @@ mod tests {
                 b.clone(),
                 VaultRoot::new("/tmp/norn-host-parallel-b").unwrap(),
             ),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5766,11 +5850,10 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-queue-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-queue-b").unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5794,13 +5877,12 @@ mod tests {
     fn public_demand_returns_warming_when_the_bounded_queue_is_full() {
         let ops = Arc::new(QueueFullOps::default());
         let names = ["a", "b", "c"].map(|name| VaultName::new(name).unwrap());
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-full-queue-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5830,13 +5912,12 @@ mod tests {
     fn failed_send_releases_the_marker_after_a_newer_epoch_is_installed() {
         let ops = Arc::new(QueueFullOps::default());
         let names = ["a", "b", "c"].map(|name| VaultName::new(name).unwrap());
-        let registry = ServingRegistry::from_entries(names.iter().map(|name| {
+        let registry = RegistryRead::from_entries(names.iter().map(|name| {
             RegistryEntry::new(
                 name.clone(),
                 VaultRoot::new(format!("/tmp/norn-host-send-race-{name}")).unwrap(),
             )
-        }))
-        .unwrap();
+        }));
         let mut host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5853,7 +5934,7 @@ mod tests {
         wait_for_flag("a_started", &ops.a_started);
         let b = host.demand(&names[1], AttachMode::Durable).unwrap();
 
-        let entry = Arc::clone(host.shared.entries.get(&names[2]).unwrap());
+        let entry = host.shared.entries.get(&names[2]).unwrap();
         let jobs_guard = host.shared.jobs.lock().unwrap();
         {
             let mut state = entry.gate.lock().unwrap();
@@ -5910,11 +5991,10 @@ mod tests {
         let ops = Arc::new(QueueFullOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -5970,11 +6050,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new(&a_root).unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new(&b_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6026,11 +6105,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new(&root).unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6220,7 +6298,7 @@ mod tests {
     fn a_throwaway_demand_is_refused_before_the_entry_is_touched() {
         let ops = Arc::new(FakeOps::default());
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
-        let entry = Arc::clone(host.shared.entries.get(&name).unwrap());
+        let entry = host.shared.entries.get(&name).unwrap();
 
         entry.gate.lock().unwrap().identity_refused = Some("the root cannot be read".into());
         assert!(
@@ -6366,7 +6444,8 @@ mod tests {
             // behind it: an entry standing still under the park is one no
             // dispatch reaches, and a claim or a marker left here is work the
             // park was supposed to have ended.
-            let state = host.shared.entries.get(&name).unwrap().gate.lock().unwrap();
+            let entry = host.shared.entries.get(&name).unwrap();
+            let state = entry.gate.lock().unwrap();
             assert!(
                 !state.claim.is_held(),
                 "the refused attach left the entry claimed under the park"
@@ -6401,11 +6480,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let healthy = VaultName::new("healthy").unwrap();
         let refused = VaultName::new("refused").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(healthy.clone(), VaultRoot::new(&healthy_root).unwrap()),
             RegistryEntry::new(refused.clone(), VaultRoot::new(&refused_root).unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6453,11 +6531,10 @@ mod tests {
     fn dispatcher_closes_ready_before_reconciling_a_polled_batch() {
         let ops = Arc::new(PollingOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-poll-fixture").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6490,11 +6567,10 @@ mod tests {
     fn idle_expiry_during_safety_pin_detaches_when_work_releases_it() {
         let ops = Arc::new(PollingOps::default());
         let name = VaultName::new("notes").unwrap();
-        let registry = ServingRegistry::from_entries([RegistryEntry::new(
+        let registry = RegistryRead::from_entries([RegistryEntry::new(
             name.clone(),
             VaultRoot::new("/tmp/norn-host-pinned-idle").unwrap(),
-        )])
-        .unwrap();
+        )]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -6536,7 +6612,7 @@ mod tests {
             name.clone(),
             VaultRoot::new("/tmp/norn-host-reader-slot-fixture").unwrap(),
         );
-        let registry = ServingRegistry::from_entries([entry]).unwrap();
+        let registry = RegistryRead::from_entries([entry]);
         let host = Host::new(
             registry,
             ops,
@@ -6695,12 +6771,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -6762,12 +6837,11 @@ mod tests {
         let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
         drop(host.demand(&name, AttachMode::Durable).unwrap());
         wait_for_state(&host, &name, TrustState::Ready);
-        let entry = Arc::clone(
-            host.shared
-                .entries
-                .get(&name)
-                .expect("the vault is registered"),
-        );
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
 
         let (epoch, attachment) = {
             let mut state = entry.gate.lock().unwrap();
@@ -7737,7 +7811,7 @@ mod tests {
             "a poll's end cleared the job leg the release window waits on"
         );
 
-        end_job_leg(&host.shared, entry, &name, epoch, attachment);
+        end_job_leg(&host.shared, &entry, &name, epoch, attachment);
         let state = entry.gate.lock().unwrap();
         assert_eq!(
             state.trust,
@@ -7842,7 +7916,7 @@ mod tests {
             assert!(state.claim.slot().is_none(), "the slot is already taken");
         }
 
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_none(),
             "a tick sent the job the leg running against the entry sends itself"
@@ -7933,7 +8007,7 @@ mod tests {
             newer
         };
 
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         wait_until(
             "the work the entry moved on to to run",
             lifecycle_wait_budget(),
@@ -7992,7 +8066,7 @@ mod tests {
                 "the entry scheduled no teardown for this case to supersede"
             );
         }
-        dispatch_pending(&host.shared, entry).unwrap();
+        dispatch_pending(&host.shared, &entry).unwrap();
         assert!(
             entry.gate.lock().unwrap().claim.slot().is_some(),
             "the teardown this case supersedes never reached the queue"
@@ -8422,11 +8496,10 @@ mod tests {
         let ops = Arc::new(FakeOps::default());
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let registry = ServingRegistry::from_entries([
+        let registry = RegistryRead::from_entries([
             RegistryEntry::new(a.clone(), VaultRoot::new("/tmp/norn-host-maint-a").unwrap()),
             RegistryEntry::new(b.clone(), VaultRoot::new("/tmp/norn-host-maint-b").unwrap()),
-        ])
-        .unwrap();
+        ]);
         let host = Host::new(
             registry,
             Arc::clone(&ops),
@@ -8474,5 +8547,544 @@ mod tests {
         ops.maintenance_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &a, TrustState::Ready);
         drop(lease_a);
+    }
+
+    /// A vault the set gains while the host runs, and a vault it loses.
+    ///
+    /// The seam under these cases is [`ServingSet::insert`] and
+    /// [`ServingSet::remove`]. Nothing outside this crate reaches either: what
+    /// a product surface would offer is a registration verb, and these two
+    /// moves are what such a verb lands on.
+    mod serving_set {
+        use super::*;
+        use crate::lifecycle::serving::ServingRefusal;
+
+        fn registration(name: &VaultName, root: &std::path::Path) -> RegistryEntry {
+            RegistryEntry::new(name.clone(), VaultRoot::new(root).unwrap())
+        }
+
+        /// A vault inserted into a running host attaches on the demand that
+        /// follows, the way a vault read at startup does — and the attach is
+        /// handed the registration the insertion carried.
+        ///
+        /// The root the ops receive is the whole of what the inserted entry
+        /// contributes to its own attach: an attach handed the incumbent's
+        /// registration would reach Ready just as this one does, over the wrong
+        /// vault.
+        #[test]
+        fn an_inserted_vault_attaches_like_a_registered_one() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, served) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let joined = VaultName::new("joined").unwrap();
+            assert_eq!(
+                host.demand(&joined, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault,
+                "a name the set does not serve was demandable before it joined"
+            );
+
+            let base = temp_base("serving-set-insert");
+            let root = base.join("joined");
+            std::fs::create_dir_all(&root).unwrap();
+            host.shared
+                .entries
+                .insert(registration(&joined, &root))
+                .expect("the set serves no such name");
+
+            drop(host.demand(&joined, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &joined, TrustState::Ready);
+            assert_eq!(
+                host.state(&served),
+                Some(TrustState::Unattached),
+                "the insertion disturbed the entry that was already served"
+            );
+            let attached = ops.attach_roots.lock().unwrap();
+            assert_eq!(
+                attached.get(&joined),
+                Some(&VaultRoot::new(&root).unwrap()),
+                "the attach was handed a registration other than the inserted vault's"
+            );
+            assert!(
+                !attached.contains_key(&served),
+                "the attach was handed the incumbent's registration"
+            );
+            drop(attached);
+
+            drop(host);
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        /// An inserted root another served name already reaches is classified
+        /// against that name, because a recheck reads the set rather than the
+        /// registrations the host was built from.
+        #[test]
+        fn an_inserted_alias_of_a_served_root_is_refused_as_a_duplicate() {
+            let ops = Arc::new(FakeOps::default());
+            let base = temp_base("serving-set-alias");
+            let root = base.join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            let served = VaultName::new("served").unwrap();
+            let alias = VaultName::new("alias").unwrap();
+            let host = host_over_roots(Arc::clone(&ops), &[(&served, root.as_path())], 2);
+
+            host.shared
+                .entries
+                .insert(registration(&alias, &root.join(".")))
+                .expect("the set serves no such name");
+
+            let lease = host.demand(&alias, AttachMode::Durable).unwrap();
+            assert_eq!(
+                lease.completion(),
+                Demand::DuplicateRoot(AliasConflict::new([alias.clone(), served.clone()])),
+                "the alias was admitted against a root the host already serves"
+            );
+
+            drop((lease, host));
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        /// A name the set already serves keeps the entry standing under it: the
+        /// insertion is refused rather than replacing that entry.
+        #[test]
+        fn a_name_the_set_serves_is_not_inserted_over() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+
+            assert_eq!(
+                host.shared.entries.insert(registration(
+                    &name,
+                    std::path::Path::new("/tmp/norn-host-elsewhere")
+                )),
+                Err(ServingRefusal::AlreadyServed)
+            );
+            let standing = host.shared.entries.get(&name).expect("the vault is served");
+            assert!(
+                Arc::ptr_eq(&entry, &standing),
+                "the refused insertion replaced the entry standing under the name"
+            );
+            assert_eq!(
+                standing.registration.root, entry.registration.root,
+                "the refused insertion moved the served root"
+            );
+        }
+
+        /// A vault removed while it holds nothing is unknown to the demand that
+        /// follows it.
+        #[test]
+        fn a_removed_vault_is_unknown_to_the_next_demand() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+
+            host.shared
+                .entries
+                .remove(&name)
+                .expect("the entry holds nothing");
+
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault
+            );
+            assert_eq!(host.state(&name), None);
+            settle();
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                0,
+                "the demand after the removal attached the vault it removed"
+            );
+        }
+
+        /// A job dispatched against a name the set then stops serving does
+        /// nothing when it arrives, and the worker that answered it goes on to
+        /// the next vault's work.
+        ///
+        /// The job in the channel carries a name and an epoch, so the worker
+        /// resolves it through the set again and finds nothing there. That
+        /// second read is what admits a removal while a job stands in the
+        /// channel, and
+        /// `an_arrival_at_a_current_epoch_for_an_unserved_name_reaches_no_entry`
+        /// is what isolates it: the epoch guard answers this arrival first, so
+        /// this case stays green with the by-name re-reads replaced.
+        ///
+        /// The refusal is what supersedes the queued job and gives the entry's
+        /// gate back, which is the window the removal is answered in — an
+        /// entry with a job scheduled against it holds its own gate and is
+        /// refused removal.
+        #[test]
+        fn a_job_arriving_for_a_name_the_set_stopped_serving_does_nothing() {
+            let ops = Arc::new(FakeOps::default());
+            let leaving = VaultName::new("leaving").unwrap();
+            let occupied = VaultName::new("occupied").unwrap();
+            let after = VaultName::new("after").unwrap();
+            let host =
+                host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &occupied, &after], 1);
+
+            // The one worker, held inside an attach: the job the demand below
+            // dispatches waits in the channel for the whole of the sequence.
+            ops.block_attach.store(true, Ordering::SeqCst);
+            let occupier = host.demand(&occupied, AttachMode::Durable).unwrap();
+            wait_for_flag("attach_started", &ops.attach_started);
+
+            drop(host.demand(&leaving, AttachMode::Durable).unwrap());
+            refuse_identity_error(&host.shared, &leaving, "root unreadable".to_string());
+            host.shared
+                .entries
+                .remove(&leaving)
+                .expect("the refused entry holds nothing");
+
+            ops.block_attach.store(false, Ordering::SeqCst);
+            ops.attach_release.store(true, Ordering::SeqCst);
+            wait_for_state(&host, &occupied, TrustState::Ready);
+
+            // The channel holds one job at a time here, so the vault demanded
+            // now reaches it only once the arrival for the removed name has
+            // been taken off. Reaching Ready is therefore both the arrival
+            // having happened and the worker being free to run the job after
+            // it. The retry is the dispatcher's duty, driven here because this
+            // fixture's tick is a minute away.
+            drop(host.demand(&after, AttachMode::Durable).unwrap());
+            wait_until(
+                "the vault demanded after the arrival to attach",
+                lifecycle_wait_budget(),
+                || {
+                    retry_pending_dispatches(&host.shared);
+                    match host.state(&after) {
+                        Some(TrustState::Ready) => Observed::Met(()),
+                        state => Observed::pending(format!("the state is {state:?}")),
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            assert!(
+                !ops.attach_roots.lock().unwrap().contains_key(&leaving),
+                "the job that arrived for the removed name attached it"
+            );
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                2,
+                "the attaches are the two vaults the set still serves and no other"
+            );
+            assert_eq!(
+                host.state(&leaving),
+                None,
+                "the arrival put back the entry the removal took out"
+            );
+            drop(occupier);
+        }
+
+        /// The arrival above with the epoch guard behind it taken away: the job
+        /// stands at the epoch its entry stood at when the set stopped serving
+        /// the name, so the name is the whole of what answers it.
+        ///
+        /// The lifecycle reaches no such arrival on its own — a job in the
+        /// channel holds its entry's gate through its marker, and the gate goes
+        /// back only where something supersedes the job first, so every removal
+        /// a dispatch races is admitted over work already left behind. The
+        /// arrival is driven directly for that reason: what it isolates is the
+        /// resolution by name, and a dispatch that carried its entry instead
+        /// would attach a vault the set no longer serves at an epoch that is
+        /// still current.
+        #[test]
+        fn an_arrival_at_a_current_epoch_for_an_unserved_name_reaches_no_entry() {
+            let ops = Arc::new(FakeOps::default());
+            let leaving = VaultName::new("leaving").unwrap();
+            let bystander = VaultName::new("bystander").unwrap();
+            let host = host_without_ambient_polling(Arc::clone(&ops), &[&leaving, &bystander], 1);
+            let epoch = host
+                .shared
+                .entries
+                .get(&leaving)
+                .expect("the vault is served")
+                .gate
+                .lock()
+                .unwrap()
+                .claim
+                .epoch();
+
+            host.shared
+                .entries
+                .remove(&leaving)
+                .expect("the entry holds nothing");
+            run_job(&host.shared, Job::Attach(leaving.clone(), epoch));
+
+            assert_eq!(
+                ops.attaches.load(Ordering::SeqCst),
+                0,
+                "the arrival for an unserved name reached an entry and attached it"
+            );
+            assert_eq!(
+                host.state(&bystander),
+                Some(TrustState::Unattached),
+                "the arrival for an unserved name ran against the entry beside it"
+            );
+        }
+
+        /// A name the set never served is already not served: removing it
+        /// answers the way removing a served name that holds nothing does, and
+        /// takes nothing out from under the names the set does serve.
+        #[test]
+        fn a_name_the_set_never_served_is_removed_by_answering() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, served) = fixture_without_ambient_polling(ops);
+            let absent = VaultName::new("absent").unwrap();
+
+            assert_eq!(
+                host.shared.entries.remove(&absent),
+                Ok(()),
+                "a name the set never served was refused removal"
+            );
+            assert!(
+                host.shared.entries.get(&served).is_some(),
+                "removing a name the set never served took out the one it does"
+            );
+        }
+
+        /// An entry holding its coverage stays in the set. Removal refuses
+        /// rather than tearing that coverage down under the set's own lock, and
+        /// the vault goes on being served.
+        ///
+        /// The coverage is the only hold standing here: the lease is withdrawn
+        /// before the removal, and the fixture's dispatcher never ticks, so no
+        /// poll is pinning the entry either.
+        #[test]
+        fn an_attached_vault_is_refused_removal_and_goes_on_being_served() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry holding its coverage left the set"
+            );
+            assert_eq!(host.state(&name), Some(TrustState::Ready));
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::State(TrustState::Ready)
+            );
+        }
+
+        /// An entry holding its scheduling gate for work it has scheduled
+        /// stays in the set: the job the marker stands for is work the entry
+        /// owes, and a removal under it takes the entry out from under a
+        /// dispatch that is still to come.
+        ///
+        /// The marker is planted directly, so the gate is the only hold: no leg
+        /// is registered, no coverage is held and no lease is recorded.
+        #[test]
+        fn an_entry_holding_its_gate_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            {
+                let mut state = entry.gate.lock().unwrap();
+                state
+                    .claim
+                    .schedule(|epoch| Job::Attach(name.clone(), epoch));
+            }
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry holding its gate for a job it has scheduled left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.open();
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the withdrawn job was holding stayed in the set"
+            );
+        }
+
+        /// An entry whose coverage is out with a leg stays in the set. The
+        /// entry holds nothing of its own, and what the leg holds comes back
+        /// where the leg ends — to an entry the set must still be serving.
+        #[test]
+        fn an_entry_whose_coverage_is_out_with_a_leg_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            drop(host.demand(&name, AttachMode::Durable).unwrap());
+            wait_for_state(&host, &name, TrustState::Ready);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            // The coverage taken out of the entry's hand and no registration
+            // beside it: the one shape that leaves out-with-a-leg as the whole
+            // of what holds the entry.
+            let (coverage, epoch) = {
+                let mut state = entry.gate.lock().unwrap();
+                let epoch = state.claim.epoch();
+                let coverage = state
+                    .coverage
+                    .take(epoch)
+                    .expect("the attached entry holds its coverage");
+                (coverage, epoch)
+            };
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry whose coverage is out with a leg left the set"
+            );
+
+            // The leg ends the coverage it took: the ops have it back, and the
+            // entry accounts for none.
+            host.shared.ops.detach(&name, coverage);
+            entry.gate.lock().unwrap().coverage.released_by(epoch);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the ended leg was holding stayed in the set"
+            );
+        }
+
+        /// A leg registered against an entry holds it in the set with the gate
+        /// already back: the leg outlives the gate it took, and it is the leg
+        /// rather than the gate that says work is still standing against the
+        /// entry.
+        #[test]
+        fn an_entry_a_registered_leg_stands_against_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let epoch = {
+                let mut state = entry.gate.lock().unwrap();
+                let epoch = state.claim.epoch();
+                state.claim.begin_job_leg(epoch);
+                state.claim.release();
+                epoch
+            };
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry a registered leg stands against left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.end_job_leg(epoch);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the ended leg was holding stayed in the set"
+            );
+        }
+
+        /// A job waiting in an entry's queue slot holds it in the set with the
+        /// gate already open: the job is entering the channel, and a removal
+        /// under it takes the entry out from under a dispatch the worker is
+        /// about to resolve by name.
+        ///
+        /// The slot is driven to being the sole hold the way the lifecycle
+        /// reaches it. A job leg makes its next job under the entry's lock,
+        /// that lock goes back before `dispatch_handoff` takes it again for the
+        /// hand-off, and a refusal in the window between the two opens the
+        /// gate — so the hand-off ends the leg and takes the slot with nothing
+        /// else left standing.
+        #[test]
+        fn an_entry_holding_its_queue_slot_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let (leg, job) = {
+                let mut state = entry.gate.lock().unwrap();
+                let leg = state.claim.epoch();
+                state.claim.begin_job_leg(leg);
+                let job = state
+                    .claim
+                    .hand_on(|epoch| Job::Attach(name.clone(), epoch));
+                (leg, job)
+            };
+            // The window the refusal reaches, and the hand-off that runs after
+            // it with the gate already back.
+            entry.gate.lock().unwrap().claim.open();
+            entry.gate.lock().unwrap().claim.hand_off(leg, &job);
+            {
+                let state = entry.gate.lock().unwrap();
+                assert_eq!(
+                    state.claim.slot(),
+                    Some(job.epoch()),
+                    "the hand-off left no job waiting in the entry's slot"
+                );
+                assert!(
+                    !state.claim.is_held() && state.claim.leg().is_none(),
+                    "a gate or a leg stands beside the slot, so the slot is not the sole hold"
+                );
+            }
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry with a job waiting in its queue slot left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.free_slot(job.epoch());
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the freed slot was holding stayed in the set"
+            );
+        }
+
+        /// A lease recorded against an entry holds it in the set even where the
+        /// entry holds nothing else. The lease is a caller waiting on the
+        /// vault, and a removal under it would leave that caller reading an
+        /// entry the host has stopped serving.
+        ///
+        /// The lease is made the sole hold by waiting for the contended leg to
+        /// let go of the entry, not by the park alone. The park is published
+        /// under the first of the two locks that leg takes and its registration
+        /// ends under the second, so a removal run between them is refused for
+        /// the leg — which would answer this case's first assertion without the
+        /// lease and leave its second one racing the leg to the answer.
+        #[test]
+        fn a_lease_recorded_against_an_entry_holds_it_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            ops.contend_attach.store(true, Ordering::SeqCst);
+            let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+            let lease = host.demand(&name, AttachMode::Durable).unwrap();
+            wait_until(
+                "the contended attach to park the entry",
+                lifecycle_wait_budget(),
+                || match lease.completion() {
+                    Demand::MaintainerContended(_) => Observed::Met(()),
+                    other => Observed::pending(format!("the lease reports {other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            wait_until(
+                "the contended leg to end its hold on the entry",
+                lifecycle_wait_budget(),
+                || {
+                    let state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.claim.leg().is_none() && !state.claim.is_held() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending(format!(
+                            "a leg stands: {}, the gate is held: {}",
+                            state.claim.leg().is_some(),
+                            state.claim.is_held()
+                        ))
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry a lease is recorded against left the set"
+            );
+            drop(lease);
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the withdrawn lease was holding stayed in the set"
+            );
+            assert_eq!(
+                host.demand(&name, AttachMode::Durable).unwrap().outcome(),
+                &Demand::UnknownVault
+            );
+        }
     }
 }

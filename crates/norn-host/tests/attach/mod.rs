@@ -31,7 +31,7 @@ use norn_config::{ConfigDirs, VaultName};
 use norn_fixtures::Profile;
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
-    ServingRegistry,
+    RegistryRead,
 };
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
@@ -202,7 +202,7 @@ impl Vault {
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
-        let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
+        let registry = RegistryRead::from_entries([entry.clone()]);
         let policy = ProductionPolicy::new(128, 128).expect("production policy");
         // Taken before the host exists, because the watcher is installed by
         // the attach the host runs and there is no later moment that is still
@@ -210,7 +210,7 @@ impl Vault {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
         let host = Host::new(
             registry,
-            ProductionEntryOps::new([entry], self.dirs(), policy),
+            ProductionEntryOps::new(self.dirs(), policy),
             LifecyclePolicy {
                 idle_after: IDLE_AFTER,
                 worker_slots: 1,

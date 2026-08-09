@@ -11,7 +11,7 @@ use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
-    ServingRegistry,
+    RegistryRead,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
@@ -191,10 +191,10 @@ impl Fixture {
             self.name.clone(),
             VaultRoot::new(&self.vault).expect("vault root"),
         );
-        let registry = ServingRegistry::from_entries([entry.clone()]).expect("serving registry");
+        let registry = RegistryRead::from_entries([entry.clone()]);
         let dirs = ConfigDirs::new(self.root.join("config"), self.root.join("data"))
             .expect("config directories");
-        let ops = ProductionEntryOps::new([entry], dirs, ProductionPolicy::new(64, 64).unwrap());
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 64).unwrap());
         Host::new(
             registry,
             ops,
