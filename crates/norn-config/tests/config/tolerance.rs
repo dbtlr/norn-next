@@ -11,13 +11,10 @@
 //! nothing, a link to something, and a link one directory up are three
 //! readings of a path, and each of them says which it was.
 
-#![allow(clippy::disallowed_methods)] // The registry surface is this crate's own, and both files' readers are what this module exercises.
-
 use norn_config::machine::tokens;
-use norn_config::registry;
 use norn_config::{ConfigDirs, ConfigError};
 
-use crate::common::{Scratch, entry, label, name};
+use crate::common::{Scratch, entry, label, name, registry};
 
 /// Both files, so a case is never written for one and forgotten for the other.
 fn both_files(scratch: &Scratch) -> [(&'static str, std::path::PathBuf); 2] {

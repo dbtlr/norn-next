@@ -11,9 +11,9 @@
 # on the smallest item that holds the effect. The allow is the audit marker:
 # it says where the effect is, which a crate-wide allow would erase.
 #
-# Rules are adopted one at a time, as each invariant's subject becomes real.
-# Which rules are configured and which are still named against the day their
-# subject exists is recorded in the mapping in
+# Rules are adopted one at a time, as each invariant's subject becomes real: a
+# rule is pending until its subject exists and live once it is configured here.
+# Which state each rule is in is recorded in the mapping in
 # crates/norn-testkit/src/invariants.rs, which is the authoritative record of
 # what carries which invariant. That mapping is asserted against this file: an
 # entry here that no live rule claims fails the architecture gate, so a rule

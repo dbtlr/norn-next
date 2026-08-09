@@ -134,8 +134,9 @@ fn the_invariant_mapping_agrees_with_the_configured_lints() {
     assert_eq!(consistency_violations(&config), Vec::<String>::new());
 }
 
-/// The ruleset is adopted one rule at a time, so a live rule and a pending
-/// one are both expected — and the file has to carry the live ones.
+/// The ruleset is adopted one rule at a time, so every rule is live or
+/// pending: a live rule's configuration has to be in the file, and a pending
+/// one names none.
 #[test]
 fn every_live_rule_is_configured_and_every_pending_rule_is_not() {
     let config = ClippyConfig::read(reading().root()).expect("reading the boundary-lint ruleset");

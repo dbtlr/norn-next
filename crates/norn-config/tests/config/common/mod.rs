@@ -160,3 +160,32 @@ pub fn entry(vault: &str, at: &str) -> Entry {
 pub fn label(text: &str) -> TokenLabel {
     TokenLabel::new(text).unwrap_or_else(|problem| panic!("`{text}` is a token label: {problem}"))
 }
+
+/// The registry surface, reached through one pair of items.
+///
+/// `norn_config::registry::read` and `mutate` are a boundary rule's subject:
+/// the serving set is `norn-host`'s to read and to change, and every other use
+/// carves itself out at the use site. This crate owns the surface, so its own
+/// suite is a carve-out at every case that touches a registry — and a case file
+/// full of them reaches for one allow over the whole file, which is the shape
+/// that does damage: `disallowed_methods` carries the filesystem rule too, so an
+/// allow wide enough to cover a file retires the `std::fs` markers standing in
+/// it. Cases reach the surface through here instead, and the marker sits on
+/// these two items rather than on the file.
+pub mod registry {
+    use norn_config::registry::Registry;
+    use norn_config::{ConfigDirs, ConfigError};
+
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's own; here it is what a case reads.
+    pub fn read(dirs: &ConfigDirs) -> Result<Registry, ConfigError> {
+        norn_config::registry::read(dirs)
+    }
+
+    #[allow(clippy::disallowed_methods)] // The registry surface is this crate's own; here it is what a case writes through.
+    pub fn mutate<T>(
+        dirs: &ConfigDirs,
+        apply: impl FnOnce(&mut Registry) -> Result<T, ConfigError>,
+    ) -> Result<T, ConfigError> {
+        norn_config::registry::mutate(dirs, apply)
+    }
+}
