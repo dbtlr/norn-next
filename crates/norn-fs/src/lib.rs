@@ -109,5 +109,5 @@ pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
     WalkFact, walk,
 };
-pub use watch::{Batch, OwnWrites, RescanScope, Subscription, WatchError, watch};
+pub use watch::{Batch, OwnWrites, RescanScope, Subscription, WatchBackend, WatchError, watch};
 pub use write::{Landed, MoveRefusal, Moved, Precondition, Vacated, move_document, vacate, write};
