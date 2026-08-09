@@ -34,6 +34,7 @@
 //! the same protocol seen from the other side: a temporary file a dead writer
 //! left, a lock name somebody planted a link at, a mutation with nothing to
 //! say, and a mutation inside a mutation.
+#![allow(clippy::disallowed_methods)] // The registry surface is this crate's own, and the write protocol under it is what this module races.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

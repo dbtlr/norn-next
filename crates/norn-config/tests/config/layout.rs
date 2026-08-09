@@ -65,6 +65,7 @@ fn the_two_channels_share_no_directory() {
 /// the crate publishes no path to either: a path is a way to open one without
 /// the lock, the mode and the replacement protocol that come with the API.
 #[test]
+#[allow(clippy::disallowed_methods)] // The registry surface is this crate's own; here it is the writer that puts the file where the convention says.
 fn the_config_directory_holds_the_registry_the_tokens_and_the_schemas() {
     let scratch = Scratch::new("config-layout");
     let dirs = scratch.dirs();

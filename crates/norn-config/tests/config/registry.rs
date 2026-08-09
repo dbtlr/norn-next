@@ -1,5 +1,6 @@
 //! The registry file: what round-trips, what is refused, and what a read
 //! never does.
+#![allow(clippy::disallowed_methods)] // The registry surface is this crate's own, and this module is what exercises it.
 
 use norn_config::ConfigError;
 use norn_config::registry::{self, Entry, PollBackend, SchemaSource};
