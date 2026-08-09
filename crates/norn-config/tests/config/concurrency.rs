@@ -41,9 +41,8 @@ use std::thread;
 
 use norn_config::ConfigError;
 use norn_config::machine::tokens;
-use norn_config::registry;
 
-use crate::common::{Scratch, entry, label, name};
+use crate::common::{Scratch, entry, label, name, registry};
 
 const WRITERS: usize = 4;
 const PER_WRITER: usize = 10;

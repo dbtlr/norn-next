@@ -350,6 +350,7 @@ fn a_mode_tighter_than_the_written_one_is_read() {
 /// The registry is not a secret and is not held to the token file's mode: it
 /// names machine layout, not a credential.
 #[test]
+#[allow(clippy::disallowed_methods)] // The registry surface is this crate's own; here it is what the token file's mode is compared against.
 fn the_registry_file_is_not_held_to_the_token_mode() {
     let scratch = Scratch::new("registry-mode");
     let dirs = scratch.dirs();

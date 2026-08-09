@@ -136,9 +136,20 @@ pub const LINT_RULES: &[LintRule] = &[
     },
     LintRule {
         name: "no norn-config registry-surface use outside norn-host",
-        state: LintState::Pending,
-        prefixes: &[],
-        required: &[],
+        state: LintState::Live,
+        prefixes: &[("disallowed-methods", "norn_config::registry::")],
+        // Reaching the registry file is the act the rule is about, so its
+        // subject is the two functions rather than the module's types. The
+        // paths to that file are not public, so a crate holding an `Entry` or
+        // a `Registry` and neither of these functions has read nothing and
+        // written nothing — and naming the types would fire on every
+        // declaration inside `norn-config` itself, derive expansions included,
+        // earning that crate the blanket allow the use-site marker exists to
+        // avoid.
+        required: &[
+            ("disallowed-methods", "norn_config::registry::read"),
+            ("disallowed-methods", "norn_config::registry::mutate"),
+        ],
     },
 ];
 

@@ -11,9 +11,9 @@
 # on the smallest item that holds the effect. The allow is the audit marker:
 # it says where the effect is, which a crate-wide allow would erase.
 #
-# Rules are adopted one at a time, as each invariant's subject becomes real.
-# The rule named but not yet configured — no norn-config registry-surface use
-# outside norn-host — is carried as a pending entry in the mapping in
+# Rules are adopted one at a time, as each invariant's subject becomes real: a
+# rule is pending until its subject exists and live once it is configured here.
+# Which state each rule is in is recorded in the mapping in
 # crates/norn-testkit/src/invariants.rs, which is the authoritative record of
 # what carries which invariant. That mapping is asserted against this file: an
 # entry here that no live rule claims fails the architecture gate, so a rule
@@ -27,10 +27,11 @@
 # review-held: a child process inheriting this process's stdout writes to a
 # terminal no render seam saw, and a raw `libc` call reaches the filesystem
 # without naming a `std` path. Neither is a lint's subject; both are a
-# reviewer's. The exception is the SQLite rule, whose subject is a registry
-# crate's constructors — a path clippy resolves only in a crate that links it,
-# which is why an entry naming one is silent everywhere else rather than an
-# error.
+# reviewer's. Two rules are the exception — the SQLite rule, whose subject is a
+# registry crate's constructors, and the registry-surface rule, whose subject
+# is a workspace crate's functions. Either is a path clippy resolves only in a
+# crate that links it, which is why an entry naming one is silent everywhere
+# else rather than an error.
 
 # `std::fs` disallowed workspace-wide.
 #
@@ -106,6 +107,22 @@ disallowed-methods = [
     { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
     { path = "rusqlite::Connection::from_handle", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
     { path = "rusqlite::Connection::from_handle_owned", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
+    # No norn-config registry-surface use outside norn-host. The registry file
+    # is the serving set, and reading or changing it is the orchestrator's act;
+    # the machine surface beside it — endpoint discovery, token read — is
+    # shared and has no entry here. `norn-config` re-exports nothing from
+    # `registry` at its root, so every use of the surface names this path and
+    # the rule can be stated over it.
+    #
+    # Reaching the file is the act the rule is about, so its subject is these
+    # two functions rather than the module's types. The paths to the registry
+    # file are not public, so a crate holding an `Entry` or a `Registry` and
+    # neither of these functions has read nothing and written nothing. Naming
+    # the types instead would fire on every declaration inside `norn-config`
+    # itself, derive expansions included, and earn that crate a blanket allow —
+    # which erases the use-site marker this rule exists to leave.
+    { path = "norn_config::registry::read", reason = "the registry surface is norn-host's; the machine surface is what a client reads" },
+    { path = "norn_config::registry::mutate", reason = "the registry surface is norn-host's; the machine surface is what a client reads" },
 ]
 
 # The types that open a filesystem handle. A type only ever obtained from a
