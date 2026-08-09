@@ -8836,6 +8836,13 @@ mod tests {
         /// entry holds nothing else. The lease is a caller waiting on the
         /// vault, and a removal under it would leave that caller reading an
         /// entry the host has stopped serving.
+        ///
+        /// The lease is made the sole hold by waiting for the contended leg to
+        /// let go of the entry, not by the park alone. The park is published
+        /// under the first of the two locks that leg takes and its registration
+        /// ends under the second, so a removal run between them is refused for
+        /// the leg — which would answer this case's first assertion without the
+        /// lease and leave its second one racing the leg to the answer.
         #[test]
         fn a_lease_recorded_against_an_entry_holds_it_in_the_set() {
             let ops = Arc::new(FakeOps::default());
@@ -8848,6 +8855,24 @@ mod tests {
                 || match lease.completion() {
                     Demand::MaintainerContended(_) => Observed::Met(()),
                     other => Observed::pending(format!("the lease reports {other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{failure}"));
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            wait_until(
+                "the contended leg to end its hold on the entry",
+                lifecycle_wait_budget(),
+                || {
+                    let state = entry.gate.lock().expect("entry gate poisoned");
+                    if state.claim.leg().is_none() && !state.claim.is_held() {
+                        Observed::Met(())
+                    } else {
+                        Observed::pending(format!(
+                            "a leg stands: {}, the gate is held: {}",
+                            state.claim.leg().is_some(),
+                            state.claim.is_held()
+                        ))
+                    }
                 },
             )
             .unwrap_or_else(|failure| panic!("{failure}"));
