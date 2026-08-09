@@ -529,31 +529,36 @@ impl<A: SnapshotSource> EntryState<A> {
     ///
     /// Every hold either side of the lifecycle can take is named here:
     /// coverage the entry holds or that is out with a leg, a claim on its
-    /// scheduling gate, a leg registered against it, a release in flight, a
-    /// read pinning it, and a demand lease recorded against it. An entry none
-    /// of these stands over owes nothing and is owed nothing, which is what
-    /// makes it removable from the serving set.
+    /// scheduling gate, a leg registered against it, a job waiting in its
+    /// queue slot, a release in flight, a read pinning it, and a demand lease
+    /// recorded against it. An entry none of these stands over owes nothing
+    /// and is owed nothing, which is what makes it removable from the serving
+    /// set.
     ///
-    /// Five of the limbs are reachable as the sole hold, and a case reaches
+    /// Six of the limbs are reachable as the sole hold, and a case reaches
     /// each: coverage in hand, coverage out with a leg, the gate, the leg
-    /// registration and the lease. [`EntryState::detach_in_flight`] and
-    /// [`EntryState::pinned`] are defence in depth over states the other five
-    /// already answer — a release in flight was begun over coverage the entry
-    /// was holding, and a pin is taken either beside the coverage in the
-    /// entry's own hand or by the leg that took it out — so no state this
-    /// crate reaches turns on either one alone.
+    /// registration, the queue slot and the lease.
+    /// [`EntryState::detach_in_flight`] and [`EntryState::pinned`] are defence
+    /// in depth over states the other six already answer — a release in flight
+    /// was begun over coverage the entry was holding, and a pin is taken either
+    /// beside the coverage in the entry's own hand or by the leg that took it
+    /// out — so no state this crate reaches turns on either one alone.
     ///
-    /// The queue slot is named by none of the limbs and needs none: a slot
-    /// taken is a gate held. Every taker takes it under the lock that leaves
-    /// the gate standing — [`Claim::take_slot_for_marked`] over the marker
-    /// holding it, and [`Claim::hand_off`] under a claim that took the gate
-    /// through [`Claim::hold`] — so a slot outliving that gate is a state no
-    /// move here produces.
+    /// The queue slot is a limb of its own because a slot can outlive the gate
+    /// that stood when it was taken. A job leg makes its next job under
+    /// [`Claim::hand_on`], which holds the gate, and the entry's lock goes back
+    /// before `dispatch_handoff` takes it again for [`Claim::hand_off`]. A
+    /// refusal reaching the entry in that window — `refuse_identity_error`,
+    /// which a caller thread reaches through `Host::demand` and
+    /// `recheck_and_refuse` — opens the gate, so the hand-off takes the slot
+    /// through its open-gate arm and the job entering the channel is held here
+    /// by the slot alone.
     fn held_by_anything(&self) -> bool {
         self.coverage.in_hand()
             || self.coverage.out_with_leg()
             || self.claim.is_held()
             || self.claim.leg().is_some()
+            || self.claim.slot_taken()
             || self.detach_in_flight
             || self.pinned()
             || self.demand_leases > 0
@@ -2512,6 +2517,11 @@ fn dispatch_handoff<O: EntryOps>(
 /// naming this job, because a slot at another epoch is that job's own
 /// occupancy and an entry whose slot is free is one a tick sends the job in it
 /// a second time.
+///
+/// The lookup this send opens with is for those three paths alone and gates
+/// nothing: the job goes into the channel whether the set still serves its name
+/// or not, and it is the worker's own re-read of the set in [`run_job`] that
+/// answers a job for a name the set has stopped serving.
 fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
     let epoch = job.epoch();
     let entry = shared.entries.get(job.name());
@@ -8690,8 +8700,10 @@ mod tests {
         /// The job in the channel carries a name and an epoch, so the worker
         /// resolves it through the set again and finds nothing there. That
         /// second read is what admits a removal while a job stands in the
-        /// channel: a job carrying its entry would attach a vault the host has
-        /// stopped serving.
+        /// channel, and
+        /// `an_arrival_at_a_current_epoch_for_an_unserved_name_reaches_no_entry`
+        /// is what isolates it: the epoch guard answers this arrival first, so
+        /// this case stays green with the by-name re-reads replaced.
         ///
         /// The refusal is what supersedes the queued job and gives the entry's
         /// gate back, which is the window the removal is answered in — an
@@ -8954,6 +8966,62 @@ mod tests {
                 host.shared.entries.remove(&name),
                 Ok(()),
                 "the entry the ended leg was holding stayed in the set"
+            );
+        }
+
+        /// A job waiting in an entry's queue slot holds it in the set with the
+        /// gate already open: the job is entering the channel, and a removal
+        /// under it takes the entry out from under a dispatch the worker is
+        /// about to resolve by name.
+        ///
+        /// The slot is driven to being the sole hold the way the lifecycle
+        /// reaches it. A job leg makes its next job under the entry's lock,
+        /// that lock goes back before `dispatch_handoff` takes it again for the
+        /// hand-off, and a refusal in the window between the two opens the
+        /// gate — so the hand-off ends the leg and takes the slot with nothing
+        /// else left standing.
+        #[test]
+        fn an_entry_holding_its_queue_slot_stays_in_the_set() {
+            let ops = Arc::new(FakeOps::default());
+            let (host, name) = fixture_without_ambient_polling(ops);
+            let entry = host.shared.entries.get(&name).expect("the vault is served");
+            let (leg, job) = {
+                let mut state = entry.gate.lock().unwrap();
+                let leg = state.claim.epoch();
+                state.claim.begin_job_leg(leg);
+                let job = state
+                    .claim
+                    .hand_on(|epoch| Job::Attach(name.clone(), epoch));
+                (leg, job)
+            };
+            // The window the refusal reaches, and the hand-off that runs after
+            // it with the gate already back.
+            entry.gate.lock().unwrap().claim.open();
+            entry.gate.lock().unwrap().claim.hand_off(leg, &job);
+            {
+                let state = entry.gate.lock().unwrap();
+                assert_eq!(
+                    state.claim.slot(),
+                    Some(job.epoch()),
+                    "the hand-off left no job waiting in the entry's slot"
+                );
+                assert!(
+                    !state.claim.is_held() && state.claim.leg().is_none(),
+                    "a gate or a leg stands beside the slot, so the slot is not the sole hold"
+                );
+            }
+
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Err(ServingRefusal::Held),
+                "an entry with a job waiting in its queue slot left the set"
+            );
+
+            entry.gate.lock().unwrap().claim.free_slot(job.epoch());
+            assert_eq!(
+                host.shared.entries.remove(&name),
+                Ok(()),
+                "the entry the freed slot was holding stayed in the set"
             );
         }
 
