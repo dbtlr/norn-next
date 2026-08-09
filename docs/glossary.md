@@ -83,6 +83,10 @@ How a boundary invariant is currently carried: by a withheld dependency edge, an
 **Review-held invariant**:
 An invariant carried by an explicit human judgment because no executable rule currently expresses it.
 
+**Dormant carrier**:
+An unreached implementation path retained because the layer roadmap names its future consumer. A path with no named consumer is speculative, not dormant.
+_Avoid_: Dead code, speculative seam
+
 **Maintainer**:
 The single process maintaining one registered vault’s derived state and serving requests against it. Maintainership is exclusive over that derived state — one vault reached by two registrations has two of them, each maintaining its own — and it never restricts any process’s access to the vault’s files.
 _Avoid_: Owner, single-owner
