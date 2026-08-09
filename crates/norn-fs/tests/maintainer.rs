@@ -325,7 +325,8 @@ fn a_contended_vault_is_fully_workable() {
     let vault = scratch.path("vault");
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the vault this case works over.
     std::fs::create_dir_all(&vault).expect("a vault root");
-    let key = MaintainershipKey::new("norn-dev", "notes").expect("two path components");
+    let key = MaintainershipKey::new("norn-dev", "notes", "0123456789abcdef")
+        .expect("three path components");
     let shadows = ShadowHome::resolve(&vault, &scratch.path("vaults/notes/tmp"), &key)
         .expect("a shadow home");
 

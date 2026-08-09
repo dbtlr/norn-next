@@ -26,8 +26,10 @@
 //!   swap. [`vacate`] and [`move_document`] are the same kernel with different
 //!   endings.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
-//!   why a leaked one is inert, and the [sweep](ShadowHome::sweep) that bounds
-//!   what they cost.
+//!   why a leaked one is inert, and the sweeps that bound what they cost: one
+//!   [per home](ShadowHome::sweep), and two over the
+//!   [fallback root](sweep_fallback_root) and [tree](sweep_fallback_tree) that
+//!   reach what no home's key names.
 //! - [`lock`] — the maintainer lock: at most one host maintains one derived
 //!   store, and that is the *only* thing it decides.
 //! - [`walk`] — the streaming, deterministic filesystem inventory, typed skip
@@ -100,7 +102,8 @@ pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, Path
 pub use read::{PathKind, ReadAndHash, path_kind, read_and_hash, read_optional_and_hash};
 pub use refusal::Refusal;
 pub use shadow::{
-    MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept, is_shadow_name,
+    FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept,
+    is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,

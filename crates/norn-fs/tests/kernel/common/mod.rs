@@ -16,7 +16,7 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The maintainership one scratch tree's shadow home is keyed by.
 pub fn key() -> MaintainershipKey {
-    MaintainershipKey::new("norn-dev", "notes").expect("two path components")
+    MaintainershipKey::new("norn-dev", "notes", "0123456789abcdef").expect("three path components")
 }
 
 /// A vault and its shadow home, for the length of one case.

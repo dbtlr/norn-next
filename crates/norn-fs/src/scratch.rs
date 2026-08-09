@@ -16,7 +16,7 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 /// The maintainership one scratch tree's home is keyed by. One key per tree is
 /// all a case needs; the cases about two keys spell their own.
 pub(crate) fn key() -> MaintainershipKey {
-    MaintainershipKey::new("norn-dev", "notes").expect("two path components")
+    MaintainershipKey::new("norn-dev", "notes", "0123456789abcdef").expect("three path components")
 }
 
 /// A tree under the system temporary directory, removed when this is dropped.
