@@ -176,8 +176,7 @@ impl Collector {
     /// than by the change the case made.
     fn start(vault: &Path, schema: &Path) -> Self {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
-        let (subscription, _own_writes) =
-            watch(vault, schema, false).expect("watch coverage is active");
+        let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
         let mut collector = Self {
             subscription,
             seen: Seen::default(),

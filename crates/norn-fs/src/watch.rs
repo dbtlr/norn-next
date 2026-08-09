@@ -277,8 +277,27 @@ impl OwnWrites {
 /// — or not as an event of its own at all. The heal is what covers that window:
 /// a caller that needs a specific change reported reads the tree rather than
 /// waiting for an event naming it.
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
 pub fn watch(
+    vault_root: &Path,
+    schema_source: &Path,
+) -> Result<(Subscription, OwnWrites), WatchError> {
+    watch_with(vault_root, schema_source, false)
+}
+
+/// Starts polling coverage through the same backend-erased watch seam.
+///
+/// Layer 1 host registration uses this degraded-latency path for filesystems
+/// whose native notification stream is unreliable. Backend event vocabulary
+/// and construction remain private to this filesystem effect seam.
+pub fn watch_polling(
+    vault_root: &Path,
+    schema_source: &Path,
+) -> Result<(Subscription, OwnWrites), WatchError> {
+    watch_with(vault_root, schema_source, true)
+}
+
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
+fn watch_with(
     vault_root: &Path,
     schema_source: &Path,
     poll: bool,
@@ -315,10 +334,6 @@ pub fn watch(
         ingest(&callback_state, result);
         let _ = callback_wake.try_send(());
     };
-    // `poll` is deliberately only a bit at this effect seam. The registry's
-    // `PollBackend` is the single public selection vocabulary; duplicating its
-    // variants here would create a second spelling, while depending on config
-    // would violate the leaf-crate boundary.
     let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
         false => Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?),
         true => Box::new(
