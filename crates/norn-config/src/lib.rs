@@ -285,7 +285,10 @@ impl ConfigDirs {
 /// the last component — and therefore the three coordinates the maintainer lock
 /// inside that directory is taken under. Two derived stores are one store
 /// exactly when all three agree; a mechanism kept elsewhere is keyed by all
-/// three or it is keyed by less than the lock is.
+/// three or it is keyed by less than the lock is. The digest is 64-bit and not
+/// cryptographic, so two data bases colliding into one key is possible at
+/// roughly 2^-64 — the unsafe direction, costing two locks one shared home —
+/// and that likelihood is the price accepted for a spellable component.
 ///
 /// The two spellable coordinates are carried as themselves. The data base is a
 /// whole absolute path and cannot be one component, so it is carried as a

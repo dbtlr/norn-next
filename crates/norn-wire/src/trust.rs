@@ -55,8 +55,9 @@ pub enum TrustState {
     /// Registered and holding nothing. There is no derived state to read from
     /// yet, and none out on loan either: change detection over the vault, the
     /// derived state and sole maintainership of that derived state have all
-    /// been given back before an entry publishes this. A caller waiting for it is waiting
-    /// for exactly that, on every entry and every path that reaches it.
+    /// been given back before an entry publishes this. A caller waiting for it
+    /// is waiting for exactly that, on every entry and every path that reaches
+    /// it.
     Unattached,
     /// Attached and not readable. The entry is either working toward readable
     /// derived state or giving up what it holds; `phase` says which, and the

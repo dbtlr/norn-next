@@ -26,15 +26,18 @@ against a concurrent writer is carried by fingerprint preconditions at the write
 exclusion.
 
 What co-maintainership costs is duplicated work, and that cost is priced rather than prevented.
-Two derived stores of one vault means the disk one store takes, taken twice, and — the expensive
-half — every document's embedding and vector derivation computed twice, since a heal derives
-against its own store and can read nothing from the other's. Every vault event is recorded once
+Two derived stores of one vault means the disk one store takes, taken twice, and every heal's
+derivation run twice, since a heal derives against its own store and can read nothing from the
+other's — a bill that grows when semantic derivation lands, whose per-document embedding work
+is carved and not built. Every vault event is recorded once
 in each store, off two recursive watcher registrations over one tree; those registrations are
 drawn against a platform watch budget the whole machine shares, and exhausting it is not a bill
 at all but watcher loss, which marks the entry that lost coverage untrusted until a demand
 re-heals it. A home whose key nothing resolves any more — a vault deregistered or renamed, a
 host moved to another data base — is residue nobody's keyed sweep opens again, and what bounds
-it is the recursive age-thresholded sweep rather than anyone remembering to remove it. All of
+it is the recursive age-thresholded sweep each fallback-placement attach runs rather than anyone
+remembering to remove it; a root no fallback attach visits again keeps its residue, inert and
+non-growing. All of
 that is a bill, not corruption. No norn lock ever restricts another process's access to vault
 files, and one that tried would be honoured by none of the writers that matter.
 
