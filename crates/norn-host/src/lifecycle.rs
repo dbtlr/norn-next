@@ -2634,6 +2634,15 @@ mod tests {
         /// serves no reads.
         coverage_mints_no_reader: std::sync::atomic::AtomicBool,
         attaches: AtomicUsize,
+        /// The root every attach was handed, filed under the name the
+        /// registration it was handed carries.
+        ///
+        /// The fake records what it is given rather than what a case expects it
+        /// to be called for, so an attach handed another entry's registration is
+        /// recorded under that entry's name and root: which registration reached
+        /// the ops is read here rather than inferred from the attach happening
+        /// at all.
+        attach_roots: Mutex<BTreeMap<VaultName, VaultRoot>>,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
         reconciles: AtomicUsize,
@@ -2712,11 +2721,15 @@ mod tests {
 
         fn attach(
             &self,
-            _: &Registration,
+            registration: &Registration,
             progress: &ProgressReporter<FakeCoverage>,
         ) -> Result<FakeCoverage, JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.attaches.fetch_add(1, Ordering::SeqCst);
+            self.attach_roots
+                .lock()
+                .expect("attach roots poisoned")
+                .insert(registration.name.clone(), registration.root.clone());
             if self.heal_in_attach.load(Ordering::SeqCst) {
                 progress.healing().report(1, Some(2));
             }
@@ -8520,7 +8533,13 @@ mod tests {
         }
 
         /// A vault inserted into a running host attaches on the demand that
-        /// follows, the way a vault read at startup does.
+        /// follows, the way a vault read at startup does — and the attach is
+        /// handed the registration the insertion carried.
+        ///
+        /// The root the ops receive is the whole of what the inserted entry
+        /// contributes to its own attach: an attach handed the incumbent's
+        /// registration would reach Ready just as this one does, over the wrong
+        /// vault.
         #[test]
         fn an_inserted_vault_attaches_like_a_registered_one() {
             let ops = Arc::new(FakeOps::default());
@@ -8547,6 +8566,17 @@ mod tests {
                 Some(TrustState::Unattached),
                 "the insertion disturbed the entry that was already served"
             );
+            let attached = ops.attach_roots.lock().unwrap();
+            assert_eq!(
+                attached.get(&joined),
+                Some(&VaultRoot::new(&root).unwrap()),
+                "the attach was handed a registration other than the inserted vault's"
+            );
+            assert!(
+                !attached.contains_key(&served),
+                "the attach was handed the incumbent's registration"
+            );
+            drop(attached);
 
             drop(host);
             let _ = std::fs::remove_dir_all(base);
