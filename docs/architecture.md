@@ -661,7 +661,7 @@ its way into a release each reach the entry without reading a pin, and a read in
 stops none of them. Through such a teardown the read keeps answering from the handle it
 holds, and that a database file outlives the teardown for it is carried by nothing: no move
 states it, and it is read-path residue rather than a contract this document states. [ADR
-0014](decisions/0014-snapshot-readers.md) records the rationale and the priced costs.
+0015](decisions/0015-snapshot-reader-lifetime.md) records the rationale and the priced costs.
 
 The suffix-resolution ladder follows the same split. Targets resolve by **right-to-left,
 segment-aligned path suffix** — `glossary` matches any `**/glossary.md`; `norn/glossary`

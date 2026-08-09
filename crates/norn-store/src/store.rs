@@ -22,7 +22,7 @@
 //! connection, opened inside this crate so the substrate seam holds, and `&mut`
 //! stays what a writer takes. A shared borrow of the store itself cannot serve
 //! reads, because the store lives inside an attachment that lifecycle jobs hold
-//! mutably for their whole duration (ADR 0014). [`SnapshotReader`] is that
+//! mutably for their whole duration (ADR 0015). [`SnapshotReader`] is that
 //! handle's type and the whole of what stands here: [`Store`] offers no mint,
 //! every request in this crate is `&mut` against the one connection, and no
 //! caller anywhere holds a reader.
