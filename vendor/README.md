@@ -24,8 +24,20 @@ Two refusals come with it, because the barrier makes them reachable:
 
 - A `FSEventStreamCreate` that returns no stream is an error, where the release
   schedules the null pointer.
-- Committing a non-empty path set reports a stream that failed to start, where
-  the release discards that error.
+- A `FSEventStreamStart` that returns false is an error, and it reaches the
+  caller: `commit`, `watch` and `unwatch` all report a non-empty path set whose
+  stream did not start, where the release discards both the Boolean and the
+  result of the call that reads it. Without this, a watcher that observes
+  nothing is indistinguishable from a quiet filesystem until the barrier's
+  deadline.
+
+One deletion comes with it:
+
+- Stream teardown no longer calls `FSEventsPurgeEventsForDeviceUpToEventId`.
+  The release purges the device's event log to suppress callbacks for events
+  still pending on a stopped stream. That log is what the barrier replays
+  from, so purging it lets one subscription's teardown discard the interval
+  another subscription in the same process is replaying.
 
 `norn-fs` needs these to publish watcher readiness only after coverage is
 provably continuous from before its edges were installed. The release exposes

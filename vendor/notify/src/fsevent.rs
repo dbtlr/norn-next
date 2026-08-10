@@ -299,13 +299,7 @@ impl PathsMut for FsEventPathsMut<'_> {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        // An empty path list leaves nothing to start, which is a commit of no
-        // paths rather than a failure. With paths staged, a stream that does
-        // not start is the whole commit failing, and the caller is told.
-        if unsafe { cf::CFArrayGetCount(self.0.paths) } == 0 {
-            return Ok(());
-        }
-        self.0.run()
+        self.0.start_staged_paths()
     }
 }
 
@@ -362,20 +356,31 @@ impl FsEventWatcher {
         })
     }
 
+    /// Start a stream over the staged path set, if there is one to start.
+    ///
+    /// An empty path list leaves nothing to start, which is a path set of
+    /// none rather than a failure. With paths staged, a stream that does not
+    /// start means the watcher observes nothing at all, so the caller is
+    /// told.
+    fn start_staged_paths(&mut self) -> Result<()> {
+        if unsafe { cf::CFArrayGetCount(self.paths) } == 0 {
+            return Ok(());
+        }
+        self.run()
+    }
+
     fn watch_inner(&mut self, path: &Path, recursive_mode: RecursiveMode) -> Result<()> {
         self.stop();
-        let result = self.append_path(path, recursive_mode);
-        // ignore return error: may be empty path list
-        let _ = self.run();
-        result
+        let added = self.append_path(path, recursive_mode);
+        let started = self.start_staged_paths();
+        added.and(started)
     }
 
     fn unwatch_inner(&mut self, path: &Path) -> Result<()> {
         self.stop();
-        let result = self.remove_path(path);
-        // ignore return error: may be empty path list
-        let _ = self.run();
-        result
+        let removed = self.remove_path(path);
+        let started = self.start_staged_paths();
+        removed.and(started)
     }
 
     #[inline]
@@ -539,30 +544,48 @@ impl FsEventWatcher {
                         cur_runloop,
                         cf::kCFRunLoopDefaultMode,
                     );
-                    fs::FSEventStreamStart(stream);
+                    // A stream that does not start delivers nothing and
+                    // reports nothing: no event, and no history marker for a
+                    // caller waiting on the end of the replay. It is reported
+                    // to `run` instead of leaving that caller at its deadline.
+                    // A stream that never started is not stopped — only
+                    // unscheduled, which is what invalidation does.
+                    if fs::FSEventStreamStart(stream) == 0 {
+                        fs::FSEventStreamInvalidate(stream);
+                        fs::FSEventStreamRelease(stream);
+                        rl_tx.send(None).expect("Unable to report the failed start");
+                        return;
+                    }
 
                     // the calling to CFRunLoopRun will be terminated by CFRunLoopStop call in drop()
                     rl_tx
-                        .send(CFSendWrapper(cur_runloop))
+                        .send(Some(CFSendWrapper(cur_runloop)))
                         .expect("Unable to send runloop to watcher");
 
                     cf::CFRunLoopRun();
                     fs::FSEventStreamStop(stream);
-                    // There are edge-cases, when many events are pending,
-                    // despite the stream being stopped, that the stream's
-                    // associated callback will be invoked. Purging events
-                    // is intended to prevent this.
-                    let event_id = fs::FSEventsGetCurrentEventId();
-                    let device = fs::FSEventStreamGetDeviceBeingWatched(stream);
-                    fs::FSEventsPurgeEventsForDeviceUpToEventId(device, event_id);
+                    // The device's event log is left intact. Purging it up to
+                    // the current identifier would discard the interval every
+                    // other stream in this process replays from, and a stream
+                    // whose replay is a caller's coverage boundary needs that
+                    // interval to still be there.
                     fs::FSEventStreamInvalidate(stream);
                     fs::FSEventStreamRelease(stream);
                 }
             })?;
-        // block until runloop has been sent
-        self.runloop = Some((rl_rx.recv().unwrap().0, thread_handle));
-
-        Ok(())
+        // block until the runloop, or the failure to start, has been sent
+        match rl_rx.recv().unwrap() {
+            Some(runloop) => {
+                self.runloop = Some((runloop.0, thread_handle));
+                Ok(())
+            }
+            None => {
+                thread_handle.join().expect("thread to shut down");
+                Err(Error::generic(
+                    "FSEventStreamStart declined to start the stream for the requested paths",
+                ))
+            }
+        }
     }
 
     fn configure_raw_mode(&mut self, _config: Config, tx: Sender<Result<bool>>) {
