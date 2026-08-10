@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use notify::event::EventKind;
-use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::PostState;
 use crate::hash::hashed_from;
@@ -366,20 +366,20 @@ impl OwnWrites {
     }
 }
 
-/// Starts watching only after every requested coverage edge is active.
+/// Starts watching only after every requested coverage edge is installed.
 ///
 /// This is the first stage of attach, not a declaration that an entry is ready:
-/// the caller heals after this function returns and consumes all resulting
-/// batches before exposing the entry as ready. Later batches remain the same
-/// subscription's warm invalidation stream.
+/// the caller waits for [`Subscription::synchronize`], heals, and consumes all
+/// resulting batches before exposing the entry as ready. Later batches remain
+/// the same subscription's warm invalidation stream.
 ///
-/// **Returning means coverage is registered, not that the backend is delivering
-/// events yet.** The platform's own stream becomes live some time after
-/// registration, and a change made in that window may reach the subscription
-/// only as a [`RescanScope`] rescan — the backend saying the path set was lost
-/// — or not as an event of its own at all. The heal is what covers that window:
-/// a caller that needs a specific change reported reads the tree rather than
-/// waiting for an event naming it.
+/// **Returning means coverage is installed, not that the subscription is
+/// [`SubscriptionState::Live`].** Which of the two returning implies is the
+/// backend's to say, and [`Subscription::synchronize`] is the one place a
+/// caller asks. Once a subscription is live, every change from before its
+/// edges were installed is either reported by the stream or already visible to
+/// a read of the tree, so the heal that follows synchronization plus the
+/// batches settling behind it leave no window a change can fall through.
 pub fn watch(
     vault_root: &Path,
     schema_source: &Path,
@@ -434,12 +434,19 @@ fn watch_with(
     let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
+    let callback_control = control.clone();
     let handler = move |result| {
-        ingest(&callback_state, result);
+        // A backend failure is control state as well as the subscription's
+        // last fact: a caller waiting on the boundary is waiting on this
+        // thread, so it learns of the failure here rather than at the
+        // deadline.
+        if let Some(error) = ingest(&callback_state, result) {
+            publish_control(&callback_control, SubscriptionState::Terminal(error));
+        }
         let _ = callback_wake.try_send(());
     };
     let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
-        false => Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?),
+        false => native_watcher(handler, &control)?,
         true => Box::new(
             PollWatcher::new(
                 handler,
@@ -456,18 +463,15 @@ fn watch_with(
 
     install(watcher.as_mut(), &plan)?;
 
-    // PollWatcher builds each edge's initial snapshot synchronously inside
-    // registration. Returning from the committed bulk registration therefore
-    // closes the baseline for the complete plan. Native registration keeps
-    // the same control seam; its stronger event-history proof replaces this
-    // provisional registration boundary in the native phase.
-    let established = shared
-        .lock()
-        .expect("watch state poisoned")
-        .terminal
-        .clone()
-        .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
-    publish_control(&control, established);
+    if registration_is_the_boundary(poll) {
+        let established = shared
+            .lock()
+            .expect("watch state poisoned")
+            .terminal
+            .clone()
+            .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
+        publish_control(&control, established);
+    }
 
     let worker_state = shared.clone();
     let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
@@ -486,6 +490,98 @@ fn watch_with(
             wake: Some(wake_tx),
         },
         owns,
+    ))
+}
+
+/// Whether returning from bulk registration is itself the synchronization
+/// boundary for the selected backend.
+///
+/// Polling answers yes on every platform: [`PollWatcher`] builds each edge's
+/// initial snapshot synchronously inside registration, so the committed bulk
+/// registration closes the baseline for the complete plan.
+///
+/// Native watching answers per platform. Where a backend establishes each
+/// watch inside the registration call and queues everything after it — inotify
+/// does — registration is the boundary. macOS FSEvents does not: its stream
+/// starts asynchronously after the stream is created, and its boundary is the
+/// event-history marker [`native_watcher`] installs, which is the only thing
+/// that publishes [`SubscriptionState::Live`] there.
+#[cfg(target_os = "macos")]
+fn registration_is_the_boundary(poll: bool) -> bool {
+    poll
+}
+
+#[cfg(not(target_os = "macos"))]
+fn registration_is_the_boundary(_poll: bool) -> bool {
+    true
+}
+
+/// Build the native backend behind whatever proof of coverage it can give.
+///
+/// On macOS the stream is created with the per-host event identifier read
+/// here, before any coverage edge is installed. The stream therefore replays
+/// every event the host recorded after that reading, delivers them to the
+/// handler, and then reports the history boundary — which is what publishes
+/// [`SubscriptionState::Live`]. Identifiers come from one per-host source and
+/// increase across every attached volume, so the one boundary covers the
+/// complete plan, including an edge on another volume.
+///
+/// Nothing else publishes `Live` for this backend: an installed stream that
+/// never reports its boundary leaves the subscription synchronizing until the
+/// caller's deadline, which is a typed [`WatchError::SynchronizationExpired`]
+/// rather than a subscription that claims coverage it cannot prove.
+#[cfg(target_os = "macos")]
+fn native_watcher(
+    handler: impl notify::EventHandler,
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
+    let since = history_boundary(notify::fsevent::current_event_id())?;
+    Ok(Box::new(
+        notify::fsevent::FsEventWatcher::with_event_history(
+            handler,
+            since,
+            history_barrier(control),
+        )
+        .map_err(backend)?,
+    ))
+}
+
+/// What the native macOS backend calls when its event-history replay is
+/// complete, and the only thing that publishes `Live` for that backend.
+#[cfg(target_os = "macos")]
+fn history_barrier(
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> impl Fn() + Send + Sync + 'static {
+    let control = control.clone();
+    move || publish_control(&control, SubscriptionState::Live)
+}
+
+/// The reading a native macOS stream may replay from.
+///
+/// Two readings are not boundaries. Zero means the host recorded no event to
+/// start after, and replaying from it asks for every event the host still
+/// holds. `u64::MAX` is the sentinel for starting at stream creation, which is
+/// the window the barrier exists to close. Both refuse rather than watch
+/// without proof; polling remains available as an explicit selection.
+#[cfg(target_os = "macos")]
+fn history_boundary(current: u64) -> Result<u64, WatchError> {
+    match current {
+        0 | u64::MAX => Err(WatchError::Backend(
+            "macOS reported no usable event-history boundary, so native watching cannot prove \
+             coverage"
+                .into(),
+        )),
+        reading => Ok(reading),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_watcher(
+    handler: impl notify::EventHandler,
+    _control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
+    Ok(Box::new(
+        notify::RecommendedWatcher::new(handler, Config::default()).map_err(backend)?,
     ))
 }
 
@@ -669,7 +765,13 @@ impl State {
     }
 }
 
-fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) {
+/// Fold one backend delivery into shared state, reporting the terminal failure
+/// the subscription now carries.
+///
+/// The report is the whole recorded cause rather than what this delivery
+/// contributed: the first cause is the one kept, and a caller waiting on the
+/// synchronization boundary needs it whichever delivery recorded it.
+fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<WatchError> {
     let mut state = shared.lock().expect("watch state poisoned");
     match result {
         Err(error) => {
@@ -677,21 +779,20 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) {
         }
         Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
         Ok(event) => {
-            if event.need_rescan() {
+            // A backend saying the path set is incomplete is the one report
+            // that widens work to a rescan: an explicit rescan flag over
+            // dropped events, or a delivery with no path to name at all.
+            if event.need_rescan() || event.paths.is_empty() {
                 state.rescan(RescanScope::Vault);
                 state.rescan(RescanScope::Schema);
-                return;
-            }
-            if event.paths.is_empty() {
-                state.rescan(RescanScope::Vault);
-                state.rescan(RescanScope::Schema);
-                return;
+                return state.terminal.clone();
             }
             for path in event.paths {
                 ingest_path(&mut state, event.kind, &path);
             }
         }
     }
+    state.terminal.clone()
 }
 
 fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
@@ -1043,6 +1144,112 @@ mod tests {
         assert_eq!(
             subscription.finish_heal(),
             Err(WatchError::Backend("lost during heal".into()))
+        );
+    }
+
+    /// **The bar under the native barrier.** Returning from registration is
+    /// not the synchronization boundary on macOS.
+    ///
+    /// The forbidden shape is publishing `Live` once the coverage plan is
+    /// installed, the way polling may. The FSEvents stream starts after it is
+    /// created, so a subscription that called itself live there would be
+    /// claiming observation of a window nothing was watching.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_registration_is_not_the_synchronization_boundary() {
+        assert!(
+            !registration_is_the_boundary(false),
+            "native macOS registration was treated as the synchronization boundary, which \
+             publishes Live over the window before the stream starts"
+        );
+        assert!(registration_is_the_boundary(true));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn registration_establishes_every_edge_on_this_platform() {
+        assert!(registration_is_the_boundary(false));
+        assert!(registration_is_the_boundary(true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_the_history_marker_publishes_live_for_the_native_backend() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+        let marker = history_barrier(&control);
+
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Synchronizing,
+            "coverage was live before the event-history replay reported its boundary"
+        );
+        marker();
+        assert_eq!(*control.0.lock().unwrap(), SubscriptionState::Live);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expiry_during_the_history_replay_survives_a_late_marker() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+        let marker = history_barrier(&control);
+
+        assert_eq!(
+            wait_for_synchronization(&control, Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+        marker();
+
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Terminal(WatchError::SynchronizationExpired)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reading_that_is_not_a_boundary_refuses_native_watching() {
+        for reading in [0, u64::MAX] {
+            assert!(
+                matches!(history_boundary(reading), Err(WatchError::Backend(_))),
+                "reading {reading} was accepted as an event-history boundary"
+            );
+        }
+        assert_eq!(history_boundary(1), Ok(1));
+        assert!(notify::fsevent::current_event_id() > 0);
+    }
+
+    /// A failure recorded while history is replaying reaches the caller
+    /// waiting on the boundary, and the marker behind it cannot overwrite it.
+    #[test]
+    fn a_terminal_during_replay_is_published_and_preserved() {
+        let state = state();
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+
+        let reported = ingest(&state, Err(notify::Error::generic("lost while replaying")))
+            .expect("a delivery that recorded a terminal failure reports it");
+        publish_control(&control, SubscriptionState::Terminal(reported.clone()));
+
+        assert_eq!(
+            wait_for_synchronization(&control, Duration::from_secs(3600)),
+            Err(reported.clone())
+        );
+        publish_control(&control, SubscriptionState::Live);
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Terminal(reported)
+        );
+    }
+
+    #[test]
+    fn a_delivery_that_records_nothing_terminal_reports_nothing() {
+        let state = state();
+        assert_eq!(
+            ingest(
+                &state,
+                Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path("/vault/note.md".into()))
+            ),
+            None
         );
     }
 
