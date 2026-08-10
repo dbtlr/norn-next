@@ -801,9 +801,15 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
         {
             let root = state.root.clone();
             state.terminal.get_or_insert(WatchError::CoverageLost(root));
-        } else {
-            state.rescan(RescanScope::Vault);
         }
+        // Any other event on the root names the root directory's own entry:
+        // its creation, or a change to its metadata. Every change to something
+        // inside the vault arrives at the path that changed, and the root has
+        // no vault-relative path of its own, so this event carries no dirty
+        // path. It is emphatically not a report that the path set is
+        // incomplete — only a backend rescan flag, a pathless delivery, or the
+        // dirty-root cap widens to [`RescanScope::Vault`], and each of those
+        // costs the full heal and the overflow reason this one must not.
         return;
     }
     let root_name_relevant = state.root.parent().is_some_and(|parent| {
@@ -997,7 +1003,9 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{AccessKind, AccessMode, ModifyKind, RemoveKind};
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, Flag, MetadataKind, ModifyKind, RemoveKind,
+    };
 
     use crate::ContentHash;
     use crate::identity::post_state;
@@ -1422,6 +1430,97 @@ mod tests {
             .map(|p| p.as_path())
             .collect();
         assert_eq!(paths, [Path::new("notes/.norn/tmp/document.md")]);
+    }
+
+    /// A benign event naming the vault root is a fact about that directory's
+    /// own entry and nothing else.
+    ///
+    /// The forbidden shape is widening it to [`RescanScope::Vault`]. That
+    /// widening costs a full tree walk and publishes watcher overflow — the
+    /// report that the path set was lost — for an event that lost nothing. A
+    /// fresh vault, whose root is created moments before coverage is
+    /// installed, produces exactly this event on every attach.
+    #[test]
+    fn a_benign_vault_root_event_widens_nothing() {
+        for kind in [
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Any),
+        ] {
+            let state = state();
+            ingest(&state, Ok(Event::new(kind).add_path("/vault".into())));
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            assert!(
+                locked.pending.as_mut().is_none(),
+                "an event on the vault root itself produced invalidation work: {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_benign_vault_root_event_keeps_the_paths_already_named() {
+        let state = state();
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/note.md".into())),
+        );
+        ingest(
+            &state,
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+                    .add_path("/vault".into()),
+            ),
+        );
+
+        let mut locked = state.lock().unwrap();
+        let batch = &locked
+            .pending
+            .as_mut()
+            .expect("the earlier path fact")
+            .batch;
+        assert_eq!(
+            batch
+                .vault_roots
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("note.md")]
+        );
+        assert!(batch.rescans.is_empty());
+    }
+
+    /// The backend's own report that the path set is incomplete still widens,
+    /// and takes the exact paths of its batch with it.
+    #[test]
+    fn a_backend_rescan_flag_widens_both_scopes_and_drops_exact_paths() {
+        let state = state();
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/before.md".into())),
+        );
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Other)
+                .add_path("/vault/dropped.md".into())
+                .set_flag(Flag::Rescan)),
+        );
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/after.md".into())),
+        );
+
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        assert_eq!(
+            batch.rescans,
+            BTreeSet::from([RescanScope::Vault, RescanScope::Schema])
+        );
+        assert!(
+            batch.vault_roots.is_empty(),
+            "a widened batch kept exact paths, which reads as a complete path set"
+        );
     }
 
     #[test]
