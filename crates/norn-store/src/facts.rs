@@ -33,6 +33,8 @@
 
 use std::collections::BTreeSet;
 
+use norn_wire::{FindingKind, Severity};
+
 use crate::json::FrontmatterValue;
 use crate::path::{ClassKey, DocumentPath};
 
@@ -364,13 +366,14 @@ pub struct CandidateFact {
 /// A structured statement that vault state violates a rule or cannot be
 /// resolved unambiguously.
 ///
-/// `kind` and `severity` are text the caller chooses. The store records the
-/// finding vocabulary rather than defining it: findings are a wire shape, and
-/// minting one here would put the vocabulary in the crate that stores it.
+/// The store records the wire vocabulary rather than defining it. Typed inputs
+/// keep an ordinary write from minting a kind or severity that no surface can
+/// advertise; the at-rest projection remains text and integrity verification
+/// detects values outside either registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FindingFacts {
-    pub kind: String,
-    pub severity: String,
+    pub kind: FindingKind,
+    pub severity: Severity,
     /// The path the finding is about, whether or not a document is stored there.
     pub path: DocumentPath,
     /// Every ambiguity class this finding is maintained by, which is

@@ -14,8 +14,8 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
-    UnknownFindingKind, UntrustedReason, WarmingPhase, WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, Severity, TrustState,
+    UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -41,6 +41,11 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
 /// Every kind a finding is filed under.
 fn finding_kinds() -> Vec<FindingKind> {
     FindingKind::ALL.to_vec()
+}
+
+/// Every severity a finding carries.
+fn severities() -> Vec<Severity> {
+    Severity::ALL.to_vec()
 }
 
 /// Every phase an entry warms in.
@@ -133,6 +138,13 @@ fn every_reason_code_survives_the_round_trip() {
 fn every_finding_kind_survives_the_round_trip() {
     for kind in finding_kinds() {
         round_trip(&kind);
+    }
+}
+
+#[test]
+fn every_severity_survives_the_round_trip() {
+    for severity in severities() {
+        round_trip(&severity);
     }
 }
 
@@ -283,6 +295,21 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         FindingKind::try_from("document/unreadable"),
         Err(UnknownFindingKind)
     );
+}
+
+/// Severity is the bare value a finding stores and renders, with one spelling
+/// shared by serde, display and the walkable registry.
+#[test]
+fn a_severity_is_the_bare_string_it_renders_as() {
+    let strings = ["error", "warning"];
+    assert_eq!(severities().len(), strings.len());
+    for (severity, string) in severities().into_iter().zip(strings) {
+        assert_eq!(severity.as_str(), string);
+        assert_eq!(severity.to_string(), string);
+        assert_eq!(wire(&severity), format!("\"{string}\""));
+        assert_eq!(Severity::try_from(string), Ok(severity));
+    }
+    assert_eq!(Severity::try_from("urgent"), Err(UnknownSeverity));
 }
 
 /// The envelope is three fields, and the detail is tagged with the same code
@@ -456,5 +483,9 @@ fn an_enum_refuses_a_variant_it_does_not_know() {
     assert!(
         serde_json::from_str::<FindingKind>(r#""document/unreadable""#).is_err(),
         "a finding kind nobody minted read back as one"
+    );
+    assert!(
+        serde_json::from_str::<Severity>(r#""urgent""#).is_err(),
+        "a severity nobody minted read back as one"
     );
 }

@@ -16,7 +16,7 @@ use norn_store::{
     Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
-use norn_wire::{FindingKind, MaintainerIdentity};
+use norn_wire::{FindingKind, MaintainerIdentity, Severity};
 
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 
@@ -978,7 +978,7 @@ fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
 
 /// The severity a quarantine finding carries. A document the vault holds and
 /// norn cannot decode is a defect in the vault, not an advisory about it.
-const QUARANTINE_SEVERITY: &str = "error";
+const QUARANTINE_SEVERITY: Severity = Severity::Error;
 
 /// Why a path the vault holds produces no document facts.
 ///
@@ -1116,8 +1116,8 @@ impl<'s> Pending<'s> {
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
         let subject = DocumentPath::rendered(path);
         self.quarantined.push(FindingFacts {
-            kind: quarantine.cause.kind().to_string(),
-            severity: QUARANTINE_SEVERITY.to_string(),
+            kind: quarantine.cause.kind(),
+            severity: QUARANTINE_SEVERITY,
             message: format!(
                 "`{}` is quarantined: {}",
                 subject.as_str(),

@@ -15,6 +15,7 @@ use norn_store::{
     LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, VectorFacts, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
+use norn_wire::{FindingKind, Severity};
 
 /// A snapshot of a request's reading, in the shape the harness compares.
 pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
@@ -245,8 +246,8 @@ pub fn ambiguity_for_target(
     total: u64,
 ) -> FindingFacts {
     FindingFacts {
-        kind: "resolution/ambiguous-target".to_string(),
-        severity: "warning".to_string(),
+        kind: FindingKind::PathNamesNoDocument,
+        severity: Severity::Warning,
         path: path(at),
         class_keys: suffix_probe(target)
             .unwrap_or_else(|problem| panic!("`{target}` is a suffix target: {problem}"))
@@ -269,8 +270,8 @@ pub fn ambiguity_for_target(
 /// A finding with no ambiguity class — the shape a vault-schema violation takes.
 pub fn violation(at: &str) -> FindingFacts {
     FindingFacts {
-        kind: "schema/field-missing".to_string(),
-        severity: "error".to_string(),
+        kind: FindingKind::BodyBytesNotUtf8,
+        severity: Severity::Error,
         path: path(at),
         class_keys: BTreeSet::new(),
         target: None,

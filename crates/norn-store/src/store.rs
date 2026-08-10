@@ -73,6 +73,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use norn_wire::{FindingKind, Severity};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
 
 use crate::ddl;
@@ -397,6 +398,16 @@ impl Store {
                 "tombstones",
                 "provenance",
                 quoted(Provenance::ALL.iter().map(|value| value.as_str())),
+            ),
+            (
+                "findings",
+                "kind",
+                quoted(FindingKind::ALL.iter().map(FindingKind::as_str)),
+            ),
+            (
+                "findings",
+                "severity",
+                quoted(Severity::ALL.iter().map(Severity::as_str)),
             ),
         ] {
             let outside: i64 = self

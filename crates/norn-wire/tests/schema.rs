@@ -11,7 +11,7 @@
 //! restating it.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, TrustState,
+    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, Severity, TrustState,
     UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
@@ -97,6 +97,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<WarmingPhase>(),
         schema_of::<ReasonCode>(),
         schema_of::<FindingKind>(),
+        schema_of::<Severity>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
         schema_of::<ErrorEnvelope>(),
@@ -304,6 +305,25 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
     assert_eq!(
         sorted(kinds),
         sorted(FindingKind::ALL.map(|kind| kind.as_str()))
+    );
+}
+
+/// Severity is advertised as the same bare string a finding stores, and the
+/// walkable list cannot drift behind the enum surfaces render.
+#[test]
+fn a_severity_advertises_its_bare_string() {
+    let schema = schema_of::<Severity>();
+    let severities: Vec<&str> = branches(&schema)
+        .iter()
+        .map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a severity branch is not a pinned string: {branch}"))
+        })
+        .collect();
+    assert_eq!(sorted(severities.clone()), sorted(["error", "warning"]));
+    assert_eq!(
+        sorted(severities),
+        sorted(Severity::ALL.map(|severity| severity.as_str()))
     );
 }
 
