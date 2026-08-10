@@ -6328,6 +6328,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    /// An invalidation takes the work scheduled against the poll it moves past.
+    /// The marker below is what a follow-up leaves when a full queue refuses
+    /// its send: it names the poll's own epoch and holds the gate until the
+    /// invalidator drops it. If it survives, the stale poll gives that marker
+    /// back with the gate still held and the demanded re-attach cannot run.
+    #[test]
+    fn an_identity_refusal_drops_work_scheduled_against_the_poll_it_invalidates() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let epoch = state.claim.epoch();
+            state.claim.restore(Job::Reconcile(name.clone(), epoch));
+            assert_eq!(state.claim.marker().map(Job::epoch), Some(epoch));
+        }
+
+        refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
+        assert!(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .marker()
+                .is_none(),
+            "the invalidation left work scheduled against the poll it superseded"
+        );
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
+    }
+
     /// The recheck a scheduled attach runs before it acquires anything is a
     /// second read of the registry, and a root that stopped answering between
     /// the demand and the job is what it is there to catch: the attach refuses

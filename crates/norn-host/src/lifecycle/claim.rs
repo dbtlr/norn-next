@@ -92,9 +92,10 @@
 //! [`Claim::stands_at`] by `an_identity_refusal_invalidates_an_in_flight_reconcile`
 //! and `a_refused_entry_is_polled_by_nothing_afterwards`, and the abandoned
 //! slot by `an_invalidation_stops_the_entry_waiting_on_the_job_it_supersedes`.
-//! The dropped marker is unpinned here: every caller either opens the gate
-//! outright under the same lock or reaches the derived gate the row above
-//! pins, so no case in the suite reads a marker this limb alone gave back.
+//! The dropped marker is pinned by
+//! `an_identity_refusal_drops_work_scheduled_against_the_poll_it_invalidates`:
+//! without it, the stale marker outlives the poll and holds the gate against
+//! the re-attach demanded after the refusal.
 //!
 //! ## The leg
 //!
