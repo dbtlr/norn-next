@@ -8,6 +8,10 @@
 //!
 //! A knob nothing fails over is decoration, and the way that happens is not
 //! malice — it is a field that quietly stops being read.
+//!
+//! This suite's scratch trees are backed by `norn_testkit::process::Sandbox`,
+//! which is unix-only.
+#![cfg(unix)]
 
 mod scratch;
 

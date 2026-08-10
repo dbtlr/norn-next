@@ -45,6 +45,12 @@
 //! its parent. Partitioning the lease root instead would give a child a lease
 //! nobody else contends for, which reads as isolation and excludes nothing.
 //!
+//! **Scratch-tree isolation joined at the partition door.** A generated tree
+//! is a directory nobody else writes, not a turn at shared state. In
+//! `norn-fixtures`, every scratch tree the calibration, determinism, knobs
+//! and preconditions suites generate into is built on
+//! [`crate::process::Sandbox`] rather than declaring a key here.
+//!
 //! # A lease is not reentrant
 //!
 //! [`Lease`] is a lock on an open file and it excludes per open file

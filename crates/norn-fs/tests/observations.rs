@@ -4,22 +4,23 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_fs::{ContentHash, Refusal, path_identity, read_and_hash};
+
+/// Distinguishes two scratch trees taken in the same process.
+static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time after epoch")
-            .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "norn-fs-observations-{label}-{}-{nonce}",
-            std::process::id()
+            "norn-fs-observations-{label}-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
+        let _ = fs::remove_dir_all(&path);
         fs::create_dir(&path).expect("scratch directory");
         Self(path)
     }

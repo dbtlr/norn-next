@@ -15,6 +15,10 @@
 //! are to measure against, and the >=5k profile belongs to the lane that runs >=5k
 //! work. Splitting on lane discipline rather than on a stopwatch keeps the
 //! rule from drifting every time a machine gets faster.
+//!
+//! This suite's scratch trees are backed by `norn_testkit::process::Sandbox`,
+//! which is unix-only.
+#![cfg(unix)]
 
 mod scratch;
 
@@ -193,7 +197,6 @@ fn the_symlink_knob_is_inside_the_contract_digest() {
 /// contents. A digest that followed the links would report the first two as
 /// one tree, and a digest that dropped the node kind would report the third as
 /// one of them.
-#[cfg(unix)]
 #[test]
 #[allow(clippy::disallowed_methods)] // The case builds the three trees it digests.
 fn the_walk_digest_reads_a_links_target_and_never_through_it() {
@@ -228,15 +231,13 @@ fn the_walk_digest_reads_a_links_target_and_never_through_it() {
 
     /// Build a tree holding one document plus whatever `add` puts in it, and
     /// return its walk digest.
-    #[allow(clippy::disallowed_methods)] // Builds and removes its own scratch tree.
+    #[allow(clippy::disallowed_methods)] // Builds its own scratch tree.
     fn link_case(label: &str, add: impl FnOnce(&Path)) -> String {
         let dir = scratch::fresh(label);
         fs::create_dir_all(&dir).expect("creating a scratch directory");
         fs::write(dir.join("doc.md"), DOCUMENT).expect("writing the document");
         add(&dir);
-        let digest = digest::tree_hex(&dir).expect("digesting a scratch tree");
-        fs::remove_dir_all(&dir).expect("removing a scratch tree");
-        digest
+        digest::tree_hex(&dir).expect("digesting a scratch tree")
     }
 }
 
@@ -357,10 +358,6 @@ fn respelling_a_name_moves_the_walk_digest_and_not_the_contract_digest() {
             "the directory reports a different name and the walk digest did not move"
         );
     }
-
-    fs::remove_dir_all(&dir).expect("removing a scratch tree");
-    fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("respelling-again"))
-        .expect("removing a scratch tree");
 }
 
 /// The decomposed spelling of the precomposed characters this crate's name
@@ -466,6 +463,4 @@ fn a_name_written_in_one_normalization_form_is_the_filesystems_business() {
             NFC_BODY
         );
     }
-
-    fs::remove_dir_all(&dir).expect("removing a scratch tree");
 }

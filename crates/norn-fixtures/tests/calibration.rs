@@ -5,6 +5,10 @@
 //! distribution tweak that quietly moves the generated corpus away from the
 //! collection it is meant to stand in for. The envelope moves only when
 //! somebody edits `probe::CALIBRATION`, which is a diff a reviewer reads.
+//!
+//! This suite's scratch trees are backed by `norn_testkit::process::Sandbox`,
+//! which is unix-only.
+#![cfg(unix)]
 
 mod scratch;
 
