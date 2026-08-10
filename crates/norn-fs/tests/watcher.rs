@@ -12,8 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use norn_fs::{
-    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, SubscriptionState,
-    WatchError, watch,
+    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -21,16 +20,20 @@ use norn_testkit::wait::{Budget, Observed, wait_until};
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The wait a case gives coverage to cross its backend synchronization
-/// boundary. It is the lifecycle's own authored deadline, so a case that
-/// reaches it saw what a host would refuse an attach over.
-const SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
+/// boundary.
+///
+/// It is this suite's own work bound and not a number of its own: crossing
+/// the boundary is one more thing a case here waits for, sized the way every
+/// other wait in the target is sized. Reaching it is a boundary that never
+/// arrived, which is what a host refuses an attach over.
+const SYNCHRONIZATION_DEADLINE: Duration = budget().work();
 
 /// The vault-relative path a collector writes to prove the backend is
 /// reporting. Not a Markdown document, and named so a reader of a leftover
 /// scratch tree knows what put it there.
 const CANARY: &str = "watch-canary";
 
-fn budget() -> Budget {
+const fn budget() -> Budget {
     Budget::new(Duration::from_secs(15), Duration::from_millis(250))
 }
 
@@ -375,16 +378,24 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
     );
 }
 
-/// **The window synchronization closes.** A write issued the moment coverage
-/// is installed — before the subscription is live — is reported for its own
-/// path once it is.
+/// **The boundary is a marker, and the write behind it comes back.** A single
+/// write made the moment coverage is installed is reported for its own path,
+/// after a boundary the backend itself delivered.
 ///
 /// This is the case a canary cannot stand in for. The canary is rewritten
 /// until one of its writes is reported, so it proves the stream is live and
-/// says nothing about the write that preceded it. Here the write happens once,
-/// while the subscription is still synchronizing, and the report is required
-/// afterwards: a backend whose stream starts at its own convenience never
-/// observed it, and the case fails naming the state it saw at the write.
+/// says nothing about any earlier write. Here the write happens once and the
+/// report is required afterwards, so what the case fails over is a fact the
+/// backend delivered exactly once or not at all.
+///
+/// **What the write does not race is the start of the stream.** Installing
+/// coverage blocks until the platform hands its runloop back, so the write
+/// that follows lands after the stream has started, and no case here can
+/// place a write inside a window it cannot observe the edges of. What the
+/// case does hold the backend to is everything after that: the marker that
+/// closes the event-history replay is delivered — without it nothing ever
+/// publishes `Live` and [`Subscription::synchronize`] returns expiry instead —
+/// and the write itself comes back as its own path rather than as a rescan.
 #[test]
 fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
     let scratch = Scratch::new("synchronization-race");
@@ -418,20 +429,6 @@ fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
             }
         },
     );
-    // What the write raced is the selected backend's boundary. On macOS the
-    // stream has not started when registration returns, so the write lands in
-    // the window the event-history replay covers. Where registration is itself
-    // the boundary, the subscription is live before the write and the backend
-    // has already queued it.
-    let expected = match cfg!(target_os = "macos") {
-        true => SubscriptionState::Synchronizing,
-        false => SubscriptionState::Live,
-    };
-    assert_eq!(
-        racing, expected,
-        "installing coverage returned with the subscription in a state this backend's \
-         synchronization boundary does not put it in, so this case raced nothing"
-    );
 }
 
 /// **One boundary covers every volume the plan touches.** A schema edge on a
@@ -460,15 +457,20 @@ fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
     let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
     let (subscription, _own_writes) =
         watch(&scratch.vault(), &schema).expect("watch coverage is active across two volumes");
-    subscription
-        .synchronize(SYNCHRONIZATION_DEADLINE)
-        .expect("one boundary to cover a plan spanning two volumes");
-    let mut collector = Collector::adopt(subscription, lease);
 
+    // Both changes are made before the boundary is waited on, so what has to
+    // cover the second volume's change is the replay the boundary closes. A
+    // boundary that only spanned the vault's own volume would report the
+    // document and leave the schema to whatever the stream happened to catch.
     std::fs::write(scratch.vault().join("note.md"), b"note\n").expect("a document write");
     let replacement = volume.mount().join(".schema.toml.new");
     std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
     std::fs::rename(&replacement, &schema).expect("the schema replacement");
+
+    subscription
+        .synchronize(SYNCHRONIZATION_DEADLINE)
+        .expect("one boundary to cover a plan spanning two volumes");
+    let mut collector = Collector::adopt(subscription, lease);
 
     collector.wait_for("both volumes to report their own change", |seen| {
         match (seen.reported(Path::new("note.md")), seen.schema_dirty) {
@@ -490,8 +492,6 @@ struct Volume {
 
 impl Volume {
     fn provision(label: &str) -> Result<Self, String> {
-        // 65,536 512-byte sectors: 32 MiB, which holds a schema file and the
-        // volume's own event log with room to spare.
         // 65,536 512-byte sectors: 32 MiB, which holds a schema file and the
         // volume's own event log with room to spare.
         let device = command("hdiutil", &["attach", "-nomount", "ram://65536"])?;
