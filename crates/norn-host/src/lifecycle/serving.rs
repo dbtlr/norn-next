@@ -11,13 +11,18 @@
 //! [`ServingSet::insert`] and [`ServingSet::remove`] are how a vault joins and
 //! leaves. Startup takes the first: [`Host::new`] inserts one entry per
 //! registration it was built from, so a vault gained later joins the set
-//! exactly the way every vault in it joined. Nothing else in this crate calls
-//! either verb today; the registration verbs a product surface offers are what
-//! call them, and they are the seam those verbs land on.
+//! exactly the way every vault in it joined.
+//!
+//! Joining while the host runs carries a classification with it, and that is
+//! the lifecycle's own move rather than this module's: a set knows which roots
+//! it holds, and whether two of them are one root is a filesystem reading taken
+//! against the entries a refusal then acts on. The registration verbs a product
+//! surface offers land on that move; these two are what it is built from.
 //!
 //! [`Host::new`]: crate::Host::new
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use norn_config::VaultName;
@@ -79,15 +84,20 @@ pub(crate) enum ServingRefusal {
 /// increments taking the reading and N decrements dropping it — and a
 /// dispatcher tick takes three such readings. [`ServingSet::recheck`] copies
 /// the name and root of every entry instead: two allocations each and no
-/// refcount, over a path hotter than the tick, since it runs up to twice per
-/// demand and twice per attach. That is the price of insertability: a pass over
-/// a set nothing can join borrows its entries in place and pays neither. A scan
-/// reads the set once and works from that reading, so a vault that joins
-/// mid-scan is served from the next pass.
+/// refcount, and it stats every one of those roots. It runs on the legs that
+/// acquire coverage and on the signals that invalidate it, never on a request
+/// path. That is the price of insertability: a pass over a set nothing can
+/// join borrows its entries in place and pays neither. A scan reads the set
+/// once and works from that reading, so a vault that joins mid-scan is served
+/// from the next pass.
 ///
 /// [`EntryOps`]: crate::EntryOps
 pub(crate) struct ServingSet<A: SnapshotSource> {
     entries: RwLock<BTreeMap<VaultName, Arc<Entry<A>>>>,
+    /// How many classifications this set has run. Each one stats every served
+    /// root, so this counts the set's whole filesystem cost, and a path that
+    /// leaves it unmoved spent no stat on the registry.
+    classifications: AtomicUsize,
 }
 
 impl<A: SnapshotSource> ServingSet<A> {
@@ -95,7 +105,18 @@ impl<A: SnapshotSource> ServingSet<A> {
     pub(crate) fn new() -> Self {
         Self {
             entries: RwLock::new(BTreeMap::new()),
+            classifications: AtomicUsize::new(0),
         }
+    }
+
+    /// How many classifications have run against this set.
+    ///
+    /// A caller reads this to hold a path to the stats it spends: the counter
+    /// moves once per [`ServingSet::recheck`], and one recheck stats every
+    /// served root.
+    #[cfg(test)]
+    pub(crate) fn classifications(&self) -> usize {
+        self.classifications.load(Ordering::SeqCst)
     }
 
     /// The entry serving `name`, and nothing where the set serves no such name.
@@ -153,6 +174,7 @@ impl<A: SnapshotSource> ServingSet<A> {
                 })
                 .collect::<Vec<_>>()
         };
+        self.classifications.fetch_add(1, Ordering::SeqCst);
         recheck(
             roots.iter().map(|(name, root)| (name, root.as_path())),
             name,
@@ -164,7 +186,9 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// The entry appears exactly as an entry read at startup does — Unattached,
     /// holding nothing, demandable — so the demand that follows attaches it the
     /// way it attaches any registered vault, classification and maintainer
-    /// singleton included.
+    /// singleton included. What a join into a *running* host owes beyond that
+    /// is the classification of the incumbents, which is the lifecycle's move
+    /// around this one.
     pub(crate) fn insert(&self, registration: Registration) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
         if entries.contains_key(&registration.name) {

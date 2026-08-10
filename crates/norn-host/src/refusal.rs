@@ -26,9 +26,9 @@
 //! **Two demands reach `host/entry-untrusted`, and deliberately.** An entry
 //! standing untrusted carries the reason its trust state carries. A root the
 //! registry cannot read is the environment refusing the work, which is what
-//! [`UntrustedReason::EnvironmentalRefusal`] already names, and the next
-//! demand's recheck is what retires either one. The two are different reads
-//! inside the host and one fact to a client: the derived state cannot be
+//! [`UntrustedReason::EnvironmentalRefusal`] already names, and the attach the
+//! next demand schedules is what retires either one. The two are different
+//! reads inside the host and one fact to a client: the derived state cannot be
 //! trusted, because the environment refused.
 //!
 //! **The aliases of a duplicate root cross in one order.** An

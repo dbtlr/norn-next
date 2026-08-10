@@ -160,10 +160,10 @@ pub enum WarmingPhase {
     ///
     /// A demand arriving now neither blocks nor fails: the release is what
     /// answers it. Where the entry is free to acquire the resources again, the
-    /// release honors the demand by doing so once it finishes. Where the entry
-    /// is parked — on a contended maintainer, a duplicate root, or a refused
-    /// identity — it answers with the park instead, because re-acquiring is
-    /// not something the entry is allowed to do.
+    /// release honors the demand by doing so once it finishes. Where another
+    /// process holds the vault's maintainer lock, it answers with that
+    /// contention instead, because re-acquiring is not something the entry is
+    /// allowed to do.
     ReleasingCoverage,
 }
 
