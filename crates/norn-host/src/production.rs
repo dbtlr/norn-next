@@ -4,11 +4,11 @@ use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use norn_config::registry::Entry as Registration;
+use norn_config::registry::{Entry as Registration, PollBackend};
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
-    Acquisition, Maintainership, MaintainershipKey, Placement, RescanScope, ShadowHome,
-    Subscription, WatchError, try_acquire, walk, watch,
+    Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
+    Subscription, WatchError, try_acquire, walk, watch, watch_polling,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -93,9 +93,15 @@ pub struct ProductionAttachment {
     maintainership: Maintainership,
     store: Store,
     subscription: Option<Subscription>,
+    /// Layer 4 plan-apply consumes this recorder at the product composition
+    /// site: successful writes stay beside coverage so their watcher echoes
+    /// can be hash-confirmed without hiding external edits.
+    _own_writes: OwnWrites,
     _shadows: ShadowHome,
     last_shadow_sweep: Instant,
 }
+
+type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
 
 impl SnapshotSource for ProductionAttachment {
     /// The store's own read-only handle. `norn-store` is where a connection is
@@ -119,6 +125,23 @@ impl ProductionEntryOps {
 
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
+    }
+
+    /// Resolve the registry's single backend selection directly to the fs
+    /// effect entrypoint. Named function pointers make this composition route
+    /// independently assertable without exposing backend introspection.
+    fn watch_entrypoint(registration: &Registration) -> WatchEntrypoint {
+        match registration.poll_backend {
+            Some(PollBackend::Poll) => watch_polling,
+            None => watch,
+        }
+    }
+
+    fn start_watch(
+        registration: &Registration,
+        schema: &Path,
+    ) -> Result<(Subscription, OwnWrites), WatchError> {
+        Self::watch_entrypoint(registration)(registration.root.as_path(), schema)
     }
 
     fn schema_path(registration: &Registration) -> PathBuf {
@@ -265,13 +288,15 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_tree(root);
         }
         let schema = Self::schema_path(registration);
-        let (subscription, _) = watch(root, &schema).map_err(watcher)?;
+        let (subscription, own_writes) =
+            Self::start_watch(registration, &schema).map_err(watcher)?;
         let store = Store::open(derived.join("store.sqlite3")).map_err(effect)?;
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             maintainership,
             store,
             subscription: Some(subscription),
+            _own_writes: own_writes,
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
         };
@@ -323,9 +348,10 @@ impl EntryOps for ProductionEntryOps {
         // same prologue phase an attach does.
         progress.installing_coverage();
         let schema = Self::schema_path(&attachment.registration);
-        let (subscription, _) =
-            watch(attachment.registration.root.as_path(), &schema).map_err(watcher)?;
+        let (subscription, own_writes) =
+            Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
+        attachment._own_writes = own_writes;
         self.heal(attachment, progress)
     }
 
@@ -1628,6 +1654,72 @@ mod tests {
             "a scoped watcher increment re-derived an unrelated document"
         );
         ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn configured_poll_backend_detects_a_same_stat_content_replacement() {
+        let f = Fixture::new("poll-watch-edit");
+        fs::write(f.vault().join("note.md"), "before").unwrap();
+        let mut registration = f.registration();
+        registration.poll_backend = Some(norn_config::registry::PollBackend::Poll);
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
+
+        let note = f.vault().join("note.md");
+        let before = fs::metadata(&note).unwrap();
+        let modified = before.modified().unwrap();
+        fs::write(&note, "after!").unwrap();
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        fs::File::options()
+            .write(true)
+            .open(&note)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let replaced = fs::metadata(&note).unwrap();
+        assert_eq!(
+            replaced.len(),
+            before.len(),
+            "the replacement changed length"
+        );
+        assert_eq!(
+            replaced.modified().unwrap(),
+            modified,
+            "the replacement changed mtime"
+        );
+
+        let after = norn_fs::ContentHash::of(b"after!").to_string();
+        reconcile_until(
+            &ops,
+            &name,
+            &mut attachment,
+            &progress,
+            "the configured polling backend to hash-detect the same-stat replacement",
+            |attachment, _| match stored(attachment, "note.md") {
+                Some(row) if row.content_hash == after => Observed::Met(()),
+                row => {
+                    Observed::pending(format!("note.md is {:?}", row.map(|row| row.content_hash)))
+                }
+            },
+        );
+        ops.detach(&name, attachment);
+    }
+
+    #[test]
+    fn registry_poll_selection_routes_to_the_polling_entrypoint() {
+        let f = Fixture::new("poll-watch-route");
+        let mut registration = f.registration();
+
+        assert!(std::ptr::fn_addr_eq(
+            ProductionEntryOps::watch_entrypoint(&registration),
+            watch as WatchEntrypoint,
+        ));
+        registration.poll_backend = Some(PollBackend::Poll);
+        assert!(std::ptr::fn_addr_eq(
+            ProductionEntryOps::watch_entrypoint(&registration),
+            watch_polling as WatchEntrypoint,
+        ));
     }
 
     #[test]
@@ -3217,9 +3309,11 @@ mod tests {
                 return Err(JobFailure::LostMaintainership);
             }
             let schema = ProductionEntryOps::schema_path(&attachment.registration);
-            let (subscription, _) =
-                watch(attachment.registration.root.as_path(), &schema).map_err(watcher)?;
+            let (subscription, own_writes) =
+                ProductionEntryOps::start_watch(&attachment.registration, &schema)
+                    .map_err(watcher)?;
             attachment.subscription = Some(subscription);
+            attachment._own_writes = own_writes;
             self.inner.heal(attachment, progress)?;
             self.started
                 .store(true, std::sync::atomic::Ordering::SeqCst);

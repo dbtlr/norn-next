@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use notify::event::EventKind;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::PostState;
 use crate::hash::hashed_from;
@@ -143,7 +143,7 @@ impl std::error::Error for WatchError {}
 /// the backend down and joins the worker.
 pub struct Subscription {
     batches: Option<mpsc::Receiver<Result<Batch, WatchError>>>,
-    watcher: Option<RecommendedWatcher>,
+    watcher: Option<Box<dyn notify::Watcher + Send>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -182,6 +182,9 @@ impl Drop for Subscription {
 /// A cloneable recorder for outcomes produced by Norn's write kernel.
 ///
 /// Recorder handles do not keep the subscription or platform watcher alive.
+/// Layer 4 plan-apply keeps one beside its attachment so writes made through
+/// Norn can be hash-confirmed and suppressed when the watcher reports them
+/// back. It is intentionally live before that layer exists.
 #[derive(Clone)]
 pub struct OwnWrites {
     ledger: Weak<Mutex<Ledger>>,
@@ -274,10 +277,30 @@ impl OwnWrites {
 /// — or not as an event of its own at all. The heal is what covers that window:
 /// a caller that needs a specific change reported reads the tree rather than
 /// waiting for an event naming it.
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
 pub fn watch(
     vault_root: &Path,
     schema_source: &Path,
+) -> Result<(Subscription, OwnWrites), WatchError> {
+    watch_with(vault_root, schema_source, false)
+}
+
+/// Starts polling coverage through the same backend-erased watch seam.
+///
+/// Layer 1 host registration uses this degraded-latency path for filesystems
+/// whose native notification stream is unreliable. Backend event vocabulary
+/// and construction remain private to this filesystem effect seam.
+pub fn watch_polling(
+    vault_root: &Path,
+    schema_source: &Path,
+) -> Result<(Subscription, OwnWrites), WatchError> {
+    watch_with(vault_root, schema_source, true)
+}
+
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
+fn watch_with(
+    vault_root: &Path,
+    schema_source: &Path,
+    poll: bool,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
     // macOS FSEvents reports the canonical `/private/var/...` spelling even
     // when a caller registered `/var/...`. Keep registration and callback
@@ -307,16 +330,27 @@ pub fn watch(
     let (batch_tx, batch_rx) = mpsc::sync_channel(1);
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
-    let mut watcher = RecommendedWatcher::new(
-        move |result| {
-            ingest(&callback_state, result);
-            let _ = callback_wake.try_send(());
-        },
-        Config::default(),
-    )
-    .map_err(backend)?;
+    let handler = move |result| {
+        ingest(&callback_state, result);
+        let _ = callback_wake.try_send(());
+    };
+    let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
+        false => Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?),
+        true => Box::new(
+            PollWatcher::new(
+                handler,
+                Config::default()
+                    .with_poll_interval(Duration::from_millis(250))
+                    // Polling exists for filesystems whose notification and
+                    // timestamp fidelity is suspect. Layer 1's hash-authority
+                    // rule forbids a same-stat edit from disappearing here.
+                    .with_compare_contents(true),
+            )
+            .map_err(backend)?,
+        ),
+    };
 
-    install(&mut watcher, &plan)?;
+    install(watcher.as_mut(), &plan)?;
 
     let worker_state = shared;
     drop(wake_tx);
@@ -365,17 +399,13 @@ fn coverage_plan(
     Ok(plan)
 }
 
-/// Install a whole coverage plan as **one** backend commit.
+/// Install a whole coverage plan through the backend's bulk-registration seam.
 ///
-/// Registration is batched rather than performed one edge at a time because a
-/// backend may rebuild its whole event stream per registration call, so an
-/// edge-at-a-time installation pays that rebuild once per edge and spends the
-/// wait before the first heal can start. A commit installs the same edges the
-/// plan names, and post-registration delivery is the same either way. What the
-/// batch does change is the registration window itself: it delivers nothing,
-/// where a serial installation ran an intermediate stream over each prefix of
-/// the plan. Nothing consumes that window — [`watch`] returns no subscription
-/// until this call is past — so no fact reaches a caller either way.
+/// A native backend can commit every edge together and avoid rebuilding its
+/// event stream per edge. Notify's polling backend implements the same seam as
+/// sequential registrations with a no-op commit; [`watch`] still exposes no
+/// subscription until the whole plan is installed, so no intermediate prefix
+/// of coverage reaches a caller.
 ///
 /// **The batch is committed whether or not every edge was accepted.** A
 /// `PathsMut` dropped without a commit leaves the watcher in a state notify
@@ -385,7 +415,7 @@ fn coverage_plan(
 /// returned as success: the caller of a failed install has a watcher whose
 /// only sound use is to drop it, and dropping it is now deterministic.
 fn install(
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut dyn notify::Watcher,
     plan: &[(PathBuf, RecursiveMode)],
 ) -> Result<(), WatchError> {
     let mut paths = watcher.paths_mut();
