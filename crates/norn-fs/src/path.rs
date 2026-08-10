@@ -22,6 +22,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+use crate::identity::identity_of;
+
 /// The case behavior established for a vault root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaseSensitivity {
@@ -229,7 +231,7 @@ impl Hash for NormalizedPath {
 }
 
 fn same_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.dev() == right.dev() && left.ino() == right.ino()
+    identity_of(left) == identity_of(right)
 }
 
 #[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only mount detection.

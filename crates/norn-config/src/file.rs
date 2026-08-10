@@ -42,6 +42,13 @@
 //! excludes nobody — two writers would each hold an exclusive lock on a
 //! different inode. A mismatch drops the handle and takes the lock again.
 //!
+//! `norn-fs` locks the maintainer lock file with a second spelling of this same
+//! idiom, because both crates are leaves and neither may depend on the other.
+//! `docs/architecture.md` records the split and names the three things that
+//! stay aligned across the two: the `O_NOFOLLOW` open, this handle-versus-name
+//! recheck with its bounded retry, and the
+//! create-new/write/fsync-file/rename/fsync-parent publish order.
+//!
 //! Waits are unbounded. A blocked writer is waiting on another writer's
 //! read-modify-write, which is bounded by a small file's rewrite, and a
 //! timeout here would turn "somebody else is mid-write" into a failure a
@@ -336,8 +343,44 @@ fn demand_owner_only(directory: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// A file's `(device, inode)` pair: which file it is, whatever it is called.
+///
+/// An inode number is unique per device and nowhere else, so the pair is the
+/// identity and neither half is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+}
+
+/// The identity of what `metadata` describes.
+fn identity_of(metadata: &std::fs::Metadata) -> Identity {
+    Identity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+/// The identity `path` resolves to now, or `None` when it resolves to nothing.
+///
+/// **A stat that fails for any other reason is the machine failing, and it
+/// travels as one.** Reading every failure as "the name means a different
+/// file" would spend a lock attempt on a question nothing answered — and on a
+/// directory that has become unreadable it spends all of them, ending in a
+/// message about a lock file being replaced by a caller that never learned the
+/// filesystem said `EACCES`.
+#[allow(clippy::disallowed_methods)] // Config-directory bytes: this crate owns them.
+fn name_identity(path: &Path) -> Result<Option<Identity>, ConfigError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(identity_of(&metadata))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io("reading the identity of", path, error)),
+    }
+}
+
 /// An exclusive lock over one machine-local file, held for as long as the
 /// value lives.
+#[derive(Debug)]
 #[allow(clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
 struct Lock {
     /// The `.lock` file's handle. Dropping it releases the lock, which is why
@@ -347,8 +390,24 @@ struct Lock {
 
 /// Take the exclusive lock guarding `path`, waiting for as long as it takes,
 /// and prepare the directory `path` sits in.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
 fn lock(path: &Path, sensitivity: Sensitivity) -> Result<Lock, ConfigError> {
+    lock_where(path, sensitivity, |_| {})
+}
+
+/// [`lock`], with something allowed to happen between taking the lock and
+/// rechecking the name.
+///
+/// `disturb` is called with the attempt number at exactly the point the
+/// dead-inode hazard opens: the lock is held and the name has not been asked
+/// about yet. That is the only place a test can manufacture the hazard
+/// deterministically — waiting for it to happen by chance is a race nobody can
+/// arrange, and the defense would then be asserted rather than checked.
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
+fn lock_where(
+    path: &Path,
+    sensitivity: Sensitivity,
+    mut disturb: impl FnMut(usize),
+) -> Result<Lock, ConfigError> {
     let directory = parent_of(path)?;
     // Asked before the directory is built: a dangling directory symlink makes
     // `create_dir_all` fail with "file exists", which is the least useful true
@@ -364,7 +423,7 @@ fn lock(path: &Path, sensitivity: Sensitivity) -> Result<Lock, ConfigError> {
     }
 
     let lock_path = lock_path(path)?;
-    for _ in 0..LOCK_ATTEMPTS {
+    for attempt in 0..LOCK_ATTEMPTS {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -377,18 +436,24 @@ fn lock(path: &Path, sensitivity: Sensitivity) -> Result<Lock, ConfigError> {
         file.lock()
             .map_err(|error| io("locking", &lock_path, error))?;
 
+        disturb(attempt);
+
         // The lock is on the inode, so holding one says nothing until the name
         // is known to still resolve to it. A file unlinked and recreated while
         // this caller waited leaves two holders of two different inodes, each
         // believing it excludes the other.
-        let held = file
-            .metadata()
-            .map_err(|error| io("reading the identity of", &lock_path, error))?;
-        if let Ok(current) = std::fs::metadata(&lock_path)
-            && (current.dev(), current.ino()) == (held.dev(), held.ino())
-        {
+        let held = identity_of(
+            &file
+                .metadata()
+                .map_err(|error| io("reading the identity of", &lock_path, error))?,
+        );
+        if name_identity(&lock_path)? == Some(held) {
             return Ok(Lock { _file: file });
         }
+        // The name means another file, or nothing. Dropping the handle releases
+        // the lock on an inode this name no longer reaches, which is the only
+        // correct thing to do with it, and the next attempt opens the name
+        // again.
     }
     Err(ConfigError::Io {
         operation: "locking",
@@ -652,6 +717,187 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The recheck that guards the lock asks one question — does this name
+    /// still mean this file — and absence is the only failure that answers it.
+    /// Anything else is the machine, and it is reported rather than counted as
+    /// a mismatch, because a lock loop that burns its attempts on unanswered
+    /// stats ends by blaming a lock file for a filesystem that said `ENOTDIR`.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a name that cannot be stat'd.
+    fn a_stat_that_cannot_answer_is_reported_rather_than_read_as_a_mismatch() {
+        let directory =
+            std::env::temp_dir().join(format!("norn-config-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+
+        let absent = directory.join("nothing-here");
+        assert_eq!(
+            name_identity(&absent).expect("absence is not a failure"),
+            None
+        );
+
+        let file = directory.join("a-file");
+        std::fs::write(&file, b"bytes").expect("a file");
+        assert_eq!(
+            name_identity(&file).expect("a stat"),
+            Some(identity_of(
+                &std::fs::metadata(&file).expect("the file's metadata")
+            )),
+        );
+
+        // A regular file is not a directory, so a name beneath one resolves to
+        // nothing — and the filesystem says so with something other than "not
+        // found".
+        let beneath = file.join("under-a-file");
+        let error = name_identity(&beneath).expect_err("a stat that cannot answer");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "reading the identity of"
+            ),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A scratch directory of this name, emptied first and named after the
+    /// case so two cases never share one.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case is arranged in.
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("norn-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        directory
+    }
+
+    /// The identity the lock is actually held on, read off the handle it holds.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: judging which inode was locked.
+    fn held_identity(lock: &Lock) -> Identity {
+        identity_of(&lock._file.metadata().expect("the locked file's metadata"))
+    }
+
+    /// **The bar on the dead-inode hazard.** A lock file replaced between the
+    /// lock and the recheck is not settled for: the acquirer drops it and
+    /// converges on the file the name means now.
+    ///
+    /// The disturbance is injected at exactly the point the hazard opens, which
+    /// is the only way to reach it deterministically. The forbidden shape is a
+    /// lock that returns as soon as `flock` succeeds: it hands back a lock on an
+    /// orphaned inode, and the next writer opening that path meets no contention
+    /// and reads the file this one is mid-rewrite of.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
+    fn a_lock_file_replaced_under_the_acquirer_is_not_settled_for() {
+        let directory = scratch("lock-aba");
+        let path = directory.join("registry.toml");
+        let lock_name = lock_path(&path).expect("a lock path");
+
+        let mut disturbed = Vec::new();
+        let taken = lock_where(&path, Sensitivity::Shared, |attempt| {
+            // A foreign actor — nothing in this crate ever removes a lock file
+            // — takes the name away and puts a different file at it. Once only,
+            // so the retry has a stable name to converge on.
+            if attempt == 0 {
+                std::fs::remove_file(&lock_name).expect("removing the lock file");
+                std::fs::write(&lock_name, b"").expect("a replacement lock file");
+                disturbed.push(attempt);
+            }
+        })
+        .expect("a lock");
+
+        assert_eq!(disturbed, vec![0], "the hazard was not manufactured");
+        let current = name_identity(&lock_name)
+            .expect("the lock path")
+            .expect("a lock file");
+        assert_eq!(
+            held_identity(&taken),
+            current,
+            "the lock settled for an inode the name no longer resolves to"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// Foreign interference that never stops is a refusal that names the bound,
+    /// rather than a loop nobody can see.
+    ///
+    /// The bound is asserted as the number it is. Asserting it against its own
+    /// constant says only that the loop counts to whatever it counts to: a bound
+    /// of two would satisfy that and would refuse an ordinary write racing a
+    /// busy machine.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
+    fn a_lock_file_replaced_on_every_attempt_refuses_at_the_bound() {
+        let directory = scratch("lock-aba-forever");
+        let path = directory.join("registry.toml");
+        let lock_name = lock_path(&path).expect("a lock path");
+
+        let mut attempts = 0usize;
+        let error = lock_where(&path, Sensitivity::Shared, |_| {
+            attempts += 1;
+            let _ = std::fs::remove_file(&lock_name);
+            std::fs::write(&lock_name, b"").expect("a replacement lock file");
+        })
+        .expect_err("a lock file that is never stable");
+
+        assert_eq!(attempts, 64, "the house bound is 64 attempts");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, path: reported, message }
+                    if *operation == "locking"
+                        && reported == &lock_name
+                        && message.contains("64")
+            ),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The recheck's stat failing is the machine failing, and the lock says so
+    /// instead of spending an attempt on it.
+    ///
+    /// The forbidden shape is reading every stat failure as "the name means a
+    /// different file". On a directory that has stopped being a directory that
+    /// spends all sixty-four attempts and ends in a message about a lock file
+    /// being replaced, by a caller that never learned what the filesystem said.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
+    fn a_recheck_whose_stat_cannot_answer_reports_the_machine() {
+        let directory = scratch("lock-unanswerable");
+        let path = directory.join("registry.toml");
+        let lock_name = lock_path(&path).expect("a lock path");
+
+        let mut attempts = 0usize;
+        let error = lock_where(&path, Sensitivity::Shared, |_| {
+            attempts += 1;
+            // A regular file is not a directory, so the lock name beneath one
+            // resolves to nothing — and the filesystem says so with something
+            // other than "not found".
+            std::fs::remove_file(&lock_name).expect("removing the lock file");
+            std::fs::remove_dir(&directory).expect("removing the directory");
+            std::fs::write(&directory, b"not a directory").expect("a file where a directory was");
+        })
+        .expect_err("a stat that cannot answer");
+
+        assert_eq!(
+            attempts, 1,
+            "an unanswered stat spent more than the one try"
+        );
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "reading the identity of"
+            ),
+            "{error}"
+        );
+
+        let _ = std::fs::remove_file(&directory);
     }
 
     /// The mode is a property of what the file holds, and the reader's demand

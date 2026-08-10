@@ -63,7 +63,17 @@
 //! stat of the path and, on a mismatch, drops the handle and takes the lock
 //! again — bounded at [`LOCK_ATTEMPTS`]. One retry is the ordinary case.
 //! Exhausting the bound is [`Refusal::LockFileReplaced`]: something is removing
-//! the lock file in a loop, and saying so is more use than retrying forever.
+//! the lock file in a loop, and saying so is more use than retrying forever. A
+//! stat that fails for any reason other than absence is the machine failing and
+//! travels as an environmental refusal, rather than spending an attempt on a
+//! question nothing answered.
+//!
+//! `norn-config` locks its machine-local files with a second spelling of this
+//! same idiom, because both crates are leaves and neither may depend on the
+//! other. `docs/architecture.md` records the split and names the three things
+//! that stay aligned across the two: the `O_NOFOLLOW` open, this
+//! handle-versus-name recheck with its bounded retry, and the
+//! create-new/write/fsync-file/rename/fsync-parent publish order.
 //!
 //! # The body is a diagnostic
 //!
@@ -175,19 +185,29 @@ impl Maintainership {
     /// Whether the lock name still resolves to the file this maintainership is
     /// held on.
     ///
-    /// `false` means the exclusivity is gone: something removed or replaced the
-    /// lock file, so a second host acquiring at that name meets no contention and
-    /// two maintainers can believe they are the one. Norn does not do this to
+    /// `Ok(false)` means the exclusivity is gone: something removed or replaced
+    /// the lock file, so a second host acquiring at that name meets no contention
+    /// and two maintainers can believe they are the one. Norn does not do this to
     /// itself — it never unlinks a lock file — so a `false` here is a report about
     /// something else on the machine.
+    ///
+    /// **A stat that fails for any reason other than absence is that machine
+    /// failure and travels as an [environmental refusal](Refusal::Environment).**
+    /// An unreadable directory says nothing about who holds the lock, and reading
+    /// it as lost exclusivity would tear down a maintainership that is still held
+    /// on the right file.
     ///
     /// **This is a health question and never a decision to steal.** There is
     /// nothing to take: the other holder is holding a real lock on a real file.
     /// What a host does with the answer is surface it.
-    pub fn still_current(&self) -> bool {
-        let held = self.file.metadata().map(|metadata| identity_of(&metadata));
-        held.is_ok_and(|held| held == self.identity)
-            && name_identity(&self.path).ok().flatten() == Some(self.identity)
+    pub fn still_current(&self) -> Result<bool, Refusal> {
+        let held = identity_of(
+            &self
+                .file
+                .metadata()
+                .map_err(|error| environment("reading the identity of", &self.path, &error))?,
+        );
+        Ok(held == self.identity && name_identity(&self.path)? == Some(self.identity))
     }
 }
 
@@ -728,7 +748,7 @@ mod tests {
         let path = lock_path(&scratch);
         let held = take(&path);
         assert!(
-            held.still_current(),
+            held.still_current().expect("a stat"),
             "a fresh maintainership is not current"
         );
 
@@ -739,11 +759,41 @@ mod tests {
         }
 
         assert!(
-            !held.still_current(),
+            !held.still_current().expect("a stat"),
             "a maintainership on an inode the name no longer resolves to called itself current"
         );
         // And the proof that the exclusivity really is gone: the replacement is
         // free to a second acquirer while this one still holds its file.
         let _second = take(&path);
+    }
+
+    /// **The bar on a health check that cannot read the machine.** A stat the
+    /// filesystem refuses to answer is that failure, not an answer of "the
+    /// exclusivity is gone".
+    ///
+    /// The forbidden shape is collapsing it to `false`. A host reads `false` as
+    /// lost maintainership and begins releasing a claim it still holds correctly:
+    /// the lock is on the right inode, and what happened is that the directory
+    /// stopped being searchable.
+    #[test]
+    fn a_health_check_whose_stat_cannot_answer_reports_the_machine() {
+        let scratch = Scratch::new("lock-unreadable");
+        let path = lock_path(&scratch);
+        let held = take(&path);
+
+        // A name beneath a regular file resolves to nothing, and the filesystem
+        // says so with something other than "not found".
+        let beneath = Maintainership {
+            file: held.file.try_clone().expect("a second descriptor"),
+            path: path.join("beneath-the-lock-file"),
+            identity: held.identity(),
+        };
+        let refusal = beneath
+            .still_current()
+            .expect_err("a stat that cannot answer");
+        assert!(
+            matches!(&refusal, Refusal::Environment { operation, .. } if *operation == "reading the identity of"),
+            "{refusal:?}"
+        );
     }
 }

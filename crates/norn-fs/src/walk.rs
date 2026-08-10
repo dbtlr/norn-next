@@ -20,7 +20,6 @@ use std::fs;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -28,7 +27,7 @@ use std::time::SystemTime;
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, readlinkat, statat};
 
 use crate::hash::{ContentHash, read_bytes_and_hash};
-use crate::identity::Identity;
+use crate::identity::{Identity, identity_of};
 use crate::path::{NormalizedPath, NormalizerError, PathError, PathNormalizer};
 use crate::shadow::{FALLBACK, is_shadow_name};
 
@@ -717,10 +716,7 @@ fn stat(metadata: &fs::Metadata) -> FileStat {
     FileStat {
         len: metadata.len(),
         mtime: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        identity: Identity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-        },
+        identity: identity_of(metadata),
     }
 }
 

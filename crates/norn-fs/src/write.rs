@@ -77,6 +77,35 @@
 //! swept, and one whose directory entry did not survive is a shadow that swept
 //! itself. Nothing a reader can see depends on it.
 //!
+//! **The parent fsync's failure is unreported by design**, which is where this
+//! kernel and the machine-local writer in `norn-config` part: that writer names
+//! the same failure as a typed `MutationUnconfirmed` outcome, and this one says
+//! nothing about it. Three facts hold that here.
+//!
+//! - No [`Refusal`] carries a parent fsync's failure, because no refusal
+//!   reaches one. On the replace path every variant is reached before the swap
+//!   or in place of it. The exclusive create is the one arm where a refusal can
+//!   still leave a name behind — `create_new` is the publication act there, and
+//!   a cleanup the filesystem blocks leaves this call's own bytes at a name that
+//!   had nothing at it — but that arm refuses before the parent is synced too.
+//!   So the typed-error spelling has nowhere to sit, and reporting would have to
+//!   add a success-side term instead.
+//! - That term would have to reach every success that fsyncs a parent:
+//!   [`Landed::Written`], [`Vacated`], and both legs of a [`Moved`] — a move
+//!   fsyncs the destination's parent and the source's, and either can fail
+//!   alone, so the pair needs two positions rather than one.
+//!   [`Landed::Unchanged`] is the one success that needs none, because it never
+//!   reaches a rename.
+//! - There is nothing a caller does with it. This kernel is single-shot, the
+//!   change is at the name, and a vault is multi-writer: whatever is finally at
+//!   the path is what the watcher reports, and re-deriving from that is the
+//!   only resolution there is. A machine-local file has one writer and a
+//!   caller that reads it back, which is what makes the same signal actionable
+//!   there.
+//!
+//! What the two share is the stance, and it is the part that binds: a
+//! durability failure after the rename is never a write that did not happen.
+//!
 //! # Crash windows, as recovery claims
 //!
 //! A process that dies mid-write leaves one of these, and nothing else:
@@ -1040,7 +1069,8 @@ fn remove_if_still_claimed(path: &Path, claimed: Option<Identity>, faults: Fault
 /// reader sees it, so what is left is whether it survives a power cut. A
 /// failure here is never allowed to read as a write that did not happen: a
 /// caller that retried on it would write a second time over its own first
-/// write.
+/// write. Why it is unreported rather than named as an outcome of its own is in
+/// the [module documentation](self).
 ///
 /// This is unix-shaped. There is no portable Windows analogue for fsyncing a
 /// directory, and pretending otherwise would put a claim in the contract that

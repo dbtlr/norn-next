@@ -174,7 +174,7 @@ impl ProductionEntryOps {
         attachment: &mut ProductionAttachment,
         progress: &ProgressReporter<ProductionAttachment>,
     ) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current() {
+        if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
         // Coverage is established by the time a heal runs, and what follows is
@@ -351,7 +351,7 @@ impl EntryOps for ProductionEntryOps {
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current() {
+        if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
         // A reconcile derives against coverage that is already installed,
@@ -381,7 +381,7 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current() {
+        if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
         // Recovery re-installs coverage before it re-heals, so it enters the
@@ -400,7 +400,7 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
-        if !attachment.maintainership.still_current() {
+        if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
         if !attachment.heal_observed.is_empty() {
@@ -414,7 +414,7 @@ impl EntryOps for ProductionEntryOps {
     }
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
-        if !attachment.maintainership.still_current() {
+        if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
         // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
@@ -3285,7 +3285,7 @@ mod tests {
         assert!(ops.maintenance_due(&name, &attachment));
         ops.maintain(&name, &mut attachment)
             .expect("cleanup availability must not withdraw serving availability");
-        assert!(attachment.maintainership.still_current());
+        assert!(attachment.maintainership.still_current().expect("a stat"));
         assert!(!ops.maintenance_due(&name, &attachment));
 
         ops.detach(&name, attachment);
@@ -3348,7 +3348,7 @@ mod tests {
             attachment: &mut Self::Attachment,
             progress: &ProgressReporter<Self::Attachment>,
         ) -> Result<(), JobFailure> {
-            if !attachment.maintainership.still_current() {
+            if !attachment.maintainership.still_current().map_err(effect)? {
                 return Err(JobFailure::LostMaintainership);
             }
             let schema = ProductionEntryOps::schema_path(&attachment.registration);
