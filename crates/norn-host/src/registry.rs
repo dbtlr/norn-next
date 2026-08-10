@@ -78,8 +78,9 @@ pub struct RegistryRead {
 
 impl RegistryRead {
     /// Read the registrations without choosing a winner among duplicate roots.
-    /// Duplicates and missing roots are classified per demand, against the
-    /// roots the host serves at that moment.
+    /// Duplicates and missing roots are classified where a host acquires
+    /// coverage over a root or is told coverage over one ended, against the
+    /// roots that host serves at that moment.
     pub fn read(registry: &Registry) -> Self {
         Self::from_entries(registry.entries().cloned())
     }

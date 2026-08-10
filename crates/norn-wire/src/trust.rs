@@ -161,9 +161,11 @@ pub enum WarmingPhase {
     /// A demand arriving now neither blocks nor fails: the release is what
     /// answers it. Where the entry is free to acquire the resources again, the
     /// release honors the demand by doing so once it finishes. Where the entry
-    /// is parked — on a contended maintainer, a duplicate root, or a refused
-    /// identity — it answers with the park instead, because re-acquiring is
-    /// not something the entry is allowed to do.
+    /// stands parked — another process holding the vault's maintainer lock, the
+    /// registered root reached under a second name, or that root refused on its
+    /// identity — the release answers with the park instead, because
+    /// re-acquiring is not something the entry is allowed to do while any of
+    /// them stands.
     ReleasingCoverage,
 }
 

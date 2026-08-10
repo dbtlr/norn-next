@@ -19,7 +19,7 @@ mod claim;
 mod serving;
 
 use claim::{Claim, Coverage, Leg};
-use serving::ServingSet;
+use serving::{ServingRefusal, ServingSet};
 
 /// Lifecycle timing chosen by the composition root. There is intentionally no
 /// ambient or library default.
@@ -389,9 +389,11 @@ struct EntryState<A: SnapshotSource> {
     /// their generation, so a lease that asked for an earlier recovery neither
     /// satisfies this one nor discounts a lease that did ask for it.
     recovery_generation: u64,
-    /// The registry's account of a root it cannot read, from the recheck that
-    /// refused it. While it is set the entry is parked, and the detail is what
-    /// the park answers with.
+    /// The registry's account of a root it cannot read, from the
+    /// classification that refused it. While it is set the entry is parked, and
+    /// the detail is what the park answers with. A demand an acquisition can
+    /// follow withdraws it, and that acquisition's own classification is what
+    /// decides whether it stands again.
     identity_refused: Option<String>,
     /// The entry's hold on itself: the epoch its work stands at, what holds its
     /// scheduling gate, the leg running against it, and the job holding its one
@@ -401,8 +403,9 @@ struct EntryState<A: SnapshotSource> {
     /// maintainer lock. While it is set the entry is parked, and only
     /// [`Host::retry`] clears it.
     maintainer_contended: Option<MaintainerIdentity>,
-    /// The conflict a recheck found over this entry's root. While it is set the
-    /// entry is parked, and a recheck that passes clears it.
+    /// The conflict a classification found over this entry's root. While it is
+    /// set the entry is parked, and a demand an acquisition can follow
+    /// withdraws it so that acquisition can classify the root again.
     duplicate_root: Option<AliasConflict>,
     last_demand: Instant,
     demand_leases: usize,
@@ -550,10 +553,10 @@ impl<A: SnapshotSource> EntryState<A> {
     /// [`Claim::hand_on`], which holds the gate, and the entry's lock goes back
     /// before `dispatch_handoff` takes it again for [`Claim::hand_off`]. A
     /// refusal reaching the entry in that window — `refuse_identity_error`,
-    /// which a caller thread reaches through `Host::demand` and
-    /// `recheck_and_refuse` — opens the gate, so the hand-off takes the slot
-    /// through its open-gate arm and the job entering the channel is held here
-    /// by the slot alone.
+    /// which the dispatcher thread reaches through
+    /// `park_on_current_classification` — opens the gate, so the hand-off takes
+    /// the slot through its open-gate arm and the job entering the channel is
+    /// held here by the slot alone.
     fn held_by_anything(&self) -> bool {
         self.coverage.in_hand()
             || self.coverage.out_with_leg()
@@ -588,6 +591,60 @@ impl<A: SnapshotSource> EntryState<A> {
             .or_else(|| self.duplicate_root.clone().map(Demand::DuplicateRoot))
             .or_else(|| self.identity_refused.clone().map(Demand::IdentityRefused))
     }
+
+    /// Withdraw the parks the registry raised, leaving the entry free to be
+    /// worked again.
+    ///
+    /// Both are statements about roots, and a root is read by the acquisition
+    /// that classifies it. Withdrawing them is therefore the caller's way of
+    /// asking for that acquisition rather than a claim that the roots have
+    /// changed: the attach that follows reads them and writes back whichever
+    /// refusal still stands.
+    ///
+    /// Maintainer contention stays. No read of the registry says whether
+    /// another process still holds this entry's lock, so nothing an
+    /// acquisition could answer is being asked for here.
+    fn retire_registry_parks(&mut self) {
+        self.identity_refused = None;
+        self.duplicate_root = None;
+    }
+
+    /// The trust label a caller reads off this entry.
+    ///
+    /// A root reached under more than one name is a refusal, and the two
+    /// settled labels that are not — Ready, and Unattached — say the opposite
+    /// of one: that the entry is readable, or that it is free to be demanded
+    /// and warmed. Answering the refusal in their place is what keeps the
+    /// status surface and the refusal surface from describing the same instant
+    /// differently.
+    ///
+    /// Warming and Untrusted stand as they are. A release in flight publishes
+    /// the phase that names it, and an untrusted entry already carries a reason
+    /// of its own — the identity park writes exactly that reason where it
+    /// parks, so this is the label it answers with either way.
+    ///
+    /// Maintainer contention is a diagnostic beside the state rather than a
+    /// state of its own: an entry another process maintains holds nothing and
+    /// says so, and its trust label is not what the contention changes.
+    fn published_trust(&self) -> TrustState {
+        match (&self.duplicate_root, &self.trust) {
+            (Some(conflict), TrustState::Ready | TrustState::Unattached) => TrustState::untrusted(
+                UntrustedReason::environmental_refusal(duplicate_root_detail(conflict)),
+            ),
+            _ => self.trust.clone(),
+        }
+    }
+}
+
+/// A duplicate root in words, for a person reading a state or a log.
+fn duplicate_root_detail(conflict: &AliasConflict) -> String {
+    let names = conflict
+        .aliases()
+        .iter()
+        .map(VaultName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("more than one registered name resolves to this vault's root: {names}")
 }
 
 #[derive(Clone)]
@@ -637,6 +694,19 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
         WatchError::SynchronizationExpired => WatcherLossCause::SynchronizationExpired,
     };
     UntrustedReason::watcher_lost(cause, detail)
+}
+
+/// Whether a terminal watch failure says the ground under the entry moved.
+///
+/// Coverage that ended because the root stopped being covered is the one
+/// watcher fact about the registry rather than about the vault's documents: the
+/// path the entry is registered at is not the path the coverage was installed
+/// over any more, so what that path resolves to now, and which other names
+/// reach it, are open questions. A classification is what asks them, and every
+/// caller that reads this fact runs one. Every other watch failure is about
+/// coverage over a root that is still the entry's own.
+fn root_moved(error: &WatchError) -> bool {
+    matches!(error, WatchError::CoverageLost(_))
 }
 
 fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
@@ -1104,8 +1174,8 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
 ///
 /// The entry stays untrusted and owing a recovery once the coverage is back,
 /// which is why the release here is the ops alone: this is a park with the
-/// resources given back under it, not a teardown, and a demand asking for the
-/// recovery is what serves the entry again.
+/// resources given back under it, not a teardown, and a demand asking for
+/// coverage again is what serves the entry.
 fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName, detail: String) {
     let Some(entry) = shared.entries.get(name) else {
         return;
@@ -1155,10 +1225,10 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
 /// One fact takes one park wherever it is found. The detail is what
 /// [`EntryState::parked`] answers with and what the trust state beside it
 /// carries, so a lease reports the refusal the same way whether the read that
-/// found it was a demand's recheck or an attach's. While the park stands
+/// found it was an attach's or a watcher signal's. While the park stands
 /// nothing schedules against the entry, so an attach a registry refusal ended
-/// is not one the next ambient poll tick arms again; the demand whose recheck
-/// reaches the root is what retires it.
+/// is not one the next ambient poll tick arms again; the demand that withdraws
+/// the park is what asks for the root to be read again.
 ///
 /// A leg publishing under its own claim writes the park here rather than
 /// through [`refuse_identity_error`], which invalidates the claim and leaves
@@ -1169,52 +1239,73 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
     state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
 }
 
-/// Re-read the registry over one entry and park it on whatever the read
-/// refuses.
+/// Classify one entry's root against every root the host serves, and park the
+/// entry on whatever the read refuses.
 ///
-/// A recheck that passes is the answer to both of the parks a recheck can
-/// raise: it read this root and classified it against every other registered
-/// root, so neither the refusal nor the conflict it once raised still stands.
-/// Clearing both here is what makes the demand this recheck admits a demand the
-/// paths behind it honor — a park left standing over a passing recheck is an
-/// entry admitted at one predicate and refused at the next.
+/// This raises parks and retires none. A park is a statement that the entry
+/// may not be served, and what withdraws it is the acquisition that reads the
+/// root again under the gate it claims an identity in: [`Host::demand`]
+/// retires the registry's parks and schedules that acquisition, and the
+/// acquisition either leaves them retired by reaching Ready or writes back the
+/// refusal that still stands. A sweep that retired a park here would answer a
+/// question no acquisition asked, on a read no acquisition is bound by.
+///
+/// Two legs acquire coverage. [`Job::Attach`] installs it where the entry
+/// holds none, reading the root under the gate itself so the identity it
+/// claims and the conflict it is judged for come from one read.
+/// [`Job::Recover`] installs it again over coverage the ops reported
+/// terminally lost, and reads the root through this. Neither meets a standing
+/// registry park — a park gives the entry's coverage back, so the work a
+/// parked entry is owed once the park is withdrawn is always the attach.
+///
+/// Both refusals the read can raise are acted on under the attach gate, so a
+/// classification and the acquisition claims it is judged against cannot
+/// interleave: the conflict this refuses is the conflict every alias in it is
+/// refused for, whichever thread found it.
 ///
 /// Maintainer contention is untouched: the registry says nothing about another
-/// process's lock, so nothing read here can retire it.
+/// process's lock, so nothing read here can raise or retire it.
 ///
 /// The park this leaves behind is the whole of the answer, so nothing is
 /// reported back: the caller reads [`EntryState::parked`] like every other
 /// reader does, and one park is answered by one predicate.
-fn recheck_and_refuse<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
-    if let Ok(reading) = shared.entries.recheck(name)
-        && reading.conflict.is_none()
-    {
-        clear_registry_parks(shared, name);
-        return;
-    }
+fn park_on_current_classification<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
     let _attach_guard = shared.attach_gate.lock().expect("attach gate poisoned");
-    let conflict = match shared.entries.recheck(name) {
-        Ok(reading) => reading.conflict,
-        Err(refusal) => {
-            refuse_identity_error(shared, name, refusal.to_string());
-            return;
+    match shared.entries.recheck(name) {
+        Ok(reading) => {
+            if let Some(conflict) = &reading.conflict {
+                refuse_conflict(shared, conflict);
+            }
         }
-    };
-    if let Some(conflict) = &conflict {
-        refuse_conflict(shared, conflict);
-    } else {
-        clear_registry_parks(shared, name);
+        Err(refusal) => refuse_identity_error(shared, name, refusal.to_string()),
     }
 }
 
-/// Retire the parks a passing registry recheck has answered for.
-fn clear_registry_parks<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
-    let Some(entry) = shared.entries.get(name) else {
-        return;
-    };
-    let mut state = entry.gate.lock().expect("entry gate poisoned");
-    state.identity_refused = None;
-    state.duplicate_root = None;
+/// Serve one more vault, and classify the root it arrives with against the
+/// roots already served.
+///
+/// The classification is part of the join rather than a step after it: a name
+/// arriving over a root another name already reaches puts both of them in a
+/// conflict, and the incumbent is serving that root right now — nothing else
+/// would read it again until that entry re-attached, which a served entry has
+/// no reason to do.
+///
+/// A departure needs no such read. Taking a name out of an alias group only
+/// shrinks it, so no departure can raise a refusal, and the parks the group
+/// still stands under are retired by the acquisitions the remaining names'
+/// demands schedule.
+///
+/// This is the seam a product surface's registration verb lands on; nothing in
+/// this crate outside its own cases reaches it yet.
+#[cfg_attr(not(test), allow(dead_code))]
+fn serve<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    registration: Registration,
+) -> Result<(), ServingRefusal> {
+    let name = registration.name.clone();
+    shared.entries.insert(registration)?;
+    park_on_current_classification(shared, &name);
+    Ok(())
 }
 
 struct Shared<O: EntryOps> {
@@ -1524,14 +1615,19 @@ impl<O: EntryOps> Host<O> {
         })
     }
 
+    /// Where one entry stands, and nothing where the host serves no such name.
+    ///
+    /// The label is [`EntryState::published_trust`]'s, which is what keeps this
+    /// surface from contradicting the one a lease answers with: an entry a
+    /// duplicate root has parked refuses every demand raised over it, and this
+    /// says so rather than reporting the settled label underneath the park.
     pub fn state(&self, name: &VaultName) -> Option<TrustState> {
         self.shared.entries.get(name).map(|entry| {
             entry
                 .gate
                 .lock()
                 .expect("entry gate poisoned")
-                .trust
-                .clone()
+                .published_trust()
         })
     }
 
@@ -1539,18 +1635,33 @@ impl<O: EntryOps> Host<O> {
     /// against the entry. The call never waits on that job: what it answers
     /// with is the state the work it started runs under.
     ///
-    /// The recheck below runs first and parks the entry on whatever it refuses,
-    /// so the park read under the entry lock is the one this call's own read
-    /// established. Every demand takes the same route to its answer: the lease
-    /// is recorded, and the park — this call's or an older one's — is what it
-    /// reports.
+    /// **The call stats nothing.** It reads the entry's own lock and the
+    /// serving set's, and no root — not this entry's, and not the registry's.
+    /// Identity is classified where coverage is acquired and where a signal
+    /// says the ground under live coverage moved, and both of those are off
+    /// this path. The cost of a demand is therefore flat in the number of
+    /// vaults the host serves.
+    ///
+    /// The registry's parks do not answer here either. A demand over an entry
+    /// parked on a duplicate root or a root the registry could not read is a
+    /// demand for that root to be read again: the park is withdrawn, an attach
+    /// is scheduled, and the classification that attach runs under the identity
+    /// gate is what clears the park or writes back the refusal that still
+    /// stands. So the refusal a caller reads is one a read established rather
+    /// than one a cache kept.
+    ///
+    /// Maintainer contention is the park that does answer here. No read this
+    /// host performs says whether another process still holds the lock, so
+    /// there is no acquisition to schedule and nothing for one to adjudicate;
+    /// [`Host::retry`] is what a caller says otherwise with. A contended entry
+    /// therefore keeps the registry's parks too: they are withdrawn for the
+    /// acquisition that reads those roots again, and no acquisition follows a
+    /// demand the contention answers.
     ///
     /// The mode says how the derived state this demand asks for is held, and it
-    /// is answered before the registry is read and before any lease is
-    /// recorded: a demand this host has no lifecycle for is refused rather than
-    /// served under another mode, and it leaves the entry standing exactly
-    /// where it found it — parks included, since the recheck below is what
-    /// retires those.
+    /// is answered before any lease is recorded: a demand this host has no
+    /// lifecycle for is refused rather than served under another mode, and it
+    /// leaves the entry standing exactly where it found it, parks included.
     pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
         mode.admitted()?;
         let Some(entry) = self.shared.entries.get(name) else {
@@ -1561,7 +1672,6 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand: None,
             });
         };
-        recheck_and_refuse(&self.shared, name);
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         state.demand_leases += 1;
         let recovery_demand = state.demand_recovery();
@@ -1570,6 +1680,28 @@ impl<O: EntryOps> Host<O> {
             state.claim.invalidate();
             state.claim.open();
             state.detach_scheduled = false;
+        }
+        // A release in flight is the entry's resources on their way back, and
+        // the flag says so whatever label stands beside it: the lease is
+        // recorded here and honored by the release, so nothing is scheduled
+        // against coverage that is going away.
+        let schedule = matches!(
+            state.trust,
+            TrustState::Unattached | TrustState::Untrusted { .. }
+        ) && !state.claim.is_held()
+            && !state.detach_in_flight;
+        // The registry's parks are withdrawn here, so that the acquisition this
+        // demand asks for is the read that answers them. The acquisition runs
+        // from this call where the schedule above admits it, and from the
+        // release in flight otherwise: `finish_release` re-arms an attach for a
+        // standing lease over an entry no park is left on.
+        //
+        // A contended entry keeps every park it stands on. The contention
+        // answers this demand and no acquisition follows it, so a withdrawal
+        // here would drop a conflict nothing is coming to read again — and
+        // leave the aliases of one root disagreeing about it.
+        if state.maintainer_contended.is_none() {
+            state.retire_registry_parks();
         }
         // A parked entry is one nothing re-attaches, so the lease is recorded
         // and answered with the park itself rather than with a trust state that
@@ -1583,15 +1715,6 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand,
             });
         }
-        // A release in flight is the entry's resources on their way back, and
-        // the flag says so whatever label stands beside it: the lease is
-        // recorded here and honored by the release, so nothing is scheduled
-        // against coverage that is going away.
-        let schedule = matches!(
-            state.trust,
-            TrustState::Unattached | TrustState::Untrusted { .. }
-        ) && !state.claim.is_held()
-            && !state.detach_in_flight;
         if schedule {
             // The job is the one `DemandedWork::owed_by` names, and
             // `schedule_demanded_work` schedules that same job: what the entry
@@ -1622,8 +1745,9 @@ impl<O: EntryOps> Host<O> {
     /// Contention is the park nothing else retires: no read this host performs
     /// says whether another process still holds this entry's maintainer lock, so
     /// a caller asking again is the whole of the evidence that it may be tried.
-    /// The parks the registry raises are left to the recheck the demand below
-    /// runs, which is the read that adjudicates them.
+    /// The parks the registry raises are the demand's own to withdraw, and the
+    /// attach it schedules is the read that adjudicates them, so this call adds
+    /// nothing for them.
     ///
     /// The retry carries the mode the demand it stands in for would carry: a
     /// park is retired for the demand that follows it, and that demand asks for
@@ -1722,6 +1846,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
         let mut schedule = None;
         let mut stale = None;
         let mut release = None;
+        let mut reclassify = false;
         {
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin();
@@ -1782,6 +1907,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.claim.end_poll(epoch);
                         state.require_recovery_keeping_demands();
                         state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        reclassify = root_moved(&error);
                         state.trust = TrustState::untrusted(watcher_lost(error));
                         state.coverage.park_by(epoch, attachment);
                     }
@@ -1852,6 +1978,12 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             if let Some(job) = schedule_demanded_work(&mut state, name) {
                 schedule = Some(job);
             }
+        }
+        // The root under this entry's coverage moved, so it is read again
+        // here. A refusal found here supersedes whatever was scheduled above,
+        // and the dispatch below then reaches an entry holding no job.
+        if reclassify {
+            park_on_current_classification(shared, name);
         }
         if let Some(job) = schedule {
             let _ = job;
@@ -2126,6 +2258,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
         Job::Recover(name, epoch) => {
+            // A recovery installs watcher coverage over the registered root
+            // again, so it acquires coverage the way an attach does and reads
+            // the root the same way before it does: nothing watched that path
+            // while the entry stood without coverage, so what it resolves to
+            // now, and which other names reach it, are open questions here. A
+            // refusal moves the entry past this epoch and gives the parked
+            // coverage back, so the leg below finds nothing left to run.
+            park_on_current_classification(shared, &name);
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
@@ -2161,6 +2301,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             state.claim.release();
             let mut next = None;
+            let mut reclassify = false;
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
@@ -2195,6 +2336,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
+                    reclassify = root_moved(&error);
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
@@ -2208,6 +2350,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
             }
             drop(state);
+            // The watcher this leg drained reported that the root stopped
+            // being covered, and this leg is the one caller that consumed the
+            // report: the classification rides the fact rather than the caller.
+            if reclassify {
+                park_on_current_classification(shared, &name);
+            }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
             }
@@ -2308,9 +2456,17 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    let reclassify = root_moved(&error);
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     let next = schedule_due_detach(&mut state, &name);
                     drop(state);
+                    // The watcher this leg drained reported that the root
+                    // stopped being covered, and this leg is the one caller
+                    // that consumed the report: the classification rides the
+                    // fact rather than the caller.
+                    if reclassify {
+                        park_on_current_classification(shared, &name);
+                    }
                     if let Some(job) = next {
                         dispatch_handoff(shared, entry, epoch, job);
                     }
@@ -2368,6 +2524,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 return Some(attachment);
             }
             let mut next = None;
+            let mut reclassify = false;
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
@@ -2402,6 +2559,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    reclassify = root_moved(&error);
                     state.trust = TrustState::untrusted(watcher_lost(error));
                     next = schedule_due_detach(&mut state, &name);
                 }
@@ -2416,6 +2574,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
             }
             drop(state);
+            // The watcher this leg drained reported that the root stopped
+            // being covered, and this leg is the one caller that consumed the
+            // report: the classification rides the fact rather than the caller.
+            if reclassify {
+                park_on_current_classification(shared, &name);
+            }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
             }
@@ -3011,12 +3175,13 @@ mod tests {
         ))
     }
 
-    /// A host over roots the filesystem answers for, with the dispatcher
-    /// ticking. Every root is created before the host reads the registry.
-    fn host_over_roots(
+    /// A host over roots the filesystem answers for. Every root is created
+    /// before the host reads the registry.
+    fn rooted_host(
         ops: Arc<FakeOps>,
         roots: &[(&VaultName, &std::path::Path)],
         worker_slots: usize,
+        watch_poll_interval: Duration,
     ) -> Host<Arc<FakeOps>> {
         for (_, root) in roots {
             std::fs::create_dir_all(root).unwrap();
@@ -3030,10 +3195,32 @@ mod tests {
             LifecyclePolicy {
                 idle_after: Duration::from_secs(60),
                 worker_slots,
-                watch_poll_interval: Duration::from_millis(2),
+                watch_poll_interval,
             },
         )
         .unwrap()
+    }
+
+    /// A host over roots the filesystem answers for, with the dispatcher
+    /// ticking.
+    fn host_over_roots(
+        ops: Arc<FakeOps>,
+        roots: &[(&VaultName, &std::path::Path)],
+        worker_slots: usize,
+    ) -> Host<Arc<FakeOps>> {
+        rooted_host(ops, roots, worker_slots, Duration::from_millis(2))
+    }
+
+    /// A host over roots the filesystem answers for, without ambient polling.
+    ///
+    /// A case that drives a watcher signal itself needs the dispatcher's own
+    /// tick out of the way: the fake holds one terminal report, and which leg
+    /// consumes it is what such a case pins.
+    fn quiet_host_over_roots(
+        ops: Arc<FakeOps>,
+        roots: &[(&VaultName, &std::path::Path)],
+    ) -> Host<Arc<FakeOps>> {
+        rooted_host(ops, roots, 2, Duration::from_secs(60))
     }
 
     /// Retarget a vault root to a symlink that resolves to itself. The identity
@@ -3111,6 +3298,64 @@ mod tests {
             || match host.state(name) {
                 Some(state) if state == expected => Observed::Met(()),
                 state => Observed::pending(format!("the state is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// The label the entry itself published, read underneath the park
+    /// [`Host::state`] answers in its place.
+    ///
+    /// A case about when a leg publishes reads it here. What such a case pins
+    /// is the order of two acts — the resources reaching the ops, then the
+    /// label saying they are back — and a park standing over the entry is a
+    /// separate fact about whether the entry may be served at all.
+    fn published_label<O: EntryOps>(host: &Host<O>, name: &VaultName) -> Option<TrustState> {
+        host.shared.entries.get(name).map(|entry| {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .trust
+                .clone()
+        })
+    }
+
+    /// Wait for the entry to publish one exact trust state, read underneath any
+    /// park, reporting the last label observed.
+    fn wait_for_published_label<O: EntryOps>(
+        host: &Host<O>,
+        name: &VaultName,
+        expected: TrustState,
+    ) {
+        wait_until(
+            &format!("the entry to publish {expected:?}"),
+            lifecycle_wait_budget(),
+            || match published_label(host, name) {
+                Some(state) if state == expected => Observed::Met(()),
+                state => Observed::pending(format!("the label is {state:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    }
+
+    /// What the entry stands parked on, where it stands on anything.
+    fn entry_park<O: EntryOps>(host: &Host<O>, name: &VaultName) -> Option<Demand> {
+        host.shared
+            .entries
+            .get(name)
+            .and_then(|entry| entry.gate.lock().expect("entry gate poisoned").parked())
+    }
+
+    /// Wait for the entry to stand on one exact park, on the one budget,
+    /// reporting the last park observed.
+    fn wait_for_park<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: Demand) {
+        wait_until(
+            &format!("the entry to park on {expected:?}"),
+            lifecycle_wait_budget(),
+            || match entry_park(host, name) {
+                Some(park) if park == expected => Observed::Met(()),
+                park => Observed::pending(format!("the park is {park:?}")),
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
@@ -3794,8 +4039,8 @@ mod tests {
 
         ops.detach_release.store(true, Ordering::SeqCst);
         refusal.join().unwrap();
-        wait_for_state(&host, &a, TrustState::Unattached);
-        wait_for_state(&host, &b, TrustState::Unattached);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+        wait_for_published_label(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
     }
@@ -3932,7 +4177,7 @@ mod tests {
 
         ops.detach_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         assert_eq!(
             ops.detaches.load(Ordering::SeqCst),
             1,
@@ -3977,7 +4222,7 @@ mod tests {
         assert_eq!(host.state(&name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         assert_eq!(
             ops.detaches.load(Ordering::SeqCst),
             1,
@@ -4053,8 +4298,8 @@ mod tests {
         ops.detach_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
         refusal.join().unwrap();
-        wait_for_state(&host, &a, TrustState::Unattached);
-        wait_for_state(&host, &b, TrustState::Unattached);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+        wait_for_published_label(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
@@ -4103,7 +4348,7 @@ mod tests {
             2,
             "a refused entry re-attached"
         );
-        assert_eq!(host.state(&a), Some(TrustState::Unattached));
+        assert_eq!(published_label(&host, &a), Some(TrustState::Unattached));
         let state = entry.gate.lock().unwrap();
         assert!(!state.coverage.in_hand());
         assert!(state.pending.is_empty());
@@ -4208,17 +4453,17 @@ mod tests {
 
         ops.detach_release.store(true, Ordering::SeqCst);
         refusal.join().unwrap();
-        wait_for_state(&host, &a, TrustState::Unattached);
-        wait_for_state(&host, &b, TrustState::Unattached);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+        wait_for_published_label(&host, &b, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
     }
 
-    /// The recheck that admits a demand is what clears the conflict park, so
-    /// the release the lease is recorded behind honors it. One predicate reads
-    /// the park on both sides of the window: a lease the demand path admitted
-    /// is never a lease the release path refuses.
+    /// The demand that withdraws the conflict park is what makes the release
+    /// the lease is recorded behind honor it. One predicate reads the park on
+    /// both sides of the window: a lease the demand path admitted is never a
+    /// lease the release path refuses.
     #[test]
-    fn a_lease_admitted_by_a_passing_recheck_is_honored_by_the_release() {
+    fn a_lease_admitted_over_a_withdrawn_park_is_honored_by_the_release() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
 
@@ -4230,9 +4475,9 @@ mod tests {
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
         wait_for_flag("detach_started", &ops.detach_started);
 
-        // The registry reports no conflict over these roots, so the recheck
-        // this demand runs passes and the lease is recorded against an entry
-        // whose release is still in flight.
+        // The demand withdraws the conflict park, so the lease is recorded
+        // against an entry whose release is still in flight and free to
+        // re-acquire when it ends.
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
         assert_eq!(*lease.outcome(), Demand::State(releasing()));
 
@@ -4243,22 +4488,22 @@ mod tests {
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             3,
-            "the release refused the re-arm for a conflict the recheck had cleared"
+            "the release refused the re-arm for a park the demand had withdrawn"
         );
         drop((lease, host));
     }
 
     /// The answer a lease reports is the answer the demand that raised it acted
-    /// on: the recheck clears the conflict park before the demand schedules
-    /// against it, so no lease reports a conflict for the length of the work
+    /// on: the demand withdraws the conflict park before it schedules against
+    /// the entry, so no lease reports a conflict for the length of the work
     /// that was scheduled over one.
     #[test]
-    fn a_demand_scheduled_over_a_cleared_conflict_answers_the_work_it_scheduled() {
+    fn a_demand_scheduled_over_a_withdrawn_conflict_answers_the_work_it_scheduled() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let conflict = AliasConflict::new([a.clone(), b.clone()]);
         refuse_conflict(&host.shared, &conflict);
-        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
 
         ops.block_attach.store(true, Ordering::SeqCst);
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
@@ -4280,13 +4525,13 @@ mod tests {
         drop((lease, host));
     }
 
-    /// A park outlives the release that publishes over it. The release says
-    /// Unattached because the resources are back, and the lease still reports
-    /// the identity refusal that keeps the entry from re-arming rather than a
-    /// released state with no account of why nothing follows it.
+    /// A lease raised inside a release window is honored by the release, and
+    /// the attach that honors it is where a root the registry cannot read is
+    /// found. The lease then reports that refusal rather than the released
+    /// state the window ended at, and the attach acquires nothing.
     #[cfg(unix)]
     #[test]
-    fn a_release_over_an_identity_refusal_reports_the_refusal() {
+    fn a_release_re_arming_over_an_unreadable_root_reports_the_refusal() {
         let base = temp_base("released-identity-park");
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
@@ -4301,28 +4546,30 @@ mod tests {
 
         refuse_root_identity(&root);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
-        assert!(
-            refuses_environmentally(host.state(&name).as_ref()),
-            "the demand's recheck did not refuse the root the registry cannot read"
-        );
 
         ops.detach_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Unattached);
-        let Demand::IdentityRefused(detail) = lease.completion() else {
-            panic!(
-                "the release published released over a park that keeps the entry from re-arming: {:?}",
-                lease.completion()
-            );
-        };
+        wait_until(
+            "the lease to answer the identity park",
+            lifecycle_wait_budget(),
+            || {
+                let completion = lease.completion();
+                if refuses_identity(&completion) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{completion:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            !detail.is_empty(),
-            "the identity park reported no account of itself"
+            refuses_environmentally(host.state(&name).as_ref()),
+            "the entry published no refusal over the root the registry cannot read"
         );
         settle();
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             1,
-            "the release re-armed against a root the registry cannot read"
+            "the re-attach acquired coverage over a root the registry cannot read"
         );
 
         drop((lease, host));
@@ -4408,15 +4655,15 @@ mod tests {
     }
 
     /// A retry recovers an entry from a conflict the registry no longer
-    /// reports, and it recovers it through the recheck the demand runs: the
-    /// registry's parks are retired by the read that adjudicates them, not by
-    /// the caller asking again.
+    /// reports, and it recovers it through the attach the demand inside it
+    /// schedules: the registry's parks are retired by the acquisition that
+    /// adjudicates them, not by the caller asking again.
     #[test]
     fn a_retry_over_a_resolved_conflict_reaches_ready() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
-        wait_for_state(&host, &a, TrustState::Unattached);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
 
         let retried = host.retry(&a, AttachMode::Durable).unwrap();
         wait_for_state(&host, &a, TrustState::Ready);
@@ -4424,15 +4671,18 @@ mod tests {
         drop((retried, host));
     }
 
-    /// A conflict is answered by the park it sets, and a lease over a parked
-    /// entry is a lease like any other: it is held against the entry and it
-    /// re-reads the park. So the conflict a demand was refused for is only the
-    /// lease's answer for as long as it stands — once a later recheck has
-    /// retired it, that same lease reports the state the entry is in rather
-    /// than the refusal it was born from.
+    /// The whole of the park's life, driven from the disk: an alias of a served
+    /// root parks the entry, the root stops being an alias, and the next demand
+    /// recovers the entry.
+    ///
+    /// Nothing between those two demands reads a root. The park stands on the
+    /// classification the first attach ran, and it is withdrawn by the second
+    /// demand so that demand's own attach can classify the roots as they are
+    /// now. A lease held across both is what says so: the answer it reports
+    /// changes from the refusal to the state, on the same lease.
     #[cfg(unix)]
     #[test]
-    fn a_lease_stops_answering_a_conflict_a_later_recheck_retired() {
+    fn a_park_raised_by_an_alias_is_retired_by_the_demand_after_the_root_is_resolved() {
         use std::os::unix::fs::symlink;
 
         let base = temp_base("retired-conflict-lease");
@@ -4443,30 +4693,356 @@ mod tests {
         let b = VaultName::new("b").unwrap();
         let host = host_over_roots(Arc::clone(&ops), &[(&a, &a_root), (&b, &b_root)], 2);
 
-        // b's root becomes a second name for a's, so b's own demand is the
-        // recheck that refuses it.
+        // b's root becomes a second name for a's, so the attach b's demand
+        // schedules is the classification that refuses it.
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
         let lease = host.demand(&b, AttachMode::Durable).unwrap();
-        assert!(
-            matches!(lease.completion(), Demand::DuplicateRoot(_)),
-            "a lease over an entry a conflict has parked did not answer the park"
+        wait_until(
+            "the lease to answer the duplicate root",
+            lifecycle_wait_budget(),
+            || {
+                let completion = lease.completion();
+                if matches!(completion, Demand::DuplicateRoot(_)) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{completion:?}"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            0,
+            "an alias of a served root acquired coverage before it was refused"
         );
 
-        // The roots are two again, so the recheck the retry runs is the read
-        // that retires the park.
+        // The roots are two again, so the attach the next demand schedules is
+        // the read that retires the park.
         std::fs::remove_file(&b_root).unwrap();
         std::fs::create_dir(&b_root).unwrap();
-        let retried = host.retry(&b, AttachMode::Durable).unwrap();
+        let recovered = host.demand(&b, AttachMode::Durable).unwrap();
         wait_for_state(&host, &b, TrustState::Ready);
         assert_eq!(
             lease.completion(),
             Demand::State(TrustState::Ready),
-            "the lease kept answering a conflict a later recheck retired"
+            "the lease kept answering a conflict the next attach retired"
         );
 
-        drop((lease, retried, host));
+        drop((lease, recovered, host));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A demand against a warm entry classifies nothing.
+    ///
+    /// The counter is the serving set's own and moves once per classification,
+    /// and one classification stats every root the host serves. So a request
+    /// path that leaves it unmoved is a request path whose cost does not grow
+    /// with the registry — which is the whole of what this pins.
+    ///
+    /// The warm-up attach is what says the counter is live. An unmoved counter
+    /// over a seam that stopped counting would read the same as a request path
+    /// that spends nothing, so the reading below is taken against a counter
+    /// this case has already watched move.
+    #[test]
+    fn a_warm_demand_classifies_no_root() {
+        let ops = Arc::new(FakeOps::default());
+        let base = temp_base("warm-demand-classifications");
+        let names = ["alpha", "beta", "gamma", "delta"]
+            .map(|name| VaultName::new(name).expect("a legal vault name"));
+        let roots = names.each_ref().map(|name| base.join(name.as_str()));
+        let served = names
+            .iter()
+            .zip(roots.iter())
+            .map(|(name, root)| (name, root.as_path()))
+            .collect::<Vec<_>>();
+        let host = host_over_roots(Arc::clone(&ops), &served, 2);
+        let warm = &names[0];
+        drop(host.demand(warm, AttachMode::Durable).unwrap());
+        wait_for_state(&host, warm, TrustState::Ready);
+
+        let before = host.shared.entries.classifications();
+        assert!(
+            before > 0,
+            "the attach that warmed the entry classified nothing, so an unmoved \
+             counter below pins nothing"
+        );
+        for _ in 0..8 {
+            let lease = host.demand(warm, AttachMode::Durable).unwrap();
+            assert_eq!(*lease.outcome(), Demand::State(TrustState::Ready));
+        }
+        assert_eq!(
+            host.shared.entries.classifications(),
+            before,
+            "a demand against a warm entry classified the roots the host serves"
+        );
+
+        drop(host);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// The status surface and the refusal surface cannot describe one instant
+    /// differently. An entry a duplicate root has parked refuses, and the state
+    /// a caller polls says so rather than reporting the settled label the park
+    /// stands over — a label that would invite exactly the demand the park
+    /// refuses.
+    #[test]
+    fn a_parked_entry_refuses_at_the_status_surface_too() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let lease = host.demand(&a, AttachMode::Durable).unwrap();
+        refuse_conflict(&host.shared, &AliasConflict::new([a.clone(), b.clone()]));
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+
+        assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
+        let state = host.state(&a).expect("the vault is registered");
+        assert!(
+            state.refusal().is_some(),
+            "the status surface answered {state:?} for an entry the refusal surface refuses"
+        );
+        assert!(lease.answer().is_err());
+
+        drop((lease, host));
+    }
+
+    /// The watcher signal that a root stopped being covered is what puts a live
+    /// entry's root back under classification.
+    ///
+    /// Nothing reads a served entry's root while it is being served, so a
+    /// retarget that makes one vault's root a second name for another's is
+    /// caught by this signal or not at all. The refusal reaches both names,
+    /// and the coverage the retargeted entry was holding goes back.
+    ///
+    /// The report is consumed here by the ambient watcher poll. A job leg's
+    /// own drain is the other caller that can consume it, and
+    /// `a_job_leg_that_drains_coverage_lost_reclassifies_the_root` is where
+    /// that one is driven.
+    #[cfg(unix)]
+    #[test]
+    fn coverage_lost_at_the_root_reclassifies_every_alias_of_it() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_base("coverage-lost-reclassify");
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+        // Only b is attached, so the coverage the poll below reports on is b's.
+        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        // b's registered root becomes a second name for a's, and the watcher
+        // reports that the coverage it had over that root has ended.
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(b_root.clone()));
+        poll_watchers(&host.shared);
+
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        assert_eq!(
+            entry_park(&host, &b),
+            Some(Demand::DuplicateRoot(conflict.clone())),
+            "the retargeted entry went on unclassified"
+        );
+        assert_eq!(
+            entry_park(&host, &a),
+            Some(Demand::DuplicateRoot(conflict.clone())),
+            "the name the retargeted root now reaches was not refused with it"
+        );
+        assert_eq!(lease.completion(), Demand::DuplicateRoot(conflict));
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the refused entry kept the coverage it was refused over"
+        );
+
+        drop((lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A watcher report is spent by whichever caller drains the subscription
+    /// first, and a job leg's own drain is such a caller. The classification
+    /// rides the report rather than the caller, so the leg that consumes it
+    /// reads the root the ambient poll would have read.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_leg_that_drains_coverage_lost_reclassifies_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_base("job-leg-coverage-lost");
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        // A maintenance leg is held open over b, so the drain that ends it is
+        // what reaches the watcher next.
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        ops.block_maintenance.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_for_flag("maintenance_started", &ops.maintenance_started);
+
+        // b's registered root becomes a second name for a's, and the watcher
+        // reports that the coverage it had over that root has ended.
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::CoverageLost(b_root.clone()));
+        ops.maintenance_release.store(true, Ordering::SeqCst);
+
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
+        assert_eq!(
+            entry_park(&host, &a),
+            Some(Demand::DuplicateRoot(conflict)),
+            "the name the retargeted root now reaches was not refused with it"
+        );
+        wait_for_detaches(&ops, 1, "the refused entry to give its coverage back");
+
+        drop((lease, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A recovery installs coverage over the registered root again, so it
+    /// classifies that root the way every acquisition does.
+    ///
+    /// The failure that left the entry owing the recovery is a fact about the
+    /// watch rather than about the root, and nothing watched that path while
+    /// the entry stood without coverage. A retarget inside that window is read
+    /// here or not at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_recovery_classifies_the_root_it_installs_coverage_over() {
+        use std::os::unix::fs::symlink;
+
+        let base = temp_base("recovery-classifies-root");
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+
+        // The watcher backend stops. The entry parks its coverage and owes a
+        // recovery, and nothing here has said anything about the root.
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &b, backend_lost());
+        assert_eq!(
+            entry_park(&host, &b),
+            None,
+            "a watcher backend that stopped parked the entry on the registry"
+        );
+
+        // b's registered root becomes a second name for a's while nothing
+        // covers it.
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+
+        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
+        assert_eq!(
+            entry_park(&host, &a),
+            Some(Demand::DuplicateRoot(conflict)),
+            "the name the retargeted root now reaches was not refused with it"
+        );
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the recovery installed coverage over a root two names reach"
+        );
+        settle();
+        assert_eq!(
+            host.state(&b).and_then(|state| state.refusal().cloned()),
+            host.state(&a).and_then(|state| state.refusal().cloned()),
+            "one root's two names stand at different states"
+        );
+
+        drop((lease, recovery, host));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A demand a contention answers withdraws no park.
+    ///
+    /// Withdrawing the registry's parks is how a demand asks for the
+    /// acquisition that reads those roots again, and a contended entry
+    /// acquires nothing. A withdrawal here would drop a conflict nothing is
+    /// coming to read again, leaving the two names of one root disagreeing
+    /// about it — and the retry below is what does ask for that read.
+    #[test]
+    fn a_demand_a_contention_answers_leaves_the_conflict_park_standing() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        refuse_conflict(&host.shared, &conflict);
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+        {
+            let entry = host
+                .shared
+                .entries
+                .get(&a)
+                .expect("the vault is registered");
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .maintainer_contended = Some(MaintainerIdentity::unknown());
+        }
+
+        let contended = host.demand(&a, AttachMode::Durable).unwrap();
+        assert_eq!(
+            *contended.outcome(),
+            Demand::MaintainerContended(MaintainerIdentity::unknown()),
+            "the contention did not answer the demand it stands over"
+        );
+        let standing = host.shared.entries.get(&a).map(|entry| {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .duplicate_root
+                .clone()
+        });
+        assert_eq!(
+            standing,
+            Some(Some(conflict)),
+            "the demand dropped a conflict no acquisition is coming to read"
+        );
+        assert!(
+            host.state(&a)
+                .is_some_and(|state| state.refusal().is_some()),
+            "the status surface invited the demand the conflict refuses"
+        );
+        settle();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the contended entry re-attached"
+        );
+
+        // The retry retires the contention, so the demand inside it withdraws
+        // the conflict park and the attach it schedules reads the roots again.
+        let retried = host.retry(&a, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+
+        drop((contended, retried, host));
     }
 
     /// A lease answers its own completion in the wire vocabulary, under the
@@ -5319,11 +5895,11 @@ mod tests {
         drop(lease);
     }
 
-    /// An identity refusal found by a demand-time recheck supersedes the
-    /// reconcile in flight against the root it refuses: the entry publishes the
-    /// refusal at once, and the reconcile gives its attachment back rather than
-    /// restoring it into an entry that has moved past it. Nothing re-attaches
-    /// against a root the registry is refusing.
+    /// A classification that refuses the root supersedes the reconcile in
+    /// flight against it: the entry publishes the refusal at once, and the
+    /// reconcile gives its attachment back rather than restoring it into an
+    /// entry that has moved past it. Nothing re-attaches against a root the
+    /// registry is refusing.
     #[cfg(unix)]
     #[test]
     fn an_identity_refusal_invalidates_an_in_flight_reconcile() {
@@ -5342,10 +5918,10 @@ mod tests {
         wait_for_flag("reconcile_started", &ops.reconcile_started);
 
         refuse_root_identity(&root);
-        let refused = host.demand(&name, AttachMode::Durable).unwrap();
+        park_on_current_classification(&host.shared, &name);
         assert!(
-            refuses_identity(&refused.completion()),
-            "the demand that refused the root did not report the park it raised"
+            refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
+            "the classification that refused the root raised no park"
         );
         assert!(refuses_environmentally(host.state(&name).as_ref()));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -5363,7 +5939,7 @@ mod tests {
             "the entry re-attached against a root the registry refuses"
         );
         assert!(refuses_environmentally(host.state(&name).as_ref()));
-        drop((refused, host));
+        drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6207,8 +6783,7 @@ mod tests {
         wait_for_flag("poll_started", &ops.poll_started);
         std::fs::remove_dir(&b_root).unwrap();
         symlink(&a_root, &b_root).unwrap();
-        let refused = host.demand(&b, AttachMode::Durable).unwrap();
-        assert!(matches!(refused.outcome(), Demand::DuplicateRoot(_)));
+        park_on_current_classification(&host.shared, &b);
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
@@ -6218,13 +6793,13 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 2);
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
-        drop((refused, a_lease, b_lease, host));
+        drop((a_lease, b_lease, host));
         let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
     #[test]
-    fn identity_recheck_refusal_invalidates_and_detaches_a_live_entry() {
+    fn identity_refusal_invalidates_and_detaches_a_live_entry() {
         use std::os::unix::fs::symlink;
 
         let base = std::env::temp_dir().join(format!(
@@ -6260,10 +6835,10 @@ mod tests {
 
         std::fs::remove_dir(&root).unwrap();
         symlink("root", &root).unwrap();
-        let demand = host.demand(&name, AttachMode::Durable).unwrap();
+        park_on_current_classification(&host.shared, &name);
         assert!(
-            refuses_identity(&demand.completion()),
-            "the demand that refused the root did not report the park it raised"
+            refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
+            "the classification that refused the root raised no park"
         );
         assert!(refuses_environmentally(host.state(&name).as_ref()));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
@@ -6273,7 +6848,7 @@ mod tests {
         settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(refuses_environmentally(host.state(&name).as_ref()));
-        drop((demand, host));
+        drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6284,9 +6859,9 @@ mod tests {
     /// and the dispatcher reaches an entry holding no attachment for nothing.
     ///
     /// The invalidator is an identity refusal, which parks the entry against
-    /// its own root. The root answering again is what unparks it, and the
-    /// recheck a demand runs is what reads that — so the lease below is raised
-    /// against an entry that owes work and has a poll in flight over it.
+    /// its own root and takes the coverage back. The demand below withdraws
+    /// that park — so the lease it returns is raised against an entry that owes
+    /// work and has a poll in flight over it.
     #[cfg(unix)]
     #[test]
     fn a_superseded_poll_gives_the_entry_back_and_schedules_the_lease_on_it() {
@@ -6301,7 +6876,7 @@ mod tests {
         ops.block_poll.store(true, Ordering::SeqCst);
         wait_for_flag("poll_started", &ops.poll_started);
         refuse_root_identity(&root);
-        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        park_on_current_classification(&host.shared, &name);
         assert!(refuses_environmentally(host.state(&name).as_ref()));
 
         // The root answers again. The poll still holds the entry, so the lease
@@ -6687,22 +7262,16 @@ mod tests {
         );
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
-        let refused_again = host.demand(&refused, AttachMode::Durable).unwrap();
+        park_on_current_classification(&host.shared, &refused);
         assert!(
-            refuses_identity(&refused_again.completion()),
-            "the demand that refused the root did not report the park it raised"
+            refuses_identity(&entry_park(&host, &refused).expect("the entry stands on a park")),
+            "the classification that refused the root raised no park"
         );
         assert!(refuses_environmentally(host.state(&refused).as_ref()));
         assert_eq!(host.state(&healthy), Some(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
 
-        drop((
-            refused_again,
-            renewed_healthy,
-            refused_lease,
-            healthy_lease,
-            host,
-        ));
+        drop((renewed_healthy, refused_lease, healthy_lease, host));
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -6979,7 +7548,7 @@ mod tests {
         assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 1);
 
         end_job_leg(&host.shared, &entry, &name, epoch, Some(attachment));
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
     }
 
@@ -8793,8 +9362,12 @@ mod tests {
         }
 
         /// An inserted root another served name already reaches is classified
-        /// against that name, because a recheck reads the set rather than the
-        /// registrations the host was built from.
+        /// as part of the join, and both names are refused for it.
+        ///
+        /// The incumbent is the reason the classification runs here rather than
+        /// at the newcomer's first demand: it is serving that root at this
+        /// instant and has no other occasion to read it again, so an alias
+        /// admitted unclassified would leave one root served under two names.
         #[test]
         fn an_inserted_alias_of_a_served_root_is_refused_as_a_duplicate() {
             let ops = Arc::new(FakeOps::default());
@@ -8804,20 +9377,26 @@ mod tests {
             let served = VaultName::new("served").unwrap();
             let alias = VaultName::new("alias").unwrap();
             let host = host_over_roots(Arc::clone(&ops), &[(&served, root.as_path())], 2);
+            let incumbent = host.demand(&served, AttachMode::Durable).unwrap();
+            wait_for_state(&host, &served, TrustState::Ready);
 
-            host.shared
-                .entries
-                .insert(registration(&alias, &root.join(".")))
+            serve(&host.shared, registration(&alias, &root.join(".")))
                 .expect("the set serves no such name");
 
-            let lease = host.demand(&alias, AttachMode::Durable).unwrap();
+            let conflict = AliasConflict::new([alias.clone(), served.clone()]);
             assert_eq!(
-                lease.completion(),
-                Demand::DuplicateRoot(AliasConflict::new([alias.clone(), served.clone()])),
+                entry_park(&host, &alias),
+                Some(Demand::DuplicateRoot(conflict.clone())),
                 "the alias was admitted against a root the host already serves"
             );
+            assert_eq!(
+                incumbent.completion(),
+                Demand::DuplicateRoot(conflict),
+                "the incumbent went on serving a root a second name now reaches"
+            );
+            wait_for_detaches(&ops, 1, "the incumbent to give its coverage back");
 
-            drop((lease, host));
+            drop((incumbent, host));
             let _ = std::fs::remove_dir_all(base);
         }
 
