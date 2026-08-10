@@ -289,8 +289,8 @@ impl<'a> Request<'a> {
                 params![
                     fingerprint,
                     generation,
-                    finding.kind,
-                    finding.severity,
+                    finding.kind.as_str(),
+                    finding.severity.as_str(),
                     finding.path.as_str(),
                     finding.target,
                     finding.span.map(|span| span.line),
@@ -1397,8 +1397,8 @@ mod tests {
             let class_key = ClassKey::new(&format!("class-{index}/")).expect("a class key");
             request
                 .record_finding(&FindingFacts {
-                    kind: "test/chunking".to_string(),
-                    severity: "warning".to_string(),
+                    kind: norn_wire::FindingKind::PathNamesNoDocument,
+                    severity: norn_wire::Severity::Warning,
                     path: subject.clone(),
                     class_keys: [class_key].into_iter().collect(),
                     target: None,

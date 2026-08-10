@@ -187,6 +187,14 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             "UPDATE tombstones SET provenance = 'rebuild-drop'",
             "tombstones.provenance",
         ),
+        (
+            "UPDATE findings SET kind = 'document/unreadable'",
+            "findings.kind",
+        ),
+        (
+            "UPDATE findings SET severity = 'urgent'",
+            "findings.severity",
+        ),
     ] {
         let scratch = Scratch::new("vocabulary");
         let mut store = scratch.open();
@@ -200,6 +208,16 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
             &path("gone.md"),
             Provenance::HealPrune,
         );
+        store
+            .begin_request()
+            .record_finding(&ambiguity(
+                subject.as_str(),
+                "glossary",
+                "glossary/",
+                &[subject.as_str()],
+                1,
+            ))
+            .expect("recording a finding");
         store.verify_integrity().expect("a store just written to");
 
         induced_failure::execute_out_of_band(&mut store, arrange)
@@ -302,8 +320,8 @@ fn a_finding_keeps_a_bounded_head_and_the_total() {
         .expect("reading findings")
         .pop()
         .expect("a finding");
-    assert_eq!(stored.kind, finding.kind);
-    assert_eq!(stored.severity, finding.severity);
+    assert_eq!(stored.kind, finding.kind.as_str());
+    assert_eq!(stored.severity, finding.severity.as_str());
     assert_eq!(stored.target.as_deref(), Some("glossary"));
     assert_eq!(stored.class_keys, classes(&["glossary/"]));
     assert_eq!(stored.span, finding.span);

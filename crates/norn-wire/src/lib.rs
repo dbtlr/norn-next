@@ -11,9 +11,9 @@
 //! What is defined here today is where a vault entry stands — [`TrustState`]
 //! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
 //! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
-//! finding is filed under, [`FindingKind`]. Maintainer contention carries the
-//! diagnostic [`MaintainerIdentity`] reported by the lock without changing an
-//! entry's trust state.
+//! finding is filed under, [`FindingKind`], and its [`Severity`]. Maintainer
+//! contention carries the diagnostic [`MaintainerIdentity`] reported by the
+//! lock without changing an entry's trust state.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -50,8 +50,9 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`], [`FindingKind`], [`WatcherLossCause`] and
-//! [`WarmingPhase`] are; an enum whose variants may carry a payload is a
+//! string, as [`ReasonCode`], [`FindingKind`], [`Severity`],
+//! [`WatcherLossCause`] and [`WarmingPhase`] are; an enum whose variants may
+//! carry a payload is a
 //! tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
 //! are. The flat string keeps a code matchable as a value; the tagged object
 //! keeps a payload's arrival from changing what the value is. Two of those
@@ -148,5 +149,5 @@ mod finding;
 mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
-pub use finding::{FindingKind, UnknownFindingKind};
+pub use finding::{FindingKind, Severity, UnknownFindingKind, UnknownSeverity};
 pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
