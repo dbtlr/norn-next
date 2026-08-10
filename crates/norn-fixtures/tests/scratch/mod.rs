@@ -212,8 +212,8 @@ mod tests {
     /// give every scratch tree.
     #[test]
     fn fresh_roots_are_unique_and_carry_the_process_id() {
-        let a = fresh("pin-uniqueness-a");
-        let b = fresh("pin-uniqueness-b");
+        let a = fresh("pin-uniqueness");
+        let b = fresh("pin-uniqueness");
         assert_ne!(
             a.tree, b.tree,
             "two scratch roots resolved to the same path"
