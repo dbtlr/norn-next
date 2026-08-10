@@ -482,6 +482,15 @@ exact equality is restricted to crates currently present.
   dependent, so a consumer naming `features = [..]` or forwarding one of its own defaults
   pulls in whatever it reaches. The crate's own manifest test states what it asks for; this
   gate reads what the workspace resolves.
+- **A local crate outside the member set fails**, because an excluded crate is outside the
+  allowlist, the lint ruleset and every test the workspace runs. `vendor/` is the one place
+  that rule does not reach, and it holds no Norn crate: each directory under it is one
+  published third-party release with a patch applied, wired in through `[patch.crates-io]`
+  and named in `vendor/README.md` with the capability the patch adds and what removes it.
+  The edge to a patched release is the third-party edge the registry release already
+  carried, so it is not the allowlist's subject — while the isolation rule above still reads
+  it, because what a crate links is what it links. A patch is temporary by construction: it
+  exists until a published release carries the capability.
 
 Symbol-level rules the dependency graph cannot express **escalate to lint tooling**. Which
 tooling expresses them is an implementation detail, not a fixed part of this contract —

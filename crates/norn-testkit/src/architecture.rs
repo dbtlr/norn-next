@@ -164,6 +164,10 @@ pub struct WorkspaceGraph {
     pub build: BTreeSet<(String, String)>,
     /// Normal or build edges from a member to a local package the workspace
     /// does not hold as a member, as `(from, name of the dependency)`.
+    ///
+    /// A package under `<root>/vendor/` is not one of these: it is a published
+    /// release with a patch applied, and the edge to it is the third-party
+    /// edge the registry release already carried.
     pub unearned: BTreeSet<(String, String)>,
     /// Every normal or build edge from a member to *any* package under this
     /// reading, registry crates included, as `(from, name of the
@@ -270,7 +274,7 @@ impl WorkspaceGraph {
                     return Err("a resolve edge carries no `pkg`".to_string());
                 };
                 let member = member_ids.contains(pkg);
-                let local = is_local_package(pkg);
+                let local = is_local_package(pkg) && !is_vendored_package(pkg, &graph.root);
                 let to = named(pkg)?;
                 for dep_kind in array(dep, "dep_kinds")? {
                     let edge = (from.clone(), to.clone());
@@ -765,6 +769,24 @@ fn is_local_package(id: &str) -> bool {
     id.starts_with("path+file://") || id.contains("(path+file://")
 }
 
+/// Whether a local package is a patched copy of a published release rather
+/// than a crate of this workspace.
+///
+/// `<root>/vendor/` holds published releases with a Norn patch applied, wired
+/// in through `[patch.crates-io]`. A member reaching one reaches the same
+/// third-party crate the registry release was, so the edge is not the
+/// allowlist's subject and the package is not a crate the crate map names.
+/// Every other local package outside the member set still is: this reads one
+/// directory, not "any path dependency".
+fn is_vendored_package(id: &str, root: &Path) -> bool {
+    let Some(start) = id.find("path+file://") else {
+        return false;
+    };
+    let path = &id[start + "path+file://".len()..];
+    let path = path.split(['#', ')']).next().unwrap_or(path);
+    Path::new(path).starts_with(root.join("vendor"))
+}
+
 /// Run `cargo metadata` under `args` and hand back its JSON.
 ///
 /// The cargo that built this test is the cargo that reads the workspace, so
@@ -979,6 +1001,41 @@ mod tests {
                 .collect()
         );
         violation_mentions(&graph, "which the workspace does not hold as a member");
+    }
+
+    /// A patched release under `vendor/` is the third-party crate it patches,
+    /// so a member reaching it reaches no crate of this workspace.
+    ///
+    /// The neighbouring case is what keeps this narrow: the exemption reads
+    /// one directory, and a local crate anywhere else is still a violation.
+    #[test]
+    fn a_member_depending_on_a_vendored_release_is_not_reaching_a_workspace_crate() {
+        let metadata = r#"{
+          "workspace_root": "/workspace",
+          "workspace_members": ["path+file:///workspace/crates/norn-fs#0.0.0"],
+          "packages": [
+            {"id": "path+file:///workspace/crates/norn-fs#0.0.0", "name": "norn-fs",
+             "manifest_path": "/workspace/crates/norn-fs/Cargo.toml"},
+            {"id": "path+file:///workspace/vendor/notify#8.2.0", "name": "notify",
+             "manifest_path": "/workspace/vendor/notify/Cargo.toml"}
+          ],
+          "resolve": {"nodes": [
+            {"id": "path+file:///workspace/crates/norn-fs#0.0.0", "deps": [
+              {"pkg": "path+file:///workspace/vendor/notify#8.2.0",
+               "dep_kinds": [{"kind": null}]}
+            ]}
+          ]}
+        }"#;
+        let graph = WorkspaceGraph::parse(metadata).expect("parsing metadata");
+        assert!(graph.unearned.is_empty());
+        assert!(graph.normal.is_empty());
+        assert!(
+            graph
+                .linked
+                .contains(&("norn-fs".to_string(), "notify".to_string())),
+            "a vendored release a member links must still be visible to the isolation rule"
+        );
+        assert_eq!(graph.violations(), Vec::<String>::new());
     }
 
     /// The same, spelled as a build dependency: an excluded crate reached
