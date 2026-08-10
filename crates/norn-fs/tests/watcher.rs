@@ -12,12 +12,18 @@ use std::thread;
 use std::time::Duration;
 
 use norn_fs::{
-    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
+    Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, SubscriptionState,
+    WatchError, watch,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// The wait a case gives coverage to cross its backend synchronization
+/// boundary. It is the lifecycle's own authored deadline, so a case that
+/// reaches it saw what a host would refuse an attach over.
+const SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 
 /// The vault-relative path a collector writes to prove the backend is
 /// reporting. Not a Markdown document, and named so a reader of a leftover
@@ -177,11 +183,7 @@ impl Collector {
     fn start(vault: &Path, schema: &Path) -> Self {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
         let (subscription, _own_writes) = watch(vault, schema).expect("watch coverage is active");
-        let mut collector = Self {
-            subscription,
-            seen: Seen::default(),
-            _watcher_lease: lease,
-        };
+        let mut collector = Self::adopt(subscription, lease);
         let canary = vault.join(CANARY);
         wait_until("the backend to report a canary write", budget(), || {
             std::fs::write(&canary, b"canary\n").expect("the canary write");
@@ -215,6 +217,20 @@ impl Collector {
         collector
     }
 
+    /// Collect from a subscription the case already holds, with the lease that
+    /// was taken before it.
+    ///
+    /// A case that builds its own subscription is one asserting something
+    /// about establishing coverage, so it takes the lease first and hands both
+    /// over together — the collector is what holds them for the same window.
+    fn adopt(subscription: Subscription, lease: Lease) -> Self {
+        Self {
+            subscription,
+            seen: Seen::default(),
+            _watcher_lease: lease,
+        }
+    }
+
     /// Take every settled batch the subscription is holding, and stop at the
     /// first terminal error — which is the last thing it ever reports.
     fn drain(&mut self) {
@@ -228,8 +244,19 @@ impl Collector {
     }
 
     /// Drain and judge until the condition holds over what has been seen.
-    fn wait_for(&mut self, description: &str, mut condition: impl FnMut(&Seen) -> Observed<()>) {
-        wait_until(description, budget(), || {
+    fn wait_for(&mut self, description: &str, condition: impl FnMut(&Seen) -> Observed<()>) {
+        self.wait_within(budget(), description, condition);
+    }
+
+    /// The same wait, for a case whose bound is its own rather than the
+    /// target's.
+    fn wait_within(
+        &mut self,
+        budget: Budget,
+        description: &str,
+        mut condition: impl FnMut(&Seen) -> Observed<()>,
+    ) {
+        wait_until(description, budget, || {
             self.drain();
             condition(&self.seen)
         })
@@ -346,6 +373,162 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
             terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
         },
     );
+}
+
+/// **The window synchronization closes.** A write issued the moment coverage
+/// is installed — before the subscription is live — is reported for its own
+/// path once it is.
+///
+/// This is the case a canary cannot stand in for. The canary is rewritten
+/// until one of its writes is reported, so it proves the stream is live and
+/// says nothing about the write that preceded it. Here the write happens once,
+/// while the subscription is still synchronizing, and the report is required
+/// afterwards: a backend whose stream starts at its own convenience never
+/// observed it, and the case fails naming the state it saw at the write.
+#[test]
+fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
+    let scratch = Scratch::new("synchronization-race");
+    let vault = scratch.vault();
+    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let (subscription, _own_writes) =
+        watch(&vault, &scratch.schema()).expect("watch coverage is active");
+
+    let racing = subscription.state();
+    std::fs::write(vault.join("raced.md"), b"raced\n").expect("the racing write");
+
+    subscription
+        .synchronize(SYNCHRONIZATION_DEADLINE)
+        .expect("coverage to become live");
+    let mut collector = Collector::adopt(subscription, lease);
+    // Every other case here retries its write until one is reported, so its
+    // wait bounds a retry loop. This one writes once and cannot ask again, so
+    // its wait bounds the platform's own delivery instead: a run that reaches
+    // this is a stream that went silent, not a machine that was slow.
+    collector.wait_within(
+        Budget::new(Duration::from_secs(60), Duration::from_millis(250)),
+        "the racing write to be reported",
+        |seen| {
+            if seen.reported(Path::new("raced.md")) {
+                Observed::Met(())
+            } else {
+                Observed::Pending(format!(
+                    "a write made while the subscription was {racing:?} went unreported; {}",
+                    seen.state()
+                ))
+            }
+        },
+    );
+    assert_eq!(
+        racing,
+        SubscriptionState::Synchronizing,
+        "the subscription was already live when it returned from installing coverage, so this \
+         case raced nothing"
+    );
+}
+
+/// **One boundary covers every volume the plan touches.** A schema edge on a
+/// second volume synchronizes with the vault's own edge and reports.
+///
+/// The identifiers a native macOS stream replays from come from one per-host
+/// source that advances across every attached volume, which is what makes a
+/// single boundary a claim about the whole plan rather than about one
+/// filesystem. A plan whose edges sit on different volumes is where that
+/// claim is worth something, so it is the topology this case builds.
+#[test]
+fn a_plan_spanning_two_volumes_synchronizes_and_reports_from_both() {
+    let scratch = Scratch::new("multi-volume");
+    let volume = match Volume::provision("schema") {
+        Ok(volume) => volume,
+        Err(reason) => {
+            eprintln!(
+                "no second volume available, so the multi-volume plan is unasserted: {reason}"
+            );
+            return;
+        }
+    };
+    let schema = volume.mount().join("schema.toml");
+    std::fs::write(&schema, b"version = 1\n").expect("a schema on the second volume");
+
+    let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+    let (subscription, _own_writes) =
+        watch(&scratch.vault(), &schema).expect("watch coverage is active across two volumes");
+    subscription
+        .synchronize(SYNCHRONIZATION_DEADLINE)
+        .expect("one boundary to cover a plan spanning two volumes");
+    let mut collector = Collector::adopt(subscription, lease);
+
+    std::fs::write(scratch.vault().join("note.md"), b"note\n").expect("a document write");
+    let replacement = volume.mount().join(".schema.toml.new");
+    std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
+    std::fs::rename(&replacement, &schema).expect("the schema replacement");
+
+    collector.wait_for("both volumes to report their own change", |seen| {
+        match (seen.reported(Path::new("note.md")), seen.schema_dirty) {
+            (true, true) => Observed::Met(()),
+            _ => Observed::Pending(seen.state()),
+        }
+    });
+}
+
+/// A second mounted volume, for the coverage plan that needs one.
+///
+/// A RAM disk is the volume a test can mount and release without privileges.
+/// Where the machine will not provide one the case that wanted it says so and
+/// asserts nothing, because a volume is the environment's to give.
+struct Volume {
+    device: String,
+    mount: PathBuf,
+}
+
+impl Volume {
+    fn provision(label: &str) -> Result<Self, String> {
+        // 65,536 512-byte sectors: 32 MiB, which holds a schema file and the
+        // volume's own event log with room to spare.
+        // 65,536 512-byte sectors: 32 MiB, which holds a schema file and the
+        // volume's own event log with room to spare.
+        let device = command("hdiutil", &["attach", "-nomount", "ram://65536"])?;
+        // The device is attached from here on, so the volume owns it before
+        // anything else can fail and leave it attached with no owner.
+        let mut volume = Self {
+            device: device.clone(),
+            mount: PathBuf::new(),
+        };
+        let name = format!("norn-{label}-{}", std::process::id());
+        command("diskutil", &["eraseVolume", "HFS+", &name, &device])?;
+        volume.mount = command("diskutil", &["info", &device])?
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Mount Point:").map(str::trim))
+            .filter(|mount| !mount.is_empty())
+            .ok_or_else(|| format!("{device} reports no mount point"))?
+            .into();
+        Ok(volume)
+    }
+
+    fn mount(&self) -> &Path {
+        &self.mount
+    }
+}
+
+impl Drop for Volume {
+    fn drop(&mut self) {
+        let _ = command("hdiutil", &["detach", "-force", &self.device]);
+    }
+}
+
+/// Run one provisioning command, reporting its output or why it gave none.
+fn command(program: &str, arguments: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("{program} could not run: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{program} {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// **The bar under the readiness check.** A vault-wide rescan covers the canary
