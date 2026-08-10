@@ -22,6 +22,11 @@ use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, Snap
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
+/// Maximum time one lifecycle worker may wait for watcher coverage to become live.
+///
+/// This is operational containment, not a performance threshold. Loaded runs
+/// measure its headroom; observations do not tune it automatically.
+pub const WATCH_SYNCHRONIZATION_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Resource bounds for the concrete filesystem/store adapter.
 #[derive(Clone, Copy, Debug)]
@@ -93,6 +98,7 @@ pub struct ProductionAttachment {
     maintainership: Maintainership,
     store: Store,
     subscription: Option<Subscription>,
+    heal_observed: norn_fs::Batch,
     /// Layer 4 plan-apply consumes this recorder at the product composition
     /// site: successful writes stay beside coverage so their watcher echoes
     /// can be hash-confirmed without hiding external edits.
@@ -185,6 +191,39 @@ impl ProductionEntryOps {
             self.policy,
             &healing,
         )
+    }
+
+    /// Establish the two proofs required before lifecycle publication.
+    ///
+    /// Attach and recovery both install coverage before entering here. This
+    /// one serial path then waits for the backend boundary and runs the
+    /// hash-authoritative heal. The lifecycle performs its nonblocking batch
+    /// drain before it can publish `Ready`.
+    fn synchronize_and_heal(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
+        attachment
+            .subscription
+            .as_ref()
+            .ok_or_else(|| environmental("watcher coverage is not installed"))?
+            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+            .map_err(watcher)?;
+        attachment
+            .subscription
+            .as_ref()
+            .expect("synchronized subscription remains installed")
+            .begin_heal();
+        let result = self.heal(attachment, progress);
+        let observed = attachment
+            .subscription
+            .as_ref()
+            .expect("subscription remains installed through its heal")
+            .finish_heal()
+            .map_err(watcher)?;
+        attachment.heal_observed.merge(observed);
+        result
     }
 }
 
@@ -296,11 +335,12 @@ impl EntryOps for ProductionEntryOps {
             maintainership,
             store,
             subscription: Some(subscription),
+            heal_observed: norn_fs::Batch::default(),
             _own_writes: own_writes,
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
         };
-        self.heal(&mut attachment, progress)?;
+        self.synchronize_and_heal(&mut attachment, progress)?;
         Ok(attachment)
     }
 
@@ -352,7 +392,7 @@ impl EntryOps for ProductionEntryOps {
             Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
-        self.heal(attachment, progress)
+        self.synchronize_and_heal(attachment, progress)
     }
 
     fn poll(
@@ -362,6 +402,9 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
         if !attachment.maintainership.still_current() {
             return Err(JobFailure::LostMaintainership);
+        }
+        if !attachment.heal_observed.is_empty() {
+            return Ok(Some(std::mem::take(&mut attachment.heal_observed)));
         }
         poll_subscription(attachment)
     }

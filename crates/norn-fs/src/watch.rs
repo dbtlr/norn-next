@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Weak, mpsc};
+use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,20 @@ pub const DIRTY_ROOT_CAP: usize = 8192;
 /// 4,096 holds two complete 2,000-document realistic-profile rewrites during
 /// the ledger's short lifetime.
 pub const OWN_WRITE_CAP: usize = 4096;
+
+/// The control-plane state of one watcher subscription.
+///
+/// This state is deliberately separate from [`Batch`]: readiness is proof
+/// about coverage, not a filesystem fact to reconcile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionState {
+    /// Coverage edges are still establishing their backend boundary.
+    Synchronizing,
+    /// Every planned edge has crossed its backend boundary.
+    Live,
+    /// Coverage establishment or established coverage failed permanently.
+    Terminal(WatchError),
+}
 
 /// A coverage partition whose exact changed paths are no longer known.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -104,6 +118,8 @@ pub enum WatchError {
     Backend(String),
     /// The vault root itself disappeared or ceased to be covered.
     CoverageLost(PathBuf),
+    /// Coverage did not become live before the caller's authored deadline.
+    SynchronizationExpired,
 }
 
 impl fmt::Display for WatchError {
@@ -112,6 +128,9 @@ impl fmt::Display for WatchError {
             Self::Backend(message) => write!(formatter, "filesystem watcher failed: {message}"),
             Self::CoverageLost(path) => {
                 write!(formatter, "watch coverage was lost for {}", path.display())
+            }
+            Self::SynchronizationExpired => {
+                write!(formatter, "filesystem watcher synchronization expired")
             }
         }
     }
@@ -145,9 +164,60 @@ pub struct Subscription {
     batches: Option<mpsc::Receiver<Result<Batch, WatchError>>>,
     watcher: Option<Box<dyn notify::Watcher + Send>>,
     worker: Option<thread::JoinHandle<()>>,
+    control: Arc<(Mutex<SubscriptionState>, Condvar)>,
+    state: Arc<Mutex<State>>,
+    wake: Option<mpsc::SyncSender<()>>,
 }
 
 impl Subscription {
+    /// Wait until every coverage edge is live, or until coverage fails.
+    ///
+    /// Expiry is returned as a typed terminal watcher error. It does not
+    /// synthesize a filesystem rescan or alter the backend selection.
+    pub fn synchronize(&self, deadline: Duration) -> Result<(), WatchError> {
+        wait_for_synchronization(&self.control, deadline)
+    }
+
+    /// Hold settled output while a hash-authoritative heal is in flight.
+    pub fn begin_heal(&self) {
+        self.state.lock().expect("watch state poisoned").healing = true;
+    }
+
+    /// Close the heal window and take every fact accumulated during it.
+    pub fn finish_heal(&self) -> Result<Batch, WatchError> {
+        let work = {
+            let mut state = self.state.lock().expect("watch state poisoned");
+            state.healing = false;
+            if let Some(error) = state.terminal.take() {
+                state.pending.take();
+                return Err(error);
+            }
+            let root = state.root.clone();
+            let ledger = state.ledger.clone();
+            state
+                .pending
+                .take()
+                .map(|pending| (root, ledger, pending.batch))
+        };
+        let _ = self
+            .wake
+            .as_ref()
+            .expect("subscription wake sender present")
+            .try_send(());
+        Ok(work.map_or_else(Batch::default, |(root, ledger, batch)| {
+            suppress(&root, &ledger, batch)
+        }))
+    }
+
+    /// Observe the current control state without consuming it.
+    pub fn state(&self) -> SubscriptionState {
+        self.control
+            .0
+            .lock()
+            .expect("watch control state poisoned")
+            .clone()
+    }
+
     /// Receive one already-settled batch without waiting.
     pub fn try_recv(&self) -> Result<Option<Batch>, WatchError> {
         match self
@@ -166,6 +236,38 @@ impl Subscription {
     }
 }
 
+fn wait_for_synchronization(
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+    deadline: Duration,
+) -> Result<(), WatchError> {
+    let (state, changed) = &**control;
+    let state = state.lock().expect("watch control state poisoned");
+    let (mut state, _) = changed
+        .wait_timeout_while(state, deadline, |state| {
+            matches!(state, SubscriptionState::Synchronizing)
+        })
+        .expect("watch control state poisoned");
+    match &*state {
+        SubscriptionState::Live => Ok(()),
+        SubscriptionState::Terminal(error) => Err(error.clone()),
+        SubscriptionState::Synchronizing => {
+            let error = WatchError::SynchronizationExpired;
+            *state = SubscriptionState::Terminal(error.clone());
+            changed.notify_all();
+            Err(error)
+        }
+    }
+}
+
+fn publish_control(control: &Arc<(Mutex<SubscriptionState>, Condvar)>, next: SubscriptionState) {
+    let (state, changed) = &**control;
+    let mut state = state.lock().expect("watch control state poisoned");
+    if !matches!(*state, SubscriptionState::Terminal(_)) {
+        *state = next;
+        changed.notify_all();
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.watcher.take();
@@ -173,6 +275,7 @@ impl Drop for Subscription {
         // joining it. Backend callbacks write only shared pending state, so
         // delivery backpressure never blocks event intake.
         self.batches.take();
+        self.wake.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -328,6 +431,7 @@ fn watch_with(
     // backpressures only this worker; callbacks keep merging into State and
     // widen to Rescan at the authored cap.
     let (batch_tx, batch_rx) = mpsc::sync_channel(1);
+    let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
     let handler = move |result| {
@@ -352,8 +456,20 @@ fn watch_with(
 
     install(watcher.as_mut(), &plan)?;
 
-    let worker_state = shared;
-    drop(wake_tx);
+    // PollWatcher builds each edge's initial snapshot synchronously inside
+    // registration. Returning from the committed bulk registration therefore
+    // closes the baseline for the complete plan. Native registration keeps
+    // the same control seam; its stronger event-history proof replaces this
+    // provisional registration boundary in the native phase.
+    let established = shared
+        .lock()
+        .expect("watch state poisoned")
+        .terminal
+        .clone()
+        .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
+    publish_control(&control, established);
+
+    let worker_state = shared.clone();
     let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
     let owns = OwnWrites {
         ledger: Arc::downgrade(&ledger),
@@ -365,6 +481,9 @@ fn watch_with(
             batches: Some(batch_rx),
             watcher: Some(watcher),
             worker: Some(worker),
+            control,
+            state: shared,
+            wake: Some(wake_tx),
         },
         owns,
     ))
@@ -511,6 +630,7 @@ struct State {
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
     terminal: Option<WatchError>,
+    healing: bool,
 }
 
 impl State {
@@ -527,6 +647,7 @@ impl State {
             ledger,
             pending: None,
             terminal: None,
+            healing: false,
         }
     }
     fn batch(&mut self) -> &mut Batch {
@@ -660,7 +781,9 @@ fn run_coalescer(
     loop {
         let wait = {
             let locked = state.lock().expect("watch state poisoned");
-            if locked.terminal.is_some() {
+            if locked.healing {
+                Duration::from_secs(3600)
+            } else if locked.terminal.is_some() {
                 Duration::ZERO
             } else if let Some(p) = &locked.pending {
                 let at = std::cmp::min(p.last + QUIET_WINDOW, p.first + MAX_BATCH_AGE);
@@ -682,7 +805,9 @@ fn run_coalescer(
         }
         let work = {
             let mut locked = state.lock().expect("watch state poisoned");
-            if let Some(error) = locked.terminal.take() {
+            if locked.healing {
+                Ok(None)
+            } else if let Some(error) = locked.terminal.take() {
                 Err(error)
             } else {
                 let root = locked.root.clone();
@@ -853,6 +978,86 @@ mod tests {
                 (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
                 (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
             ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn polling_registration_publishes_live_only_after_the_complete_plan_scan() {
+        let scratch = Scratch::new("polling-synchronization");
+        let vault = scratch.path("vault");
+        let schema_parent = scratch.path("schema");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::create_dir_all(&schema_parent).unwrap();
+        let schema = schema_parent.join("vault.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+
+        assert_eq!(subscription.state(), SubscriptionState::Live);
+        assert_eq!(subscription.synchronize(Duration::ZERO), Ok(()));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn the_heal_window_returns_unsettled_facts_before_ready_can_be_published() {
+        let scratch = Scratch::new("heal-window");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.begin_heal();
+        let observed_root = subscription.state.lock().unwrap().root.clone();
+
+        ingest(
+            &subscription.state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(observed_root.join("during.md"))),
+        );
+
+        let observed = subscription.finish_heal().unwrap();
+        assert_eq!(
+            observed
+                .vault_roots()
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("during.md")]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn the_heal_window_surfaces_terminal_loss_before_any_ready_handoff() {
+        let scratch = Scratch::new("heal-terminal");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.begin_heal();
+        subscription.state.lock().unwrap().terminal =
+            Some(WatchError::Backend("lost during heal".into()));
+
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::Backend("lost during heal".into()))
+        );
+    }
+
+    #[test]
+    fn synchronization_expiry_is_terminal_and_a_late_live_signal_cannot_revive_it() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+
+        assert_eq!(
+            wait_for_synchronization(&control, Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+        publish_control(&control, SubscriptionState::Live);
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Terminal(WatchError::SynchronizationExpired)
         );
     }
 
