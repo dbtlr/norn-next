@@ -450,7 +450,9 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
     are `norn-fs`'s, not config's** — the maintainer lock file under the data root, and the
     shadow home under the data root too unless the vault is on another filesystem, are
     vault-effect mechanisms that follow the seam owning their meaning rather than the directory
-    they sit in.
+    they sit in. Both crates are leaves, so each spells the file mechanics its own protocol
+    needs; [the file-mechanics split](#two-spellings-of-the-file-mechanics-and-the-discipline-both-keep)
+    records what diverges between the two spellings and what must stay aligned across them.
 12. **`norn-embed` is blind.** No `embed → store` and no `embed → fs` edge exists; the host
     mediates every vector write. Semantic search stays a query surface and never a
     correctness input, because the inference crate structurally cannot reach findings or
@@ -556,6 +558,65 @@ Two notes on that table:
 
 `norn-serve` is a deliberate non-entry: it binds a loopback socket, which is not a
 filesystem effect.
+
+#### Two spellings of the file mechanics, and the discipline both keep
+
+`norn-fs` and `norn-config` each own their own spelling of the same three idioms: an
+exclusive `flock` with a bounded ABA recheck, a temporary-file/fsync/rename durability
+sequence, and a `(device, inode)` stat-identity comparison. **The split is purposeful and
+recorded rather than extracted**, and invariant 11 is why it has to be: both crates are
+leaves the rest of the workspace depends on, so neither may depend on the other, and a
+third crate holding the mechanics would be edges the allowlist does not carry — added for
+code that looks alike rather than for a boundary that means something.
+
+What the two spellings say is not the same thing:
+
+- **Waiting.** `norn-fs` never blocks. Acquisition answers `Contended` and carries the
+  incumbent's diagnostics, because the caller is a host deciding whether it maintains a
+  vault. `norn-config` waits, without a bound, because its caller is inside a
+  read-modify-write of a small machine-local file and the wait is one other writer's
+  rewrite.
+- **Where a write is staged.** `norn-fs` stages in the shadow home outside the vault
+  ([ADR 0011](decisions/0011-shadows-live-outside-the-vault.md)), so an unpublished write
+  is never a file in the tree the watcher reports on. `norn-config` stages a sibling
+  temporary in the config directory and sweeps a dead writer's residue under the same
+  lock that guards the write.
+- **What a failure is called.** `Refusal` and `ConfigError` are separate closed
+  vocabularies over separate subjects: vault documents a plan was composed against, and
+  machine-local state one writer owns. A refusal means nothing was published; a config
+  error distinguishes a write that did not happen from one whose rename landed and whose
+  durability was not confirmed.
+- **Fault injection.** `norn-fs` threads a fault seam through its write stages, because
+  the crash windows it claims cannot be produced on a temporary directory. `norn-config`
+  carries no such seam.
+
+What must stay aligned is the discipline, and a change to either spelling is judged
+against it:
+
+- **`O_NOFOLLOW` on the lock-file open.** A symlink planted at the lock name is refused,
+  never followed to a file nothing else guards.
+- **The handle-versus-name identity recheck.** An advisory lock follows the file, so
+  after it is taken the handle's `(device, inode)` is compared against what the name
+  resolves to now; a mismatch drops the handle and takes the lock again, bounded by a
+  retry count whose exhaustion is reported rather than looped on. **A stat that fails for
+  any reason other than absence is that machine failure, reported as itself** — never a
+  spent retry.
+- **The publish order:** create the file with `create_new`, write, fsync the file, rename
+  onto the destination, fsync the parent directory. The rename is the atom every reader
+  is protected by, and the parent's fsync is what makes it survive a power cut. An
+  exclusive create is the one shorter case — `create_new` claims the name atomically, so
+  there is no rename and nothing staged — and the bytes still reach the disk before the
+  parent does.
+
+The one place the two deliberately part on that last point is **what a failed parent
+fsync is told to the caller**. Both hold the same stance — the rename landed, every
+reader sees the change, and this is never reported as a write that did not happen — and
+they surface it differently. `norn-config` names it as its own outcome, because a
+machine-local file has one writer and a caller that reads it back. `norn-fs` leaves it
+best-effort and silent, because a refusal there means nothing was published, its three
+success outcomes would each have to grow the term, a move fsyncs two parent directories
+that one term cannot tell apart, and a vault is multi-writer — whatever is finally at the
+path is what the watcher reports and what derived state converges on.
 
 **Stdout** — write sites:
 
