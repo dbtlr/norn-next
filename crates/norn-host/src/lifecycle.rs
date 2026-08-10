@@ -1881,13 +1881,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     finish_release(shared, entry, name, epoch, None);
                     continue;
                 }
-                // A job that lost the attachment to this poll left its marker
-                // at the poll's own epoch, and the entry has moved past that
-                // epoch: the marker goes back with the claim rather than
-                // standing for work whatever moved the entry on superseded.
-                if state.claim.marker().map(Job::epoch) == Some(epoch) {
-                    state.claim.drop_marker();
-                }
                 state.claim.end_poll(epoch);
             }
             if let Some(job) = schedule_demanded_work(&mut state, name) {
