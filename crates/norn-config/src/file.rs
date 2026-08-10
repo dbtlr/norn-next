@@ -885,7 +885,10 @@ mod tests {
         })
         .expect_err("a stat that cannot answer");
 
-        assert_eq!(attempts, 1, "an unanswered stat spent more than the one try");
+        assert_eq!(
+            attempts, 1,
+            "an unanswered stat spent more than the one try"
+        );
         assert!(
             matches!(
                 &error,
