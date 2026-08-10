@@ -1708,19 +1708,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             if state.claim.is_held() {
                 continue;
             }
-            // The same shape the post-poll arm below stands for, read before
-            // the entry is claimed, and unreached for the same reason: nothing
-            // leaves facts standing in an unclaimed entry with no recovery owed
-            // and nothing scheduled. The guard is live — an entry owing a
-            // recovery is passed through to the poll rather than reconciled.
-            if !state.pending.is_empty() && state.coverage.in_hand() && !state.recovery_required {
-                state
-                    .claim
-                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
-                drop(state);
-                let _ = dispatch_pending(shared, entry);
-                continue;
-            }
             let epoch = state.claim.epoch();
             let Some(attachment) = state.coverage.take(epoch) else {
                 continue;
@@ -1749,28 +1736,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                                 state
                                     .claim
                                     .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
-                            );
-                        } else if !state.pending.is_empty() && !state.recovery_required {
-                            // Facts standing in the entry with nothing
-                            // scheduled against them. No writer of
-                            // `state.pending` leaves the entry in that shape:
-                            // each one either schedules the follow-up under the
-                            // same lock, sets `recovery_required` beside the
-                            // facts, or clears them outright, so this arm
-                            // reaches nothing today. It stands for the entry
-                            // this poll holds — the poll would be what
-                            // schedules the reconcile such facts are owed, with
-                            // maintenance above carrying them instead where
-                            // both are due, because its own handoff ends in the
-                            // same reconcile. The guard is what is live: an
-                            // entry owing a recovery schedules neither arm,
-                            // because what reconciles facts is coverage, and
-                            // the recovery a demand asks for is what installs
-                            // it again.
-                            schedule = Some(
-                                state
-                                    .claim
-                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
                             );
                         }
                     }
