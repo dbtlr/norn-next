@@ -1708,19 +1708,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             if state.claim.is_held() {
                 continue;
             }
-            // The same shape the post-poll arm below stands for, read before
-            // the entry is claimed, and unreached for the same reason: nothing
-            // leaves facts standing in an unclaimed entry with no recovery owed
-            // and nothing scheduled. The guard is live — an entry owing a
-            // recovery is passed through to the poll rather than reconciled.
-            if !state.pending.is_empty() && state.coverage.in_hand() && !state.recovery_required {
-                state
-                    .claim
-                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch));
-                drop(state);
-                let _ = dispatch_pending(shared, entry);
-                continue;
-            }
             let epoch = state.claim.epoch();
             let Some(attachment) = state.coverage.take(epoch) else {
                 continue;
@@ -1749,28 +1736,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                                 state
                                     .claim
                                     .schedule(|epoch| Job::Maintenance(name.clone(), epoch)),
-                            );
-                        } else if !state.pending.is_empty() && !state.recovery_required {
-                            // Facts standing in the entry with nothing
-                            // scheduled against them. No writer of
-                            // `state.pending` leaves the entry in that shape:
-                            // each one either schedules the follow-up under the
-                            // same lock, sets `recovery_required` beside the
-                            // facts, or clears them outright, so this arm
-                            // reaches nothing today. It stands for the entry
-                            // this poll holds — the poll would be what
-                            // schedules the reconcile such facts are owed, with
-                            // maintenance above carrying them instead where
-                            // both are due, because its own handoff ends in the
-                            // same reconcile. The guard is what is live: an
-                            // entry owing a recovery schedules neither arm,
-                            // because what reconciles facts is coverage, and
-                            // the recovery a demand asks for is what installs
-                            // it again.
-                            schedule = Some(
-                                state
-                                    .claim
-                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
                             );
                         }
                     }
@@ -1880,13 +1845,6 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     drop(state);
                     finish_release(shared, entry, name, epoch, None);
                     continue;
-                }
-                // A job that lost the attachment to this poll left its marker
-                // at the poll's own epoch, and the entry has moved past that
-                // epoch: the marker goes back with the claim rather than
-                // standing for work whatever moved the entry on superseded.
-                if state.claim.marker().map(Job::epoch) == Some(epoch) {
-                    state.claim.drop_marker();
                 }
                 state.claim.end_poll(epoch);
             }
@@ -6368,6 +6326,51 @@ mod tests {
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// An invalidation takes the work scheduled against the poll it moves past.
+    /// The marker below is what a follow-up leaves when a full queue refuses
+    /// its send: it names the poll's own epoch and holds the gate until the
+    /// invalidator drops it. If it survives, the stale poll gives that marker
+    /// back with the gate still held and the demanded re-attach cannot run.
+    #[test]
+    fn an_identity_refusal_drops_work_scheduled_against_the_poll_it_invalidates() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.block_poll.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let poll = thread::spawn(move || poll_watchers(&shared));
+        wait_for_flag("poll_started", &ops.poll_started);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            let epoch = state.claim.epoch();
+            state.claim.restore(Job::Reconcile(name.clone(), epoch));
+            assert_eq!(state.claim.marker().map(Job::epoch), Some(epoch));
+        }
+
+        refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
+        assert!(
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .claim
+                .marker()
+                .is_none(),
+            "the invalidation left work scheduled against the poll it superseded"
+        );
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        ops.poll_release.store(true, Ordering::SeqCst);
+        poll.join().unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
+        drop(lease);
     }
 
     /// The recheck a scheduled attach runs before it acquires anything is a
