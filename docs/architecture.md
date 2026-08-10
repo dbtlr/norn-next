@@ -65,12 +65,14 @@ restores trust. Three rungs, cheapest first:
 
 1. **Scoped increment** — the watcher reports filesystem facts; the increment touches only
    the changed set. This is the warm steady state.
-2. **Full tree heal** — `attach = heal-then-ready`: add missing, update changed, prune
-   deleted. "Update changed" is decided by a content hash, never by a stat comparison — see
-   [the trust model](#5-the-trust-model). Deliberately unoptimized, and billed once to the
-   first request under a framed `Warming` progress display. Its resumable-friendly shape is
-   carved for a later stat-prioritized, progressive-verification evolution; nothing measures
-   it today.
+2. **Full tree heal** — attach and recovery establish watcher coverage, heal, drain the
+   filesystem facts accumulated during the heal, then publish `Ready`. The coverage boundary
+   and drain are defined by [ADR 0017](decisions/0017-watcher-synchronization-gates-readiness.md).
+   The heal adds missing, updates changed and prunes deleted. "Update changed" is decided by a
+   content hash, never by a stat comparison — see [the trust model](#5-the-trust-model).
+   Deliberately unoptimized, and billed once to the first request under a framed `Warming`
+   progress display. Its resumable-friendly shape is carved for a later stat-prioritized,
+   progressive-verification evolution; nothing measures it today.
 
    **The prologue comes before the heal, and the display says which of the two an entry is
    in.** Before a document is read, an entry takes sole maintainership of its own derived state,
@@ -245,6 +247,17 @@ Two mechanisms carry trust, and both are contract:
   watch — is terminal, and the entry stays untrusted until a client demands it back. The two
   carry different `norn-wire` reasons, because a state that recovers by itself and a state
   that waits are not one fact.
+
+  Watcher registration alone does not establish trust. A subscription first reports control
+  state as `Synchronizing`, then `Live` only after its backend proves coverage over every
+  registered edge; a synchronization failure is `Terminal(error)`. Attach and recovery wait
+  for that boundary, run the hash-authoritative heal, reconcile the filesystem batches that
+  accumulated during it, and only then publish `Ready`. Synchronization markers are not
+  filesystem facts and never widen a batch to a vault rescan. The barrier does not mutate the
+  vault, and a backend that cannot provide it refuses rather than silently changing the
+  registration to polling. [ADR
+  0017](decisions/0017-watcher-synchronization-gates-readiness.md) records the protocol and its
+  trade-offs.
 - **Background just-in-time drift scans** — idle-time, iterative, progressive
   re-verification of derived state against the files. This mechanism is not built yet, which
   makes it no less a contract: an absent mechanism binds here for the same reason an absent
