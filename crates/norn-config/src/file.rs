@@ -336,6 +336,41 @@ fn demand_owner_only(directory: &Path) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// A file's `(device, inode)` pair: which file it is, whatever it is called.
+///
+/// An inode number is unique per device and nowhere else, so the pair is the
+/// identity and neither half is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+}
+
+/// The identity of what `metadata` describes.
+fn identity_of(metadata: &std::fs::Metadata) -> Identity {
+    Identity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+/// The identity `path` resolves to now, or `None` when it resolves to nothing.
+///
+/// **A stat that fails for any other reason is the machine failing, and it
+/// travels as one.** Reading every failure as "the name means a different
+/// file" would spend a lock attempt on a question nothing answered — and on a
+/// directory that has become unreadable it spends all of them, ending in a
+/// message about a lock file being replaced by a caller that never learned the
+/// filesystem said `EACCES`.
+#[allow(clippy::disallowed_methods)] // Config-directory bytes: this crate owns them.
+fn name_identity(path: &Path) -> Result<Option<Identity>, ConfigError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(identity_of(&metadata))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io("reading the identity of", path, error)),
+    }
+}
+
 /// An exclusive lock over one machine-local file, held for as long as the
 /// value lives.
 #[allow(clippy::disallowed_types)] // Config-directory bytes: this crate owns them.
@@ -381,14 +416,18 @@ fn lock(path: &Path, sensitivity: Sensitivity) -> Result<Lock, ConfigError> {
         // is known to still resolve to it. A file unlinked and recreated while
         // this caller waited leaves two holders of two different inodes, each
         // believing it excludes the other.
-        let held = file
-            .metadata()
-            .map_err(|error| io("reading the identity of", &lock_path, error))?;
-        if let Ok(current) = std::fs::metadata(&lock_path)
-            && (current.dev(), current.ino()) == (held.dev(), held.ino())
-        {
+        let held = identity_of(
+            &file
+                .metadata()
+                .map_err(|error| io("reading the identity of", &lock_path, error))?,
+        );
+        if name_identity(&lock_path)? == Some(held) {
             return Ok(Lock { _file: file });
         }
+        // The name means another file, or nothing. Dropping the handle releases
+        // the lock on an inode this name no longer reaches, which is the only
+        // correct thing to do with it, and the next attempt opens the name
+        // again.
     }
     Err(ConfigError::Io {
         operation: "locking",
@@ -649,6 +688,50 @@ mod tests {
             std::fs::read(&path).expect("the file"),
             b"version = 1\n",
             "the mutation did not land"
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The recheck that guards the lock asks one question — does this name
+    /// still mean this file — and absence is the only failure that answers it.
+    /// Anything else is the machine, and it is reported rather than counted as
+    /// a mismatch, because a lock loop that burns its attempts on unanswered
+    /// stats ends by blaming a lock file for a filesystem that said `ENOTDIR`.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a name that cannot be stat'd.
+    fn a_stat_that_cannot_answer_is_reported_rather_than_read_as_a_mismatch() {
+        let directory =
+            std::env::temp_dir().join(format!("norn-config-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+
+        let absent = directory.join("nothing-here");
+        assert_eq!(
+            name_identity(&absent).expect("absence is not a failure"),
+            None
+        );
+
+        let file = directory.join("a-file");
+        std::fs::write(&file, b"bytes").expect("a file");
+        assert_eq!(
+            name_identity(&file).expect("a stat"),
+            Some(identity_of(
+                &std::fs::metadata(&file).expect("the file's metadata")
+            )),
+        );
+
+        // A regular file is not a directory, so a name beneath one resolves to
+        // nothing — and the filesystem says so with something other than "not
+        // found".
+        let beneath = file.join("under-a-file");
+        let error = name_identity(&beneath).expect_err("a stat that cannot answer");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "reading the identity of"
+            ),
+            "{error}"
         );
 
         let _ = std::fs::remove_dir_all(&directory);
