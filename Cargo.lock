@@ -362,6 +362,7 @@ dependencies = [
  "norn-wire",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

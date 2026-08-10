@@ -165,9 +165,10 @@ pub struct WorkspaceGraph {
     /// Normal or build edges from a member to a local package the workspace
     /// does not hold as a member, as `(from, name of the dependency)`.
     ///
-    /// A package under `<root>/vendor/` is not one of these: it is a published
-    /// release with a patch applied, and the edge to it is the third-party
-    /// edge the registry release already carried.
+    /// A package whose manifest is under `<root>/vendor/` *and* whose name the
+    /// root manifest replaces through `[patch.crates-io]` is not one of these:
+    /// it is a published release with a patch applied, and the edge to it is
+    /// the third-party edge the registry release already carried.
     pub unearned: BTreeSet<(String, String)>,
     /// Every normal or build edge from a member to *any* package under this
     /// reading, registry crates included, as `(from, name of the
@@ -199,6 +200,7 @@ impl WorkspaceGraph {
             .ok_or("cargo metadata carries no `workspace_root`")?;
 
         let mut name_of: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut manifest_of: BTreeMap<&str, &str> = BTreeMap::new();
         for package in array(&root, "packages")? {
             let (Some(id), Some(name)) = (
                 package.get("id").and_then(Value::as_str),
@@ -207,6 +209,9 @@ impl WorkspaceGraph {
                 return Err("a package carries no `id` or no `name`".to_string());
             };
             name_of.insert(id, name);
+            if let Some(manifest) = package.get("manifest_path").and_then(Value::as_str) {
+                manifest_of.insert(id, manifest);
+            }
         }
         let named = |id: &str| -> Result<String, String> {
             name_of
@@ -260,6 +265,7 @@ impl WorkspaceGraph {
         let resolve = root
             .get("resolve")
             .ok_or("cargo metadata carries no resolve graph, so no edge can be read")?;
+        let mut patched: Option<BTreeSet<String>> = None;
         for node in array(resolve, "nodes")? {
             let id = node
                 .get("id")
@@ -274,8 +280,14 @@ impl WorkspaceGraph {
                     return Err("a resolve edge carries no `pkg`".to_string());
                 };
                 let member = member_ids.contains(pkg);
-                let local = is_local_package(pkg) && !is_vendored_package(pkg, &graph.root);
                 let to = named(pkg)?;
+                let vendored = is_vendored_package(
+                    manifest_of.get(pkg).copied(),
+                    &to,
+                    &graph.root,
+                    &mut patched,
+                )?;
+                let local = is_local_package(pkg) && !vendored;
                 for dep_kind in array(dep, "dep_kinds")? {
                     let edge = (from.clone(), to.clone());
                     let kind = dep_kind.get("kind").and_then(Value::as_str);
@@ -772,19 +784,59 @@ fn is_local_package(id: &str) -> bool {
 /// Whether a local package is a patched copy of a published release rather
 /// than a crate of this workspace.
 ///
-/// `<root>/vendor/` holds published releases with a Norn patch applied, wired
-/// in through `[patch.crates-io]`. A member reaching one reaches the same
-/// third-party crate the registry release was, so the edge is not the
-/// allowlist's subject and the package is not a crate the crate map names.
-/// Every other local package outside the member set still is: this reads one
-/// directory, not "any path dependency".
-fn is_vendored_package(id: &str, root: &Path) -> bool {
-    let Some(start) = id.find("path+file://") else {
-        return false;
+/// Two things have to hold, and neither alone is the exemption. The package's
+/// manifest sits under `<root>/vendor/`, and the root manifest replaces a
+/// crate of that name through `[patch.crates-io]`. The second is what makes
+/// the first mean anything: the directory is only a patch surface because the
+/// patch table points at it, so a local crate parked under `vendor/` and wired
+/// in as an ordinary path dependency is a local crate the workspace excludes.
+///
+/// A package that satisfies both is the same third-party crate the registry
+/// release was, so the edge to it is not the allowlist's subject and the
+/// package is not a crate the crate map names.
+///
+/// The manifest path is read from the package's own `manifest_path`, not from
+/// its id: cargo percent-encodes the path in an id, so a workspace under a
+/// directory with a space in its name has an id that matches no real path.
+///
+/// The patch table is read at most once, and only when a candidate reaches
+/// this far, so a reading over metadata whose workspace root is not on this
+/// filesystem never touches the disk.
+fn is_vendored_package(
+    manifest_path: Option<&str>,
+    name: &str,
+    root: &Path,
+    patched: &mut Option<BTreeSet<String>>,
+) -> Result<bool, String> {
+    let Some(manifest) = manifest_path else {
+        return Ok(false);
     };
-    let path = &id[start + "path+file://".len()..];
-    let path = path.split(['#', ')']).next().unwrap_or(path);
-    Path::new(path).starts_with(root.join("vendor"))
+    if !Path::new(manifest).starts_with(root.join("vendor")) {
+        return Ok(false);
+    }
+    let patched = match patched {
+        Some(known) => known,
+        empty => empty.insert(patched_crates(root)?),
+    };
+    Ok(patched.contains(name))
+}
+
+/// The crate names the workspace root manifest replaces through
+/// `[patch.crates-io]`.
+#[allow(clippy::disallowed_methods)] // Reading the workspace's own layout, which is this gate's subject.
+fn patched_crates(root: &Path) -> Result<BTreeSet<String>, String> {
+    let manifest = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read `{}`: {e}", manifest.display()))?;
+    let document: toml::Table = text
+        .parse()
+        .map_err(|e| format!("`{}` is not readable as TOML: {e}", manifest.display()))?;
+    Ok(document
+        .get("patch")
+        .and_then(|patch| patch.get("crates-io"))
+        .and_then(toml::Value::as_table)
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default())
 }
 
 /// Run `cargo metadata` under `args` and hand back its JSON.
@@ -1003,30 +1055,65 @@ mod tests {
         violation_mentions(&graph, "which the workspace does not hold as a member");
     }
 
+    /// A workspace on disk whose root manifest is `patch`, for the vendor
+    /// exemption's two halves.
+    ///
+    /// The directory name carries a space on purpose. Cargo percent-encodes
+    /// the path inside a package id, so a reading that compared ids against
+    /// the workspace root would find no vendored package here at all — and
+    /// would report the exemption's absence as a workspace violation, on a
+    /// machine whose only peculiarity is where it keeps its checkout.
+    #[allow(clippy::disallowed_methods)] // Building the tree the reader is tested against.
+    fn workspace_root_with_patch_table(label: &str, patch: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("norn arch gate-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch workspace root");
+        std::fs::write(root.join("Cargo.toml"), patch).expect("a root manifest");
+        root
+    }
+
+    /// The metadata one member and one package under `vendor/` produce, with
+    /// the id spelled the way cargo spells it: percent-encoded.
+    fn vendored_metadata(root: &Path) -> String {
+        let encoded = root.display().to_string().replace(' ', "%20");
+        format!(
+            r#"{{
+          "workspace_root": "{root}",
+          "workspace_members": ["path+file://{encoded}/crates/norn-fs#0.0.0"],
+          "packages": [
+            {{"id": "path+file://{encoded}/crates/norn-fs#0.0.0", "name": "norn-fs",
+             "manifest_path": "{root}/crates/norn-fs/Cargo.toml"}},
+            {{"id": "path+file://{encoded}/vendor/notify#8.2.0", "name": "notify",
+             "manifest_path": "{root}/vendor/notify/Cargo.toml"}}
+          ],
+          "resolve": {{"nodes": [
+            {{"id": "path+file://{encoded}/crates/norn-fs#0.0.0", "deps": [
+              {{"pkg": "path+file://{encoded}/vendor/notify#8.2.0",
+               "dep_kinds": [{{"kind": null}}]}}
+            ]}}
+          ]}}
+        }}"#,
+            root = root.display()
+        )
+    }
+
     /// A patched release under `vendor/` is the third-party crate it patches,
     /// so a member reaching it reaches no crate of this workspace.
     ///
-    /// The neighbouring case is what keeps this narrow: the exemption reads
-    /// one directory, and a local crate anywhere else is still a violation.
+    /// The two neighbouring cases are what keep this narrow: the exemption
+    /// reads one directory *and* the patch table, and a local crate that
+    /// misses either is still a violation.
     #[test]
+    #[allow(clippy::disallowed_methods)] // Cleaning up the tree the reader is tested against.
     fn a_member_depending_on_a_vendored_release_is_not_reaching_a_workspace_crate() {
-        let metadata = r#"{
-          "workspace_root": "/workspace",
-          "workspace_members": ["path+file:///workspace/crates/norn-fs#0.0.0"],
-          "packages": [
-            {"id": "path+file:///workspace/crates/norn-fs#0.0.0", "name": "norn-fs",
-             "manifest_path": "/workspace/crates/norn-fs/Cargo.toml"},
-            {"id": "path+file:///workspace/vendor/notify#8.2.0", "name": "notify",
-             "manifest_path": "/workspace/vendor/notify/Cargo.toml"}
-          ],
-          "resolve": {"nodes": [
-            {"id": "path+file:///workspace/crates/norn-fs#0.0.0", "deps": [
-              {"pkg": "path+file:///workspace/vendor/notify#8.2.0",
-               "dep_kinds": [{"kind": null}]}
-            ]}
-          ]}
-        }"#;
-        let graph = WorkspaceGraph::parse(metadata).expect("parsing metadata");
+        let root = workspace_root_with_patch_table(
+            "patched",
+            "[patch.crates-io]\nnotify = { path = \"vendor/notify\" }\n",
+        );
+        let graph = WorkspaceGraph::parse(&vendored_metadata(&root)).expect("parsing metadata");
+        let _ = std::fs::remove_dir_all(&root);
+
         assert!(graph.unearned.is_empty());
         assert!(graph.normal.is_empty());
         assert!(
@@ -1036,6 +1123,33 @@ mod tests {
             "a vendored release a member links must still be visible to the isolation rule"
         );
         assert_eq!(graph.violations(), Vec::<String>::new());
+    }
+
+    /// **The bar under the vendor exemption.** A package under `vendor/` that
+    /// the patch table does not name is a local crate the workspace excludes.
+    ///
+    /// The forbidden shape is a directory-shaped exemption. Under one, any
+    /// path dependency moved beneath `vendor/` leaves the allowlist, the lint
+    /// ruleset and every test the workspace runs, and the gate reports
+    /// nothing. What earns the exemption is the patch table: it is what makes
+    /// the directory a replacement for a published release.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Cleaning up the tree the reader is tested against.
+    fn a_vendored_package_the_patch_table_does_not_name_still_fails() {
+        let root = workspace_root_with_patch_table(
+            "unpatched",
+            "[patch.crates-io]\nserde = { path = \"vendor/serde\" }\n",
+        );
+        let graph = WorkspaceGraph::parse(&vendored_metadata(&root)).expect("parsing metadata");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            graph.unearned,
+            [("norn-fs".to_string(), "notify".to_string())]
+                .into_iter()
+                .collect()
+        );
+        violation_mentions(&graph, "which the workspace does not hold as a member");
     }
 
     /// The same, spelled as a build dependency: an excluded crate reached

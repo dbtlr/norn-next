@@ -25,3 +25,7 @@ norn-store = { path = "../norn-store" }
 norn-wire = { path = "../norn-wire" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The architecture gate reads the workspace root manifest: `[patch.crates-io]`
+# is what makes a directory under `vendor/` a patched published release rather
+# than a local crate hiding in an exempt directory.
+toml = { workspace = true }
