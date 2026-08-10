@@ -157,7 +157,7 @@ fn a_lost_watcher_advertises_a_typed_cause_beside_its_prose() {
                 .map(|branch| string_constant(branch)
                     .unwrap_or_else(|| panic!("a cause branch is not a pinned string: {branch}")))
         ),
-        sorted(["backend", "coverage_lost"])
+        sorted(["backend", "coverage_lost", "synchronization_expired",])
     );
 }
 

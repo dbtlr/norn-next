@@ -634,6 +634,7 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
     let cause = match error {
         WatchError::Backend(_) => WatcherLossCause::Backend,
         WatchError::CoverageLost(_) => WatcherLossCause::CoverageLost,
+        WatchError::SynchronizationExpired => WatcherLossCause::SynchronizationExpired,
     };
     UntrustedReason::watcher_lost(cause, detail)
 }

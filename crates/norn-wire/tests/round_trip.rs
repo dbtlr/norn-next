@@ -23,7 +23,11 @@ use std::fmt::Debug;
 
 /// Every cause a lost watcher carries.
 fn watcher_loss_causes() -> Vec<WatcherLossCause> {
-    vec![WatcherLossCause::Backend, WatcherLossCause::CoverageLost]
+    vec![
+        WatcherLossCause::Backend,
+        WatcherLossCause::CoverageLost,
+        WatcherLossCause::SynchronizationExpired,
+    ]
 }
 
 /// Every reason the vocabulary carries.

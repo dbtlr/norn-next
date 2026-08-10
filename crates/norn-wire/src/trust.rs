@@ -224,7 +224,7 @@ impl UntrustedReason {
 /// What ended watcher coverage for an entry.
 ///
 /// On the wire a cause is the flat string itself: `"backend"`,
-/// `"coverage_lost"`.
+/// `"coverage_lost"`, or `"synchronization_expired"`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -235,4 +235,7 @@ pub enum WatcherLossCause {
     /// The vault root the watcher covered stopped being covered — it was
     /// removed, replaced, or moved out from under the watch.
     CoverageLost,
+    /// Coverage did not cross its backend synchronization boundary before the
+    /// authored lifecycle deadline.
+    SynchronizationExpired,
 }
