@@ -17,16 +17,19 @@ path = "src/main.rs"
 # inherits that crate's version drift into the trees every gate measures
 # against. The digest, the calendar arithmetic, the PRNG and the argument
 # parsing are all in-crate for that reason. Nothing this crate builds or ships
-# links anything; the one dev edge below reaches no generated tree.
+# links anything; the one dev edge below is test-only.
 [dependencies]
 
 # The measurement suite spawns this crate's own binary under the testkit's
 # process harness and reads the peak resident set the kernel accounted to it.
 # It has to live in this package: `CARGO_BIN_EXE_norn-fixtures` is set only for
-# integration tests of the package that defines the binary. The edge is a
-# development one and cycles back — the testkit names this crate's profiles as
-# the two scales of a size-independence pair — which is why the allowlist does
-# not describe it: dev edges cycle by construction and the architecture gate
-# reads and discards them.
+# integration tests of the package that defines the binary. Every scratch
+# tree the calibration, determinism, knobs and preconditions suites generate
+# into is also placed and removed through this edge: `tests/scratch/mod.rs`
+# names a `norn_testkit::process::Sandbox` as the partition each tree lives
+# under. The edge is a development one and cycles back — the testkit names
+# this crate's profiles as the two scales of a size-independence pair — which
+# is why the allowlist does not describe it: dev edges cycle by construction
+# and the architecture gate reads and discards them.
 [dev-dependencies]
 norn-testkit = { path = "../norn-testkit" }

@@ -46,9 +46,10 @@
 //! nobody else contends for, which reads as isolation and excludes nothing.
 //!
 //! **Scratch-tree isolation joined at the partition door.** A generated tree
-//! is a directory nobody else writes, not a turn at shared state, so a case
-//! that needs one builds it on [`crate::process::Sandbox`] rather than
-//! declaring a key here.
+//! is a directory nobody else writes, not a turn at shared state. In
+//! `norn-fixtures`, every scratch tree the calibration, determinism, knobs
+//! and preconditions suites generate into is built on
+//! [`crate::process::Sandbox`] rather than declaring a key here.
 //!
 //! # A lease is not reentrant
 //!

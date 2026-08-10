@@ -128,18 +128,12 @@ pub fn symlinks(root: &Path) -> Vec<(Entry, String)> {
         .collect()
 }
 
-/// A fresh, empty, non-hidden directory named `label`, private to the
-/// sandbox backing it and removed when the value drops.
+/// An absent, non-hidden directory named `label`, private to the sandbox
+/// backing it and removed when the value drops.
 pub struct Scratch {
     // Held for its `Drop`: removing the sandbox is what removes `tree`.
     sandbox: Sandbox,
     tree: PathBuf,
-}
-
-impl Scratch {
-    pub fn path(&self) -> &Path {
-        &self.tree
-    }
 }
 
 impl Deref for Scratch {
@@ -156,21 +150,25 @@ impl AsRef<Path> for Scratch {
     }
 }
 
-/// A fresh, empty, non-hidden directory named `label`.
+/// An absent, non-hidden directory named `label`; the caller creates it.
 ///
 /// The directory lives under a [`Sandbox`] keyed on this process's id and a
 /// per-process counter, so two suites racing on the same `label` — in one
 /// process or several — never resolve to the same root. Nothing removes it
 /// but the sandbox's own `Drop`, so a scratch tree outlives exactly the value
-/// this returns.
+/// this returns; that removal is best-effort and runs during a panicking
+/// unwind too, so a failing case leaves nothing at the reported path to
+/// inspect afterward. A run interrupted before `Drop` runs (a killed or
+/// cancelled process) leaks its tree into `CARGO_TARGET_TMPDIR`, where it
+/// stays until the next `cargo clean`.
 pub fn fresh(label: &str) -> Scratch {
     assert!(
         !label.starts_with('.'),
         "a scratch root must not be hidden: {label}"
     );
-    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label)
-        .expect("a scratch sandbox");
-    let tree = sandbox.root().join("tree");
+    let sandbox =
+        Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a scratch sandbox");
+    let tree = sandbox.root().join(label);
     Scratch { sandbox, tree }
 }
 
@@ -181,15 +179,15 @@ pub fn fresh(label: &str) -> Scratch {
 /// on whatever spelling the filesystem hands back.
 pub fn generate_and_digest(label: &str, profile: &Profile, seed: u64) -> ([u8; 32], Manifest) {
     let scratch = fresh(label);
-    let manifest = generate(profile, seed, scratch.path()).expect("generating a scratch tree");
+    let manifest = generate(profile, seed, &scratch).expect("generating a scratch tree");
     (manifest.tree_digest, manifest)
 }
 
 /// Generate, measure the tree's shape, then delete it.
 pub fn generate_and_measure(label: &str, profile: &Profile, seed: u64) -> (VaultStats, Manifest) {
     let scratch = fresh(label);
-    let manifest = generate(profile, seed, scratch.path()).expect("generating a scratch tree");
-    let stats = probe::measure(scratch.path()).expect("measuring a scratch tree");
+    let manifest = generate(profile, seed, &scratch).expect("generating a scratch tree");
+    let stats = probe::measure(&scratch).expect("measuring a scratch tree");
     (stats, manifest)
 }
 
@@ -201,6 +199,30 @@ pub fn with_tree<T>(
     inspect: impl FnOnce(&Path, &Manifest) -> T,
 ) -> T {
     let scratch = fresh(label);
-    let manifest = generate(profile, seed, scratch.path()).expect("generating a scratch tree");
-    inspect(scratch.path(), &manifest)
+    let manifest = generate(profile, seed, &scratch).expect("generating a scratch tree");
+    inspect(&scratch, &manifest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh;
+
+    /// Two roots for the same label, in the same process, never collide, and
+    /// each carries this process's id — the property `Sandbox` exists to
+    /// give every scratch tree.
+    #[test]
+    fn fresh_roots_are_unique_and_carry_the_process_id() {
+        let a = fresh("pin-uniqueness-a");
+        let b = fresh("pin-uniqueness-b");
+        assert_ne!(
+            a.tree, b.tree,
+            "two scratch roots resolved to the same path"
+        );
+        let pid = std::process::id().to_string();
+        assert!(
+            a.tree.to_string_lossy().contains(&pid),
+            "a scratch root did not carry this process's id: {}",
+            a.tree.display()
+        );
+    }
 }
