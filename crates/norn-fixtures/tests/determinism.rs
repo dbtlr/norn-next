@@ -357,10 +357,6 @@ fn respelling_a_name_moves_the_walk_digest_and_not_the_contract_digest() {
             "the directory reports a different name and the walk digest did not move"
         );
     }
-
-    fs::remove_dir_all(&dir).expect("removing a scratch tree");
-    fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("respelling-again"))
-        .expect("removing a scratch tree");
 }
 
 /// The decomposed spelling of the precomposed characters this crate's name
