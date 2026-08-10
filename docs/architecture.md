@@ -559,6 +559,20 @@ Two notes on that table:
 `norn-serve` is a deliberate non-entry: it binds a loopback socket, which is not a
 filesystem effect.
 
+**Stdout** — write sites:
+
+| Site | Why |
+|---|---|
+| `norn-console` | *Reserved.* The render seam; this is the rule's home once the crate is written, not a carve-out |
+| `norn-client` stdio-MCP shim | *Reserved.* JSON-RPC frames are the protocol; they cannot route through a record renderer |
+| `norn-client` `completions` and `manpage` | *Reserved.* Generated artifacts consumed by other programs, not rendered records |
+| `norn-fixtures` (dev) | Its command line reports what it generated and what it measured. Routing a dev generator's output through the product's render seam would give a leaf a dependency the allowlist forbids |
+| `norn-fs` and `norn-host` measurement harnesses (test targets) | A probe child reports its readings on stdout and the parent test case reads them. The stream is machine-consumed and its shape is the harness's protocol, so a render seam would be reading it, not writing it |
+
+Everything a person reads as *output* still goes through `norn-console`. The carve-outs
+cover machine-consumed byte streams and the dev crates' own command lines and harness
+protocols only.
+
 #### Two spellings of the file mechanics, and the discipline both keep
 
 `norn-fs` and `norn-config` each own their own spelling of the same three idioms: an
@@ -576,16 +590,19 @@ What the two spellings say is not the same thing:
   vault. `norn-config` waits, without a bound, because its caller is inside a
   read-modify-write of a small machine-local file and the wait is one other writer's
   rewrite.
-- **Where a write is staged.** `norn-fs` stages in the shadow home outside the vault
-  ([ADR 0011](decisions/0011-shadows-live-outside-the-vault.md)), so an unpublished write
-  is never a file in the tree the watcher reports on. `norn-config` stages a sibling
-  temporary in the config directory and sweeps a dead writer's residue under the same
-  lock that guards the write.
+- **Where a write is staged.** `norn-fs` stages in the shadow home under the data root
+  ([ADR 0011](decisions/0011-shadows-live-outside-the-vault.md)), or — when the vault is
+  on another filesystem, per invariant 11 — under `.norn/tmp` inside the vault, which the
+  walk and the watcher exclude by that one root whatever key's home sits beneath it.
+  Either way an unpublished write is never a file the watcher reports on, and the
+  exclusion is what carries that in the fallback placement rather than the location.
+  `norn-config` stages a sibling temporary in the config directory and sweeps a dead
+  writer's residue under the same lock that guards the write.
 - **What a failure is called.** `Refusal` and `ConfigError` are separate closed
   vocabularies over separate subjects: vault documents a plan was composed against, and
-  machine-local state one writer owns. A refusal means nothing was published; a config
-  error distinguishes a write that did not happen from one whose rename landed and whose
-  durability was not confirmed.
+  machine-local state one writer owns. A refusal never reports a published replacement; a
+  config error distinguishes a write that did not happen from one whose rename landed and
+  whose durability was not confirmed.
 - **Fault injection.** `norn-fs` threads a fault seam through its write stages, because
   the crash windows it claims cannot be produced on a temporary directory. `norn-config`
   carries no such seam.
@@ -600,7 +617,9 @@ against it:
   resolves to now; a mismatch drops the handle and takes the lock again, bounded by a
   retry count whose exhaustion is reported rather than looped on. **A stat that fails for
   any reason other than absence is that machine failure, reported as itself** — never a
-  spent retry.
+  spent retry, and never an answer of "this name means a different file". That holds
+  wherever the comparison is made, including `norn-fs`'s post-acquisition health check on
+  a maintainership it already holds.
 - **The publish order:** create the file with `create_new`, write, fsync the file, rename
   onto the destination, fsync the parent directory. The rename is the atom every reader
   is protected by, and the parent's fsync is what makes it survive a power cut. An
@@ -613,24 +632,11 @@ fsync is told to the caller**. Both hold the same stance — the rename landed, 
 reader sees the change, and this is never reported as a write that did not happen — and
 they surface it differently. `norn-config` names it as its own outcome, because a
 machine-local file has one writer and a caller that reads it back. `norn-fs` leaves it
-best-effort and silent, because a refusal there means nothing was published, its three
-success outcomes would each have to grow the term, a move fsyncs two parent directories
-that one term cannot tell apart, and a vault is multi-writer — whatever is finally at the
-path is what the watcher reports and what derived state converges on.
-
-**Stdout** — write sites:
-
-| Site | Why |
-|---|---|
-| `norn-console` | *Reserved.* The render seam; this is the rule's home once the crate is written, not a carve-out |
-| `norn-client` stdio-MCP shim | *Reserved.* JSON-RPC frames are the protocol; they cannot route through a record renderer |
-| `norn-client` `completions` and `manpage` | *Reserved.* Generated artifacts consumed by other programs, not rendered records |
-| `norn-fixtures` (dev) | Its command line reports what it generated and what it measured. Routing a dev generator's output through the product's render seam would give a leaf a dependency the allowlist forbids |
-| `norn-fs` and `norn-host` measurement harnesses (test targets) | A probe child reports its readings on stdout and the parent test case reads them. The stream is machine-consumed and its shape is the harness's protocol, so a render seam would be reading it, not writing it |
-
-Everything a person reads as *output* still goes through `norn-console`. The carve-outs
-cover machine-consumed byte streams and the dev crates' own command lines and harness
-protocols only.
+best-effort and silent, because no refusal of its reaches a parent fsync at all, so
+reporting would mean growing the success side instead — at four positions, since a move
+fsyncs the destination's parent and the source's and either can fail alone — and because
+a vault is multi-writer: whatever is finally at the path is what the watcher reports and
+what derived state converges on.
 
 ### Enforcement posture
 

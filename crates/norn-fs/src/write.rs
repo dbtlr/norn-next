@@ -82,13 +82,20 @@
 //! the same failure as a typed `MutationUnconfirmed` outcome, and this one says
 //! nothing about it. Three facts hold that here.
 //!
-//! - [`Refusal`] means nothing was published — every variant is reached before
-//!   the swap or in place of it — so the typed-error spelling has no home in
-//!   this vocabulary, and reporting would have to add a success-side term
-//!   instead.
-//! - That term would have to appear on all three outcomes — [`Landed`],
-//!   [`Vacated`] and [`Moved`] — and a move fsyncs two parent directories, the
-//!   destination's and the source's, which one term cannot tell apart.
+//! - No [`Refusal`] carries a parent fsync's failure, because no refusal
+//!   reaches one. On the replace path every variant is reached before the swap
+//!   or in place of it. The exclusive create is the one arm where a refusal can
+//!   still leave a name behind — `create_new` is the publication act there, and
+//!   a cleanup the filesystem blocks leaves this call's own bytes at a name that
+//!   had nothing at it — but that arm refuses before the parent is synced too.
+//!   So the typed-error spelling has nowhere to sit, and reporting would have to
+//!   add a success-side term instead.
+//! - That term would have to reach every success that fsyncs a parent:
+//!   [`Landed::Written`], [`Vacated`], and both legs of a [`Moved`] — a move
+//!   fsyncs the destination's parent and the source's, and either can fail
+//!   alone, so the pair needs two positions rather than one.
+//!   [`Landed::Unchanged`] is the one success that needs none, because it never
+//!   reaches a rename.
 //! - There is nothing a caller does with it. This kernel is single-shot, the
 //!   change is at the name, and a vault is multi-writer: whatever is finally at
 //!   the path is what the watcher reports, and re-deriving from that is the
