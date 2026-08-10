@@ -580,6 +580,8 @@ fn native_watcher(
     handler: impl notify::EventHandler,
     _control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
 ) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
+    use notify::Watcher as _;
+
     Ok(Box::new(
         notify::RecommendedWatcher::new(handler, Config::default()).map_err(backend)?,
     ))
