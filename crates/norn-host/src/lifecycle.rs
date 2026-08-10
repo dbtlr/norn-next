@@ -950,11 +950,27 @@ fn dispatch_pending<O: EntryOps>(
         };
         job
     };
+    dispatch_taken_job(shared, entry, job)
+}
+
+/// Send a job whose queue slot the caller already took.
+///
+/// Keeping refusal cleanup with the send makes the take-then-shutdown window
+/// directly exercisable: every exit on which no channel accepted the job gives
+/// back only the slot still naming that job's epoch.
+fn dispatch_taken_job<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    job: Job,
+) -> Result<(), HostError> {
     if shared.shutting_down.load(Ordering::SeqCst) {
+        release_queue_slot(entry, job.epoch());
         return Err(HostError::WorkerStopped);
     }
     let jobs = shared.jobs.lock().expect("job sender poisoned");
     let Some(jobs) = jobs.as_ref() else {
+        drop(jobs);
+        release_queue_slot(entry, job.epoch());
         return Err(HostError::WorkerStopped);
     };
     match jobs.try_send(job.clone()) {
@@ -963,7 +979,10 @@ fn dispatch_pending<O: EntryOps>(
             release_queue_slot(entry, job.epoch());
             Ok(())
         }
-        Err(mpsc::TrySendError::Disconnected(_)) => Err(HostError::WorkerStopped),
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            release_queue_slot(entry, job.epoch());
+            Err(HostError::WorkerStopped)
+        }
     }
 }
 
@@ -5567,6 +5586,46 @@ mod tests {
         drop((held, retry));
     }
 
+    /// A release reads whether its lost coverage was demanded before clearing
+    /// that recovery requirement. A lease predating the loss keeps the entry
+    /// alive, but it asked for no recovery and therefore schedules no attach.
+    #[test]
+    fn a_release_owing_undemanded_recovery_schedules_no_reattach() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let held = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host.shared.entries.get(&name).unwrap();
+        let (epoch, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            let attachment = state
+                .coverage
+                .take(epoch)
+                .expect("the ready entry holds its attachment");
+            state.require_recovery();
+            assert_eq!(state.recovery_demands, 0);
+            begin_release(&mut state);
+            (epoch, attachment)
+        };
+
+        finish_release(&host.shared, &entry, &name, epoch, Some(attachment));
+
+        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "a lease that demanded no recovery scheduled a re-attach"
+        );
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        let state = entry.gate.lock().unwrap();
+        assert!(state.claim.marker().is_none());
+        assert!(state.claim.slot().is_none());
+        drop(state);
+        drop(held);
+    }
+
     /// Wait for the dispatcher to run `count` further watcher polls of the
     /// entry. A leg that publishes nothing is observed through the polls that
     /// follow it, because the entry is only claimable again once it has run.
@@ -5971,6 +6030,121 @@ mod tests {
         drop(state);
         ops.release_a.store(true, Ordering::SeqCst);
         drop((a, b));
+    }
+
+    /// A dispatcher tick takes the queue slot before it observes shutdown. A
+    /// refused send gives that slot back, because no channel holds the job it
+    /// names even though the terminal host will never dispatch it again.
+    #[test]
+    fn shutdown_after_a_dispatch_takes_the_slot_gives_the_slot_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = {
+            let mut state = entry.gate.lock().unwrap();
+            let job = state
+                .claim
+                .schedule(|epoch| Job::Attach(name.clone(), epoch));
+            job.epoch()
+        };
+
+        let job = {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.take_slot_for_marked().unwrap()
+        };
+        host.shared.shutting_down.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            dispatch_taken_job(&host.shared, &entry, job),
+            Err(HostError::WorkerStopped)
+        ));
+        assert_eq!(
+            entry.gate.lock().unwrap().claim.slot(),
+            None,
+            "a shutdown-refused dispatch kept the queue slot it took at epoch {epoch}"
+        );
+    }
+
+    /// A dispatcher tick can likewise take the queue slot before discovering
+    /// that the worker channel is gone. No channel accepted the job, so the
+    /// refused dispatch gives the slot back before reporting the stopped pool.
+    #[test]
+    fn a_disconnected_dispatch_gives_its_queue_slot_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state
+                .claim
+                .schedule(|epoch| Job::Attach(name.clone(), epoch));
+        }
+        let (jobs, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        *host.shared.jobs.lock().unwrap() = Some(jobs);
+
+        assert!(matches!(
+            dispatch_pending(&host.shared, &entry),
+            Err(HostError::WorkerStopped)
+        ));
+        assert_eq!(
+            entry.gate.lock().unwrap().claim.slot(),
+            None,
+            "a disconnected dispatch kept a queue slot for a job no channel holds"
+        );
+    }
+
+    /// A missing sender is the stopped-pool spelling reached after host
+    /// teardown has taken the sender but a caller still holds the shared state.
+    /// The caller took a slot before observing that absence, so it gives it back.
+    #[test]
+    fn a_dispatch_with_no_sender_gives_its_queue_slot_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let entry = host.shared.entries.get(&name).unwrap();
+        {
+            let mut state = entry.gate.lock().unwrap();
+            state
+                .claim
+                .schedule(|epoch| Job::Attach(name.clone(), epoch));
+        }
+        host.shared.jobs.lock().unwrap().take();
+
+        assert!(matches!(
+            dispatch_pending(&host.shared, &entry),
+            Err(HostError::WorkerStopped)
+        ));
+        assert_eq!(
+            entry.gate.lock().unwrap().claim.slot(),
+            None,
+            "a dispatch with no sender kept a queue slot for a job no channel holds"
+        );
+    }
+
+    /// A leg's follow-up has already taken the entry's queue slot when the
+    /// worker channel disappears. The refusal gives the slot back because no
+    /// channel holds the job it names.
+    #[test]
+    fn a_disconnected_follow_up_gives_its_queue_slot_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let job = {
+            let mut state = entry.gate.lock().unwrap();
+            let job = state
+                .claim
+                .hand_on(|epoch| Job::Attach(name.clone(), epoch));
+            state.claim.take_slot(job.epoch());
+            job
+        };
+        host.shared.jobs.lock().unwrap().take();
+
+        dispatch_followup(&host.shared, job);
+
+        assert_eq!(
+            entry.gate.lock().unwrap().claim.slot(),
+            None,
+            "a disconnected follow-up kept a queue slot for a job no channel holds"
+        );
     }
 
     #[cfg(unix)]
