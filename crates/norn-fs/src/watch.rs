@@ -15,8 +15,8 @@ use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::event::EventKind;
-use notify::{Config, Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::event::{CreateKind, EventKind, ModifyKind};
+use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::PostState;
 use crate::hash::hashed_from;
@@ -174,8 +174,30 @@ impl Subscription {
     ///
     /// Expiry is returned as a typed terminal watcher error. It does not
     /// synthesize a filesystem rescan or alter the backend selection.
+    ///
+    /// A failure here is the whole subscription's terminal fact, not just this
+    /// caller's: it is recorded so the batch stream and [`Self::finish_heal`]
+    /// refuse too. Coverage that could not prove itself never yields batches a
+    /// consumer may treat as a complete account of the tree, whether or not
+    /// that consumer read the error returned here.
     pub fn synchronize(&self, deadline: Duration) -> Result<(), WatchError> {
-        wait_for_synchronization(&self.control, deadline)
+        let outcome = wait_for_synchronization(&self.control, deadline);
+        if let Err(error) = &outcome {
+            self.state
+                .lock()
+                .expect("watch state poisoned")
+                .terminal
+                .get_or_insert_with(|| error.clone());
+            // The coalescer is parked with nothing pending, so the recorded
+            // failure reaches the stream on this wake rather than behind
+            // whatever the backend reports next.
+            let _ = self
+                .wake
+                .as_ref()
+                .expect("subscription wake sender present")
+                .try_send(());
+        }
+        outcome
     }
 
     /// Hold settled output while a hash-authoritative heal is in flight.
@@ -366,20 +388,20 @@ impl OwnWrites {
     }
 }
 
-/// Starts watching only after every requested coverage edge is active.
+/// Starts watching only after every requested coverage edge is installed.
 ///
 /// This is the first stage of attach, not a declaration that an entry is ready:
-/// the caller heals after this function returns and consumes all resulting
-/// batches before exposing the entry as ready. Later batches remain the same
-/// subscription's warm invalidation stream.
+/// the caller waits for [`Subscription::synchronize`], heals, and consumes all
+/// resulting batches before exposing the entry as ready. Later batches remain
+/// the same subscription's warm invalidation stream.
 ///
-/// **Returning means coverage is registered, not that the backend is delivering
-/// events yet.** The platform's own stream becomes live some time after
-/// registration, and a change made in that window may reach the subscription
-/// only as a [`RescanScope`] rescan — the backend saying the path set was lost
-/// — or not as an event of its own at all. The heal is what covers that window:
-/// a caller that needs a specific change reported reads the tree rather than
-/// waiting for an event naming it.
+/// **Returning means coverage is installed, not that the subscription is
+/// [`SubscriptionState::Live`].** Which of the two returning implies is the
+/// backend's to say, and [`Subscription::synchronize`] is the one place a
+/// caller asks. Once a subscription is live, every change from before its
+/// edges were installed is either reported by the stream or already visible to
+/// a read of the tree, so the heal that follows synchronization plus the
+/// batches settling behind it leave no window a change can fall through.
 pub fn watch(
     vault_root: &Path,
     schema_source: &Path,
@@ -434,12 +456,19 @@ fn watch_with(
     let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
+    let callback_control = control.clone();
     let handler = move |result| {
-        ingest(&callback_state, result);
+        // A backend failure is control state as well as the subscription's
+        // last fact: a caller waiting on the boundary is waiting on this
+        // thread, so it learns of the failure here rather than at the
+        // deadline.
+        if let Some(error) = ingest(&callback_state, result) {
+            publish_control(&callback_control, SubscriptionState::Terminal(error));
+        }
         let _ = callback_wake.try_send(());
     };
     let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
-        false => Box::new(RecommendedWatcher::new(handler, Config::default()).map_err(backend)?),
+        false => native_watcher(handler, &control)?,
         true => Box::new(
             PollWatcher::new(
                 handler,
@@ -456,18 +485,15 @@ fn watch_with(
 
     install(watcher.as_mut(), &plan)?;
 
-    // PollWatcher builds each edge's initial snapshot synchronously inside
-    // registration. Returning from the committed bulk registration therefore
-    // closes the baseline for the complete plan. Native registration keeps
-    // the same control seam; its stronger event-history proof replaces this
-    // provisional registration boundary in the native phase.
-    let established = shared
-        .lock()
-        .expect("watch state poisoned")
-        .terminal
-        .clone()
-        .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
-    publish_control(&control, established);
+    if registration_is_the_boundary(poll) {
+        let established = shared
+            .lock()
+            .expect("watch state poisoned")
+            .terminal
+            .clone()
+            .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
+        publish_control(&control, established);
+    }
 
     let worker_state = shared.clone();
     let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
@@ -486,6 +512,122 @@ fn watch_with(
             wake: Some(wake_tx),
         },
         owns,
+    ))
+}
+
+/// Whether returning from bulk registration is itself the synchronization
+/// boundary for the selected backend.
+///
+/// Polling answers yes on every platform: [`PollWatcher`] builds each edge's
+/// initial snapshot synchronously inside registration, so the committed bulk
+/// registration closes the baseline for the complete plan.
+///
+/// Native watching answers per platform. Where a backend establishes each
+/// watch inside the registration call and queues everything after it — inotify
+/// does — registration is the boundary. macOS FSEvents does not: its stream
+/// starts asynchronously after the stream is created, and its boundary is the
+/// event-history marker [`native_watcher`] installs, which is the only thing
+/// that publishes [`SubscriptionState::Live`] there.
+#[cfg(target_os = "macos")]
+fn registration_is_the_boundary(poll: bool) -> bool {
+    poll
+}
+
+#[cfg(not(target_os = "macos"))]
+fn registration_is_the_boundary(_poll: bool) -> bool {
+    true
+}
+
+/// Build the native backend behind whatever proof of coverage it can give.
+///
+/// On macOS the stream is created with the per-host event identifier read
+/// here, before any coverage edge is installed. The stream therefore replays
+/// every event the host recorded after that reading, delivers them to the
+/// handler, and then reports the history boundary — which is what publishes
+/// [`SubscriptionState::Live`]. Identifiers come from one per-host source and
+/// increase across every attached volume, so the one boundary covers the
+/// complete plan, including an edge on another volume.
+///
+/// Nothing else publishes `Live` for this backend: an installed stream that
+/// never reports its boundary leaves the subscription synchronizing until the
+/// caller's deadline, which is a typed [`WatchError::SynchronizationExpired`]
+/// rather than a subscription that claims coverage it cannot prove.
+#[cfg(target_os = "macos")]
+fn native_watcher(
+    handler: impl notify::EventHandler,
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
+    let since = history_boundary(notify::fsevent::current_event_id())?;
+    Ok(Box::new(
+        notify::fsevent::FsEventWatcher::with_event_history(
+            handler,
+            since,
+            history_barrier(control),
+        )
+        .map_err(backend)?,
+    ))
+}
+
+/// What the native macOS backend calls when its event-history replay is
+/// complete, and the only thing that publishes `Live` for that backend.
+#[cfg(target_os = "macos")]
+fn history_barrier(
+    control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> impl Fn() + Send + Sync + 'static {
+    let control = control.clone();
+    move || publish_control(&control, SubscriptionState::Live)
+}
+
+/// The reading a native macOS stream may replay from.
+///
+/// Two readings are not boundaries. Zero means the host recorded no event to
+/// start after, and replaying from it asks for every event the host still
+/// holds. `u64::MAX` is the sentinel for starting at stream creation, which is
+/// the window the barrier exists to close. Both refuse rather than watch
+/// without proof; polling remains available as an explicit selection.
+#[cfg(target_os = "macos")]
+fn history_boundary(current: u64) -> Result<u64, WatchError> {
+    match current {
+        0 | u64::MAX => Err(WatchError::Backend(
+            "macOS reported no usable event-history boundary, so native watching cannot prove \
+             coverage"
+                .into(),
+        )),
+        reading => Ok(reading),
+    }
+}
+
+/// Why a recommended backend of this kind cannot serve a native registration.
+///
+/// Notify falls back to its polling backend where a platform offers no native
+/// notification API. Building it here would give a caller that asked for
+/// native watching the cost and latency of polling under a subscription that
+/// reports itself live, and polling is an explicit selection through
+/// [`watch_polling`]. Every other kind is a native backend whose registration
+/// establishes each edge, which is the boundary this platform publishes.
+#[cfg(not(target_os = "macos"))]
+fn native_kind_refusal(kind: notify::WatcherKind) -> Option<WatchError> {
+    matches!(kind, notify::WatcherKind::PollWatcher).then(|| {
+        WatchError::Backend(
+            "this platform recommends the polling backend for native watching, and polling is an \
+             explicit selection rather than a substitution made for a caller"
+                .into(),
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_watcher(
+    handler: impl notify::EventHandler,
+    _control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
+    use notify::Watcher as _;
+
+    if let Some(refusal) = native_kind_refusal(notify::RecommendedWatcher::kind()) {
+        return Err(refusal);
+    }
+    Ok(Box::new(
+        notify::RecommendedWatcher::new(handler, Config::default()).map_err(backend)?,
     ))
 }
 
@@ -669,7 +811,13 @@ impl State {
     }
 }
 
-fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) {
+/// Fold one backend delivery into shared state, reporting the terminal failure
+/// the subscription now carries.
+///
+/// The report is the whole recorded cause rather than what this delivery
+/// contributed: the first cause is the one kept, and a caller waiting on the
+/// synchronization boundary needs it whichever delivery recorded it.
+fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<WatchError> {
     let mut state = shared.lock().expect("watch state poisoned");
     match result {
         Err(error) => {
@@ -677,30 +825,59 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) {
         }
         Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
         Ok(event) => {
-            if event.need_rescan() {
+            // A backend saying the path set is incomplete is the one report
+            // that widens work to a rescan: an explicit rescan flag over
+            // dropped events, or a delivery with no path to name at all.
+            if event.need_rescan() || event.paths.is_empty() {
                 state.rescan(RescanScope::Vault);
                 state.rescan(RescanScope::Schema);
-                return;
-            }
-            if event.paths.is_empty() {
-                state.rescan(RescanScope::Vault);
-                state.rescan(RescanScope::Schema);
-                return;
+                return state.terminal.clone();
             }
             for path in event.paths {
                 ingest_path(&mut state, event.kind, &path);
             }
         }
     }
+    state.terminal.clone()
+}
+
+/// Whether a kind delivered at a watched directory's own path is a fact about
+/// that directory entry and nothing below it.
+///
+/// The set is closed: the directory being created, a change to its metadata,
+/// and the backend's unspecified modify. Every change to something inside the
+/// directory arrives at the path that changed, so a kind in this set names no
+/// dirty path at all. Access-only kinds never reach this predicate — [`ingest`]
+/// drops them before any path is examined.
+///
+/// Every other kind at that same path can replace what the directory holds
+/// without one event per item — macOS reports a volume mounted over a watched
+/// path as `Create(CreateKind::Other)`, which substitutes a whole tree — so
+/// outside this set the delivery is a report that the path set below is no
+/// longer known.
+fn names_only_the_directory_entry(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::Folder)
+            | EventKind::Modify(ModifyKind::Metadata(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
 }
 
 fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     if path == state.root {
-        if kind.is_remove() || matches!(kind, EventKind::Modify(notify::event::ModifyKind::Name(_)))
-        {
+        if kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))) {
             let root = state.root.clone();
             state.terminal.get_or_insert(WatchError::CoverageLost(root));
-        } else {
+            return;
+        }
+        // A kind naming only the root directory entry carries no dirty path,
+        // and it is emphatically not a report that the path set is incomplete:
+        // widening it would cost the full heal and publish watcher overflow
+        // for an event that lost nothing. Anything else at the root can put a
+        // different tree behind that name with no event per item, which is
+        // exactly what [`RescanScope::Vault`] reports.
+        if !names_only_the_directory_entry(kind) {
             state.rescan(RescanScope::Vault);
         }
         return;
@@ -729,7 +906,12 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             normalizer,
         } => {
             if path == parent {
-                (false, true)
+                // The schema's own parent directory is watched for one file,
+                // so the same closed rule the vault root uses applies here: a
+                // kind naming only that directory entry says nothing about the
+                // schema source, and any other kind can replace what the
+                // directory holds without naming the file.
+                (false, !names_only_the_directory_entry(kind))
             } else {
                 (
                     path.strip_prefix(parent)
@@ -896,7 +1078,9 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{AccessKind, AccessMode, ModifyKind, RemoveKind};
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, ModifyKind, RemoveKind,
+    };
 
     use crate::ContentHash;
     use crate::identity::post_state;
@@ -925,6 +1109,41 @@ mod tests {
             normalizer,
         }
     }
+
+    fn state_with(schema: SchemaLocation) -> Arc<Mutex<State>> {
+        Arc::new(Mutex::new(State::new(
+            PathBuf::from("/vault"),
+            normalizer(),
+            schema,
+            Arc::new(Mutex::new(Ledger::default())),
+        )))
+    }
+
+    /// Every kind that names only a watched directory entry, and one of each
+    /// shape that does not.
+    ///
+    /// The second list is what keeps the first closed: a kind moved from one
+    /// list to the other fails whichever case reads it, so widening the
+    /// benign set cannot pass silently.
+    const NAMES_ONLY_THE_DIRECTORY: &[EventKind] = &[
+        EventKind::Create(CreateKind::Folder),
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+        EventKind::Modify(ModifyKind::Any),
+    ];
+
+    /// Kinds at a watched directory's own path that can put different content
+    /// behind it with no event per item. `Create(CreateKind::Other)` is the
+    /// one macOS reports for a volume mounted over the watched path.
+    const REPLACES_WHAT_THE_DIRECTORY_HOLDS: &[EventKind] = &[
+        EventKind::Create(CreateKind::Other),
+        EventKind::Create(CreateKind::Any),
+        EventKind::Create(CreateKind::File),
+        EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+        EventKind::Modify(ModifyKind::Other),
+        EventKind::Any,
+        EventKind::Other,
+    ];
 
     #[test]
     fn the_plan_covers_the_vault_tree_and_the_name_the_root_occupies() {
@@ -1046,6 +1265,137 @@ mod tests {
         );
     }
 
+    /// **The bar under the native barrier.** Returning from registration is
+    /// not the synchronization boundary on macOS.
+    ///
+    /// The forbidden shape is publishing `Live` once the coverage plan is
+    /// installed, the way polling may. The FSEvents stream starts after it is
+    /// created, so a subscription that called itself live there would be
+    /// claiming observation of a window nothing was watching.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_registration_is_not_the_synchronization_boundary() {
+        assert!(
+            !registration_is_the_boundary(false),
+            "native macOS registration was treated as the synchronization boundary, which \
+             publishes Live over the window before the stream starts"
+        );
+        assert!(registration_is_the_boundary(true));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn registration_establishes_every_edge_on_this_platform() {
+        assert!(registration_is_the_boundary(false));
+        assert!(registration_is_the_boundary(true));
+    }
+
+    /// **One registration never switches from native watching to polling.**
+    /// A platform whose recommended backend is the polling fallback refuses.
+    ///
+    /// The forbidden shape is building that fallback here. It would give a
+    /// caller of [`watch`] the poll interval's latency and the poll scan's
+    /// cost under a subscription reporting itself live, and it would hide the
+    /// absence of a native backend behind coverage that still looks correct.
+    /// Polling is reached through [`watch_polling`] and nowhere else.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_recommended_backend_that_is_polling_refuses_a_native_registration() {
+        assert!(matches!(
+            native_kind_refusal(notify::WatcherKind::PollWatcher),
+            Some(WatchError::Backend(_))
+        ));
+        for kind in [
+            notify::WatcherKind::Inotify,
+            notify::WatcherKind::Kqueue,
+            notify::WatcherKind::Fsevent,
+            notify::WatcherKind::ReadDirectoryChangesWatcher,
+        ] {
+            assert!(native_kind_refusal(kind).is_none(), "{kind:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_the_history_marker_publishes_live_for_the_native_backend() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+        let marker = history_barrier(&control);
+
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Synchronizing,
+            "coverage was live before the event-history replay reported its boundary"
+        );
+        marker();
+        assert_eq!(*control.0.lock().unwrap(), SubscriptionState::Live);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expiry_during_the_history_replay_survives_a_late_marker() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+        let marker = history_barrier(&control);
+
+        assert_eq!(
+            wait_for_synchronization(&control, Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+        marker();
+
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Terminal(WatchError::SynchronizationExpired)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_reading_that_is_not_a_boundary_refuses_native_watching() {
+        for reading in [0, u64::MAX] {
+            assert!(
+                matches!(history_boundary(reading), Err(WatchError::Backend(_))),
+                "reading {reading} was accepted as an event-history boundary"
+            );
+        }
+        assert_eq!(history_boundary(1), Ok(1));
+        assert!(notify::fsevent::current_event_id() > 0);
+    }
+
+    /// A failure recorded while history is replaying reaches the caller
+    /// waiting on the boundary, and the marker behind it cannot overwrite it.
+    #[test]
+    fn a_terminal_during_replay_is_published_and_preserved() {
+        let state = state();
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+
+        let reported = ingest(&state, Err(notify::Error::generic("lost while replaying")))
+            .expect("a delivery that recorded a terminal failure reports it");
+        publish_control(&control, SubscriptionState::Terminal(reported.clone()));
+
+        assert_eq!(
+            wait_for_synchronization(&control, Duration::from_secs(3600)),
+            Err(reported.clone())
+        );
+        publish_control(&control, SubscriptionState::Live);
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Terminal(reported)
+        );
+    }
+
+    #[test]
+    fn a_delivery_that_records_nothing_terminal_reports_nothing() {
+        let state = state();
+        assert_eq!(
+            ingest(
+                &state,
+                Ok(Event::new(EventKind::Modify(ModifyKind::Any))
+                    .add_path("/vault/note.md".into()))
+            ),
+            None
+        );
+    }
+
     #[test]
     fn synchronization_expiry_is_terminal_and_a_late_live_signal_cannot_revive_it() {
         let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
@@ -1059,6 +1409,72 @@ mod tests {
             *control.0.lock().unwrap(),
             SubscriptionState::Terminal(WatchError::SynchronizationExpired)
         );
+    }
+
+    /// **Expiry is the subscription's fact, not the waiting caller's.** A
+    /// heal that runs past an expired boundary finishes with the failure.
+    ///
+    /// The forbidden shape is a successful [`Subscription::finish_heal`] here.
+    /// A caller that dropped the error from [`Subscription::synchronize`]
+    /// would otherwise take a clean batch out of the heal window and publish
+    /// readiness on coverage that never proved itself.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_expired_boundary_is_terminal_for_the_batch_stream_too() {
+        let scratch = Scratch::new("synchronization-expiry");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        // The heal window is where the hazard lives, and it is also what
+        // holds the recorded failure still: the coalescer takes no terminal
+        // while a heal is open, so `finish_heal` is the one place it surfaces.
+        subscription.begin_heal();
+        *subscription.control.0.lock().unwrap() = SubscriptionState::Synchronizing;
+
+        assert_eq!(
+            subscription.synchronize(Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+
+        assert_eq!(
+            subscription.state.lock().unwrap().terminal,
+            Some(WatchError::SynchronizationExpired)
+        );
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::SynchronizationExpired)
+        );
+    }
+
+    /// The stream half of the same contract: with no heal window open, the
+    /// recorded expiry reaches the batch receiver as its own refusal.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_expired_boundary_reaches_the_batch_stream_without_a_heal() {
+        let scratch = Scratch::new("synchronization-expiry-stream");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        *subscription.control.0.lock().unwrap() = SubscriptionState::Synchronizing;
+
+        assert_eq!(
+            subscription.synchronize(Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+
+        norn_testkit::wait::wait_until(
+            "the batch stream to refuse with the recorded expiry",
+            norn_testkit::wait::Budget::new(Duration::from_secs(5), Duration::from_secs(1)),
+            || match subscription.try_recv() {
+                Err(WatchError::SynchronizationExpired) => norn_testkit::wait::Observed::Met(()),
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1148,21 +1564,28 @@ mod tests {
         );
     }
 
+    /// The vault root is the load-bearing row: inotify reports an open of a
+    /// watched directory at the directory's own path, so a read of the root
+    /// must record nothing — no dirty path, no rescan, no terminal.
     #[test]
     fn every_access_only_event_is_ignored() {
-        for kind in [
-            AccessKind::Any,
-            AccessKind::Read,
-            AccessKind::Open(AccessMode::Write),
-            AccessKind::Close(AccessMode::Write),
-            AccessKind::Other,
-        ] {
-            let state = state();
-            ingest(
-                &state,
-                Ok(Event::new(EventKind::Access(kind)).add_path("/vault/note.md".into())),
-            );
-            assert!(state.lock().unwrap().pending.is_none(), "{kind:?}");
+        for path in ["/vault/note.md", "/vault"] {
+            for kind in [
+                AccessKind::Any,
+                AccessKind::Read,
+                AccessKind::Open(AccessMode::Write),
+                AccessKind::Close(AccessMode::Write),
+                AccessKind::Other,
+            ] {
+                let state = state();
+                ingest(
+                    &state,
+                    Ok(Event::new(EventKind::Access(kind)).add_path(path.into())),
+                );
+                let locked = state.lock().unwrap();
+                assert!(locked.pending.is_none(), "{kind:?} at {path}");
+                assert!(locked.terminal.is_none(), "{kind:?} at {path}");
+            }
         }
     }
 
@@ -1215,6 +1638,197 @@ mod tests {
             .map(|p| p.as_path())
             .collect();
         assert_eq!(paths, [Path::new("notes/.norn/tmp/document.md")]);
+    }
+
+    /// An event naming only the vault root's own directory entry is a fact
+    /// about that entry and nothing else.
+    ///
+    /// The forbidden shape is widening it to [`RescanScope::Vault`]. That
+    /// widening costs a full tree walk and publishes watcher overflow — the
+    /// report that the path set was lost — for an event that lost nothing. A
+    /// fresh vault, whose root is created moments before coverage is
+    /// installed, produces exactly this event on every attach.
+    #[test]
+    fn a_vault_root_event_naming_only_its_entry_widens_nothing() {
+        for &kind in NAMES_ONLY_THE_DIRECTORY {
+            let state = state();
+            ingest(&state, Ok(Event::new(kind).add_path("/vault".into())));
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            assert!(
+                locked.pending.as_mut().is_none(),
+                "an event on the vault root itself produced invalidation work: {kind:?}"
+            );
+        }
+    }
+
+    /// **The bar under the drop at the vault root.** The drop set is closed,
+    /// and every other kind at the root still widens.
+    ///
+    /// The forbidden shape is silence for whatever kind is not one of the
+    /// three named. `Create(CreateKind::Other)` is what macOS reports when a
+    /// volume is mounted over the watched path: the whole tree is replaced,
+    /// no per-item event describes it, and a subscription that recorded
+    /// nothing would go on answering from the tree that is no longer there.
+    #[test]
+    fn a_vault_root_event_that_can_replace_the_tree_widens_to_a_vault_rescan() {
+        for &kind in REPLACES_WHAT_THE_DIRECTORY_HOLDS {
+            let state = state();
+            ingest(&state, Ok(Event::new(kind).add_path("/vault".into())));
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            let batch = &locked
+                .pending
+                .as_mut()
+                .unwrap_or_else(|| {
+                    panic!("an event that can substitute the whole vault tree recorded nothing: {kind:?}")
+                })
+                .batch;
+            assert_eq!(
+                batch.rescans,
+                BTreeSet::from([RescanScope::Vault]),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The schema parent's edge covers one file, so an event naming only that
+    /// directory entry carries nothing about the schema source.
+    ///
+    /// The forbidden shape is [`RescanScope::Schema`] for any event that
+    /// happens to name the directory. That parent is often a directory the
+    /// vault does not own — a mount point, a configuration directory — whose
+    /// ordinary metadata churn would otherwise reload the schema on every
+    /// touch.
+    #[test]
+    fn a_schema_parent_event_naming_only_its_entry_widens_nothing() {
+        for &kind in NAMES_ONLY_THE_DIRECTORY {
+            let state = state_with(external_schema("/etc/norn/schemas"));
+            ingest(
+                &state,
+                Ok(Event::new(kind).add_path("/etc/norn/schemas".into())),
+            );
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            assert!(
+                locked.pending.as_mut().is_none(),
+                "an event on the schema parent itself produced invalidation work: {kind:?}"
+            );
+        }
+    }
+
+    /// **The bar under the drop at the schema parent.** Everything the drop
+    /// does not name still reaches the schema.
+    #[test]
+    fn the_schema_parent_drop_reaches_neither_the_file_nor_the_other_kinds() {
+        let state = state_with(external_schema("/etc/norn/schemas"));
+        ingest(
+            &state,
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+                    .add_path("/etc/norn/schemas/schema.yml".into()),
+            ),
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .batch
+                .schema_dirty,
+            "an event at the schema file itself was dropped with the parent's noise"
+        );
+
+        for &kind in REPLACES_WHAT_THE_DIRECTORY_HOLDS {
+            let state = state_with(external_schema("/etc/norn/schemas"));
+            ingest(
+                &state,
+                Ok(Event::new(kind).add_path("/etc/norn/schemas".into())),
+            );
+
+            let mut locked = state.lock().unwrap();
+            let batch = &locked
+                .pending
+                .as_mut()
+                .unwrap_or_else(|| {
+                    panic!("an event that can substitute the schema directory recorded nothing: {kind:?}")
+                })
+                .batch;
+            assert_eq!(
+                batch.rescans,
+                BTreeSet::from([RescanScope::Schema]),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_benign_vault_root_event_keeps_the_paths_already_named() {
+        let state = state();
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/note.md".into())),
+        );
+        ingest(
+            &state,
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+                    .add_path("/vault".into()),
+            ),
+        );
+
+        let mut locked = state.lock().unwrap();
+        let batch = &locked
+            .pending
+            .as_mut()
+            .expect("the earlier path fact")
+            .batch;
+        assert_eq!(
+            batch
+                .vault_roots
+                .iter()
+                .map(|path| path.as_path())
+                .collect::<Vec<_>>(),
+            [Path::new("note.md")]
+        );
+        assert!(batch.rescans.is_empty());
+    }
+
+    /// The backend's own report that the path set is incomplete still widens,
+    /// and takes the exact paths of its batch with it.
+    #[test]
+    fn a_backend_rescan_flag_widens_both_scopes_and_drops_exact_paths() {
+        let state = state();
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/before.md".into())),
+        );
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Other)
+                .add_path("/vault/dropped.md".into())
+                .set_flag(Flag::Rescan)),
+        );
+        ingest(
+            &state,
+            Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path("/vault/after.md".into())),
+        );
+
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        assert_eq!(
+            batch.rescans,
+            BTreeSet::from([RescanScope::Vault, RescanScope::Schema])
+        );
+        assert!(
+            batch.vault_roots.is_empty(),
+            "a widened batch kept exact paths, which reads as a complete path set"
+        );
     }
 
     #[test]

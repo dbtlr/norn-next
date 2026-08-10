@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `vendor/notify` is a patched copy of a published release, not a Norn crate.
+# It carries no Norn code, holds no place in the crate map, and is excluded so
+# that the architecture gate's crate scan and the workspace lints stay bound to
+# the crates under `crates/`.
+exclude = ["vendor/notify"]
+
+# The macOS synchronization barrier needs an FSEvents event-history boundary
+# that the published `notify` release does not expose. `vendor/README.md`
+# states the release, the capability, and what removes the patch.
+[patch.crates-io]
+notify = { path = "vendor/notify" }
 
 # The workspace holds only the crates that have been earned. A crate's
 # absence here is not an absence from the crate map in docs/architecture.md,
