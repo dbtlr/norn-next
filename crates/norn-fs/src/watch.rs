@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::event::EventKind;
+use notify::event::{CreateKind, EventKind, ModifyKind};
 use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::PostState;
@@ -174,8 +174,30 @@ impl Subscription {
     ///
     /// Expiry is returned as a typed terminal watcher error. It does not
     /// synthesize a filesystem rescan or alter the backend selection.
+    ///
+    /// A failure here is the whole subscription's terminal fact, not just this
+    /// caller's: it is recorded so the batch stream and [`Self::finish_heal`]
+    /// refuse too. Coverage that could not prove itself never yields batches a
+    /// consumer may treat as a complete account of the tree, whether or not
+    /// that consumer read the error returned here.
     pub fn synchronize(&self, deadline: Duration) -> Result<(), WatchError> {
-        wait_for_synchronization(&self.control, deadline)
+        let outcome = wait_for_synchronization(&self.control, deadline);
+        if let Err(error) = &outcome {
+            self.state
+                .lock()
+                .expect("watch state poisoned")
+                .terminal
+                .get_or_insert_with(|| error.clone());
+            // The coalescer is parked with nothing pending, so the recorded
+            // failure reaches the stream on this wake rather than behind
+            // whatever the backend reports next.
+            let _ = self
+                .wake
+                .as_ref()
+                .expect("subscription wake sender present")
+                .try_send(());
+        }
+        outcome
     }
 
     /// Hold settled output while a hash-authoritative heal is in flight.
@@ -575,6 +597,25 @@ fn history_boundary(current: u64) -> Result<u64, WatchError> {
     }
 }
 
+/// Why a recommended backend of this kind cannot serve a native registration.
+///
+/// Notify falls back to its polling backend where a platform offers no native
+/// notification API. Building it here would give a caller that asked for
+/// native watching the cost and latency of polling under a subscription that
+/// reports itself live, and polling is an explicit selection through
+/// [`watch_polling`]. Every other kind is a native backend whose registration
+/// establishes each edge, which is the boundary this platform publishes.
+#[cfg(not(target_os = "macos"))]
+fn native_kind_refusal(kind: notify::WatcherKind) -> Option<WatchError> {
+    matches!(kind, notify::WatcherKind::PollWatcher).then(|| {
+        WatchError::Backend(
+            "this platform recommends the polling backend for native watching, and polling is an \
+             explicit selection rather than a substitution made for a caller"
+                .into(),
+        )
+    })
+}
+
 #[cfg(not(target_os = "macos"))]
 fn native_watcher(
     handler: impl notify::EventHandler,
@@ -582,6 +623,9 @@ fn native_watcher(
 ) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
     use notify::Watcher as _;
 
+    if let Some(refusal) = native_kind_refusal(notify::RecommendedWatcher::kind()) {
+        return Err(refusal);
+    }
     Ok(Box::new(
         notify::RecommendedWatcher::new(handler, Config::default()).map_err(backend)?,
     ))
@@ -797,21 +841,44 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
     state.terminal.clone()
 }
 
+/// Whether a kind delivered at a watched directory's own path is a fact about
+/// that directory entry and nothing below it.
+///
+/// The set is closed, and it is exactly three kinds: the directory being
+/// created, and a change to its metadata. Every change to something inside the
+/// directory arrives at the path that changed, so a kind in this set names no
+/// dirty path at all.
+///
+/// Every other kind at that same path can replace what the directory holds
+/// without one event per item — macOS reports a volume mounted over a watched
+/// path as `Create(CreateKind::Other)`, which substitutes a whole tree — so
+/// outside this set the delivery is a report that the path set below is no
+/// longer known.
+fn names_only_the_directory_entry(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(CreateKind::Folder)
+            | EventKind::Modify(ModifyKind::Metadata(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
+}
+
 fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     if path == state.root {
-        if kind.is_remove() || matches!(kind, EventKind::Modify(notify::event::ModifyKind::Name(_)))
-        {
+        if kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))) {
             let root = state.root.clone();
             state.terminal.get_or_insert(WatchError::CoverageLost(root));
+            return;
         }
-        // Any other event on the root names the root directory's own entry:
-        // its creation, or a change to its metadata. Every change to something
-        // inside the vault arrives at the path that changed, and the root has
-        // no vault-relative path of its own, so this event carries no dirty
-        // path. It is emphatically not a report that the path set is
-        // incomplete — only a backend rescan flag, a pathless delivery, or the
-        // dirty-root cap widens to [`RescanScope::Vault`], and each of those
-        // costs the full heal and the overflow reason this one must not.
+        // A kind naming only the root directory entry carries no dirty path,
+        // and it is emphatically not a report that the path set is incomplete:
+        // widening it would cost the full heal and publish watcher overflow
+        // for an event that lost nothing. Anything else at the root can put a
+        // different tree behind that name with no event per item, which is
+        // exactly what [`RescanScope::Vault`] reports.
+        if !names_only_the_directory_entry(kind) {
+            state.rescan(RescanScope::Vault);
+        }
         return;
     }
     let root_name_relevant = state.root.parent().is_some_and(|parent| {
@@ -838,7 +905,12 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             normalizer,
         } => {
             if path == parent {
-                (false, true)
+                // The schema's own parent directory is watched for one file,
+                // so the same closed rule the vault root uses applies here: a
+                // kind naming only that directory entry says nothing about the
+                // schema source, and any other kind can replace what the
+                // directory holds without naming the file.
+                (false, !names_only_the_directory_entry(kind))
             } else {
                 (
                     path.strip_prefix(parent)
@@ -1006,7 +1078,7 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
 mod tests {
     use super::*;
     use notify::event::{
-        AccessKind, AccessMode, CreateKind, Flag, MetadataKind, ModifyKind, RemoveKind,
+        AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, ModifyKind, RemoveKind,
     };
 
     use crate::ContentHash;
@@ -1036,6 +1108,41 @@ mod tests {
             normalizer,
         }
     }
+
+    fn state_with(schema: SchemaLocation) -> Arc<Mutex<State>> {
+        Arc::new(Mutex::new(State::new(
+            PathBuf::from("/vault"),
+            normalizer(),
+            schema,
+            Arc::new(Mutex::new(Ledger::default())),
+        )))
+    }
+
+    /// Every kind that names only a watched directory entry, and one of each
+    /// shape that does not.
+    ///
+    /// The second list is what keeps the first closed: a kind moved from one
+    /// list to the other fails whichever case reads it, so widening the
+    /// benign set cannot pass silently.
+    const NAMES_ONLY_THE_DIRECTORY: &[EventKind] = &[
+        EventKind::Create(CreateKind::Folder),
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+        EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+        EventKind::Modify(ModifyKind::Any),
+    ];
+
+    /// Kinds at a watched directory's own path that can put different content
+    /// behind it with no event per item. `Create(CreateKind::Other)` is the
+    /// one macOS reports for a volume mounted over the watched path.
+    const REPLACES_WHAT_THE_DIRECTORY_HOLDS: &[EventKind] = &[
+        EventKind::Create(CreateKind::Other),
+        EventKind::Create(CreateKind::Any),
+        EventKind::Create(CreateKind::File),
+        EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+        EventKind::Modify(ModifyKind::Other),
+        EventKind::Any,
+        EventKind::Other,
+    ];
 
     #[test]
     fn the_plan_covers_the_vault_tree_and_the_name_the_root_occupies() {
@@ -1182,6 +1289,31 @@ mod tests {
         assert!(registration_is_the_boundary(true));
     }
 
+    /// **One registration never switches from native watching to polling.**
+    /// A platform whose recommended backend is the polling fallback refuses.
+    ///
+    /// The forbidden shape is building that fallback here. It would give a
+    /// caller of [`watch`] the poll interval's latency and the poll scan's
+    /// cost under a subscription reporting itself live, and it would hide the
+    /// absence of a native backend behind coverage that still looks correct.
+    /// Polling is reached through [`watch_polling`] and nowhere else.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_recommended_backend_that_is_polling_refuses_a_native_registration() {
+        assert!(matches!(
+            native_kind_refusal(notify::WatcherKind::PollWatcher),
+            Some(WatchError::Backend(_))
+        ));
+        for kind in [
+            notify::WatcherKind::Inotify,
+            notify::WatcherKind::Kqueue,
+            notify::WatcherKind::Fsevent,
+            notify::WatcherKind::ReadDirectoryChangesWatcher,
+        ] {
+            assert!(native_kind_refusal(kind).is_none(), "{kind:?}");
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn only_the_history_marker_publishes_live_for_the_native_backend() {
@@ -1275,6 +1407,43 @@ mod tests {
         assert_eq!(
             *control.0.lock().unwrap(),
             SubscriptionState::Terminal(WatchError::SynchronizationExpired)
+        );
+    }
+
+    /// **Expiry is the subscription's fact, not the waiting caller's.** A
+    /// heal that runs past an expired boundary finishes with the failure.
+    ///
+    /// The forbidden shape is a successful [`Subscription::finish_heal`] here.
+    /// A caller that dropped the error from [`Subscription::synchronize`]
+    /// would otherwise take a clean batch out of the heal window and publish
+    /// readiness on coverage that never proved itself.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_expired_boundary_is_terminal_for_the_batch_stream_too() {
+        let scratch = Scratch::new("synchronization-expiry");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        // The heal window is where the hazard lives, and it is also what
+        // holds the recorded failure still: the coalescer takes no terminal
+        // while a heal is open, so `finish_heal` is the one place it surfaces.
+        subscription.begin_heal();
+        *subscription.control.0.lock().unwrap() = SubscriptionState::Synchronizing;
+
+        assert_eq!(
+            subscription.synchronize(Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+
+        assert_eq!(
+            subscription.state.lock().unwrap().terminal,
+            Some(WatchError::SynchronizationExpired)
+        );
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::SynchronizationExpired)
         );
     }
 
@@ -1434,8 +1603,8 @@ mod tests {
         assert_eq!(paths, [Path::new("notes/.norn/tmp/document.md")]);
     }
 
-    /// A benign event naming the vault root is a fact about that directory's
-    /// own entry and nothing else.
+    /// An event naming only the vault root's own directory entry is a fact
+    /// about that entry and nothing else.
     ///
     /// The forbidden shape is widening it to [`RescanScope::Vault`]. That
     /// widening costs a full tree walk and publishes watcher overflow — the
@@ -1443,12 +1612,8 @@ mod tests {
     /// fresh vault, whose root is created moments before coverage is
     /// installed, produces exactly this event on every attach.
     #[test]
-    fn a_benign_vault_root_event_widens_nothing() {
-        for kind in [
-            EventKind::Create(CreateKind::Folder),
-            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
-            EventKind::Modify(ModifyKind::Any),
-        ] {
+    fn a_vault_root_event_naming_only_its_entry_widens_nothing() {
+        for &kind in NAMES_ONLY_THE_DIRECTORY {
             let state = state();
             ingest(&state, Ok(Event::new(kind).add_path("/vault".into())));
 
@@ -1457,6 +1622,110 @@ mod tests {
             assert!(
                 locked.pending.as_mut().is_none(),
                 "an event on the vault root itself produced invalidation work: {kind:?}"
+            );
+        }
+    }
+
+    /// **The bar under the drop at the vault root.** The drop set is closed,
+    /// and every other kind at the root still widens.
+    ///
+    /// The forbidden shape is silence for whatever kind is not one of the
+    /// three named. `Create(CreateKind::Other)` is what macOS reports when a
+    /// volume is mounted over the watched path: the whole tree is replaced,
+    /// no per-item event describes it, and a subscription that recorded
+    /// nothing would go on answering from the tree that is no longer there.
+    #[test]
+    fn a_vault_root_event_that_can_replace_the_tree_widens_to_a_vault_rescan() {
+        for &kind in REPLACES_WHAT_THE_DIRECTORY_HOLDS {
+            let state = state();
+            ingest(&state, Ok(Event::new(kind).add_path("/vault".into())));
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            let batch = &locked
+                .pending
+                .as_mut()
+                .unwrap_or_else(|| {
+                    panic!("an event that can substitute the whole vault tree recorded nothing: {kind:?}")
+                })
+                .batch;
+            assert_eq!(
+                batch.rescans,
+                BTreeSet::from([RescanScope::Vault]),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The schema parent's edge covers one file, so an event naming only that
+    /// directory entry carries nothing about the schema source.
+    ///
+    /// The forbidden shape is [`RescanScope::Schema`] for any event that
+    /// happens to name the directory. That parent is often a directory the
+    /// vault does not own — a mount point, a configuration directory — whose
+    /// ordinary metadata churn would otherwise reload the schema on every
+    /// touch.
+    #[test]
+    fn a_schema_parent_event_naming_only_its_entry_widens_nothing() {
+        for &kind in NAMES_ONLY_THE_DIRECTORY {
+            let state = state_with(external_schema("/etc/norn/schemas"));
+            ingest(
+                &state,
+                Ok(Event::new(kind).add_path("/etc/norn/schemas".into())),
+            );
+
+            let mut locked = state.lock().unwrap();
+            assert!(locked.terminal.is_none(), "{kind:?}");
+            assert!(
+                locked.pending.as_mut().is_none(),
+                "an event on the schema parent itself produced invalidation work: {kind:?}"
+            );
+        }
+    }
+
+    /// **The bar under the drop at the schema parent.** Everything the drop
+    /// does not name still reaches the schema.
+    #[test]
+    fn the_schema_parent_drop_reaches_neither_the_file_nor_the_other_kinds() {
+        let state = state_with(external_schema("/etc/norn/schemas"));
+        ingest(
+            &state,
+            Ok(
+                Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+                    .add_path("/etc/norn/schemas/schema.yml".into()),
+            ),
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .batch
+                .schema_dirty,
+            "an event at the schema file itself was dropped with the parent's noise"
+        );
+
+        for &kind in REPLACES_WHAT_THE_DIRECTORY_HOLDS {
+            let state = state_with(external_schema("/etc/norn/schemas"));
+            ingest(
+                &state,
+                Ok(Event::new(kind).add_path("/etc/norn/schemas".into())),
+            );
+
+            let mut locked = state.lock().unwrap();
+            let batch = &locked
+                .pending
+                .as_mut()
+                .unwrap_or_else(|| {
+                    panic!("an event that can substitute the schema directory recorded nothing: {kind:?}")
+                })
+                .batch;
+            assert_eq!(
+                batch.rescans,
+                BTreeSet::from([RescanScope::Schema]),
+                "{kind:?}"
             );
         }
     }
