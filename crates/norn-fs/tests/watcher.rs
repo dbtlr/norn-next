@@ -418,11 +418,19 @@ fn a_write_issued_before_synchronization_is_reported_for_its_own_path() {
             }
         },
     );
+    // What the write raced is the selected backend's boundary. On macOS the
+    // stream has not started when registration returns, so the write lands in
+    // the window the event-history replay covers. Where registration is itself
+    // the boundary, the subscription is live before the write and the backend
+    // has already queued it.
+    let expected = match cfg!(target_os = "macos") {
+        true => SubscriptionState::Synchronizing,
+        false => SubscriptionState::Live,
+    };
     assert_eq!(
-        racing,
-        SubscriptionState::Synchronizing,
-        "the subscription was already live when it returned from installing coverage, so this \
-         case raced nothing"
+        racing, expected,
+        "installing coverage returned with the subscription in a state this backend's \
+         synchronization boundary does not put it in, so this case raced nothing"
     );
 }
 
