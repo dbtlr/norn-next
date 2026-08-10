@@ -844,10 +844,11 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
 /// Whether a kind delivered at a watched directory's own path is a fact about
 /// that directory entry and nothing below it.
 ///
-/// The set is closed, and it is exactly three kinds: the directory being
-/// created, and a change to its metadata. Every change to something inside the
+/// The set is closed: the directory being created, a change to its metadata,
+/// and the backend's unspecified modify. Every change to something inside the
 /// directory arrives at the path that changed, so a kind in this set names no
-/// dirty path at all.
+/// dirty path at all. Access-only kinds never reach this predicate — [`ingest`]
+/// drops them before any path is examined.
 ///
 /// Every other kind at that same path can replace what the directory holds
 /// without one event per item — macOS reports a volume mounted over a watched
@@ -1447,6 +1448,35 @@ mod tests {
         );
     }
 
+    /// The stream half of the same contract: with no heal window open, the
+    /// recorded expiry reaches the batch receiver as its own refusal.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_expired_boundary_reaches_the_batch_stream_without_a_heal() {
+        let scratch = Scratch::new("synchronization-expiry-stream");
+        let vault = scratch.path("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        *subscription.control.0.lock().unwrap() = SubscriptionState::Synchronizing;
+
+        assert_eq!(
+            subscription.synchronize(Duration::ZERO),
+            Err(WatchError::SynchronizationExpired)
+        );
+
+        norn_testkit::wait::wait_until(
+            "the batch stream to refuse with the recorded expiry",
+            norn_testkit::wait::Budget::new(Duration::from_secs(5), Duration::from_secs(1)),
+            || match subscription.try_recv() {
+                Err(WatchError::SynchronizationExpired) => norn_testkit::wait::Observed::Met(()),
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn host_side_merge_unions_every_kind_of_uncertainty() {
         let normalizer = normalizer();
@@ -1534,21 +1564,28 @@ mod tests {
         );
     }
 
+    /// The vault root is the load-bearing row: inotify reports an open of a
+    /// watched directory at the directory's own path, so a read of the root
+    /// must record nothing — no dirty path, no rescan, no terminal.
     #[test]
     fn every_access_only_event_is_ignored() {
-        for kind in [
-            AccessKind::Any,
-            AccessKind::Read,
-            AccessKind::Open(AccessMode::Write),
-            AccessKind::Close(AccessMode::Write),
-            AccessKind::Other,
-        ] {
-            let state = state();
-            ingest(
-                &state,
-                Ok(Event::new(EventKind::Access(kind)).add_path("/vault/note.md".into())),
-            );
-            assert!(state.lock().unwrap().pending.is_none(), "{kind:?}");
+        for path in ["/vault/note.md", "/vault"] {
+            for kind in [
+                AccessKind::Any,
+                AccessKind::Read,
+                AccessKind::Open(AccessMode::Write),
+                AccessKind::Close(AccessMode::Write),
+                AccessKind::Other,
+            ] {
+                let state = state();
+                ingest(
+                    &state,
+                    Ok(Event::new(EventKind::Access(kind)).add_path(path.into())),
+                );
+                let locked = state.lock().unwrap();
+                assert!(locked.pending.is_none(), "{kind:?} at {path}");
+                assert!(locked.terminal.is_none(), "{kind:?} at {path}");
+            }
         }
     }
 
