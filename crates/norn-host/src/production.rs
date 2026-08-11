@@ -12,8 +12,8 @@ use norn_fs::{
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
-    FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance, Span,
-    Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
+    FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
+    SchemaPin, Span, Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::{FindingKind, MaintainerIdentity, Severity};
@@ -158,15 +158,20 @@ impl ProductionEntryOps {
             .unwrap_or_else(|| registration.root.as_path().join(IN_VAULT_SCHEMA_PATH))
     }
 
-    fn pin_schema(store: &mut Store, registration: &Registration) -> Result<(), JobFailure> {
+    /// Re-read the vault schema and pin what it says.
+    ///
+    /// The answer carries whether the pin moved the fingerprint, which is the
+    /// fact a caller re-derives on: a pin that moved discarded every finding
+    /// keyed by the fingerprint it replaced, and only a re-derivation of the
+    /// schema-keyed tables records what holds under the new one.
+    fn pin_schema(store: &mut Store, registration: &Registration) -> Result<SchemaPin, JobFailure> {
         let observed = norn_fs::read_and_hash(&Self::schema_path(registration)).map_err(effect)?;
         std::str::from_utf8(observed.bytes())
             .map_err(|e| environmental(format!("schema is not UTF-8: {e}")))?;
         store
             .begin_request()
             .pin_vault_schema(observed.bytes(), &observed.content_hash().to_string())
-            .map_err(effect)?;
-        Ok(())
+            .map_err(effect)
     }
 
     fn heal(
@@ -183,6 +188,14 @@ impl ProductionEntryOps {
         // remember to announce it.
         let healing = progress.healing();
         let exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        // Pinning first is what makes this the re-derivation leg of a schema
+        // change: every finding the walk below records carries the fingerprint
+        // the pin just installed. What the pin discarded stands again because a
+        // finding only ever sits where no document row does — `Pending::flush`
+        // refuses one at a path that has a row — and the walk reads every such
+        // path whatever its bytes say. The rest of the walk is hash-gated: a
+        // path whose document row stands is re-derived only when its content
+        // hash moved, and no finding sits at such a path.
         Self::pin_schema(&mut attachment.store, &attachment.registration)?;
         heal_documents(
             &mut attachment.store,
@@ -356,15 +369,21 @@ impl EntryOps for ProductionEntryOps {
         }
         // A reconcile derives against coverage that is already installed,
         // whichever rung of the ladder the envelope reaches for.
-        let healing = progress.healing();
         let schema =
             work.batch.schema_dirty() || work.batch.rescans().contains(&RescanScope::Schema);
-        if schema {
-            Self::pin_schema(&mut attachment.store, &attachment.registration)?;
-        }
-        if work.batch.rescans().contains(&RescanScope::Vault) {
+        // A re-pin that moved the fingerprint discarded every finding keyed by
+        // the old one, and the paths those findings sit at are not the paths
+        // this batch names — so the scoped increment cannot record them again
+        // and the vault-wide heal is the leg that does: a finding sits only
+        // where no document row does, and the heal reads every such path. A
+        // schema event whose re-read pins the same bytes moved nothing and
+        // discarded nothing, so it stays on the increment it arrived as.
+        let repinned =
+            schema && Self::pin_schema(&mut attachment.store, &attachment.registration)?.repinned;
+        if repinned || work.batch.rescans().contains(&RescanScope::Vault) {
             return self.heal(attachment, progress);
         }
+        let healing = progress.healing();
         scoped_increment(
             &mut attachment.store,
             attachment.registration.root.as_path(),
@@ -1951,6 +1970,100 @@ mod tests {
         let second = findings_at(&mut attachment.store, "bad.md");
         assert_eq!(second.len(), 1, "the stale finding outlived its cause");
         assert_ne!(second[0].detail, first[0].detail);
+        ops.detach(&name, attachment);
+    }
+
+    /// **The bar on the re-derivation leg of a schema change.** A re-pin
+    /// discards every finding keyed by the fingerprint it replaced, and the
+    /// paths those findings sit at are not paths a schema batch names — so the
+    /// increment such a batch would otherwise run reaches none of them. The
+    /// reconcile that re-pins is therefore the reconcile that records them
+    /// again, which is the whole vault's re-derivation.
+    ///
+    /// Both envelopes a schema change arrives in carry it: the bare
+    /// invalidation an edit to the configured source reports, and the schema
+    /// rescan the backend reports when it loses the exact fact.
+    ///
+    /// The forbidden shape is a hand edit to the schema file leaving the
+    /// findings table empty until unrelated work happens to touch those paths.
+    #[test]
+    fn a_schema_edit_re_derives_the_findings_its_re_pin_discarded() {
+        let f = Fixture::new("schema-repin-heal");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(before.len(), 1, "the quarantine was not recorded at attach");
+
+        // A hand edit to the schema file, reconciled under the envelope the
+        // caller names.
+        let edit = |attachment: &mut ProductionAttachment, bytes: &str, batch: norn_fs::Batch| {
+            fs::write(f.vault().join(".norn/schema.yaml"), bytes).unwrap();
+            ops.reconcile(&name, attachment, ReconcileWork { batch }, &progress)
+                .unwrap();
+        };
+
+        // The envelope an edit to the in-vault schema reports: the schema is
+        // invalidated, and the vault paths such a batch also names are not
+        // paths a finding sits at.
+        edit(
+            &mut attachment,
+            "version: 1\n# edited by hand\n",
+            norn_fs::Batch::schema_change(),
+        );
+
+        let after = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(after.len(), 1, "the schema edit discarded a live finding");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_ne!(
+            after[0].vault_schema_fingerprint, before[0].vault_schema_fingerprint,
+            "the edit did not move the pin, so this proves nothing"
+        );
+        assert!(
+            after[0].generation > before[0].generation,
+            "the finding standing here was never re-derived"
+        );
+        assert_eq!(after[0].detail, before[0].detail);
+
+        // The other envelope: the backend lost the schema's own facts and says
+        // only that the source partition is dirty.
+        edit(
+            &mut attachment,
+            "version: 1\n# edited again\n",
+            norn_fs::Batch::rescan(RescanScope::Schema),
+        );
+
+        let rescanned = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(
+            rescanned.len(),
+            1,
+            "the schema rescan discarded a live finding"
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_ne!(
+            rescanned[0].vault_schema_fingerprint, after[0].vault_schema_fingerprint,
+            "the edit did not move the pin, so this proves nothing"
+        );
+        assert!(
+            rescanned[0].generation > after[0].generation,
+            "the finding standing here was never re-derived"
+        );
+
+        // The same bytes written again are a schema event and not a schema
+        // change: the re-pin discards nothing, so nothing is re-derived.
+        edit(
+            &mut attachment,
+            "version: 1\n# edited again\n",
+            norn_fs::Batch::schema_change(),
+        );
+
+        let again = findings_at(&mut attachment.store, "bad.md");
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].generation, rescanned[0].generation,
+            "a re-pin that changed nothing re-derived the vault"
+        );
         ops.detach(&name, attachment);
     }
 

@@ -81,6 +81,19 @@ impl Batch {
             ..Self::default()
         }
     }
+    /// One settled schema invalidation and no vault path.
+    ///
+    /// This is the fact an edit to the configured schema source carries,
+    /// separated from whatever else the events reporting it touched: a batch
+    /// the coalescer settles for an in-vault schema also names that schema's
+    /// own path among its dirty roots, and one settled for an external source
+    /// names nothing inside the vault at all.
+    pub fn schema_change() -> Self {
+        Self {
+            schema_dirty: true,
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
