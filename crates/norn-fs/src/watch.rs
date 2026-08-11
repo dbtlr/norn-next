@@ -88,6 +88,10 @@ impl Batch {
     /// the coalescer settles for an in-vault schema also names that schema's
     /// own path among its dirty roots, and one settled for an external source
     /// names nothing inside the vault at all.
+    ///
+    /// The batch's fields are private, so this constructor is the one way a
+    /// consumer outside this crate stands the fact up without a coalescer;
+    /// the host's schema-reconcile tests are its present callers.
     pub fn schema_change() -> Self {
         Self {
             schema_dirty: true,

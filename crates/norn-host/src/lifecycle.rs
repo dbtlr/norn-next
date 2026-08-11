@@ -832,8 +832,11 @@ fn schedule_due_detach<A: SnapshotSource>(
 ///
 /// A claim holds the entry's gate for as long as it lasts, so a demand raised
 /// against a claimed entry records its lease and schedules nothing. Every path
-/// that ends a claim answers those leases here, which is what makes the claim's
-/// own completion the moment the demand is honored rather than some later one.
+/// that ends a claim without a terminal verdict answers those leases here,
+/// which is what makes the claim's own completion the moment the demand is
+/// honored rather than some later one. A job that fails terminally publishes
+/// its refusal or park instead and deliberately schedules nothing: the held
+/// lease's completion is the caller's handle on that outcome.
 /// The job is [`DemandedWork::owed_by`]'s, which is the one [`Host::demand`]
 /// schedules too: what the entry needs is the same fact at either door.
 ///
@@ -1617,7 +1620,7 @@ impl<O: EntryOps> Host<O> {
 
     /// Where one entry stands, and nothing where the host serves no such name.
     ///
-    /// The label is [`EntryState::published_trust`]'s, which is what keeps this
+    /// The label is `EntryState::published_trust`'s, which is what keeps this
     /// surface from contradicting the one a lease answers with: an entry a
     /// duplicate root has parked refuses every demand raised over it, and this
     /// says so rather than reporting the settled label underneath the park.
