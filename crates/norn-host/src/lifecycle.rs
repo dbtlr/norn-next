@@ -2048,6 +2048,13 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 /// one. A leg still standing at the entry's own epoch is not that: it published
 /// its verdict under its own claim and scheduled whatever follows it there, and
 /// a terminal failure among those verdicts restarts no coverage of its own.
+///
+/// The epoch is the whole of that separation, and it carries it because a leg
+/// publishes a verdict only while standing at the entry's own epoch: every arm
+/// of [`run_job_inner`] reads that epoch before it writes one. A leg reaching
+/// the schedule below published none, so what the lease is answered with there
+/// is work the entry still owes rather than coverage restarted over a verdict
+/// already given.
 fn end_job_leg<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -2833,6 +2840,7 @@ mod tests {
         detaches: AtomicUsize,
         recovers: AtomicUsize,
         reconciles: AtomicUsize,
+        terminal_attach: std::sync::atomic::AtomicBool,
         terminal_recover: std::sync::atomic::AtomicBool,
         terminal_reconcile: std::sync::atomic::AtomicBool,
         environmental_recover: std::sync::atomic::AtomicBool,
@@ -2923,6 +2931,11 @@ mod tests {
             if self.block_attach.load(Ordering::SeqCst) {
                 self.attach_started.store(true, Ordering::SeqCst);
                 wait_for_release("attach_release", &self.attach_release);
+            }
+            if self.terminal_attach.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::WatcherTerminal(WatchError::Backend(
+                    "lost".into(),
+                )));
             }
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -6972,6 +6985,56 @@ mod tests {
             "the lease waited on a second demand for the acquisition it was owed"
         );
         assert_eq!(lease.completion(), Demand::State(TrustState::Ready));
+        drop((lease, host));
+    }
+
+    /// The other arm of the same epilogue: a leg that ends still standing at
+    /// the entry's own epoch schedules nothing for the lease standing over it,
+    /// whatever that lease is owed.
+    ///
+    /// The attach below fails terminally, which leaves the entry untrusted
+    /// holding no coverage and on no park — the shape
+    /// [`DemandedWork::owed_by`] answers with another attach, and the one
+    /// [`schedule_demanded_work`] admits. What holds the acquisition back is
+    /// the epoch alone: a terminal failure restarts no coverage of its own,
+    /// and a fresh demand is what the entry waits for.
+    ///
+    /// The lease is held across the wait. Dropping it before the leg ends
+    /// takes the demand out of the entry, and with it the thing this rules
+    /// out.
+    #[test]
+    fn a_lease_held_across_a_terminal_attach_does_not_re_acquire_coverage() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        ops.terminal_attach.store(true, Ordering::SeqCst);
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, backend_lost());
+        settle();
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the terminally failed attach acquired coverage again on its own"
+        );
+        assert_eq!(
+            host.state(&name),
+            Some(backend_lost()),
+            "the entry moved off the failure nothing addressed"
+        );
+        assert!(
+            entry_park(&host, &name).is_none(),
+            "the entry stands on a park, so the epoch is not what held the \
+             acquisition back"
+        );
+
+        drop(lease);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the demand that followed the failure acquired nothing"
+        );
         drop((lease, host));
     }
 
