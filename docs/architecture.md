@@ -791,11 +791,13 @@ upgrade is a migration of derived state.
 carries everything derivation- and validation-shaping, exclusion paths included, and its
 fingerprint is the invalidation key for the schema-dependent derived tables. The operational
 config file carries the rest, and a change to it may never require re-derivation. Every
-schema change converges on one path — re-read, atomic re-pin, re-derivation of exactly the
+schema change converges on one path — re-read, atomic re-pin, re-derivation of the
 schema-keyed tables — whether it arrives as a hand edit the watcher observes or through a
-future verb. The re-pin discards the schema-keyed rows and names no paths, so the
-re-derivation that records them again is the vault-wide one; it writes nothing outside those
-tables, because a document whose bytes did not move is not re-derived.
+future verb, and it invalidates nothing outside those tables. The re-pin discards the
+schema-keyed rows and names no paths, so the re-derivation that records them again is the
+vault-wide walk. That walk is hash-authoritative: it reads every path no document row stands
+at — which is every path a finding stands at — and beyond the schema-keyed rows it re-derives
+only a document that drifted since it was last derived, which any reconcile owed anyway.
 
 **Mutation — everything is a plan.**
 
