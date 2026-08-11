@@ -269,6 +269,53 @@ fn a_dangling_ancestor_refuses_rather_than_reading_as_absent() {
     unlink(dirs.config_dir());
 }
 
+/// A link's own name can be stat'd while its target cannot: the link sits in
+/// a directory this process can search, and what it points at sits under one
+/// it cannot. That failure is not absence, so it must not be reported as a
+/// link to nothing — it is the machine refusing to answer, reported as
+/// itself.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: locking a directory to construct an unreadable target.
+fn a_link_to_an_unsearchable_target_reports_the_stat_failure_rather_than_dangling() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new("unsearchable-target");
+    let dirs = scratch.dirs();
+    let config = scratch.make_config_dir();
+
+    let locked = config.join("locked");
+    std::fs::create_dir(&locked).expect("a directory to lock");
+    let target = locked.join("target");
+    std::fs::write(&target, b"bytes").expect("a target file");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("locking the directory");
+
+    // A credential that bypasses directory modes (root, most commonly) cannot
+    // construct the divergence this case pins; nothing here would tell it
+    // apart from a link that resolves.
+    if std::fs::metadata(&target).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("restoring the directory mode");
+        return;
+    }
+
+    for (which, path) in both_files(&scratch) {
+        link(&target, &path);
+        let error = read_either(which, dirs).expect_err("a link whose target is unsearchable");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "resolving the target of"
+            ),
+            "the {which} file: {error}"
+        );
+        unlink(&path);
+    }
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+        .expect("restoring the directory mode");
+}
+
 fn read_either(which: &str, dirs: &ConfigDirs) -> Result<(), ConfigError> {
     match which {
         "registry" => registry::read(dirs).map(|_| ()),
