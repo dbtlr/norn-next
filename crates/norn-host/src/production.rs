@@ -3215,6 +3215,9 @@ mod tests {
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         attachment.subscription.take();
         assert!(matches!(poll_subscription(&mut attachment), Ok(None)));
+        // Poll drains the heal batch before consulting the subscription, so any
+        // heal observation of this setup write is not this assertion's subject.
+        attachment.heal_observed = norn_fs::Batch::default();
         assert!(matches!(ops.poll(&name, &mut attachment), Ok(None)));
     }
 
