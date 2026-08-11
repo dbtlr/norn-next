@@ -2039,6 +2039,15 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 /// Coverage the leg still holds ends with it, and reaches the ops before that
 /// gate goes back: work scheduled against an entry whose resources are still
 /// going back is work running beside them.
+///
+/// The work an outstanding demand lease is owed is scheduled where such a claim
+/// ends. The entry accounts for no coverage once this leg's has gone to the
+/// ops, and a watcher poll passes over an entry holding none, so a lease left
+/// standing here is one no later dispatcher tick reaches: the claim's own end
+/// is the moment the demand is honored, as it is at every other site that ends
+/// one. A leg still standing at the entry's own epoch is not that: it published
+/// its verdict under its own claim and scheduled whatever follows it there, and
+/// a terminal failure among those verdicts restarts no coverage of its own.
 fn end_job_leg<O: EntryOps>(
     shared: &Arc<Shared<O>>,
     entry: &Arc<Entry<O::Attachment>>,
@@ -2075,6 +2084,10 @@ fn end_job_leg<O: EntryOps>(
         }
         if !state.claim.stands_at(epoch) {
             state.claim.release();
+            if schedule_demanded_work(&mut state, name).is_some() {
+                drop(state);
+                let _ = dispatch_pending(shared, entry);
+            }
         }
     }
 }
@@ -6902,6 +6915,64 @@ mod tests {
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A job leg the entry has moved past ends the same way a superseded poll
+    /// does: the coverage it took goes to [`EntryOps::detach`], the claim goes
+    /// back to the entry, and the lease standing against the entry by then is
+    /// scheduled there. The entry holds no coverage once the leg's is back, so
+    /// a watcher poll passes over it and no later tick reaches the lease.
+    ///
+    /// The invalidator is an identity refusal, which parks the entry and leaves
+    /// the coverage the reconcile is holding to that leg's end. The demand
+    /// below withdraws the park and asks for the recovery the refusal left the
+    /// entry owing, so the lease it returns is raised against an entry that
+    /// owes work and has a leg in flight over it.
+    #[test]
+    fn a_superseded_job_leg_gives_the_entry_back_and_schedules_the_lease_on_it() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        // Watcher facts schedule the reconcile, and blocking it is what holds
+        // the entry's coverage out with a job leg.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
+        assert!(
+            refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
+            "the refusal raised no park"
+        );
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        assert!(
+            entry_park(&host, &name).is_none(),
+            "the demand left the registry's park standing over the entry"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "a lease raised under a live job leg scheduled work against it"
+        );
+
+        ops.block_reconcile.store(false, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the superseded leg kept the coverage it took"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the lease waited on a second demand for the acquisition it was owed"
+        );
+        assert_eq!(lease.completion(), Demand::State(TrustState::Ready));
+        drop((lease, host));
     }
 
     /// An invalidation takes the work scheduled against the poll it moves past.
