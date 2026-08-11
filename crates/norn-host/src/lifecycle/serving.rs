@@ -16,8 +16,14 @@
 //! Joining while the host runs carries a classification with it, and that is
 //! the lifecycle's own move rather than this module's: a set knows which roots
 //! it holds, and whether two of them are one root is a filesystem reading taken
-//! against the entries a refusal then acts on. The registration verbs a product
-//! surface offers land on that move; these two are what it is built from.
+//! against the entries a refusal then acts on. The registration verbs Layer
+//! 3's product surface offers land on that move; these two are what it is
+//! built from.
+//!
+//! The pair is dormant until those verbs exist. Startup and the lifecycle's
+//! own join are what reach [`ServingSet::insert`], [`ServingSet::remove`] has
+//! no caller outside this crate's own cases, and nothing above this crate
+//! reaches either.
 //!
 //! [`Host::new`]: crate::Host::new
 
@@ -218,7 +224,8 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// lock does.
     // Insertion is on the startup path and removal has no caller in this crate
     // outside its own cases, so the allow is what says the seam is built and
-    // waiting for the registration verb that calls it rather than unfinished.
+    // waiting for the registration verb Layer 3's product surface offers to
+    // call it rather than unfinished.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remove(&self, name: &VaultName) -> Result<(), ServingRefusal> {
         let mut entries = self.entries.write().expect("serving set poisoned");
