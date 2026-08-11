@@ -314,9 +314,12 @@ fn dangling_ancestor(path: &Path) -> Result<(), ConfigError> {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return match std::fs::metadata(ancestor) {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(ConfigError::DanglingSymlink {
-                        path: ancestor.to_path_buf(),
-                    }),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Err(ConfigError::DanglingSymlink {
+                            path: ancestor.to_path_buf(),
+                        })
+                    }
+                    Err(error) => Err(io("resolving the target of", ancestor, error)),
                 };
             }
             Ok(_) => return Ok(()),

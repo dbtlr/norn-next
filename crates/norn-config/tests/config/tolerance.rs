@@ -269,6 +269,30 @@ fn a_dangling_ancestor_refuses_rather_than_reading_as_absent() {
     unlink(dirs.config_dir());
 }
 
+/// A directory locked to `0o000` for the length of a case, restored on drop
+/// so an assertion failure midway through never leaves an unsearchable
+/// directory behind for the scratch tree's own cleanup to trip over.
+#[allow(clippy::disallowed_types)] // Harness scaffolding: the directory a case locks down.
+struct LockedDir(std::path::PathBuf);
+
+impl LockedDir {
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: locking a directory to construct an unreadable target.
+    fn lock(path: std::path::PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+            .expect("locking the directory");
+        LockedDir(path)
+    }
+}
+
+impl Drop for LockedDir {
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: restoring what the case locked.
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 /// A link's own name can be stat'd while its target cannot: the link sits in
 /// a directory this process can search, and what it points at sits under one
 /// it cannot. That failure is not absence, so it must not be reported as a
@@ -277,25 +301,21 @@ fn a_dangling_ancestor_refuses_rather_than_reading_as_absent() {
 #[test]
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: locking a directory to construct an unreadable target.
 fn a_link_to_an_unsearchable_target_reports_the_stat_failure_rather_than_dangling() {
-    use std::os::unix::fs::PermissionsExt;
-
     let scratch = Scratch::new("unsearchable-target");
     let dirs = scratch.dirs();
     let config = scratch.make_config_dir();
 
-    let locked = config.join("locked");
-    std::fs::create_dir(&locked).expect("a directory to lock");
-    let target = locked.join("target");
+    let locked_path = config.join("locked");
+    std::fs::create_dir(&locked_path).expect("a directory to lock");
+    let target = locked_path.join("target");
     std::fs::write(&target, b"bytes").expect("a target file");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
-        .expect("locking the directory");
+    let locked = LockedDir::lock(locked_path);
 
     // A credential that bypasses directory modes (root, most commonly) cannot
     // construct the divergence this case pins; nothing here would tell it
     // apart from a link that resolves.
     if std::fs::metadata(&target).is_ok() {
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
-            .expect("restoring the directory mode");
+        drop(locked);
         return;
     }
 
@@ -309,11 +329,74 @@ fn a_link_to_an_unsearchable_target_reports_the_stat_failure_rather_than_danglin
             ),
             "the {which} file: {error}"
         );
+
+        let error = mutate_either(which, dirs)
+            .expect_err("a mutation through a link whose target is unsearchable");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "resolving the target of"
+            ),
+            "the {which} file: {error}"
+        );
+
         unlink(&path);
     }
 
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
-        .expect("restoring the directory mode");
+    drop(locked);
+}
+
+/// The same failure, one directory up: the config directory itself is a link,
+/// and its target sits under a directory this process cannot search.
+///
+/// The two directions reach the stat failure by different routes and even
+/// disagree on which call names it — a read resolves the whole file path (or,
+/// for the token file, its directory's mode) in one call and never reaches the
+/// ancestor walk, while a mutation asks about the ancestor directly — but
+/// neither direction may report it as a dangling link.
+#[test]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: locking a directory to construct an unreadable target.
+fn a_dangling_ancestor_check_reports_the_stat_failure_rather_than_dangling() {
+    let scratch = Scratch::new("unsearchable-ancestor-target");
+    let dirs = scratch.dirs();
+
+    let locked_path = scratch.config_base().join("locked");
+    std::fs::create_dir(&locked_path).expect("a directory to lock");
+    let target = locked_path.join("real");
+    std::fs::create_dir(&target).expect("a target directory");
+    link(&target, dirs.config_dir());
+    let locked = LockedDir::lock(locked_path);
+
+    // A credential that bypasses directory modes (root, most commonly) cannot
+    // construct the divergence this case pins; nothing here would tell it
+    // apart from a link that resolves.
+    if std::fs::metadata(&target).is_ok() {
+        drop(locked);
+        unlink(dirs.config_dir());
+        return;
+    }
+
+    for which in ["registry", "tokens"] {
+        let error =
+            read_either(which, dirs).expect_err("a config directory whose target is unsearchable");
+        assert!(
+            matches!(&error, ConfigError::Io { .. }),
+            "the {which} file was refused as something other than a stat failure: {error}"
+        );
+
+        let error = mutate_either(which, dirs)
+            .expect_err("a mutation under a config directory whose target is unsearchable");
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Io { operation, .. } if *operation == "resolving the target of"
+            ),
+            "the {which} file: {error}"
+        );
+    }
+
+    drop(locked);
+    unlink(dirs.config_dir());
 }
 
 fn read_either(which: &str, dirs: &ConfigDirs) -> Result<(), ConfigError> {
