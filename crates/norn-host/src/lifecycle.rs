@@ -1295,8 +1295,8 @@ fn park_on_current_classification<O: EntryOps>(shared: &Arc<Shared<O>>, name: &V
 /// still stands under are retired by the acquisitions the remaining names'
 /// demands schedule.
 ///
-/// This is the seam Layer 3's registration verb lands on; nothing in this
-/// crate outside its own cases reaches it yet.
+/// This is the seam the registration verb Layer 3's product surface offers
+/// lands on; nothing in this crate outside its own cases reaches it yet.
 #[cfg_attr(not(test), allow(dead_code))]
 fn serve<O: EntryOps>(
     shared: &Arc<Shared<O>>,
@@ -9435,8 +9435,8 @@ mod tests {
     ///
     /// The seam under these cases is [`ServingSet::insert`] and
     /// [`ServingSet::remove`]. Nothing outside this crate reaches either: what
-    /// Layer 3 offers is a registration verb, and these two moves are what such
-    /// a verb lands on.
+    /// Layer 3's product surface offers is a registration verb, and these two
+    /// moves are what such a verb lands on.
     mod serving_set {
         use super::*;
         use crate::lifecycle::serving::ServingRefusal;
