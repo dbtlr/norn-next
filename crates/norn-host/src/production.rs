@@ -3223,14 +3223,17 @@ mod tests {
 
     /// A poll drains whatever the heal batch holds before it ever consults the
     /// subscription, and draining takes the batch: the next poll reports no
-    /// facts even though the subscription remains attached.
+    /// facts.
     #[test]
     fn a_poll_reports_the_heal_batch_and_drains_it_exactly_once() {
         let f = Fixture::new("heal-batch-handoff");
-        fs::write(f.vault().join("note.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        // The live subscription is not this test's subject: the heal batch is
+        // seeded by hand, and a real watcher event would race the final
+        // no-facts assertion.
+        attachment.subscription.take();
         attachment.heal_observed = norn_fs::Batch::rescan(RescanScope::Vault);
 
         let batch = ops.poll(&name, &mut attachment).unwrap();
