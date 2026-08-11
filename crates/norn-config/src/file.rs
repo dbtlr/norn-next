@@ -280,15 +280,23 @@ fn open_existing(
 /// The refusal a symlink at a data file's own name earns, precise about which
 /// kind it is: a link to nothing is state that moved, and a link to something
 /// is a file this crate would read from one place and replace in another.
+///
+/// Resolving the link can fail for a reason that is neither of those: the
+/// target sits under a directory this process cannot search. That failure is
+/// reported as itself rather than folded into "dangling", which would tell a
+/// permissions problem it is a moved-state problem.
 #[allow(clippy::disallowed_methods)] // Config-directory bytes: this crate owns them.
 fn symlink_refusal(path: &Path) -> ConfigError {
     match std::fs::metadata(path) {
         Ok(_) => ConfigError::SymlinkedFile {
             path: path.to_path_buf(),
         },
-        Err(_) => ConfigError::DanglingSymlink {
-            path: path.to_path_buf(),
-        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ConfigError::DanglingSymlink {
+                path: path.to_path_buf(),
+            }
+        }
+        Err(error) => io("resolving the target of", path, error),
     }
 }
 
@@ -306,13 +314,17 @@ fn dangling_ancestor(path: &Path) -> Result<(), ConfigError> {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return match std::fs::metadata(ancestor) {
                     Ok(_) => Ok(()),
-                    Err(_) => Err(ConfigError::DanglingSymlink {
-                        path: ancestor.to_path_buf(),
-                    }),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Err(ConfigError::DanglingSymlink {
+                            path: ancestor.to_path_buf(),
+                        })
+                    }
+                    Err(error) => Err(io("resolving the target of", ancestor, error)),
                 };
             }
             Ok(_) => return Ok(()),
-            Err(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io("reading the type of", ancestor, error)),
         }
     }
     Ok(())
@@ -505,10 +517,11 @@ fn write_atomically(
     // A rename onto a link replaces the link rather than what it points at, so
     // the writer and the reader would disagree about where the state is. Both
     // directions refuse instead.
-    if let Ok(metadata) = std::fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(symlink_refusal(path));
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => return Err(symlink_refusal(path)),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io("reading the type of", path, error)),
     }
 
     let temporary = directory.join(format!(
