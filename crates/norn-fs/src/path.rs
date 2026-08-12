@@ -215,7 +215,11 @@ impl NormalizedPath {
     /// Containment is answered on the comparison key, so a root's case behavior
     /// decides it exactly as it decides equality, and only whole components
     /// match: `notes-archive` lies beneath `notes` no more than a sibling does.
-    pub fn starts_with(&self, root: &Self) -> bool {
+    ///
+    /// In-crate: [`Exclusions`](crate::Exclusions) is the exported way to ask
+    /// what a root contains, so a host cannot spell a second answer out of this
+    /// primitive.
+    pub(crate) fn starts_with(&self, root: &Self) -> bool {
         let (path, prefix) = (self.key.as_bytes(), root.key.as_bytes());
         path.starts_with(prefix) && matches!(path.get(prefix.len()), None | Some(b'/'))
     }
