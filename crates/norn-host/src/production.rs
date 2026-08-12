@@ -8,7 +8,7 @@ use norn_config::registry::{Entry as Registration, PollBackend};
 use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
-    Subscription, WatchError, try_acquire, walk, watch, watch_polling,
+    Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
@@ -244,15 +244,13 @@ impl ProductionEntryOps {
 /// this entry's placement puts them, and the schema when it is a file in the
 /// vault.
 ///
-/// **Which mechanism covers which walk.** A walk rooted at the vault root has a
-/// built-in mechanism root — the fallback dot-directory — and skips it without
-/// being told. That check is relative to the *walk's* root, and so are the
-/// exclusions handed in, so neither fires on its own for a walk rooted deeper: a
-/// watcher event on `<vault>/.norn` is not mechanism-suppressed, and the subtree
-/// heal it schedules is rooted there, where `.norn/tmp` is a plain child. The
-/// fallback-root entry is what cuts that walk, at one node, before it reaches
-/// any maintainership's home. Naming one home instead would let the same walk
-/// descend into every other home over this root.
+/// **What these roots mean.** Every entry is vault-relative, and `norn-fs`
+/// answers membership against the vault root whatever subtree a walk is narrowed
+/// to. A fallback home is excluded by the **fallback root** rather than by
+/// itself, so one entry cuts every maintainership's home under it: naming one
+/// home would leave the subtree heal a watcher event on `<vault>/.norn`
+/// schedules free to descend into every other home over this root and read
+/// staged bytes as documents.
 ///
 /// In [`Placement::DataRoot`] the home is outside the vault entirely and nothing
 /// is excluded for it — unless this vault's root happens to contain the data
@@ -508,7 +506,7 @@ fn heal_documents(
             index = 0;
             exhausted = stored.is_empty();
         }
-        let fs_path = next_nameable(&mut files, None, &mut pending)?;
+        let fs_path = next_nameable(&mut files, &mut pending)?;
         let db_path = stored.get(index).map(|d| d.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
@@ -564,13 +562,13 @@ fn scoped_increment(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let sensitivity = norn_fs::PathNormalizer::detect(root)
-        .map_err(effect)?
-        .case_sensitivity();
+    let normalizer = norn_fs::PathNormalizer::detect(root).map_err(effect)?;
+    let sensitivity = normalizer.case_sensitivity();
+    let excluded = norn_fs::Exclusions::new(&normalizer, exclusions).map_err(effect)?;
     let mut pending = Pending::new(store, policy.changeset_size);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
-        if is_excluded(path, exclusions) {
+        if excluded.excludes(relative) {
             continue;
         }
         // Both the identity and the range it addresses are read before anything
@@ -700,20 +698,15 @@ fn quarantine_subtree(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let scoped_exclusions = exclusions
-        .iter()
-        .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
-        .map(Path::to_owned)
-        .collect::<Vec<_>>();
-    let walk = walk(&vault_root.join(relative_root), &scoped_exclusions).map_err(effect)?;
+    let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     let mut pending = Pending::new(store, policy.changeset_size);
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
             continue;
         };
-        let path = relative_root.join(file.path().as_path());
-        if !is_markdown(&path) || is_excluded(&path, exclusions) {
+        let path = file.path().as_path().to_owned();
+        if !is_markdown(&path) {
             continue;
         }
         match document_path(&path) {
@@ -762,19 +755,13 @@ fn heal_subtree(
 ) -> Result<(), JobFailure> {
     let prefix = scope.as_str();
     let relative_root = Path::new(prefix);
-    let scoped_exclusions = exclusions
-        .iter()
-        .filter_map(|excluded| excluded.strip_prefix(relative_root).ok())
-        .map(Path::to_owned)
-        .collect::<Vec<_>>();
-    let walk = walk(&vault_root.join(relative_root), &scoped_exclusions).map_err(effect)?;
+    let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
     let order = store_order(sensitivity);
     let mut files = walk
         .filter_map(|fact| match fact {
             Ok(norn_fs::WalkFact::File(file)) => {
-                let full = relative_root.join(file.path().as_path());
-                (is_markdown(&full) && !is_excluded(&full, exclusions)).then_some(Ok(file))
+                is_markdown(file.path().as_path()).then_some(Ok(file))
             }
             Ok(_) => None,
             Err(error) => Some(Err(error)),
@@ -792,7 +779,7 @@ fn heal_subtree(
             index = 0;
             exhausted = stored.is_empty();
         }
-        let fs_path = next_nameable(&mut files, Some(prefix), &mut pending)?;
+        let fs_path = next_nameable(&mut files, &mut pending)?;
         let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
@@ -982,11 +969,10 @@ fn prune_descendants_and_aliases(
 /// bytes name no document quarantined and passed over.
 ///
 /// The iterator is left standing on the file whose spelling comes back, so the
-/// caller reads it after deciding what the merge does with it. `prefix` is the
-/// scope the walk is relative to, and `None` is a walk of the vault root.
+/// caller reads it after deciding what the merge does with it. Every walk names
+/// its files from the vault root, so a scope needs no repair here.
 fn next_nameable<I>(
     files: &mut Peekable<I>,
-    prefix: Option<&str>,
     pending: &mut Pending<'_>,
 ) -> Result<Option<String>, JobFailure>
 where
@@ -994,10 +980,7 @@ where
 {
     loop {
         let spelling = match files.peek() {
-            Some(Ok(file)) => file.path().as_path().to_str().map(|spelling| match prefix {
-                Some(prefix) => format!("{prefix}/{spelling}"),
-                None => spelling.to_owned(),
-            }),
+            Some(Ok(file)) => file.path().as_path().to_str().map(str::to_owned),
             Some(Err(error)) => return Err(effect(error)),
             None => return Ok(None),
         };
@@ -1005,10 +988,7 @@ where
             return Ok(Some(spelling));
         }
         let file = files.next().expect("peeked").map_err(effect)?;
-        let path = match prefix {
-            Some(prefix) => Path::new(prefix).join(file.path().as_path()),
-            None => file.path().as_path().to_owned(),
-        };
+        let path = file.path().as_path().to_owned();
         pending.quarantine(
             &path,
             Quarantine {
@@ -1032,10 +1012,6 @@ fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
         norn_fs::CaseSensitivity::Sensitive => StoredPathOrder::Sensitive,
         norn_fs::CaseSensitivity::Insensitive => StoredPathOrder::AsciiCaseInsensitive,
     }
-}
-
-fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
-    exclusions.iter().any(|excluded| path.starts_with(excluded))
 }
 
 /// The severity a quarantine finding carries. A document the vault holds and
@@ -1398,9 +1374,8 @@ mod tests {
 
     /// **The bar on what a walk is told about shadows.** A fallback home is
     /// excluded by the fallback root, so the entry cuts every maintainership's
-    /// home at one node — including for a walk rooted inside `.norn`, where the
-    /// walk's own built-in mechanism root does not fire and this entry is
-    /// stripped to `tmp`.
+    /// home at one node, and the root is vault-relative so it cuts the same node
+    /// for a walk narrowed to any subtree.
     ///
     /// The forbidden shape is excluding the home itself. A watcher event on
     /// `<vault>/.norn` is not mechanism-suppressed, so the subtree heal it
@@ -1415,10 +1390,11 @@ mod tests {
         let fallback = shadow_exclusion(Placement::VaultFallback, &home, root)
             .expect("a fallback home is inside the vault");
         assert_eq!(fallback, Path::new(norn_fs::FALLBACK));
-        assert_eq!(
-            fallback.strip_prefix(".norn"),
-            Ok(Path::new("tmp")),
-            "a walk rooted at `.norn` is not cut at the fallback root"
+        assert!(
+            home.strip_prefix(root)
+                .expect("a home inside the vault")
+                .starts_with(&fallback),
+            "the excluded root does not cut this placement's home"
         );
 
         assert_eq!(
@@ -2400,6 +2376,118 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["document/body-bytes-not-utf8"]
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The bar on what a scoped heal reads.** Exclusion is a fact about the
+    /// vault, so a heal narrowed to a subtree reads exactly the documents the
+    /// vault heal reads under that subtree.
+    ///
+    /// The forbidden shape is answering membership against the scope. A vault
+    /// directory holding a `.norn/tmp` of its own is ordinary content: the vault
+    /// heal derives it and the watcher reports on it, so a scoped heal that read
+    /// it as the mechanism root would prune live rows the next watcher event
+    /// puts straight back, and the two would trade the vault back and forth.
+    #[test]
+    fn a_scoped_subtree_heal_keeps_the_documents_the_vault_heal_holds_under_it() {
+        let f = Fixture::new("scoped-subtree-mechanism-lookalike");
+        fs::create_dir_all(f.vault().join("folder/.norn/tmp")).unwrap();
+        fs::write(f.vault().join("folder/.norn/tmp/live.md"), "live").unwrap();
+        fs::write(f.vault().join("folder/ok.md"), "ok").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let vault_heal = stored_paths(&mut attachment.store);
+        assert_eq!(vault_heal, ["folder/.norn/tmp/live.md", "folder/ok.md"]);
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "folder"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), vault_heal);
+        ops.detach(&name, attachment);
+    }
+
+    /// **The bar on the other direction.** The vault's own fallback root is cut
+    /// for a scoped heal rooted at its parent, without the host naming it: this
+    /// placement stages outside the vault and still excludes nothing here.
+    ///
+    /// The forbidden shape is a scoped heal reading staged bytes as documents.
+    /// A watcher event on `<vault>/.norn` schedules a heal rooted there, and the
+    /// vault heal holds no row for anything under `.norn/tmp`.
+    #[test]
+    fn a_scoped_subtree_heal_rooted_at_the_mechanism_parent_still_cuts_it() {
+        let f = Fixture::new("scoped-subtree-mechanism-root");
+        let staged = f.vault().join(norn_fs::FALLBACK).join("norn-dev/notes");
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("shadow.md"), "staged bytes").unwrap();
+        fs::write(f.vault().join(".norn/notes.md"), "a document").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            attachment._shadows.placement(),
+            Placement::DataRoot,
+            "this fixture stages outside the vault, so no host root names `.norn/tmp`"
+        );
+        let vault_heal = stored_paths(&mut attachment.store);
+        assert_eq!(vault_heal, [".norn/notes.md"]);
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), ".norn"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), vault_heal);
+        ops.detach(&name, attachment);
+    }
+
+    /// **The bar on a dirty root named through a link.** A watcher backend that
+    /// follows links reports paths through one, and a directory it names is
+    /// still a directory to `path_kind`. The heal it schedules converges on the
+    /// rows the vault heal holds, which under a link is none.
+    ///
+    /// The forbidden shape is deriving documents there. The vault walk enters no
+    /// link, so every such document would be a row the next vault heal prunes,
+    /// and its bytes cannot be read back through the vault root at all — the
+    /// increment would fail the reconcile again on every event for that root.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_subtree_heal_named_through_a_link_reads_what_the_vault_heal_reads() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("scoped-subtree-linked-ancestor");
+        fs::create_dir_all(f.vault().join("real/sub")).unwrap();
+        fs::write(f.vault().join("real/sub/doc.md"), "doc").unwrap();
+        symlink("real", f.vault().join("link")).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let vault_heal = stored_paths(&mut attachment.store);
+        assert_eq!(vault_heal, ["real/sub/doc.md"]);
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "link/sub"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .expect("a dirty root behind a link to converge rather than fail the reconcile");
+
+        assert_eq!(stored_paths(&mut attachment.store), vault_heal);
         ops.detach(&name, attachment);
     }
 

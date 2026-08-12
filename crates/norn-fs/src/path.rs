@@ -162,6 +162,13 @@ impl PathNormalizer {
         self.sensitivity
     }
 
+    /// A normalizer for a root whose case behavior a case states outright,
+    /// so identity rules are judged on both behaviors from any host.
+    #[cfg(test)]
+    pub(crate) fn for_sensitivity(sensitivity: CaseSensitivity) -> Self {
+        Self { sensitivity }
+    }
+
     /// Normalizes a path while retaining its actual access/display spelling.
     pub fn normalize(&self, path: &Path) -> Result<NormalizedPath, PathError> {
         let mut access = PathBuf::new();
@@ -201,6 +208,20 @@ impl NormalizedPath {
     /// The opaque root-scoped comparison and sort key.
     pub(crate) fn comparison_key(&self) -> &OsStr {
         &self.key
+    }
+
+    /// Whether this path is `root` itself or lies beneath it.
+    ///
+    /// Containment is answered on the comparison key, so a root's case behavior
+    /// decides it exactly as it decides equality, and only whole components
+    /// match: `notes-archive` lies beneath `notes` no more than a sibling does.
+    ///
+    /// In-crate: [`Exclusions`](crate::Exclusions) is the exported way to ask
+    /// what a root contains, so a host cannot spell a second answer out of this
+    /// primitive.
+    pub(crate) fn starts_with(&self, root: &Self) -> bool {
+        let (path, prefix) = (self.key.as_bytes(), root.key.as_bytes());
+        path.starts_with(prefix) && matches!(path.get(prefix.len()), None | Some(b'/'))
     }
 }
 
@@ -286,7 +307,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     fn normalizer(sensitivity: CaseSensitivity) -> PathNormalizer {
-        PathNormalizer { sensitivity }
+        PathNormalizer::for_sensitivity(sensitivity)
     }
 
     /// Distinguishes two scratch roots taken in the same process. A clock
@@ -351,6 +372,45 @@ mod tests {
         let lower = paths.normalize(Path::new("notes/a.md")).unwrap();
         assert_eq!(upper, lower);
         assert_ne!(upper.as_path(), lower.as_path());
+    }
+
+    #[test]
+    fn containment_matches_whole_components_under_the_root_scoped_key() {
+        let paths = normalizer(CaseSensitivity::Sensitive);
+        let root = paths.normalize(Path::new("notes")).unwrap();
+        assert!(
+            paths
+                .normalize(Path::new("notes"))
+                .unwrap()
+                .starts_with(&root)
+        );
+        assert!(
+            paths
+                .normalize(Path::new("notes/today.md"))
+                .unwrap()
+                .starts_with(&root)
+        );
+        assert!(
+            !paths
+                .normalize(Path::new("notes-archive/today.md"))
+                .unwrap()
+                .starts_with(&root)
+        );
+        assert!(!root.starts_with(&paths.normalize(Path::new("notes/today.md")).unwrap()));
+    }
+
+    #[test]
+    fn containment_folds_case_exactly_where_equality_does() {
+        let sensitive = normalizer(CaseSensitivity::Sensitive);
+        let insensitive = normalizer(CaseSensitivity::Insensitive);
+        for paths in [&sensitive, &insensitive] {
+            let root = paths.normalize(Path::new("Notes")).unwrap();
+            let under = paths.normalize(Path::new("notes/today.md")).unwrap();
+            assert_eq!(
+                under.starts_with(&root),
+                paths.case_sensitivity() == CaseSensitivity::Insensitive
+            );
+        }
     }
 
     #[test]

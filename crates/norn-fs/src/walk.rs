@@ -12,8 +12,12 @@
 //! are roots, not schema rules, and Norn's cross-device shadow fallback is the
 //! one built-in mechanism root. Ordinary dotfiles and dot-directories belong to
 //! the vault and are walked normally.
+//!
+//! A walk is always identified by the vault root, whether it traverses the whole
+//! vault or one subtree of it. Paths, exclusion membership and link containment
+//! are therefore vault-relative in both, and a subtree walk of `notes` reads the
+//! same files the vault walk reads under `notes`.
 
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -26,10 +30,11 @@ use std::time::SystemTime;
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, readlinkat, statat};
 
+use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
 use crate::path::{NormalizedPath, NormalizerError, PathError, PathNormalizer};
-use crate::shadow::{FALLBACK, is_shadow_name};
+use crate::shadow::is_shadow_name;
 
 /// Begins a deterministic streaming walk of `root`.
 ///
@@ -37,33 +42,119 @@ use crate::shadow::{FALLBACK, is_shadow_name};
 /// and opens only the first directory frontier. Later directory failures arrive
 /// from the iterator at their deterministic position.
 pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
+    let mut walk = open_vault(root, exclusions)?;
+    let first = DirectoryFrontier::new(walk.root_fd.clone(), Path::new(""));
+    walk.stack.push(first);
+    Ok(walk)
+}
+
+/// Begins a deterministic streaming walk of the `relative` subtree of `root`.
+///
+/// The walk is the vault's, narrowed to one subtree: facts carry vault-relative
+/// paths, exclusion roots are the vault's own, and a link's containment is
+/// judged against the vault root. A subtree the vault walk does not descend to
+/// is not entered and yields exactly the skip the vault walk states at the
+/// component that stops it.
+pub fn walk_subtree(
+    root: &Path,
+    relative: &Path,
+    exclusions: &[PathBuf],
+) -> Result<Walk, WalkError> {
+    let mut walk = open_vault(root, exclusions)?;
+    let subtree = walk
+        .normalizer
+        .normalize(relative)
+        .map_err(|source| WalkError::Path {
+            path: relative.to_owned(),
+            source,
+        })?;
+    if let Some(reason) = walk.exclusions.reason(&subtree) {
+        walk.skipped = Some(SkipFact {
+            path: subtree,
+            reason: reason.into(),
+        });
+        return Ok(walk);
+    }
+    match open_subtree(&walk, &subtree)? {
+        Frontier::Open(fd) => walk
+            .stack
+            .push(DirectoryFrontier::new(fd, subtree.as_path())),
+        Frontier::Skipped(skipped) => walk.skipped = Some(skipped),
+    }
+    Ok(walk)
+}
+
+/// The subtree frontier, or the skip that stands in place of it.
+enum Frontier {
+    Open(Arc<OwnedFd>),
+    Skipped(SkipFact),
+}
+
+/// Descends to the subtree one component at a time, deciding each component the
+/// way the vault walk decides the entries it descends through: a name the vault
+/// walk skips ends the descent at that name's own skip, so a subtree walk reads
+/// nothing under a name the vault walk never enters.
+///
+/// A single multi-component open would resolve the intermediate names in the
+/// kernel, where `O_NOFOLLOW` binds only the last of them.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
+fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
+    let mut directory = walk.root_fd.clone();
+    let mut traversed = PathBuf::new();
+    for component in subtree.as_path().components() {
+        let name = component.as_os_str();
+        traversed.push(name);
+        let access = walk.root.join(&traversed);
+        let path = walk
+            .normalizer
+            .normalize(&traversed)
+            .expect("a leading run of a normalized path's components is normalized");
+        if is_shadow_name(name) {
+            return Ok(Frontier::Skipped(SkipFact {
+                path,
+                reason: SkipReason::Shadow,
+            }));
+        }
+        let metadata = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| environment_errno("stating", &access, source))?;
+        if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) == EntryKind::Symlink
+        {
+            let kind = classify_link(
+                &walk.root_fd,
+                path.as_path(),
+                &directory,
+                name,
+                &walk.normalizer,
+            )?;
+            return Ok(Frontier::Skipped(SkipFact {
+                path,
+                reason: SkipReason::SymbolicLink(kind),
+            }));
+        }
+        directory = Arc::new(
+            openat(&directory, name, directory_flags(), Mode::empty())
+                .map_err(|source| environment_errno("opening directory", &access, source))?,
+        );
+    }
+    Ok(Frontier::Open(directory))
+}
+
+/// The vault-identified walk state both entry points start from, with no
+/// frontier open yet.
+fn open_vault(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
     let normalizer = PathNormalizer::detect(root).map_err(WalkError::Normalizer)?;
-    let exclusions = exclusions
-        .iter()
-        .map(|path| {
-            normalizer
-                .normalize(path)
-                .map_err(|source| WalkError::Path {
-                    path: path.clone(),
-                    source,
-                })
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let mechanism = normalizer
-        .normalize(Path::new(FALLBACK))
-        .expect("the fixed mechanism root is relative and normalized");
+    let exclusions = Exclusions::new(&normalizer, exclusions)?;
     let root_fd = Arc::new(
         open(root, directory_flags(), Mode::empty())
             .map_err(|source| environment_errno("opening directory", root, source))?,
     );
-    let first = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
     Ok(Walk {
         root: Arc::new(root.to_owned()),
         root_fd,
         normalizer,
         exclusions,
-        mechanism,
-        stack: vec![first],
+        stack: Vec::new(),
+        skipped: None,
     })
 }
 
@@ -75,33 +166,32 @@ pub struct Walk {
     root: Arc<PathBuf>,
     root_fd: Arc<OwnedFd>,
     normalizer: PathNormalizer,
-    exclusions: BTreeSet<NormalizedPath>,
-    mechanism: NormalizedPath,
+    exclusions: Exclusions,
     stack: Vec<DirectoryFrontier>,
+    skipped: Option<SkipFact>,
 }
 
 impl Iterator for Walk {
     type Item = Result<WalkFact, WalkError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(skipped) = self.skipped.take() {
+            return Some(Ok(WalkFact::Skipped(skipped)));
+        }
         loop {
             let frontier = self.stack.last_mut()?;
-            let pending = match frontier.next_pending(
-                &self.root_fd,
-                &self.normalizer,
-                &self.exclusions,
-                &self.mechanism,
-            ) {
-                Ok(Some(pending)) => pending,
-                Ok(None) => {
-                    self.stack.pop();
-                    continue;
-                }
-                Err(error) => {
-                    self.stack.clear();
-                    return Some(Err(error));
-                }
-            };
+            let pending =
+                match frontier.next_pending(&self.root_fd, &self.normalizer, &self.exclusions) {
+                    Ok(Some(pending)) => pending,
+                    Ok(None) => {
+                        self.stack.pop();
+                        continue;
+                    }
+                    Err(error) => {
+                        self.stack.clear();
+                        return Some(Err(error));
+                    }
+                };
 
             if let Some(reason) = pending.skip {
                 return Some(Ok(WalkFact::Skipped(SkipFact {
@@ -307,6 +397,15 @@ pub enum SkipReason {
     SpecialFile(FileKind),
 }
 
+impl From<Excluded> for SkipReason {
+    fn from(excluded: Excluded) -> Self {
+        match excluded {
+            Excluded::Host => Self::HostExclusion,
+            Excluded::Mechanism => Self::Mechanism,
+        }
+    }
+}
+
 /// What an unsupported symbolic link was observed to name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkKind {
@@ -348,6 +447,15 @@ pub enum WalkError {
         path: PathBuf,
         source: io::Error,
     },
+}
+
+impl From<ExclusionError> for WalkError {
+    fn from(error: ExclusionError) -> Self {
+        Self::Path {
+            path: error.path,
+            source: error.source,
+        }
+    }
 }
 
 impl fmt::Display for WalkError {
@@ -430,8 +538,7 @@ impl DirectoryFrontier {
         &mut self,
         root_fd: &Arc<OwnedFd>,
         normalizer: &PathNormalizer,
-        exclusions: &BTreeSet<NormalizedPath>,
-        mechanism: &NormalizedPath,
+        exclusions: &Exclusions,
     ) -> Result<Option<Pending>, WalkError> {
         if let Some(item) = self.page.next() {
             return Ok(Some(item));
@@ -446,7 +553,6 @@ impl DirectoryFrontier {
             self.cursor.as_deref(),
             normalizer,
             exclusions,
-            mechanism,
         ) {
             Ok(page) => page,
             Err(error) => {
@@ -472,8 +578,7 @@ fn directory_page(
     relative: &Path,
     cursor: Option<&[u8]>,
     normalizer: &PathNormalizer,
-    exclusions: &BTreeSet<NormalizedPath>,
-    mechanism: &NormalizedPath,
+    exclusions: &Exclusions,
 ) -> Result<(Vec<Pending>, bool), WalkError> {
     let display = relative;
     let entries = Dir::read_from(directory)
@@ -502,11 +607,7 @@ fn directory_page(
             classify_file_type(entry.file_type())
         };
         let mut sort_key = path.comparison_key().as_bytes().to_vec();
-        if kind == EntryKind::Directory
-            && !exclusions.contains(&path)
-            && path != *mechanism
-            && !is_shadow_name(&name)
-        {
+        if kind == EntryKind::Directory && !exclusions.excludes(&path) && !is_shadow_name(&name) {
             sort_key.push(b'/');
         }
         if cursor.is_some_and(|cursor| sort_key.as_slice() <= cursor) {
@@ -549,10 +650,8 @@ fn directory_page(
                 ),
             ));
         }
-        let skip = if exclusions.contains(&path) {
-            Some(SkipReason::HostExclusion)
-        } else if path == *mechanism {
-            Some(SkipReason::Mechanism)
+        let skip = if let Some(reason) = exclusions.reason(&path) {
+            Some(reason.into())
         } else if is_shadow_name(&name) {
             Some(SkipReason::Shadow)
         } else if kind == EntryKind::Symlink {
@@ -1028,13 +1127,11 @@ mod tests {
         let normalizer = PathNormalizer::detect(&scratch.at("")).expect("normalizer");
         let root_fd =
             Arc::new(open(scratch.at(""), directory_flags(), Mode::empty()).expect("root fd"));
-        let mechanism = normalizer
-            .normalize(Path::new(FALLBACK))
-            .expect("mechanism");
+        let exclusions = Exclusions::new(&normalizer, &[]).expect("no host roots");
         let mut frontier = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
         let mut count = 0;
         while frontier
-            .next_pending(&root_fd, &normalizer, &BTreeSet::new(), &mechanism)
+            .next_pending(&root_fd, &normalizer, &exclusions)
             .expect("page")
             .is_some()
         {
@@ -1055,6 +1152,127 @@ mod tests {
             !facts
                 .iter()
                 .any(|(_, reason)| matches!(reason, Some(SkipReason::Mechanism)))
+        );
+    }
+
+    /// **The bar on a subtree walk.** Its facts are the vault walk's facts under
+    /// that subtree, spelled from the vault root, so a caller can compare them
+    /// against vault-relative state without repairing them first.
+    ///
+    /// The forbidden shape is a walk identified by where it starts. A subtree
+    /// named `.norn` holding `tmp`, or any directory holding a `.norn/tmp` of
+    /// its own, is vault content: reading it as the mechanism root would drop
+    /// live documents from an inventory the vault walk includes.
+    #[test]
+    fn a_subtree_walk_yields_vault_relative_facts_and_the_vault_s_own_exclusions() {
+        let scratch = Scratch::new("walk-subtree-vault-relative");
+        scratch.directory("vault/notes/.norn/tmp");
+        scratch.place("notes/.norn/tmp/theirs.md", b"ordinary nested content");
+        scratch.place("notes/today.md", b"today");
+        scratch.place("outside.md", b"outside");
+
+        let facts = paths(walk_subtree(&scratch.at(""), Path::new("notes"), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![
+                (PathBuf::from("notes/.norn/tmp/theirs.md"), None),
+                (PathBuf::from("notes/today.md"), None),
+            ]
+        );
+    }
+
+    /// **The bar on the built-in root under a subtree walk.** The mechanism root
+    /// hangs from the vault root wherever a walk starts, so a subtree walk of
+    /// `.norn` cuts `tmp` without being told about it.
+    #[test]
+    fn a_subtree_walk_cuts_the_vault_s_mechanism_root() {
+        let scratch = Scratch::new("walk-subtree-mechanism");
+        scratch.directory("vault/.norn/tmp/deep");
+        scratch.place(".norn/tmp/deep/staged", b"staged bytes");
+        scratch.place(".norn/notes.md", b"a document under a dot directory");
+
+        let facts = paths(walk_subtree(&scratch.at(""), Path::new(".norn"), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![
+                (PathBuf::from(".norn/notes.md"), None),
+                (PathBuf::from(".norn/tmp"), Some(SkipReason::Mechanism)),
+            ]
+        );
+    }
+
+    /// **The bar on an excluded subtree.** A walk of a root the vault excludes
+    /// reads nothing under it and says so, rather than reporting an empty tree.
+    #[test]
+    fn a_subtree_walk_of_an_excluded_root_yields_only_its_skip() {
+        let scratch = Scratch::new("walk-subtree-excluded");
+        scratch.directory("vault/excluded/deep");
+        scratch.place("excluded/deep/no.md", b"no");
+
+        let facts = paths(
+            walk_subtree(
+                &scratch.at(""),
+                Path::new("excluded/deep"),
+                &[PathBuf::from("excluded")],
+            )
+            .expect("walk"),
+        );
+        assert_eq!(
+            facts,
+            vec![(
+                PathBuf::from("excluded/deep"),
+                Some(SkipReason::HostExclusion)
+            )]
+        );
+    }
+
+    /// **The bar on a subtree reached through a link.** The vault walk enters no
+    /// symbolic link, so a subtree walk named through one reads nothing either
+    /// and yields the same skip at the same name.
+    ///
+    /// The forbidden shape is resolving the subtree in one open, where
+    /// `O_NOFOLLOW` binds only the last component: the walk would then enumerate
+    /// files under a name the vault walk never admits, and every one of them
+    /// would be spelled from a vault root it cannot be read through.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a linked ancestor.
+    fn a_subtree_walk_named_through_a_link_yields_the_link_s_own_skip() {
+        let scratch = Scratch::new("walk-subtree-linked-ancestor");
+        scratch.directory("vault/real/sub");
+        scratch.place("real/sub/doc.md", b"a document under a linked name");
+        std::os::unix::fs::symlink("real", scratch.at("link")).expect("link");
+
+        let facts = paths(walk_subtree(&scratch.at(""), Path::new("link/sub"), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![(
+                PathBuf::from("link"),
+                Some(SkipReason::SymbolicLink(LinkKind::InVaultDirectory))
+            )]
+        );
+
+        let itself = paths(walk_subtree(&scratch.at(""), Path::new("link"), &[]).expect("walk"));
+        assert_eq!(itself, facts, "a linked subtree root is the same skip");
+    }
+
+    /// **The bar on a subtree walk's containment.** A link is judged against the
+    /// vault root, so a target the vault contains is an in-vault name even when
+    /// it sits outside the subtree the walk started at.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a link out of the subtree.
+    fn a_subtree_walk_judges_link_containment_against_the_vault_root() {
+        let scratch = Scratch::new("walk-subtree-link-containment");
+        scratch.directory("vault/notes");
+        scratch.place("outside.md", b"outside");
+        std::os::unix::fs::symlink("../outside.md", scratch.at("notes/up.md")).expect("link");
+
+        let facts = paths(walk_subtree(&scratch.at(""), Path::new("notes"), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![(
+                PathBuf::from("notes/up.md"),
+                Some(SkipReason::SymbolicLink(LinkKind::InVaultFile))
+            )]
         );
     }
 
