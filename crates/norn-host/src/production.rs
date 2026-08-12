@@ -3611,7 +3611,7 @@ mod tests {
             // Nothing is reconciled here: the batches are queued for the
             // dispatcher, because a recovery that reconciled its own handoff
             // would leave the handoff untested.
-            let subject = self.subject.as_str().to_owned();
+            let subject = PathBuf::from(self.subject.as_str());
             let mut queued = std::collections::VecDeque::new();
             norn_testkit::wait::absorb_until(
                 "the edit made during the recovery to be reported",
@@ -3831,7 +3831,7 @@ mod tests {
     /// all from a bare count.
     fn note_batch(batch: &norn_fs::Batch, absorbed: &mut norn_testkit::wait::Absorbed) {
         for root in batch.vault_roots() {
-            absorbed.note(format!("root {}", root.as_path().display()));
+            absorbed.note(root_fact(root.as_path()));
         }
         for rescan in batch.rescans() {
             absorbed.note(match rescan {
@@ -3844,16 +3844,112 @@ mod tests {
         }
     }
 
+    /// The lead-in of the fact a batch's invalidation root is noted as, ahead
+    /// of the root itself.
+    ///
+    /// [`root_fact`] writes it and [`noted_root`] reads the root back out of
+    /// it, so the rendering a failure shows and the value a condition judges
+    /// are one string with one spelling of its shape.
+    const ROOT_FACT: &str = "root ";
+
+    /// The fact one invalidation root notes about itself.
+    fn root_fact(root: &Path) -> String {
+        format!("{ROOT_FACT}{}", root.display())
+    }
+
+    /// The invalidation root a noted fact carries, for the facts that are one.
+    ///
+    /// The roots these facts render are vault-relative paths this process
+    /// normalized, so the rendering round-trips: nothing here is a path the
+    /// platform handed over as bytes that are not a path.
+    fn noted_root(fact: &str) -> Option<&Path> {
+        fact.strip_prefix(ROOT_FACT).map(Path::new)
+    }
+
     /// Whether what has been absorbed invalidates `path`.
     ///
-    /// Two reports answer yes and they are not the same answer. A root at or
-    /// above the path is the backend naming it. A vault-wide rescan names
-    /// nothing and covers everything, because it is the backend saying the
-    /// exact path set was lost — and a case whose outcome is that a reconcile
-    /// happened is answered by either, since a reconcile of a rescan reaches
-    /// the path too.
-    fn absorbed_covers(absorbed: &norn_testkit::wait::Absorbed, path: &str) -> bool {
-        absorbed.saw(VAULT_RESCAN) || absorbed.saw(&format!("root {path}"))
+    /// Two reports answer yes and they are not the same answer. An
+    /// invalidation root at or above the path is the backend naming it, and
+    /// at-or-above is [`norn_testkit::invalidation::covers`] — the workspace's
+    /// one spelling of that containment, which the `norn-fs` watcher cases ask
+    /// of the same reports. A vault-wide rescan names nothing and covers
+    /// everything, because it is the backend saying the exact path set was
+    /// lost — and a case whose outcome is that a reconcile happened is
+    /// answered by either, since a reconcile of a rescan reaches the path too.
+    fn absorbed_covers(absorbed: &norn_testkit::wait::Absorbed, path: &Path) -> bool {
+        absorbed.saw(VAULT_RESCAN)
+            || absorbed.saw_any(|fact| {
+                noted_root(fact).is_some_and(|root| norn_testkit::invalidation::covers(root, path))
+            })
+    }
+
+    /// The per-path half of [`absorbed_covers`], driven: an absorbed root
+    /// above the awaited document answers the condition, and a root that is
+    /// only a byte prefix of it does not.
+    ///
+    /// **The reports here are stood up rather than waited for**, because the
+    /// platform does not produce this shape where the condition is used.
+    /// [`recovery_handoff_reconciles_an_event_observed_during_the_heal`] is
+    /// answered by [`VAULT_RESCAN`]: an edit made while a heal runs is
+    /// reported as the path set having been lost, so the batches that case
+    /// absorbs carry no per-path root at all. Naming the reports is what makes
+    /// the other half of the condition live, and it is the half where the
+    /// difference between at-or-above and exact equality is visible.
+    #[test]
+    fn an_absorbed_root_above_the_awaited_document_covers_it() {
+        let root = std::env::temp_dir().join(format!(
+            "norn-host-absorbed-covers-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("notes")).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(&root).unwrap();
+        let normalize = |relative: &str| normalizer.normalize(Path::new(relative)).unwrap();
+
+        // `notes/note` is a byte prefix of the awaited document and no
+        // ancestor of it, so it is the report a containment answered on
+        // strings would wrongly accept; `notes` is the directory holding the
+        // document, which is the report a containment answered on equality
+        // would wrongly reject.
+        let awaited = PathBuf::from("notes/note.md");
+        let mut reports = std::collections::VecDeque::from([
+            norn_fs::Batch::vault_change(normalize("notes/note")),
+            norn_fs::Batch::vault_change(normalize("notes")),
+        ]);
+        let mut applied: Vec<norn_fs::Batch> = Vec::new();
+        norn_testkit::wait::absorb_until(
+            "an absorbed invalidation root at or above the awaited document",
+            absorbing_budget(),
+            &mut (),
+            |_: &mut (), absorbed| {
+                let batch = reports.pop_front()?;
+                note_batch(&batch, absorbed);
+                Some(batch)
+            },
+            |_: &mut (), batch| applied.push(batch),
+            |_: &mut (), absorbed| {
+                if absorbed_covers(absorbed, &awaited) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no absorbed root is at or above the awaited document")
+                }
+            },
+        );
+
+        assert_eq!(
+            applied.len(),
+            2,
+            "the wait ended on a root that is a byte prefix of the awaited document \
+             rather than an ancestor of it"
+        );
+        assert!(
+            applied.iter().all(|batch| batch.rescans().is_empty()),
+            "a rescan answered a condition this case drives per-path"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Reconcile settled batches until `condition` holds, under one budget.

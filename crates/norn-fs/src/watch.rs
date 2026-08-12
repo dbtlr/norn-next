@@ -98,6 +98,21 @@ impl Batch {
             ..Self::default()
         }
     }
+    /// One settled invalidation of a vault path, and no other fact.
+    ///
+    /// The root stands for its own entry and every descendant of it, which is
+    /// the shape a coalesced backend event settles into. The batch's fields
+    /// are private, so this constructor is the one way a consumer outside this
+    /// crate stands a per-path invalidation up without a coalescer: the host's
+    /// absorbing-wait cases, which drive a pump with the reports they name
+    /// rather than the ones a platform happens to deliver, are its present
+    /// callers.
+    pub fn vault_change(root: NormalizedPath) -> Self {
+        Self {
+            vault_roots: BTreeSet::from([root]),
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
