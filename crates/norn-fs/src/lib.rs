@@ -32,8 +32,13 @@
 //!   reach what no home's key names.
 //! - [`lock`] — the maintainer lock: at most one host maintains one derived
 //!   store, and that is the *only* thing it decides.
-//! - [`walk`] — the streaming, deterministic filesystem inventory, typed skip
-//!   notations, and the one-open/one-read content observation.
+//! - [`walk`] — the streaming, deterministic filesystem inventory and its typed
+//!   skip notations.
+//! - `open` — the one contained open every read of a file's content goes
+//!   through: anchored at a directory, one component at a time, no link
+//!   followed and no blocking on a name that is not a regular file.
+//!   [`read_and_hash`] and [`read_optional_and_hash`] are the one-open/one-read
+//!   content observation over it, and the walk's own reads take the same seam.
 //! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
 //!   by walks today and watcher invalidation roots next.
 //! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
@@ -91,6 +96,7 @@ pub mod write;
 mod faults;
 mod hash;
 mod identity;
+mod open;
 mod read;
 mod refusal;
 #[cfg(test)]
