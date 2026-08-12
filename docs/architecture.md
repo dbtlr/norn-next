@@ -116,6 +116,14 @@ retry, or coverage re-installed over the same database, meets the same page agai
 requirement damage sets dominates the one a broken environment sets wherever both stand.
 Watcher coverage and the maintainer lock stand through the rung: neither is what was damaged.
 
+**An attach runs the rung inline, and publishes no verdict for it.** An entry holding no
+coverage owes an attach before it owes a rung, so a verdict published from an attach would
+be answered by a second attach against the same file and the same page. The attach that
+meets damage in its own heal therefore resolves it where it stands, and a rung-3 run reached
+that way is not observable in the trust stream — the same silence a rebuild-from-zero at open
+time already carries. What a client sees is Warming, then Ready. Every other route publishes
+the verdict, because every other route is an entry that holds the store the rung will replace.
+
 **Silent damage is asked about on a schedule.** The verification that compares the database
 against itself is the only thing that meets damage no read fails on, so it runs as bounded
 lifecycle maintenance beside the shadow sweep — off the request path, never per request.

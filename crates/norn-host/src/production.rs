@@ -30,6 +30,16 @@ pub const MAX_CHANGESET_SIZE: usize = 1024;
 /// never on the request path, and an entry pays it once an hour whatever its
 /// query traffic. Shorter would spend a full scan to shorten a window nothing
 /// is racing; longer would leave silent damage standing across a working day.
+///
+/// **What the interval is traded against.** The maintenance leg holds the
+/// entry's coverage while it runs, and an entry whose coverage is out with a
+/// leg drains no watcher batch, so the scan is time the subscription's queue
+/// fills unattended. On a store large enough for one scan to outlast that
+/// queue, the overflow and the full rescan answering it are the accepted cost
+/// of asking the question at all: silent damage that nothing else meets is
+/// worse than a re-read of a vault that is sound. The scan's cost grows with
+/// the database, so a corpus that makes the trade unaffordable is a reason to
+/// measure the scan and move this bound, not to skip it.
 pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Maximum time one lifecycle worker may wait for watcher coverage to become live.
@@ -105,9 +115,8 @@ pub struct ProductionAttachment {
     /// The registration this attachment was established from: the root it
     /// derives, and where its schema is read.
     registration: Registration,
-    maintainership: Maintainership,
-    store: Store,
     subscription: Option<Subscription>,
+    store: Store,
     heal_observed: norn_fs::Batch,
     /// Layer 4 plan-apply consumes this recorder at the product composition
     /// site: successful writes stay beside coverage so their watcher echoes
@@ -115,14 +124,23 @@ pub struct ProductionAttachment {
     _own_writes: OwnWrites,
     _shadows: ShadowHome,
     last_shadow_sweep: Instant,
-    /// When the store last answered for its own consistency.
+    /// When the store is next asked to answer for its own consistency.
     ///
     /// Logical damage is silent: a full-text index that stopped agreeing with
     /// the column it indexes, a value outside a closed vocabulary, a foreign key
     /// pointing at a row that is gone. None of it fails a read that does not
     /// touch it, so nothing meets it until a client's query does — which is why
     /// the question is asked on a schedule instead.
-    last_store_verification: Instant,
+    ///
+    /// The deadline is carried rather than the last answer, so the one clock
+    /// reading says both whether the question is due and, once it is answered,
+    /// when it is due again.
+    store_verification_due: Instant,
+    /// The maintainer lock, declared last because fields drop in declaration
+    /// order: an attachment dropped rather than released gives its resources
+    /// back in the order [`release`] gives them back, so the lock never ends
+    /// while this process's watch over the vault still stands.
+    maintainership: Maintainership,
 }
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
@@ -312,7 +330,7 @@ impl ProductionEntryOps {
                 return Err(store_effect(error));
             }
         }
-        attachment.last_store_verification = Instant::now();
+        attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
         let derived = self
             .heal_under_coverage(&mut attachment, progress)
             .and_then(|()| {
@@ -345,6 +363,11 @@ impl ProductionEntryOps {
 /// maintainership in while this one is still reporting facts about the tree.
 /// The store is closed between them, which is where a throwaway store's file
 /// goes.
+///
+/// This is the spelling that reports the store's own teardown. The order it
+/// runs in is [`ProductionAttachment`]'s field order too, so an attachment that
+/// reaches a drop instead of this call still gives its resources back the same
+/// way round.
 fn release(attachment: ProductionAttachment) {
     drop(attachment.subscription);
     let _ = attachment.store.close();
@@ -461,7 +484,7 @@ impl EntryOps for ProductionEntryOps {
             _own_writes: own_writes,
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
-            last_store_verification: Instant::now(),
+            store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
@@ -553,15 +576,32 @@ impl EntryOps for ProductionEntryOps {
         attachment: Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
-        if !attachment.maintainership.still_current().map_err(effect)? {
-            return Err(JobFailure::LostMaintainership);
+        // The attachment is this call's, and a failure here is the last thing
+        // that touches it: the lifecycle reads a failed rebuild as coverage the
+        // leg consumed and calls no detach for it. Both refusals below
+        // therefore give the resources back through [`release`] rather than by
+        // dropping the attachment, which would release the maintainer lock
+        // ahead of the watch it is declared before.
+        match attachment.maintainership.still_current() {
+            Ok(true) => self.rung_three(attachment, progress),
+            Ok(false) => {
+                release(attachment);
+                Err(JobFailure::LostMaintainership)
+            }
+            Err(refusal) => {
+                let failure = effect(refusal);
+                release(attachment);
+                Err(failure)
+            }
         }
-        self.rung_three(attachment, progress)
     }
 
+    /// Maintenance is due when either act's own clock is up. Which acts then
+    /// run is [`ProductionEntryOps::maintain`]'s reading of the same two
+    /// clocks: the leg is one leg, and the cadences it serves are two.
     fn maintenance_due(&self, _: &VaultName, attachment: &Self::Attachment) -> bool {
         attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD
-            || attachment.last_store_verification.elapsed() >= STORE_VERIFICATION_INTERVAL
+            || Instant::now() >= attachment.store_verification_due
     }
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
@@ -571,15 +611,23 @@ impl EntryOps for ProductionEntryOps {
         // Shadow residue is inert, and a sweep is only bounded cleanup. Losing
         // that cleanup opportunity must not withdraw an otherwise healthy
         // attachment or force a full heal; try again at the next normal cadence.
-        let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
-        attachment.last_shadow_sweep = Instant::now();
+        if attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD {
+            let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
+            attachment.last_shadow_sweep = Instant::now();
+        }
         // The store's own consistency is the other maintenance question, and it
         // is asked here for the same reason the sweep is: it is bounded work
-        // off the request path. A verdict of damage is **not** swallowed the way
-        // a failed sweep is — a sweep that did not run leaves derived state
-        // sound, and this is the one caller that learns it is not.
-        attachment.store.verify_integrity().map_err(store_effect)?;
-        attachment.last_store_verification = Instant::now();
+        // off the request path. Its clock is read separately from the sweep's,
+        // because the two acts cost differently: a sweep reads one directory,
+        // and this reads every page of the database. One leg serving both
+        // cadences on whichever clock is up would spend the read on the
+        // sweep's. A verdict of damage is **not** swallowed the way a failed
+        // sweep is — a sweep that did not run leaves derived state sound, and
+        // this is the one caller that learns it is not.
+        if Instant::now() >= attachment.store_verification_due {
+            attachment.store.verify_integrity().map_err(store_effect)?;
+            attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
+        }
         Ok(())
     }
 
@@ -1483,16 +1531,35 @@ fn environmental(message: impl Into<String>) -> JobFailure {
 /// so a store refusal cannot reach [`JobFailure::Environmental`] by being
 /// handed to the same helper as a walk that could not list a directory. Store
 /// refusals go through [`store_effect`], which is the one place a damaged
-/// database is told apart from a broken environment — and a new store call site
-/// that reaches for `effect` does not compile.
-trait EnvironmentalFailure: fmt::Display {}
+/// database is told apart from a broken environment.
+///
+/// The trait is sealed on [`sealed::Sealed`], so the environmental error types
+/// are the list below and every addition to it is written at the list: a
+/// `StoreError` handed to `effect` does not compile, and granting it that
+/// status takes a deliberate pair of implementations here rather than one line
+/// anywhere the trait is in scope.
+trait EnvironmentalFailure: sealed::Sealed + fmt::Display {}
 
+mod sealed {
+    /// The seal on [`super::EnvironmentalFailure`]. It is implemented beside
+    /// each implementation of that trait and nowhere else, which is what keeps
+    /// the two lists one list.
+    pub(super) trait Sealed {}
+}
+
+impl sealed::Sealed for std::io::Error {}
 impl EnvironmentalFailure for std::io::Error {}
+impl sealed::Sealed for norn_fs::Refusal {}
 impl EnvironmentalFailure for norn_fs::Refusal {}
+impl sealed::Sealed for norn_fs::WalkError {}
 impl EnvironmentalFailure for norn_fs::WalkError {}
+impl sealed::Sealed for &norn_fs::WalkError {}
 impl EnvironmentalFailure for &norn_fs::WalkError {}
+impl sealed::Sealed for norn_fs::PathError {}
 impl EnvironmentalFailure for norn_fs::PathError {}
+impl sealed::Sealed for norn_fs::NormalizerError {}
 impl EnvironmentalFailure for norn_fs::NormalizerError {}
+impl sealed::Sealed for norn_fs::ExclusionError {}
 impl EnvironmentalFailure for norn_fs::ExclusionError {}
 
 fn effect(error: impl EnvironmentalFailure) -> JobFailure {
@@ -2288,6 +2355,9 @@ mod tests {
     fn a_corrupt_store_at_attach_reaches_rung_three_and_derives_the_vault_again() {
         let f = Fixture::new("attach-damage");
         write_a_vault_of_documents(&f, 120);
+        // A document no derivation reads facts out of, so the finding a heal
+        // files for it is on both sides of the equality below.
+        fs::write(f.vault().join("unreadable.md"), UNDECODABLE).unwrap();
         let (ops, name) = f.ops(64);
         let policy = ProductionPolicy::new(64, 2).unwrap();
         let progress = ProgressReporter::disconnected();
@@ -2308,9 +2378,14 @@ mod tests {
             .verify_integrity()
             .expect("a store rung 3 rebuilt");
         assert_eq!(
-            every_stored_fact(&mut attachment.store),
+            derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "attach-damage-oracle", policy),
             "the rebuild derived something a from-scratch build does not"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "unreadable.md").len(),
+            1,
+            "the rebuild derived no finding, so the equality above compared none"
         );
         ops.detach(&name, attachment);
     }
@@ -2321,14 +2396,22 @@ mod tests {
     /// A full-text index that stopped agreeing with the column it indexes
     /// answers reads about text no document holds. No read fails, so nothing
     /// else in the warm cycle can report it.
+    ///
+    /// The maintenance leg serves two cadences, so this also pins that the
+    /// store is asked only on its own: a leg the shadow clock brought round
+    /// inside the store interval reads no page of the database.
     #[test]
     fn scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
         let f = Fixture::new("silent-damage");
         write_a_vault_of_documents(&f, 8);
+        // A document no derivation reads facts out of, so the finding a heal
+        // files for it is on both sides of the equality below.
+        fs::write(f.vault().join("unreadable.md"), UNDECODABLE).unwrap();
         let (ops, name) = f.ops(64);
         let policy = ProductionPolicy::new(64, 2).unwrap();
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.store_verification_due = Instant::now();
         ops.maintain(&name, &mut attachment)
             .expect("a store nothing has damaged");
 
@@ -2341,6 +2424,12 @@ mod tests {
         )
         .unwrap();
 
+        ops.maintain(&name, &mut attachment).expect(
+            "a maintenance leg inside the store interval asked the database about damage \
+             the verification above had already cleared it of",
+        );
+
+        attachment.store_verification_due = Instant::now();
         let failure = ops
             .maintain(&name, &mut attachment)
             .expect_err("a full-text index that stopped agreeing with its column");
@@ -2355,10 +2444,11 @@ mod tests {
             .expect("rung 3 over a damaged store");
         assert_eq!(*attachment.store.open_outcome(), OpenOutcome::Created);
         assert_eq!(
-            every_stored_fact(&mut attachment.store),
+            derived_vault(&mut attachment.store, f.vault().as_path()),
             from_scratch(&f, "silent-damage-oracle", policy),
             "the rebuild derived something a from-scratch build does not"
         );
+        attachment.store_verification_due = Instant::now();
         ops.maintain(&name, &mut attachment)
             .expect("a store rung 3 rebuilt");
         ops.detach(&name, attachment);
@@ -2410,12 +2500,127 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// Everything one derivation of a vault produced, in the shape two
+    /// derivations are compared as.
+    ///
+    /// Four readings, because a derivation puts its answer in four places: the
+    /// document rows and every fact row under them, the findings that sit where
+    /// no document row does, how much each pillar holds — tombstones and
+    /// finding candidates included — and the vault schema the whole derivation
+    /// was keyed by. A rebuild that lost a finding, kept a tombstone or stopped
+    /// re-pinning the schema disagrees here.
+    ///
+    /// The oracle for a rung-3 rebuild is a from-scratch run of the same heal,
+    /// so what an equality over this proves is that rung 3 derives what a first
+    /// attach derives. A defect inside the shared walk is invisible to it, and
+    /// is what the heal's own cases cover.
+    #[derive(Debug, Eq, PartialEq)]
+    struct DerivedVault {
+        documents: Vec<DerivedDocument>,
+        findings: Vec<norn_store::StoredFinding>,
+        pillars: norn_store::PillarReport,
+        /// The pinned schema's bytes and fingerprint. The generation beside
+        /// them is not compared: it counts writes to the database rather than
+        /// describing the schema the derivation ran under.
+        vault_schema: Option<(Vec<u8>, String)>,
+    }
+
+    /// One document's row and every fact row under it, without the timestamp
+    /// the row was written at.
+    ///
+    /// `derived_at` is a whole-second wall clock recording when a row was
+    /// written, so two derivations of one vault differ there whenever they land
+    /// in different seconds — it is bookkeeping about the writing rather than a
+    /// fact read out of the vault, and no claim about equal derivations rests
+    /// on it. Everything else stays, `generation` among it: both sides pin and
+    /// then walk the same documents under the same policy, so the batching that
+    /// hands out generations is part of what the equality claims.
+    #[derive(Debug, Eq, PartialEq)]
+    struct DerivedDocument {
+        path: DocumentPath,
+        content_hash: String,
+        byte_length: u64,
+        body_offset: u64,
+        frontmatter: Option<String>,
+        frontmatter_diagnostic_count: u32,
+        generation: i64,
+        body: String,
+        links: Vec<LinkFact>,
+        headings: Vec<HeadingFact>,
+        blocks: Vec<BlockFact>,
+        tags: Vec<TagFact>,
+    }
+
+    impl From<norn_store::StoredFacts> for DerivedDocument {
+        fn from(facts: norn_store::StoredFacts) -> Self {
+            let norn_store::StoredFacts {
+                document,
+                body,
+                links,
+                headings,
+                blocks,
+                tags,
+            } = facts;
+            Self {
+                path: document.path,
+                content_hash: document.content_hash,
+                byte_length: document.byte_length,
+                body_offset: document.body_offset,
+                frontmatter: document.frontmatter,
+                frontmatter_diagnostic_count: document.frontmatter_diagnostic_count,
+                generation: document.generation,
+                body,
+                links,
+                headings,
+                blocks,
+                tags,
+            }
+        }
+    }
+
+    fn derived_vault(store: &mut Store, vault: &Path) -> DerivedVault {
+        let documents = every_stored_fact(store)
+            .into_iter()
+            .map(DerivedDocument::from)
+            .collect();
+        // A finding sits only where no document row does, so the paths it is
+        // read at come from the vault rather than from the store's own list of
+        // documents.
+        let findings = vault_relative_paths(vault)
+            .iter()
+            .flat_map(|path| findings_at(store, path))
+            .collect();
+        let pillars = store.begin_request().pillars().unwrap();
+        let vault_schema = store
+            .begin_request()
+            .vault_schema_pin()
+            .unwrap()
+            .map(|pin| (pin.bytes, pin.fingerprint));
+        DerivedVault {
+            documents,
+            findings,
+            pillars,
+            vault_schema,
+        }
+    }
+
+    /// Every name directly under a fixture vault, in order, as the document
+    /// grammar spells it.
+    fn vault_relative_paths(vault: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(vault)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| DocumentPath::new(name).is_ok())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Every fact the store holds about every document it holds, in path order.
     ///
-    /// This is the shape two derivations are compared as. It reads the rows a
-    /// read answers from rather than a summary of them, so two stores agreeing
-    /// here agree about content hashes, links, tags, headings, blocks and the
-    /// frontmatter projection alike.
+    /// It reads the rows a read answers from rather than a summary of them, so
+    /// two stores agreeing here agree about content hashes, links, tags,
+    /// headings, blocks and the frontmatter projection alike.
     fn every_stored_fact(store: &mut Store) -> Vec<norn_store::StoredFacts> {
         let paths: Vec<DocumentPath> = store
             .begin_request()
@@ -2443,11 +2648,7 @@ mod tests {
     /// rather than a restatement of what the heal ought to find: a rebuild that
     /// stopped agreeing with a from-scratch derivation would have to disagree
     /// with this.
-    fn from_scratch(
-        f: &Fixture,
-        label: &str,
-        policy: ProductionPolicy,
-    ) -> Vec<norn_store::StoredFacts> {
+    fn from_scratch(f: &Fixture, label: &str, policy: ProductionPolicy) -> DerivedVault {
         let mut store = Store::open(f.root.join(format!("{label}.sqlite3"))).unwrap();
         let registration = f.registration();
         let progress = ProgressReporter::disconnected();
@@ -2469,7 +2670,7 @@ mod tests {
             &progress.healing(),
         )
         .unwrap();
-        every_stored_fact(&mut store)
+        derived_vault(&mut store, registration.root.as_path())
     }
 
     /// Overwrite the pages a database keeps its documents in, leaving the store
