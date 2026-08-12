@@ -1032,13 +1032,17 @@ fn quarantine_subtree(
     vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
+    // Nothing under this root derives, so every finding here is read from a
+    // path — and the places they land at are renderings, outside the root this
+    // walk enters. What stands at such a place is another producer's.
     let mut pending = Pending::new(
         store,
         policy.changeset_size,
         vault_root,
         exclusions,
         vacated,
-    );
+    )
+    .reading_spellings();
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -1550,15 +1554,15 @@ struct Pending<'s> {
     /// What this scope's first record at a place replaces there, which is what
     /// this scope reads.
     ///
-    /// A scope that derives documents opens the bytes at the paths it reaches,
-    /// so it concludes any cause a quarantine carries and replaces the place
-    /// whole. The reading of a vacated root opens none: it reaches every
-    /// spelling beneath its roots and continues past every path the grammar
-    /// admits, so what it concludes is what a spelling alone decides and that is
-    /// all it replaces. A quarantine about the document standing at a place it
-    /// files at is a finding it did not read and does not re-file, and taking it
-    /// would delete a true statement about a real document until an unrelated
-    /// vault heal.
+    /// A scope that derives documents opens the bytes at the paths it walks, so
+    /// it concludes any cause a quarantine carries and replaces the place whole.
+    /// The two scopes that derive nothing — the reading of a vacated root, and
+    /// the sweep of a root the grammar poisons — open no bytes at all: they read
+    /// paths, so what they conclude is what a spelling alone decides and that is
+    /// all they replace. A quarantine about the document standing at a place
+    /// such a scope files at is a finding it did not read and does not re-file,
+    /// and taking it would delete a true statement about a real document until
+    /// an unrelated vault heal.
     rederives: DiscardScope<'static>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
@@ -1754,8 +1758,7 @@ impl<'s> Pending<'s> {
     /// reached, so a second spelling standing there that the reading never got
     /// to is a finding the discard takes and the next vault heal files again.
     /// The record withholds wherever a document row stands, so a place this
-    /// reading discards at is a place holding no row for that heal to have to
-    /// step around.
+    /// reading discards at holds no row to withhold that heal's filing.
     fn revisit(&mut self, roots: &[String]) -> Result<(), JobFailure> {
         for start in roots {
             count_reading();
@@ -1788,7 +1791,7 @@ impl<'s> Pending<'s> {
                 // recording after it decides which ones stand: a place a
                 // document row still occupies withholds its finding there, so
                 // the reading needs no account of which places its job freed.
-                // What a place this reading files at is re-derived in is its
+                // What this reading re-derives at a place is that place's
                 // spellings — the discard the first finding there carries takes
                 // the spelling findings an earlier job or this job's own merge
                 // recorded, and every spelling the reading meets is filed over
@@ -2956,6 +2959,68 @@ mod tests {
             finding_total(&mut attachment.store),
             2,
             "the reading filed a second copy of the spelling it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The sweep of a poisoned root replaces the spellings it read and nothing
+    /// else**, for the reason the reading does: it derives no document, so every
+    /// finding it files is read from a path.
+    ///
+    /// The place its findings land at sits outside the root it walks — a
+    /// rendering names a place, and the directory whose own name is that place
+    /// is a directory this walk never enters. So a quarantine standing there is
+    /// one this sweep neither read nor re-files.
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_root_sweep_leaves_the_content_quarantine_standing_at_a_place_it_files_at() {
+        let f = Fixture::new("poisoned-root-collision");
+        fs::create_dir(f.vault().join("bad\u{fffd}dir")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}dir/note.md"), UNDECODABLE).unwrap();
+        let poisoned = f.vault().join("bad\\dir");
+        if fs::create_dir(&poisoned).is_err() {
+            eprintln!("skipped: this filesystem does not create `{poisoned:?}`");
+            return;
+        }
+        if !write_or_report(&poisoned.join("note.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/note.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The dirty root names no document and no prefix, which is the sweep
+        // this case is about.
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\dir"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/note.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the sweep took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the sweep filed a second copy of the spelling it re-derived"
         );
         ops.detach(&name, attachment);
     }

@@ -210,16 +210,17 @@ unreadable — and **the heal that removes the colliding document is the one tha
 it**: the deaths that vacate rendered places send the heal back, after its last increment,
 to read the roots those places sit under, and every refused spelling those readings meet is
 quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
-is what that revisit exists to prevent. **A revisit replaces the findings it re-derives**,
-which are the ones a spelling alone decides: it reads paths rather than bytes, so a
-quarantine about the document standing at a place it files at is left where it is. **The
-revisit is opportunistic, and it is owed once per heal rather than once per removal**: its
-increments are already committed, so a directory it cannot open ends that root's reading
-rather than refusing the heal, and a place left unread that way keeps its finding withheld
-until a later heal reads it again — the same honesty the paging window above states, for the
-same reason. Recovery needs no second mechanism: a
-document that reads again is an ordinary derivation, and the increment's own findings
-discard takes the finding with it.
+is what that revisit exists to prevent. **A producer replaces the findings it re-derives and
+no others.** A scope that reads paths and not bytes — the revisit, and the sweep of a root
+the grammar poisons — concludes what a spelling alone decides, so a quarantine about the
+document standing at a place it files at is left where it is; a scope that derives documents
+reads a place whole and replaces it whole. **The revisit is opportunistic, and it is owed
+once per heal rather than once per removal**: its increments are already committed, so a
+directory it cannot open ends that root's reading rather than refusing the heal, and a place
+left unread that way keeps its finding withheld until a later heal reads it again — the same
+honesty the paging window above states, for the same reason. Recovery needs no second
+mechanism: a document that reads again is an ordinary derivation, and the increment's own
+findings discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
