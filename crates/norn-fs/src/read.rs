@@ -4,11 +4,11 @@ use std::io;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{Mode, open};
 
 use crate::hash::{ContentHash, read_bytes_and_hash};
-use crate::open::{Reached, Unreached, open_regular_at};
-use crate::refusal::{Refusal, environment};
+use crate::open::{Reached, Unreached, anchor_flags, open_regular_at};
+use crate::refusal::{Refusal, environment, environment_at};
 
 /// What kind of filesystem object a watcher invalidation root names now.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,9 +80,12 @@ pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refu
     let path = anchor.join(relative);
     match observe(anchor, relative, &path)? {
         Observed::Read(read) => Ok(read),
-        Observed::Nothing(unreached) => {
-            Err(environment(unreached.operation(), &path, unreached.error()))
-        }
+        Observed::Nothing(unreached) => Err(environment_at(
+            unreached.operation(),
+            &path,
+            unreached.component(),
+            unreached.error(),
+        )),
     }
 }
 
@@ -120,14 +123,12 @@ enum Observed {
 
 #[allow(clippy::disallowed_types)] // norn-fs owns file handles.
 fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refusal> {
-    let anchor_fd = open(
-        anchor,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY,
-        Mode::empty(),
-    )
-    .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
-    let reached = open_regular_at(anchor_fd.as_fd(), relative)
-        .map_err(|error| environment(error.operation(), path, &error.into_error()))?;
+    let anchor_fd = open(anchor, anchor_flags(), Mode::empty())
+        .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
+    let reached = open_regular_at(anchor_fd.as_fd(), relative).map_err(|error| {
+        let (operation, component) = (error.operation(), error.component().to_owned());
+        environment_at(operation, path, &component, &error.into_error())
+    })?;
     let fd = match reached {
         Reached::Regular(fd) => fd,
         Reached::Nothing(unreached) => return Ok(Observed::Nothing(unreached)),

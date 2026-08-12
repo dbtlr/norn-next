@@ -20,7 +20,7 @@
 //! fact about the name that stopped the descent, and each caller decides
 //! whether that fact is an absence to converge on or a refusal to report.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Component, Path};
@@ -31,6 +31,23 @@ use rustix::io::Errno;
 /// The flags every directory a contained descent passes through is opened with.
 pub(crate) fn directory_flags() -> OFlags {
     OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
+}
+
+/// The flags the anchor a contained descent starts from is opened with.
+///
+/// `O_NOFOLLOW` is absent here, and its absence is a rule rather than an
+/// oversight: the anchor **is** the boundary, so it is resolved exactly as the
+/// caller spelled it, while every name below it is a name inside the boundary
+/// and is reached through no link at all. The lock file's open splits the same
+/// way — the directory holding it is resolved as configured and only the lock's
+/// own name refuses a link.
+///
+/// The vault walk opens its root with [`directory_flags`] instead, because a
+/// walk states what a whole tree holds and a root that is itself a link is a
+/// tree it declines to enumerate. A read anchored at that same directory
+/// answers a narrower question and does not re-derive the name it was handed.
+pub(crate) fn anchor_flags() -> OFlags {
+    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY
 }
 
 /// The flags the last component of a contained descent is opened with.
@@ -53,25 +70,34 @@ pub(crate) enum Reached {
 /// about whether the machine could act: a denied directory, an exhausted
 /// descriptor table and a failing device are the error half of the same result
 /// and never arrive here.
+///
+/// The component is carried with the fact because a path has more than one name
+/// in it and only one of them stopped the descent. A caller that reported the
+/// whole path and the condition would leave an operator to work out which name
+/// the sentence is about — and the two-name default schema path is where that
+/// question is asked most.
 #[derive(Debug)]
 pub(crate) struct Unreached {
     operation: &'static str,
+    component: OsString,
     error: io::Error,
 }
 
 impl Unreached {
     /// Nothing is at one of the names in the path.
-    fn missing(errno: Errno) -> Self {
+    fn missing(component: &OsStr, errno: Errno) -> Self {
         Self {
             operation: "opening",
+            component: component.to_owned(),
             error: io::Error::from_raw_os_error(errno.raw_os_error()),
         }
     }
 
     /// One of the names in the path is a symbolic link.
-    fn symbolic_link() -> Self {
+    fn symbolic_link(component: &OsStr) -> Self {
         Self {
             operation: "opening",
+            component: component.to_owned(),
             error: io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a name in the path is a symbolic link",
@@ -80,9 +106,10 @@ impl Unreached {
     }
 
     /// One of the names before the last is not a directory.
-    fn not_a_directory() -> Self {
+    fn not_a_directory(component: &OsStr) -> Self {
         Self {
             operation: "opening",
+            component: component.to_owned(),
             error: io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "a name in the path is not a directory",
@@ -91,9 +118,10 @@ impl Unreached {
     }
 
     /// The last name is a directory, a device, a socket or a pipe.
-    fn not_regular() -> Self {
+    fn not_regular(component: &OsStr) -> Self {
         Self {
             operation: "reading",
+            component: component.to_owned(),
             error: io::Error::new(
                 io::ErrorKind::InvalidData,
                 "the name does not identify a regular file",
@@ -104,6 +132,11 @@ impl Unreached {
     /// What was being attempted, in words that complete "… failed".
     pub(crate) fn operation(&self) -> &'static str {
         self.operation
+    }
+
+    /// The name the descent stopped at, which is the one the fact is about.
+    pub(crate) fn component(&self) -> &OsStr {
+        &self.component
     }
 
     /// The fact stated as the error a refusal carries.
@@ -137,13 +170,15 @@ pub(crate) fn open_regular_at(
     let mut components = relative.components().peekable();
     let mut descended: Option<OwnedFd> = None;
     while let Some(component) = components.next() {
+        let name = component.as_os_str();
         match component {
             Component::Normal(_) | Component::CurDir => {}
             Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
-                return Err(OpenError::Uncontained);
+                return Err(OpenError::Uncontained {
+                    component: name.to_owned(),
+                });
             }
         }
-        let name = component.as_os_str();
         let last = components.peek().is_none();
         let opened = {
             let parent = descended.as_ref().map_or(anchor, AsFd::as_fd);
@@ -165,31 +200,34 @@ pub(crate) fn open_regular_at(
             descended = Some(fd);
             continue;
         }
-        let kind = FileType::from_raw_mode(fstat(&fd)?.st_mode as _);
+        let stat = fstat(&fd).map_err(|errno| OpenError::Machine {
+            errno,
+            component: name.to_owned(),
+        })?;
+        let kind = FileType::from_raw_mode(stat.st_mode as _);
         return Ok(match kind {
             FileType::RegularFile => Reached::Regular(fd),
-            _ => Reached::Nothing(Unreached::not_regular()),
+            _ => Reached::Nothing(Unreached::not_regular(name)),
         });
     }
     // An empty relative path names the anchor directory itself, which is not a
-    // regular file and is not opened again to say so.
-    Ok(Reached::Nothing(Unreached::not_regular()))
+    // regular file and is not opened again to say so. The name it stopped at is
+    // the anchor, spelled the way an empty path spells it.
+    Ok(Reached::Nothing(Unreached::not_regular(OsStr::new("."))))
 }
 
 /// What stops an open that is not a fact about a name on the filesystem.
+///
+/// Each arm carries the component it is about, for the reason [`Unreached`]
+/// does: a denied directory in the middle of a path is a different thing to fix
+/// than a denied document, and the whole path says neither.
 #[derive(Debug)]
 pub(crate) enum OpenError {
     /// The machine refused: a denied directory, a full descriptor table, a
     /// failing device.
-    Machine(Errno),
+    Machine { errno: Errno, component: OsString },
     /// The relative path is not a name below the anchor at all.
-    Uncontained,
-}
-
-impl From<Errno> for OpenError {
-    fn from(errno: Errno) -> Self {
-        Self::Machine(errno)
-    }
+    Uncontained { component: OsString },
 }
 
 impl OpenError {
@@ -198,11 +236,18 @@ impl OpenError {
         "opening"
     }
 
+    /// The name the open stopped at, which is the one the failure is about.
+    pub(crate) fn component(&self) -> &OsStr {
+        match self {
+            Self::Machine { component, .. } | Self::Uncontained { component } => component,
+        }
+    }
+
     /// The failure stated as the error a refusal carries.
     pub(crate) fn into_error(self) -> io::Error {
         match self {
-            Self::Machine(errno) => io::Error::from_raw_os_error(errno.raw_os_error()),
-            Self::Uncontained => io::Error::new(
+            Self::Machine { errno, .. } => io::Error::from_raw_os_error(errno.raw_os_error()),
+            Self::Uncontained { .. } => io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the path leaves the directory it is read from",
             ),
@@ -217,19 +262,32 @@ impl OpenError {
 /// name is a link and the other says it is not a directory. The stat costs
 /// nothing in the common case — it happens only where an open already failed —
 /// and it is what lets the refusal name the condition an operator has to fix.
+///
+/// The kinds an open declines to give a descriptor for are facts too. A socket
+/// cannot be opened at all — `ENXIO` on one platform, `EOPNOTSUPP` on the other
+/// — and a name longer than the filesystem holds names is a name no file is
+/// ever at. Both say the same thing the type check after a successful open
+/// says: no regular file is there. Reporting them as the machine's failure
+/// would make an optional read refuse where its own contract promises an
+/// answer, and the racing case is ordinary — a document replaced by a socket
+/// between a stat and this open.
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
 fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reached, OpenError> {
     match errno {
-        Errno::NOENT => Ok(Reached::Nothing(Unreached::missing(errno))),
-        Errno::LOOP => Ok(Reached::Nothing(Unreached::symbolic_link())),
+        Errno::NOENT | Errno::NAMETOOLONG => Ok(Reached::Nothing(Unreached::missing(name, errno))),
+        Errno::LOOP => Ok(Reached::Nothing(Unreached::symbolic_link(name))),
+        Errno::NXIO | Errno::OPNOTSUPP => Ok(Reached::Nothing(Unreached::not_regular(name))),
         Errno::NOTDIR => Ok(Reached::Nothing(
             match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink => {
-                    Unreached::symbolic_link()
+                    Unreached::symbolic_link(name)
                 }
-                _ => Unreached::not_a_directory(),
+                _ => Unreached::not_a_directory(name),
             },
         )),
-        other => Err(OpenError::Machine(other)),
+        errno => Err(OpenError::Machine {
+            errno,
+            component: name.to_owned(),
+        }),
     }
 }

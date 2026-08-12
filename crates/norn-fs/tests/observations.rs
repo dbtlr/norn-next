@@ -241,6 +241,44 @@ fn a_directory_cannot_masquerade_as_configured_file_bytes() {
     );
 }
 
+/// **The bar on the kinds an open never hands back a descriptor for.** A socket
+/// cannot be opened at all and a name longer than the filesystem holds names is
+/// a name no file is at, so both are the answer the optional read promises for
+/// a name that is not a regular file — not the machine's failure.
+///
+/// The reachable shape is a race: a document replaced by a socket between the
+/// kind a caller stated and the read it then makes. Reporting that as a fault
+/// fails a whole reconcile over one path that a walk would simply not yield.
+#[test]
+fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
+    let scratch = Scratch::new("socket-schema");
+    let socket = scratch.0.join("sock.md");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a bound socket");
+
+    assert!(
+        read_optional_and_hash(scratch.anchor(), Path::new("sock.md"))
+            .expect("a socket is an answer rather than a fault")
+            .is_none(),
+        "a socket was read as document bytes"
+    );
+    let refusal =
+        read_and_hash(scratch.anchor(), Path::new("sock.md")).expect_err("a socket must refuse");
+    assert!(
+        matches!(&refusal, Refusal::Environment { kind, .. }
+            if *kind == std::io::ErrorKind::InvalidData),
+        "{refusal:?}"
+    );
+    drop(listener);
+
+    let unnameable = "x".repeat(300);
+    assert!(
+        read_optional_and_hash(scratch.anchor(), Path::new(&unnameable))
+            .expect("a name no file can have is an answer rather than a fault")
+            .is_none(),
+        "a name too long to exist was read as a document"
+    );
+}
+
 /// **The bar on the split between an answer and a refusal.** An absent name is
 /// an answer to the optional read; a machine that will not let this account
 /// look is not. Reporting the second as absence would have a transient fault
