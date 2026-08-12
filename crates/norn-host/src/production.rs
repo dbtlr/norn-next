@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
@@ -701,6 +701,7 @@ fn heal_documents(
 ) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
+    let mut vacated = Vacated::default();
     merge_walk(
         store,
         root,
@@ -710,7 +711,9 @@ fn heal_documents(
         HealScope::Vault,
         policy,
         progress,
-    )
+        &mut vacated,
+    )?;
+    revisit_vacated(store, root, exclusions, policy, &mut vacated)
 }
 
 /// Converge the rows a scope addresses against the files a walk of it yields.
@@ -737,6 +740,7 @@ fn merge_walk<I>(
     scope: HealScope<'_>,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure>
 where
     I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
@@ -755,7 +759,7 @@ where
     let mut stored = Vec::new();
     let mut index = 0usize;
     let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, vacated);
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
@@ -853,7 +857,8 @@ fn scoped_increment(
     let normalizer = norn_fs::PathNormalizer::detect(root).map_err(effect)?;
     let sensitivity = normalizer.case_sensitivity();
     let excluded = norn_fs::Exclusions::new(&normalizer, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions);
+    let mut vacated = Vacated::default();
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut vacated);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         if excluded.excludes(relative) {
@@ -878,7 +883,15 @@ fn scoped_increment(
                 pending.flush()?;
                 match scope {
                     Some(scope) => {
-                        heal_subtree(pending.store, root, scope, policy, progress, exclusions)?;
+                        heal_subtree(
+                            pending.store,
+                            root,
+                            scope,
+                            policy,
+                            progress,
+                            exclusions,
+                            pending.vacated,
+                        )?;
                     }
                     None => {
                         quarantine_subtree(
@@ -888,6 +901,7 @@ fn scoped_increment(
                             policy,
                             progress,
                             exclusions,
+                            pending.vacated,
                         )?;
                     }
                 }
@@ -908,6 +922,7 @@ fn scoped_increment(
                         policy,
                         progress,
                         store_order(sensitivity),
+                        pending.vacated,
                     )?;
                 }
                 continue;
@@ -938,6 +953,7 @@ fn scoped_increment(
             policy,
             progress,
             sensitivity,
+            pending.vacated,
         )?;
         if !is_markdown(path) {
             continue;
@@ -991,7 +1007,8 @@ fn scoped_increment(
         }
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
-    pending.flush()
+    pending.flush()?;
+    revisit_vacated(store, root, exclusions, policy, &mut vacated)
 }
 
 /// Converge a dirty directory that addresses no stored rows at all.
@@ -1012,9 +1029,16 @@ fn quarantine_subtree(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    );
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -1047,6 +1071,7 @@ fn quarantine_subtree(
 /// The merge is the vault heal's, narrowed to one root. The scope is what makes
 /// the prune half reachable for a directory whose own leaf reduces to a refused
 /// stem — it names no document and still addresses every row beneath it.
+#[allow(clippy::too_many_arguments)]
 fn heal_subtree(
     store: &mut Store,
     vault_root: &Path,
@@ -1054,6 +1079,7 @@ fn heal_subtree(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let scope = HealScope::from(scope);
     let relative_root = Path::new(scope.as_str());
@@ -1068,6 +1094,7 @@ fn heal_subtree(
         scope,
         policy,
         progress,
+        vacated,
     )
 }
 
@@ -1151,6 +1178,7 @@ impl HealScope<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_subtree_ordered(
     store: &mut Store,
     vault_root: &Path,
@@ -1159,11 +1187,18 @@ fn prune_subtree_ordered(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     order: StoredPathOrder,
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let scope = HealScope::from(scope);
     let mut after = None;
     let mut healed = 0;
-    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    );
     loop {
         let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
@@ -1186,6 +1221,7 @@ fn prune_subtree_ordered(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_descendants_and_aliases(
     store: &mut Store,
     vault_root: &Path,
@@ -1194,10 +1230,17 @@ fn prune_descendants_and_aliases(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     sensitivity: norn_fs::CaseSensitivity,
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let mut after = None;
     let mut pruned = 0;
-    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    );
     loop {
         let page = pending
             .store
@@ -1257,9 +1300,8 @@ where
         let file = files.next().expect("peeked").map_err(effect)?;
         let path = file.path().as_path().to_owned();
         // The identity seam states the cause, so a path reached here and the
-        // same path reached through any other caller carry one account of it —
-        // which is what lets one flush tell a path it has already filed from a
-        // path it has not.
+        // same path reached through the reading of a vacated root carry one
+        // account of it, whichever of them the store records.
         if let Err(quarantine) = document_path(&path) {
             pending.quarantine(&path, quarantine);
         }
@@ -1344,6 +1386,130 @@ struct Quarantine {
     problem: String,
 }
 
+/// The roots one job's deaths owe a reading of.
+///
+/// A finding is withheld while a document row stands at its subject, so the
+/// death that vacates a rendered place is what frees the findings about the
+/// spellings rendering there. **Death is final within a job** — no later
+/// increment puts a row back at a place an earlier one killed — so the readings
+/// those deaths owe are owed once, after the job's last flush, rather than once
+/// per flush: removing a directory whose own name carries the marker vacates a
+/// place per row beneath it, and one reading of the root they share answers
+/// every one of them however many pages the removal took.
+///
+/// **What is held is the roots rather than the places**, which is what keeps a
+/// job's residency off the number of rows it kills: one entry per directory a
+/// vacated place sits under, which counts the vault's rendered names rather than
+/// its documents. A reading files a finding for every refused spelling beneath
+/// its root, and the recording after it withholds the ones a document row still
+/// stands at — so a spelling the job did not free is either a finding nothing
+/// was holding, which the next vault heal would file anyway, or a finding still
+/// withheld.
+#[derive(Default)]
+struct Vacated {
+    roots: BTreeSet<String>,
+}
+
+impl Vacated {
+    /// Take the roots a changeset's deaths free a reading of.
+    ///
+    /// Only a place carrying the rendering marker can have withheld a finding: a
+    /// finding is withheld when a document row stands at its subject, a subject
+    /// is a rendering, and a rendering of a spelling the grammar refuses carries
+    /// the marker. A subject the grammar admits as it is written belongs to the
+    /// document at that path, whose own row dies in the same changeset as the
+    /// finding that replaces it.
+    ///
+    /// The root a place is read from is its deepest ancestor carrying no marker,
+    /// which is as narrow as the search can be: a candidate's segments above the
+    /// first rendered one are that place's own segments, spelled the same way,
+    /// because rendering a segment is what puts the marker there.
+    fn absorb(&mut self, changes: &[Change]) {
+        for change in changes {
+            match change {
+                Change::Death { path, .. } if path.carries_marker() => {
+                    self.roots.insert(path.unrendered_ancestor().to_owned());
+                }
+                Change::Death { .. } | Change::Upsert(_) => {}
+            }
+        }
+    }
+
+    /// The roots to read, with every root another one already reaches dropped.
+    ///
+    /// A reading yields every file beneath its root, so a root under another
+    /// root is one that root's reading already covers and reading it too would
+    /// read the same subtree twice. Sorted order puts a root ahead of everything
+    /// beneath it, so the roots kept so far are the only ones a later root can
+    /// be under.
+    fn into_readings(self) -> Vec<String> {
+        let mut readings: Vec<String> = Vec::new();
+        for root in self.roots {
+            if !readings.iter().any(|kept| reading_reaches(kept, &root)) {
+                readings.push(root);
+            }
+        }
+        readings
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many readings of a vacated root this thread has started.
+    ///
+    /// The grouping is what keeps a job's readings off the count of rows it
+    /// kills and off the count of flushes that kill them, and the count of
+    /// readings is the only place that shows: a job whose reading is per death
+    /// or per flush files the same findings this one does, at the cost the case
+    /// in `tests` holds.
+    static REVISIT_READINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_reading() {
+    REVISIT_READINGS.with(|readings| readings.set(readings.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_reading() {}
+
+/// Whether a reading rooted at `root` yields everything a reading rooted at
+/// `inner` yields.
+///
+/// The vault root is the empty spelling and reaches every path. Any other root
+/// reaches the paths whose spelling continues past it at a segment boundary,
+/// which is what keeps a directory from reaching a sibling whose name it opens.
+fn reading_reaches(root: &str, inner: &str) -> bool {
+    root.is_empty()
+        || inner == root
+        || inner
+            .strip_prefix(root)
+            .is_some_and(|below| below.starts_with('/'))
+}
+
+/// Read the roots a job's deaths freed and record what those readings file.
+///
+/// This runs after the job's last flush, and **nothing may flush after it**: the
+/// reading's findings are recorded by the drain here, and a flush that followed
+/// would find the queue already empty while its own increment discarded them.
+fn revisit_vacated(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    vacated: &mut Vacated,
+) -> Result<(), JobFailure> {
+    let readings = std::mem::take(vacated).into_readings();
+    if readings.is_empty() {
+        return Ok(());
+    }
+    // The reading files findings and pushes no change, so the accumulator it
+    // carries — this job's own, emptied above — is one nothing adds to.
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, vacated);
+    pending.revisit(&readings)?;
+    pending.record_findings()
+}
+
 /// What one heal scope has derived and not yet committed: the changeset being
 /// filled, and the findings its quarantined documents record.
 ///
@@ -1364,6 +1530,10 @@ struct Pending<'s> {
     /// The roots a walk of this vault does not read, so a revisit reads exactly
     /// the documents the vault heal reads.
     exclusions: &'s [PathBuf],
+    /// The job's account of what its flushes vacated, which outlives this scope:
+    /// a scoped increment runs several scopes, and the reading they owe is one
+    /// reading after the last of them.
+    vacated: &'s mut Vacated,
     changes: Vec<Change>,
     quarantined: Vec<FindingFacts>,
     /// The subjects this scope has already re-derived, so a second finding at
@@ -1374,15 +1544,6 @@ struct Pending<'s> {
     /// count rather than its size, and it is strictly smaller than what those
     /// same defects put in the findings table.
     replaced: BTreeSet<DocumentPath>,
-    /// The paths this flush has already filed a finding for, by the place each
-    /// stands at. One path with one cause is one finding however many ways the
-    /// flush reached it, and a revisit of a vacated place reaches paths the
-    /// merge around it may have reached already.
-    ///
-    /// It is keyed by the path rather than by the finding's text, because the
-    /// two sites that read a path's identity state the same refusal in their own
-    /// words. It is emptied with the findings it tracks.
-    filed: BTreeMap<DocumentPath, BTreeSet<PathBuf>>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
     /// covers.
@@ -1390,15 +1551,21 @@ struct Pending<'s> {
 }
 
 impl<'s> Pending<'s> {
-    fn new(store: &'s mut Store, bound: usize, root: &'s Path, exclusions: &'s [PathBuf]) -> Self {
+    fn new(
+        store: &'s mut Store,
+        bound: usize,
+        root: &'s Path,
+        exclusions: &'s [PathBuf],
+        vacated: &'s mut Vacated,
+    ) -> Self {
         Pending {
             store,
             root,
             exclusions,
+            vacated,
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
             replaced: BTreeSet::new(),
-            filed: BTreeMap::new(),
             bound,
         }
     }
@@ -1451,10 +1618,6 @@ impl<'s> Pending<'s> {
     /// tellable apart.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
         let subject = DocumentPath::rendered(path);
-        self.filed
-            .entry(subject.clone())
-            .or_default()
-            .insert(path.to_path_buf());
         self.quarantined.push(FindingFacts {
             kind: quarantine.cause.kind(),
             severity: QUARANTINE_SEVERITY,
@@ -1482,39 +1645,36 @@ impl<'s> Pending<'s> {
         self.changes.len() >= self.bound || self.quarantined.len() >= self.bound
     }
 
-    /// Apply the changeset, then re-derive what its quarantines say.
+    /// Apply the changeset, then record what its quarantines say.
     ///
     /// Findings go after the increment because the increment's own subject
     /// discard would otherwise take them, and because a document that derived is
     /// then readable: a place a real document occupies is that document's, and a
     /// finding there would call a document that just derived unreadable.
     ///
-    /// The places the increment **vacated** are read again between the two, for
-    /// the other half of that exclusion: while a document stood at a rendered
-    /// spelling, every finding filed there was withheld, and the paths those
-    /// findings are about are not paths the increment names. So the increment
-    /// that removes the document is the increment that files them.
+    /// The places the increment **vacated** are the other half of that
+    /// exclusion: while a document stood at a rendered spelling, every finding
+    /// filed there was withheld, and the paths those findings are about are not
+    /// paths the increment names. The roots to read for them go to the job,
+    /// which reads each of them once after its last flush — a row this increment
+    /// kills is a row no later one revives, so a reading here would be a reading
+    /// per flush of an answer that does not change.
     fn flush(&mut self) -> Result<(), JobFailure> {
         if !self.changes.is_empty() {
-            let vacated = self.vacated_places();
+            self.vacated.absorb(&self.changes);
             self.store
                 .begin_request()
                 .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
                 .map_err(store_effect)?;
-            self.revisit(vacated)?;
         }
-        self.record_findings()?;
-        // The findings this flush held are recorded, so what it reached them
-        // through is answered too.
-        self.filed.clear();
-        Ok(())
+        self.record_findings()
     }
 
-    /// Record every finding waiting in this flush, emptying the queue.
+    /// Record every finding waiting in this scope, emptying the queue.
     ///
-    /// The revisit calls this as well as the flush around it, which is what
-    /// keeps a queue filled by a reading of the vault inside the bound the
-    /// changeset beside it holds to.
+    /// The revisit calls this whenever it fills the bound as well as at its own
+    /// end, which is what keeps a queue filled by a reading of the vault inside
+    /// the bound the changeset beside it holds to.
     fn record_findings(&mut self) -> Result<(), JobFailure> {
         for finding in self.quarantined.drain(..) {
             let mut request = self.store.begin_request();
@@ -1540,57 +1700,33 @@ impl<'s> Pending<'s> {
         Ok(())
     }
 
-    /// The places this changeset's deaths free for a finding to stand at.
+    /// Read the roots this job's deaths freed and quarantine every path beneath
+    /// them the grammar refuses.
     ///
-    /// Only a place carrying the rendering marker can have withheld one: a
-    /// finding is withheld when a document row stands at its subject, a subject
-    /// is a rendering, and a rendering of a spelling the grammar refuses carries
-    /// the marker. A subject the grammar admits as it is written belongs to the
-    /// document at that path, whose own row dies in the same changeset as the
-    /// finding that replaces it.
-    fn vacated_places(&self) -> Vec<DocumentPath> {
-        self.changes
-            .iter()
-            .filter_map(|change| match change {
-                Change::Death { path, .. } if path.carries_marker() => Some(path.clone()),
-                Change::Death { .. } | Change::Upsert(_) => None,
-            })
-            .collect()
-    }
-
-    /// Read the places this increment vacated again and quarantine every path
-    /// the vault holds that renders to one of them.
-    ///
-    /// Each reading is rooted at the deepest ancestor of a place that carries no
-    /// marker, which is as narrow as the search can be: a candidate's segments
-    /// above the first rendered one are that place's own segments, spelled the
-    /// same way, because rendering a segment is what puts the marker there.
-    /// **Places that share a root are read together**, so removing a directory
-    /// whose own name is rendered costs one reading rather than one per row that
-    /// died under it.
+    /// **One reading per root**, however many places died under it and however
+    /// many flushes killed them: removing a directory whose own name is rendered
+    /// costs one reading rather than one per row or one per store page. Each
+    /// root is a vacated place's deepest ancestor carrying no marker, which is
+    /// as narrow as the search can be — a candidate's segments above the first
+    /// rendered one are that place's own segments, spelled the same way, because
+    /// rendering a segment is what puts the marker there.
     ///
     /// **The reading is opportunistic: its own filesystem failures end it rather
-    /// than the job.** The increment is committed before it runs, so a refusal
-    /// here would discard the findings queued beside it and consume the death
-    /// that asks for them — leaving the withheld finding unreachable until an
+    /// than the job.** The increments are committed before it runs, so a refusal
+    /// here would discard the findings queued beside it and consume the deaths
+    /// that ask for them — leaving the withheld finding unreachable until an
     /// unrelated vault heal. A reading that fails leaves what a heal with no
     /// revisit leaves instead: a finding still withheld, and a place the next
     /// heal reads.
-    fn revisit(&mut self, vacated: Vec<DocumentPath>) -> Result<(), JobFailure> {
-        let mut searches: BTreeMap<String, BTreeSet<DocumentPath>> = BTreeMap::new();
-        for place in vacated {
-            searches
-                .entry(place.unrendered_ancestor().to_owned())
-                .or_default()
-                .insert(place);
-        }
-        for (ancestor, places) in searches {
+    fn revisit(&mut self, roots: &[String]) -> Result<(), JobFailure> {
+        for start in roots {
+            count_reading();
             // The vault's own root is walked as the vault, because a subtree
             // walk is named by a relative path and the root is named by none.
-            let reading = if ancestor.is_empty() {
+            let reading = if start.is_empty() {
                 walk(self.root, self.exclusions)
             } else {
-                walk_subtree(self.root, Path::new(&ancestor), self.exclusions)
+                walk_subtree(self.root, Path::new(start), self.exclusions)
             };
             // A root that is gone, that is no longer a directory, or that this
             // account cannot open holds no candidate this reading can reach.
@@ -1610,21 +1746,14 @@ impl<'s> Pending<'s> {
                 let Err(quarantine) = document_path(&path) else {
                     continue;
                 };
-                let place = DocumentPath::rendered(&path);
-                if !places.contains(&place) {
-                    continue;
-                }
-                // A vault heal reaches a colliding path through its own merge as
-                // well as through the revisit that frees the place, and one path
-                // with one cause is one finding however many ways it was
-                // reached.
-                if self
-                    .filed
-                    .get(&place)
-                    .is_some_and(|filed| filed.contains(&path))
-                {
-                    continue;
-                }
+                // Every refused spelling this reading meets is filed, and the
+                // recording after it decides which ones stand: a place a
+                // document row still occupies withholds its finding there, so
+                // the reading needs no account of which places its job freed.
+                // A place this reading files at is re-derived whole — the
+                // discard the first finding there carries takes what an earlier
+                // job or this job's own merge recorded, and every spelling the
+                // reading meets is filed over it.
                 self.quarantine(&path, quarantine);
                 if self.is_full() {
                     self.record_findings()?;
@@ -2740,7 +2869,9 @@ mod tests {
     /// it removed.
     ///
     /// The merge reaches the surviving colliding path as well, and one path with
-    /// one cause is one finding however many ways the flush reached it.
+    /// one cause is one finding however many ways the job reached it: the
+    /// reading re-derives the place whole, discarding what the merge recorded
+    /// there before filing what it read.
     #[cfg(unix)]
     #[test]
     fn removing_the_rows_under_a_rendered_directory_files_one_finding_per_spelling() {
@@ -2791,6 +2922,196 @@ mod tests {
             ["document/path-names-no-document"],
         );
         assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// **One reading per root a job vacated, whatever it took to vacate it.**
+    /// The reading is what the convergence costs, and it costs a walk of the
+    /// root: a job that starts one per death, or one per flush, pays the root's
+    /// size times the rows it removed, so removing a directory of notes reads
+    /// the vault once per page of them.
+    ///
+    /// The two forbidden shapes are both a reading per something the removal
+    /// counts. This case holds both at once: the changeset bound and the store
+    /// page are two, so seven rows die across four flushes with several deaths
+    /// in each, and either shape starts more than one reading. The finding the
+    /// reading files is asserted beside the count, because a job that starts no
+    /// reading at all also starts fewer than two.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_reads_a_vacated_root_once_however_many_flushes_vacate_it() {
+        let f = Fixture::new("collision-cleared-one-reading");
+        let folder = f.vault().join("fold\u{fffd}er");
+        fs::create_dir(&folder).unwrap();
+        for index in 0..6 {
+            fs::write(folder.join(format!("note{index}.md")), "real").unwrap();
+        }
+        fs::write(folder.join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&folder.join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store).len(), 7);
+        assert!(
+            findings_at(&mut attachment.store, "fold\u{fffd}er/bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        for index in 0..6 {
+            fs::remove_file(folder.join(format!("note{index}.md"))).unwrap();
+        }
+        fs::remove_file(folder.join("bad\u{fffd}name.md")).unwrap();
+        let before = revisit_readings();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            revisit_readings() - before,
+            1,
+            "the job read one root more than once"
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// **What the reading costs, measured rather than argued.** Removing a
+    /// directory whose own name carries the marker vacates a place per row
+    /// beneath it, which is the removal that owes the most readings; the same
+    /// removal of a directory whose name carries none owes no reading at all and
+    /// is what its cost is read against. A job that reads per flush turns the
+    /// second into the first times the pages the removal took, so the two grow
+    /// apart as the vault does — which is the shape this case is here to catch.
+    ///
+    /// Ignored because it builds vaults of thousands of documents, which is
+    /// minutes of setup rather than a suite's worth of seconds. Run it as
+    /// `cargo test -p norn-host --release -- --ignored --nocapture
+    /// removing_a_rendered_directory_costs`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "scaling measurement: builds vaults of thousands of documents"]
+    fn removing_a_rendered_directory_costs_one_reading_of_the_vault() {
+        for size in [900usize, 2700, 8100] {
+            let mut elapsed = Vec::new();
+            for leaf in ["folder", "fold\u{fffd}er"] {
+                let f = Fixture::watcherless("revisit-scaling");
+                fs::create_dir(f.vault().join(leaf)).unwrap();
+                fs::create_dir(f.vault().join("elsewhere")).unwrap();
+                for index in 0..size {
+                    let note = format!("note{index}.md");
+                    fs::write(f.vault().join(leaf).join(&note), "body").unwrap();
+                    fs::write(f.vault().join("elsewhere").join(&note), "body").unwrap();
+                }
+                let mut store = Store::open(f.root.join("scaling.sqlite3")).unwrap();
+                let progress = ProgressReporter::disconnected();
+                let policy = ProductionPolicy::new(128, 128).unwrap();
+                ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+                heal_documents(
+                    &mut store,
+                    f.vault().as_path(),
+                    &[],
+                    policy,
+                    &progress.healing(),
+                )
+                .unwrap();
+                assert_eq!(
+                    store.begin_request().pillars().unwrap().documents,
+                    size as u64 * 2
+                );
+
+                fs::remove_dir_all(f.vault().join(leaf)).unwrap();
+                let started = Instant::now();
+                scoped_increment(
+                    &mut store,
+                    f.vault().as_path(),
+                    &dirty_path(f.vault().as_path(), leaf),
+                    policy,
+                    &progress.healing(),
+                    &[],
+                )
+                .unwrap();
+                elapsed.push(started.elapsed());
+                assert_eq!(
+                    store.begin_request().pillars().unwrap().documents,
+                    size as u64
+                );
+                eprintln!(
+                    "removal of `{leaf}` at {size} documents inside and {size} elsewhere: {:?}",
+                    elapsed.last().unwrap()
+                );
+            }
+            let (unmarked, marked) = (elapsed[0].as_secs_f64(), elapsed[1].as_secs_f64());
+            assert!(
+                marked < unmarked * 4.0 + 0.25,
+                "the rendered directory's removal cost {marked:.3}s against {unmarked:.3}s \
+                 for the same removal owing no reading, which is more than one reading of \
+                 the vault"
+            );
+        }
+    }
+
+    /// **A root another root already reaches is not read again.** A reading
+    /// yields every file beneath its root, so a job that vacated a place at the
+    /// vault root has already read every directory under it — and reading one of
+    /// them again would read the same files a second time.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_that_vacates_nested_roots_reads_only_the_outer_one() {
+        let f = Fixture::new("collision-cleared-nested-roots");
+        fs::create_dir(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}one.md"), "a real document").unwrap();
+        fs::write(
+            f.vault().join("folder/bad\u{fffd}two.md"),
+            "a real document",
+        )
+        .unwrap();
+        if !write_or_report(&f.vault().join("bad\\one.md"), b"body") {
+            return;
+        }
+        if !write_or_report(&f.vault().join("folder/bad\\two.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 0);
+
+        fs::remove_file(f.vault().join("bad\u{fffd}one.md")).unwrap();
+        fs::remove_file(f.vault().join("folder/bad\u{fffd}two.md")).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let dirty = ["bad\u{fffd}one.md", "folder/bad\u{fffd}two.md"]
+            .into_iter()
+            .map(|dirty| normalizer.normalize(Path::new(dirty)).unwrap())
+            .collect();
+        let before = revisit_readings();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty,
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            revisit_readings() - before,
+            1,
+            "the vault's own reading was not the one the directory's root took"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "one reading did not reach both vacated places"
+        );
         ops.detach(&name, attachment);
     }
 
@@ -2909,6 +3230,7 @@ mod tests {
             HealScope::Vault,
             policy,
             &progress.healing(),
+            &mut Vacated::default(),
         )
         .unwrap();
 
@@ -2952,6 +3274,7 @@ mod tests {
             HealScope::Vault,
             policy,
             &progress.healing(),
+            &mut Vacated::default(),
         )
         .unwrap();
 
@@ -3344,6 +3667,12 @@ mod tests {
 
     fn finding_total(store: &mut Store) -> u64 {
         store.begin_request().pillars().unwrap().findings
+    }
+
+    /// The readings of a vacated root this thread has started, which a case
+    /// reads either side of a job to count the ones that job started.
+    fn revisit_readings() -> usize {
+        REVISIT_READINGS.with(std::cell::Cell::get)
     }
 
     /// Writes a name the vault holds and the document-path grammar refuses, or
@@ -4710,6 +5039,9 @@ mod tests {
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         let pruned_root = DocumentPath::new("folder").unwrap();
         let pruned_exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        // The leg accrues the roots its deaths owe a reading of, and the job
+        // around it is what reads them; this case is that job.
+        let mut vacated = Vacated::default();
         prune_subtree_ordered(
             &mut attachment.store,
             f.vault().as_path(),
@@ -4718,6 +5050,15 @@ mod tests {
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
             StoredPathOrder::Sensitive,
+            &mut vacated,
+        )
+        .unwrap();
+        revisit_vacated(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &pruned_exclusions,
+            ProductionPolicy::new(8, 2).unwrap(),
+            &mut vacated,
         )
         .unwrap();
         fs::write(f.vault().join("after.md"), "after").unwrap();
