@@ -11,7 +11,7 @@ use norn_fs::{
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
-    BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
+    BlockFact, Change, DirectoryPrefix, DiscardScope, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
     SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
@@ -1401,10 +1401,12 @@ struct Quarantine {
 /// job's residency off the number of rows it kills: one entry per directory a
 /// vacated place sits under, which counts the vault's rendered names rather than
 /// its documents. A reading files a finding for every refused spelling beneath
-/// its root, and the recording after it withholds the ones a document row still
-/// stands at — so a spelling the job did not free is either a finding nothing
-/// was holding, which the next vault heal would file anyway, or a finding still
-/// withheld.
+/// its root, whether or not this job freed the place it renders to. What that
+/// costs is bounded by what the reading re-derives: the recording withholds
+/// every finding a document row still stands at, and the discard it carries to a
+/// place takes the spelling kinds it is re-filing there and nothing else, so a
+/// quarantine about the document occupying that place stands through a reading
+/// that was never about it.
 #[derive(Default)]
 struct Vacated {
     roots: BTreeSet<String>,
@@ -1505,7 +1507,8 @@ fn revisit_vacated(
     }
     // The reading files findings and pushes no change, so the accumulator it
     // carries — this job's own, emptied above — is one nothing adds to.
-    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, vacated);
+    let mut pending =
+        Pending::new(store, policy.changeset_size, root, exclusions, vacated).reading_spellings();
     pending.revisit(&readings)?;
     pending.record_findings()
 }
@@ -1544,11 +1547,31 @@ struct Pending<'s> {
     /// count rather than its size, and it is strictly smaller than what those
     /// same defects put in the findings table.
     replaced: BTreeSet<DocumentPath>,
+    /// What this scope's first record at a place replaces there, which is what
+    /// this scope reads.
+    ///
+    /// A scope that derives documents opens the bytes at the paths it reaches,
+    /// so it concludes any cause a quarantine carries and replaces the place
+    /// whole. The reading of a vacated root opens none: it reaches every
+    /// spelling beneath its roots and continues past every path the grammar
+    /// admits, so what it concludes is what a spelling alone decides and that is
+    /// all it replaces. A quarantine about the document standing at a place it
+    /// files at is a finding it did not read and does not re-file, and taking it
+    /// would delete a true statement about a real document until an unrelated
+    /// vault heal.
+    rederives: DiscardScope<'static>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
     /// covers.
     bound: usize,
 }
+
+/// The finding kinds a path alone decides, which is what a reading of a place's
+/// spellings re-derives: the two ways [`document_path`] refuses a spelling.
+const SPELLING_KINDS: [FindingKind; 2] = [
+    FindingKind::PathBytesNotUtf8,
+    FindingKind::PathNamesNoDocument,
+];
 
 impl<'s> Pending<'s> {
     fn new(
@@ -1566,8 +1589,16 @@ impl<'s> Pending<'s> {
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
             replaced: BTreeSet::new(),
+            rederives: DiscardScope::EveryKind,
             bound,
         }
+    }
+
+    /// The same scope, recording as a reading of spellings rather than as a
+    /// derivation of documents.
+    fn reading_spellings(mut self) -> Self {
+        self.rederives = DiscardScope::Kinds(&SPELLING_KINDS);
+        self
     }
 
     fn push(&mut self, change: Change) {
@@ -1686,13 +1717,14 @@ impl<'s> Pending<'s> {
                 continue;
             }
             // The first finding this scope **records** at a subject replaces
-            // what stood there, which is how a cause that changed stops being
-            // reported twice; the ones after it append, because two spellings
-            // can render to one place and each is a document somebody has to
-            // fix. A withheld finding records nothing and so takes no turn.
+            // what this scope re-derives there, which is how a cause that
+            // changed stops being reported twice; the ones after it append,
+            // because two spellings can render to one place and each is a
+            // document somebody has to fix. A withheld finding records nothing
+            // and so takes no turn.
             if self.replaced.insert(finding.path.clone()) {
                 request
-                    .discard_findings_about(&finding.path)
+                    .discard_findings_about(&finding.path, self.rederives)
                     .map_err(store_effect)?;
             }
             request.record_finding(&finding).map_err(store_effect)?;
@@ -1718,10 +1750,12 @@ impl<'s> Pending<'s> {
     /// unrelated vault heal. A reading that fails leaves what a heal with no
     /// revisit leaves instead: a finding still withheld, and a place the next
     /// heal reads. It leaves one thing more where it had already filed at a
-    /// place — that place is re-derived from what the reading reached, so a
-    /// second spelling standing there that the reading never got to is a finding
-    /// the discard takes and the next vault heal files again, since no row
-    /// stands at a place a death vacated.
+    /// place — that place's spellings are re-derived from what the reading
+    /// reached, so a second spelling standing there that the reading never got
+    /// to is a finding the discard takes and the next vault heal files again.
+    /// The record withholds wherever a document row stands, so a place this
+    /// reading discards at is a place holding no row for that heal to have to
+    /// step around.
     fn revisit(&mut self, roots: &[String]) -> Result<(), JobFailure> {
         for start in roots {
             count_reading();
@@ -1754,10 +1788,12 @@ impl<'s> Pending<'s> {
                 // recording after it decides which ones stand: a place a
                 // document row still occupies withholds its finding there, so
                 // the reading needs no account of which places its job freed.
-                // A place this reading files at is re-derived whole — the
-                // discard the first finding there carries takes what an earlier
-                // job or this job's own merge recorded, and every spelling the
-                // reading meets is filed over it.
+                // What a place this reading files at is re-derived in is its
+                // spellings — the discard the first finding there carries takes
+                // the spelling findings an earlier job or this job's own merge
+                // recorded, and every spelling the reading meets is filed over
+                // them. A quarantine about the document occupying that place is
+                // read from bytes this reading never opens, so it stands.
                 self.quarantine(&path, quarantine);
                 if self.is_full() {
                     self.record_findings()?;
@@ -2862,20 +2898,81 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A reading replaces the spellings it read and nothing else.** The
+    /// reading files at every refused spelling beneath its root, so it reaches
+    /// places no death of this job's freed — and the first finding it records at
+    /// a place replaces what stood there. What it re-derives is spellings: it
+    /// continues past every path the grammar admits and never opens a byte. A
+    /// quarantine about the document standing at that place is therefore a
+    /// finding this reading is not re-filing, and taking it would delete a true
+    /// statement about a real document until an unrelated vault heal.
+    ///
+    /// The vault here holds a marker-named document whose bytes do not decode
+    /// and a refused spelling that renders to that same place, and the job that
+    /// runs is about neither of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_leaves_the_content_quarantine_standing_at_a_place_it_files_at() {
+        let f = Fixture::new("collision-cleared-unrelated");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("other\u{fffd}doc.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // A place this job vacates, which is what owes the reading. It is not
+        // the collided place and the reading is not about it.
+        fs::remove_file(f.vault().join("other\u{fffd}doc.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "other\u{fffd}doc.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "an unrelated job's reading took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the reading filed a second copy of the spelling it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **Places vacated under one root are read together.** Removing a directory
     /// whose own name carries the marker vacates a place per row beneath it, and
     /// every one of those places has the same unrendered ancestor — the vault
-    /// root — so the reading that files their withheld findings is one reading
-    /// rather than one per row.
+    /// root — so one reading files the findings all of them withheld.
     ///
-    /// The forbidden shape is a reading per death: an ordinary `rm -rf` of a
-    /// mojibake-named directory would then cost the vault's size times the rows
-    /// it removed.
+    /// What this case holds is the finding, not the count of readings: a job
+    /// that read once per death would file exactly what is asserted here, and
+    /// the count is held by the cases that read it either side of a job.
     ///
     /// The merge reaches the surviving colliding path as well, and one path with
     /// one cause is one finding however many ways the job reached it: the
-    /// reading re-derives the place whole, discarding what the merge recorded
-    /// there before filing what it read.
+    /// reading re-derives that place's spellings, discarding the spelling
+    /// findings the merge recorded there before filing what it read.
     #[cfg(unix)]
     #[test]
     fn removing_the_rows_under_a_rendered_directory_files_one_finding_per_spelling() {
@@ -3596,6 +3693,18 @@ mod tests {
 
     fn finding_total(store: &mut Store) -> u64 {
         store.begin_request().pillars().unwrap().findings
+    }
+
+    /// The kinds standing at a place, in kind order rather than in the order
+    /// they were written: what a case about which causes stand is about is the
+    /// set, and a re-derived cause is re-recorded and moves.
+    fn sorted_kinds(store: &mut Store, at: &str) -> Vec<String> {
+        let mut kinds: Vec<String> = findings_at(store, at)
+            .into_iter()
+            .map(|finding| finding.kind)
+            .collect();
+        kinds.sort_unstable();
+        kinds
     }
 
     /// The readings of a vacated root this thread has started, which a case

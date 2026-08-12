@@ -210,11 +210,14 @@ unreadable — and **the heal that removes the colliding document is the one tha
 it**: the deaths that vacate rendered places send the heal back, after its last increment,
 to read the roots those places sit under, and every refused spelling those readings meet is
 quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
-is what that revisit exists to prevent. **The revisit is opportunistic, and it is owed once
-per heal rather than once per removal**: its increments are already committed, so a
-directory it cannot open ends it rather than refusing the heal, and a death consumed that
-way leaves the finding withheld until a later heal reads that place again — the same honesty
-the paging window above states, for the same reason. Recovery needs no second mechanism: a
+is what that revisit exists to prevent. **A revisit replaces the findings it re-derives**,
+which are the ones a spelling alone decides: it reads paths rather than bytes, so a
+quarantine about the document standing at a place it files at is left where it is. **The
+revisit is opportunistic, and it is owed once per heal rather than once per removal**: its
+increments are already committed, so a directory it cannot open ends that root's reading
+rather than refusing the heal, and a place left unread that way keeps its finding withheld
+until a later heal reads it again — the same honesty the paging window above states, for the
+same reason. Recovery needs no second mechanism: a
 document that reads again is an ordinary derivation, and the increment's own findings
 discard takes the finding with it.
 
@@ -252,8 +255,9 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
 connection — and four named statements carry an index bar through it: suffix candidates,
-findings in a class, and the class- and subject-scoped findings discards. None of those is a
-query shape's bar. **No builder compiles wire params to SQL yet**, so no query shape carries
+findings in a class, and the class- and subject-scoped findings discards, the subject
+discard in both the whole form and the form narrowed to the kinds a producer re-derives.
+None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no query shape carries
 its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate per PR, and no query
 shape carries a timing or a memory bar.
 
