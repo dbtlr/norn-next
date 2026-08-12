@@ -287,6 +287,7 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/path-bytes-not-utf8",
         "document/path-names-no-document",
         "document/body-bytes-not-utf8",
+        "document/frontmatter-too-large",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {

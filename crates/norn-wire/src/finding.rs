@@ -92,6 +92,11 @@ pub enum FindingKind {
     /// no facts are read out of it.
     #[serde(rename = "document/body-bytes-not-utf8")]
     BodyBytesNotUtf8,
+    /// `document/frontmatter-too-large` — the frontmatter block is past the
+    /// bound the text layer reads, so the block is refused unparsed and the
+    /// document's fields are unknown.
+    #[serde(rename = "document/frontmatter-too-large")]
+    FrontmatterTooLarge,
 }
 
 impl FindingKind {
@@ -100,10 +105,11 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 3] = [
+    pub const ALL: [FindingKind; 4] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
+        FindingKind::FrontmatterTooLarge,
     ];
 
     /// The kind as the string it is on the wire.
@@ -112,6 +118,7 @@ impl FindingKind {
             FindingKind::PathBytesNotUtf8 => "document/path-bytes-not-utf8",
             FindingKind::PathNamesNoDocument => "document/path-names-no-document",
             FindingKind::BodyBytesNotUtf8 => "document/body-bytes-not-utf8",
+            FindingKind::FrontmatterTooLarge => "document/frontmatter-too-large",
         }
     }
 }

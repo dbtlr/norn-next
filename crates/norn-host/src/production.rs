@@ -15,7 +15,7 @@ use norn_store::{
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
     SchemaPin, Span, Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
-use norn_text::{Document, SourceSpan, Value};
+use norn_text::{DiagnosticCode, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, MaintainerIdentity, Severity};
 
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
@@ -1086,6 +1086,17 @@ enum Undecodable {
     PathSpelling,
     /// The document's bytes are not UTF-8.
     BodyBytes,
+    /// The frontmatter block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so
+    /// the text layer refuses it unparsed and the document's fields are
+    /// unknown.
+    ///
+    /// This is a cause class rather than a note beside a derived row because
+    /// the fields are what a vault is queried by: deriving the body of a
+    /// document whose whole block went unread would answer *this document has
+    /// no tags, no title, no aliases*, which is a wrong answer rather than a
+    /// missing one. Quarantine states the absence instead, and the document
+    /// returns of its own accord once the block is written inside the bound.
+    FrontmatterSize,
 }
 
 impl Undecodable {
@@ -1098,6 +1109,7 @@ impl Undecodable {
             Undecodable::PathBytes => FindingKind::PathBytesNotUtf8,
             Undecodable::PathSpelling => FindingKind::PathNamesNoDocument,
             Undecodable::BodyBytes => FindingKind::BodyBytesNotUtf8,
+            Undecodable::FrontmatterSize => FindingKind::FrontmatterTooLarge,
         }
     }
 
@@ -1107,6 +1119,7 @@ impl Undecodable {
             Undecodable::PathBytes => "its path bytes are not UTF-8",
             Undecodable::PathSpelling => "its path names no document",
             Undecodable::BodyBytes => "its bytes are not UTF-8",
+            Undecodable::FrontmatterSize => "its frontmatter block is past the bound that is read",
         }
     }
 }
@@ -1300,6 +1313,20 @@ fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts,
         problem: problem.to_string(),
     })?;
     let document = Document::parse(source);
+    // The text layer reads a block only up to its own bound and says so rather
+    // than parsing past it, so this costs the bound at worst however the block
+    // is shaped. A block it refused for size leaves the fields unknown, which
+    // is a cause class and not a note beside a row.
+    if let Some(note) = document
+        .diagnostics()
+        .iter()
+        .find(|note| note.code == DiagnosticCode::FrontmatterTooLarge)
+    {
+        return Err(Quarantine {
+            cause: Undecodable::FrontmatterSize,
+            problem: note.detail.clone().unwrap_or_else(|| note.message.clone()),
+        });
+    }
     let scan = document.scan_body();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64);
     facts.body_offset = document.body_start() as u64;
@@ -2208,6 +2235,182 @@ mod tests {
         );
         assert!(findings[0].detail.is_some());
         assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// A document whose frontmatter block is past the bound the text layer
+    /// reads, and the same block written one byte under it.
+    ///
+    /// The block nests flow collections and never closes them, which is the
+    /// shape the YAML scanner is quadratic on: an unbounded read of the
+    /// oversized one is seconds of CPU spent on one file.
+    fn unclosed_flow_nest(bytes: usize) -> Vec<u8> {
+        let mut block = String::with_capacity(bytes);
+        block.push_str("a: ");
+        while block.len() + 1 < bytes {
+            block.push('[');
+        }
+        block.push('\n');
+        format!("---\n{block}---\n# body\n").into_bytes()
+    }
+
+    #[test]
+    fn heal_quarantines_an_oversized_frontmatter_block_and_indexes_every_other_document() {
+        let f = Fixture::new("quarantine-frontmatter-size");
+        fs::write(f.vault().join("alpha.md"), "alpha").unwrap();
+        fs::write(f.vault().join("huge.md"), unclosed_flow_nest(100 * 1024)).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        // The heal is what the bound protects: a worker reading this vault
+        // spends the bound on `huge.md` rather than the block's own length.
+        let started = std::time::Instant::now();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["alpha.md"]);
+        let findings = findings_at(&mut attachment.store, "huge.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "document/frontmatter-too-large");
+        assert_eq!(findings[0].severity, "error");
+        assert!(
+            findings[0].message.contains("huge.md"),
+            "the finding does not name the document: {}",
+            findings[0].message
+        );
+        assert!(
+            findings[0].detail.as_ref().is_some_and(
+                |detail| detail.contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string())
+            ),
+            "the finding does not state the bound: {:?}",
+            findings[0].detail
+        );
+        // Loose by orders of magnitude against the seconds an unbounded read
+        // of this block costs, so a slow machine still measures the bound.
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "the heal took {elapsed:?}"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// The same block at the bound is read like any other block, so the
+    /// refusal above is the bound and not the shape.
+    #[test]
+    fn a_frontmatter_block_at_the_bound_still_derives() {
+        let source = unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES);
+        let facts = map_document(
+            "note.md",
+            &source,
+            norn_fs::ContentHash::of(&source).to_string(),
+        )
+        .expect("a block under the bound derives");
+        // The block is not well-formed YAML, which is the ordinary forgiving
+        // read: no projection, one block-scoped note, and a body.
+        assert!(facts.frontmatter.is_none());
+        assert_eq!(facts.frontmatter_diagnostic_count, 1);
+    }
+
+    #[test]
+    fn an_oversized_frontmatter_block_is_a_quarantine_cause_rather_than_a_note() {
+        let source = unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES + 1);
+        let quarantine = map_document(
+            "note.md",
+            &source,
+            norn_fs::ContentHash::of(&source).to_string(),
+        )
+        .expect_err("a block past the bound is not read");
+        assert_eq!(quarantine.cause, Undecodable::FrontmatterSize);
+        assert!(
+            quarantine
+                .problem
+                .contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string()),
+            "the refusal does not state the bound: {}",
+            quarantine.problem
+        );
+    }
+
+    /// The document comes back of its own accord: a block rewritten inside the
+    /// bound is an ordinary derivation, and the increment's own discard takes
+    /// the finding with it.
+    #[test]
+    fn a_document_whose_block_is_rewritten_inside_the_bound_derives_and_clears_its_finding() {
+        let f = Fixture::new("quarantine-frontmatter-size-recovery");
+        fs::write(
+            f.vault().join("note.md"),
+            unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES * 4),
+        )
+        .unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
+        assert!(stored_paths(&mut attachment.store).is_empty());
+
+        fs::write(f.vault().join("note.md"), "---\ntitle: note\n---\n# body\n").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        assert!(findings_at(&mut attachment.store, "note.md").is_empty());
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
+    /// The direction a user causes: a document that derived and served queries
+    /// has an oversized block written into it. The standing row dies with the
+    /// increment — recorded as a quarantine, so nothing reads it as the
+    /// document leaving the vault — and the finding stands where the row was.
+    #[test]
+    fn a_document_rewritten_past_the_bound_loses_its_row_to_a_quarantine() {
+        let f = Fixture::new("quarantine-frontmatter-size-onset");
+        fs::write(f.vault().join("note.md"), "---\ntitle: note\n---\n# body\n").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"]
+        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
+
+        fs::write(
+            f.vault().join("note.md"),
+            unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES * 4),
+        )
+        .unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "document/frontmatter-too-large");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .expect("a tombstone")
+                .provenance,
+            Provenance::Quarantine
+        );
         ops.detach(&name, attachment);
     }
 

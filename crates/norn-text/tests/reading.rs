@@ -134,6 +134,117 @@ fn malformed_yaml_is_diagnosed_and_still_reports_where_the_block_was() {
     assert!(document.diagnostics()[0].detail.is_some());
 }
 
+// ── The bound on the block ───────────────────────────────────────────────
+
+/// A block of `bytes` bytes that parses to a mapping, closed and well-formed.
+///
+/// Keys are padded to a fixed width so the block lands on the requested length
+/// exactly, which is what makes a test either side of the bound a test of the
+/// bound rather than of the padding.
+fn block_of(bytes: usize) -> String {
+    let mut yaml = String::with_capacity(bytes);
+    let mut index = 0usize;
+    while yaml.len() + 16 <= bytes {
+        yaml.push_str(&format!("k{index:012}: 1\n"));
+        index += 1;
+    }
+    // Pad the tail out with a comment, which is block bytes carrying no field.
+    if yaml.len() < bytes {
+        let padding = bytes - yaml.len();
+        yaml.push('#');
+        yaml.push_str(&"p".repeat(padding - 2));
+        yaml.push('\n');
+    }
+    assert_eq!(yaml.len(), bytes, "the block is built to an exact length");
+    yaml
+}
+
+/// The pathological shape: nested flow collections that never close. The YAML
+/// scanner is quadratic in the length of this block, so the bound is the only
+/// thing between one ordinary-looking document and seconds of CPU.
+fn unclosed_flow_nest(bytes: usize) -> String {
+    let mut yaml = String::with_capacity(bytes);
+    yaml.push_str("a: ");
+    while yaml.len() + 1 < bytes {
+        yaml.push('[');
+    }
+    yaml.push('\n');
+    assert_eq!(yaml.len(), bytes, "the block is built to an exact length");
+    yaml
+}
+
+fn document_of(block: &str) -> String {
+    format!("---\n{block}---\n# body\n")
+}
+
+#[test]
+fn a_block_at_the_bound_parses_and_one_byte_past_it_is_refused() {
+    let under = document_of(&block_of(norn_text::FRONTMATTER_MAX_BYTES));
+    let document = Document::parse(&under);
+    assert!(document.diagnostics().is_empty(), "{:?}", codes(&document));
+    assert!(matches!(document.frontmatter(), Some(Value::Map(_))));
+
+    let over = document_of(&block_of(norn_text::FRONTMATTER_MAX_BYTES + 1));
+    let document = Document::parse(&over);
+    assert_eq!(codes(&document), ["frontmatter-too-large"]);
+    assert_eq!(document.frontmatter(), None);
+}
+
+/// The refusal is the same shape every other block refusal has: no value, the
+/// block's range still reported, the body still read, and the note carrying
+/// the parser-free account of what was refused. Nothing is truncated — a
+/// truncated block would read back as a document nobody wrote.
+#[test]
+fn an_oversized_block_is_refused_with_its_body_and_its_range_intact() {
+    let block = block_of(norn_text::FRONTMATTER_MAX_BYTES * 2);
+    let source = document_of(&block);
+    let document = Document::parse(&source);
+    assert_eq!(codes(&document), ["frontmatter-too-large"]);
+    assert_eq!(document.frontmatter(), None);
+    assert_eq!(document.frontmatter_range(), Some(4..4 + block.len()));
+    assert_eq!(document.body(), "# body\n");
+    let detail = document.diagnostics()[0]
+        .detail
+        .clone()
+        .expect("the note states the block's length and the bound");
+    assert!(detail.contains(&block.len().to_string()), "{detail}");
+    assert!(
+        detail.contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string()),
+        "{detail}"
+    );
+}
+
+/// The regression: an unclosed nest of flow collections costs the YAML scanner
+/// time quadratic in the block's length, so a 100 KiB block of it is seconds of
+/// CPU on one document. Past the bound no parser sees it at all, and the wall
+/// bound below is loose by orders of magnitude so that a slow machine still
+/// measures the refusal rather than the parse.
+#[test]
+fn a_pathological_block_past_the_bound_is_refused_without_parsing_it() {
+    let source = document_of(&unclosed_flow_nest(100 * 1024));
+    let start = std::time::Instant::now();
+    let document = Document::parse(&source);
+    let elapsed = start.elapsed();
+    assert_eq!(codes(&document), ["frontmatter-too-large"]);
+    assert_eq!(document.frontmatter(), None);
+    assert_eq!(document.body(), "# body\n");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "reading a refused block took {elapsed:?}"
+    );
+}
+
+/// The same shape *under* the bound is parsed, and what comes back is the
+/// ordinary refusal for YAML that does not close. The bound refuses by size
+/// and never by shape.
+#[test]
+fn the_pathological_shape_under_the_bound_is_still_read_and_diagnosed_as_yaml() {
+    let source = document_of(&unclosed_flow_nest(1024));
+    let document = Document::parse(&source);
+    assert_eq!(codes(&document), ["frontmatter-parse-failed"]);
+    assert_eq!(document.frontmatter(), None);
+}
+
 /// NRN-371, NRN-114: a document norn itself creates has an empty block, and it
 /// must stay mutable. An empty block is null with a range, not an absent one.
 #[test]

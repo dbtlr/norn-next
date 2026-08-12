@@ -640,6 +640,90 @@ fn a_tab_indented_sequence_does_not_parse_and_refuses_every_edit() {
     );
 }
 
+/// A block past [`norn_text::FRONTMATTER_MAX_BYTES`] was never read, so there
+/// is no mapping to write into and every edit refuses. The refusal matters
+/// more than the read does: an edit that took the block for absent would
+/// synthesize a *second* block above the first, and the re-read would find the
+/// synthesized one and approve.
+#[test]
+fn an_oversized_block_refuses_every_edit_rather_than_writing_a_second_block() {
+    let mut block = String::from("a: ");
+    while block.len() < norn_text::FRONTMATTER_MAX_BYTES + 1 {
+        block.push('x');
+    }
+    block.push('\n');
+    let source = format!("---\n{block}---\nbody\n");
+    let document = Document::parse(&source);
+    assert_eq!(document.frontmatter(), None);
+    assert!(
+        document
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::FrontmatterTooLarge)
+    );
+    assert_eq!(
+        set(&source, "title", Value::String("x".into())),
+        Err(EditError::FrontmatterUnreadable)
+    );
+    assert_eq!(remove(&source, "a"), Err(EditError::FrontmatterUnreadable));
+}
+
+/// A block that reads today and would be past the bound once a field is added
+/// refuses on the bound, by name. The document parses clean, so the refusal
+/// cannot be reported as the splice failing to read back: nothing is wrong
+/// with the bytes the splice writes, and the reason the edit stops is the rule
+/// that no read will turn them into fields again. Shrinking the same block
+/// stays available, which is how the document gets back under the bound.
+#[test]
+fn an_edit_that_grows_the_block_past_the_bound_names_the_bound() {
+    let bound = norn_text::FRONTMATTER_MAX_BYTES;
+    let mut block = String::new();
+    let mut index = 0;
+    while block.len() + 17 <= bound {
+        block.push_str(&format!("k{index:012}: 1\n"));
+        index += 1;
+    }
+    // A comment line pads the tail out to the bound exactly, carrying block
+    // bytes and no field.
+    let padding = bound - block.len();
+    block.push('#');
+    block.push_str(&"p".repeat(padding - 2));
+    block.push('\n');
+    let source = format!("---\n{block}---\nbody\n");
+    let document = Document::parse(&source);
+    assert!(
+        document.diagnostics().is_empty(),
+        "{:?}",
+        document.diagnostics()
+    );
+    assert_eq!(
+        block.len(),
+        bound,
+        "the block is built to the bound exactly"
+    );
+
+    let entry = "newfield: v\n";
+    assert_eq!(
+        set(&source, "newfield", Value::String("v".into())),
+        Err(EditError::FrontmatterPastBound {
+            bytes: bound + entry.len(),
+            bound,
+        })
+    );
+    assert!(
+        set(&source, "newfield", Value::String("v".into()))
+            .unwrap_err()
+            .to_string()
+            .contains(&bound.to_string())
+    );
+
+    // Rewriting a field in place keeps the block the length it was, and
+    // removing one shortens it: neither crosses the bound, so both stand.
+    assert!(set(&source, "k000000000000", Value::Int(2)).is_ok());
+    let shortened = remove(&source, "k000000000000").expect("removing a field shortens the block");
+    assert!(Document::parse(&shortened).frontmatter().is_some());
+}
+
 /// A stub carrying a trailing comment takes a scalar and refuses a sequence,
 /// and the asymmetry is not an oversight. A scalar splices into the insertion
 /// point between the colon and the comment, so the comment stays put. A
