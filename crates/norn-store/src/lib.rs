@@ -81,7 +81,9 @@ pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe,
     suffix_probe,
 };
-pub use request::{EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request};
+pub use request::{
+    DiscardScope, EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request,
+};
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
 pub use store::{
