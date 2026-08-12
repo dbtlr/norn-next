@@ -206,12 +206,17 @@ collision is one key holding one row, and the **document wins**: while it stands
 quarantined document's finding is withheld rather than filed over a readable document, so
 for as long as the collision lasts nothing records that the quarantined document cannot be
 read. The trade is deliberate — a finding at that place would call a document that derived
-unreadable — and **the increment that removes the colliding document is the one that clears
-it**: a death that vacates a rendered place sends the heal back to read that place, and
-every path the vault holds that renders there is quarantined then and there. Waiting for a
-demand or for unrelated work to reach the quarantined path is what that revisit exists to
-prevent. Recovery needs no second mechanism: a document that reads again is an ordinary
-derivation, and the increment's own findings discard takes the finding with it.
+unreadable — and **the heal that removes the colliding document is the one that clears
+it**: the deaths that vacate rendered places send the heal back, after its last increment,
+to read the roots those places sit under, and every refused spelling those readings meet is
+quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
+is what that revisit exists to prevent. **The revisit is opportunistic, and it is owed once
+per heal rather than once per removal**: its increments are already committed, so a
+directory it cannot open ends it rather than refusing the heal, and a death consumed that
+way leaves the finding withheld until a later heal reads that place again — the same honesty
+the paging window above states, for the same reason. Recovery needs no second mechanism: a
+document that reads again is an ordinary derivation, and the increment's own findings
+discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
