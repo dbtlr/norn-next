@@ -2682,7 +2682,7 @@ mod tests {
             .expect("a link at the schema name is not schema bytes");
         let stated = format!("{failure:?}");
         assert!(
-            stated.contains("symbolic link") && stated.contains("schema.yaml"),
+            stated.contains("symbolic link: schema.yaml"),
             "the refusal does not name the link or the name it is at: {stated}"
         );
     }
@@ -2710,7 +2710,7 @@ mod tests {
             .expect("a link at the schema directory is not a way into the vault");
         let stated = format!("{failure:?}");
         assert!(
-            stated.contains("symbolic link") && stated.contains(".norn"),
+            stated.contains("symbolic link: .norn"),
             "the refusal does not name the link or the name it is at: {stated}"
         );
     }
@@ -2744,7 +2744,7 @@ mod tests {
             .expect("a link at the configured schema name is not schema bytes");
         let stated = format!("{failure:?}");
         assert!(
-            stated.contains("symbolic link") && stated.contains("linked-schema.yaml"),
+            stated.contains("symbolic link: linked-schema.yaml"),
             "the refusal does not name the link or the name it is at: {stated}"
         );
     }
