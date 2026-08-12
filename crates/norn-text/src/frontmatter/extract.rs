@@ -1,9 +1,12 @@
 //! Pulling the leading `---` … `---` block out of a document.
 //!
-//! Extraction is forgiving: an absent, unclosed or malformed block yields no
-//! value plus a diagnostic, never an error return, and the body is still
-//! reported. Offsets are absolute in the original content, byte-order mark
-//! included, so a splice computed from them lands where it was measured.
+//! Extraction is forgiving: an absent, unclosed, malformed or oversized block
+//! yields no value plus a diagnostic, never an error return, and the body is
+//! still reported. Offsets are absolute in the original content, byte-order
+//! mark included, so a splice computed from them lands where it was measured.
+//!
+//! A block is read only up to [`FRONTMATTER_MAX_BYTES`], which is what bounds
+//! what one document costs to read.
 
 use std::ops::Range;
 
@@ -12,6 +15,27 @@ use crate::value::{StripReport, Value, from_yaml};
 
 /// The byte length of a UTF-8 byte-order mark.
 pub(crate) const BOM: &str = "\u{feff}";
+
+/// The largest frontmatter block this crate reads, in bytes, counted between
+/// the delimiters.
+///
+/// The bound is what holds the cost of reading one document. The YAML scanner
+/// behind this seam is superlinear in the length of a block — a block that
+/// nests flow collections costs time quadratic in its own length, so a document
+/// that looks ordinary can carry a block worth seconds of CPU — and length is
+/// the input that decides how far that goes. Sixteen kibibytes is two orders of
+/// magnitude past the largest block a hand-written vault document carries,
+/// where a block is a few hundred bytes of title, dates, status and tags, so no
+/// authored frontmatter comes near it and the shapes that do are not
+/// frontmatter anybody wrote.
+///
+/// A block past the bound is refused rather than parsed or truncated: the
+/// document carries no frontmatter value and a
+/// [`FrontmatterTooLarge`](crate::DiagnosticCode::FrontmatterTooLarge) note
+/// saying so, exactly as a block that is not well-formed YAML does. Reading
+/// stays forgiving here; what a consumer does with a document whose block was
+/// refused is the consumer's contract.
+pub const FRONTMATTER_MAX_BYTES: usize = 16 * 1024;
 
 pub(crate) struct Extraction<'a> {
     /// The parsed block, or `None` when there is none or it is malformed.
@@ -71,14 +95,8 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
                 diagnostics,
                 &mut strip,
             )),
-            Err(error) => {
-                diagnostics.push(
-                    Diagnostic::warning(
-                        DiagnosticCode::FrontmatterParseFailed,
-                        "frontmatter could not be parsed",
-                    )
-                    .with_detail(error),
-                );
+            Err(refusal) => {
+                diagnostics.push(refusal.into_diagnostic());
                 None
             }
         };
@@ -126,7 +144,47 @@ fn is_fence(line: &str) -> bool {
 /// The key a merge directive is written under.
 pub(crate) const MERGE_KEY: &str = "<<";
 
+/// Why a frontmatter block yields no value.
+///
+/// The two refusals are told apart because they are different defects in the
+/// document: one block is written in a YAML this crate cannot read, and the
+/// other is larger than the block it reads at all.
+#[derive(Debug)]
+pub(crate) enum BlockRefusal {
+    /// The block is longer than [`FRONTMATTER_MAX_BYTES`], carrying its own
+    /// length so the note can state how far past the bound it is.
+    TooLarge { bytes: usize },
+    /// The block is not well-formed YAML, or carries a merge directive that
+    /// names no mapping.
+    Unreadable { problem: String },
+}
+
+impl BlockRefusal {
+    /// The note this refusal is filed as.
+    pub(crate) fn into_diagnostic(self) -> Diagnostic {
+        match self {
+            BlockRefusal::TooLarge { bytes } => Diagnostic::warning(
+                DiagnosticCode::FrontmatterTooLarge,
+                "frontmatter is larger than the block that is read",
+            )
+            .with_detail(format!(
+                "the block is {bytes} bytes and the bound is {FRONTMATTER_MAX_BYTES}"
+            )),
+            BlockRefusal::Unreadable { problem } => Diagnostic::warning(
+                DiagnosticCode::FrontmatterParseFailed,
+                "frontmatter could not be parsed",
+            )
+            .with_detail(problem),
+        }
+    }
+}
+
 /// Parse the YAML between the delimiters, expanding merge keys.
+///
+/// This is the one place document text reaches a YAML parser, so it is where
+/// [`FRONTMATTER_MAX_BYTES`] is enforced: a block past the bound is refused
+/// here and no parser sees it, which is what keeps the cost of reading one
+/// document bounded by the bound rather than by what the block is shaped like.
 ///
 /// `<<` is a merge directive rather than a field: the mapping it names is
 /// folded into the one holding it, and the value model — which addresses
@@ -135,10 +193,15 @@ pub(crate) const MERGE_KEY: &str = "<<";
 /// and `<<` never becomes a field. A `<<` that names no mapping is not a merge
 /// and cannot be expanded, so the block is refused rather than read with a
 /// directive silently carried as a field.
-pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, String> {
+pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal> {
+    if yaml.len() > FRONTMATTER_MAX_BYTES {
+        return Err(BlockRefusal::TooLarge { bytes: yaml.len() });
+    }
     let mut parsed: serde_yaml::Value =
-        serde_yaml::from_str(yaml).map_err(|error| error.to_string())?;
-    expand_merges(&mut parsed)?;
+        serde_yaml::from_str(yaml).map_err(|error| BlockRefusal::Unreadable {
+            problem: error.to_string(),
+        })?;
+    expand_merges(&mut parsed).map_err(|problem| BlockRefusal::Unreadable { problem })?;
     Ok(parsed)
 }
 

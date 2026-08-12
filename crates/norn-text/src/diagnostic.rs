@@ -39,6 +39,10 @@ pub enum DiagnosticCode {
     FrontmatterUnclosed,
     /// The block is not well-formed YAML — duplicate keys included. No value.
     FrontmatterParseFailed,
+    /// The block is longer than
+    /// [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES), so no parser
+    /// reads it. No value, and nothing is truncated.
+    FrontmatterTooLarge,
     /// An entry keyed by something other than a string. The entry is dropped.
     FrontmatterNonStringKey,
     /// An explicit YAML tag. The tag is dropped and its value kept.
@@ -56,6 +60,7 @@ impl DiagnosticCode {
         match self {
             DiagnosticCode::FrontmatterUnclosed => "frontmatter-unclosed",
             DiagnosticCode::FrontmatterParseFailed => "frontmatter-parse-failed",
+            DiagnosticCode::FrontmatterTooLarge => "frontmatter-too-large",
             DiagnosticCode::FrontmatterNonStringKey => "frontmatter-non-string-key",
             DiagnosticCode::FrontmatterTagStripped => "frontmatter-tag-stripped",
             DiagnosticCode::FrontmatterIntegerOutOfRange => "frontmatter-integer-out-of-range",
@@ -73,6 +78,7 @@ impl DiagnosticCode {
         match self {
             DiagnosticCode::FrontmatterUnclosed
             | DiagnosticCode::FrontmatterParseFailed
+            | DiagnosticCode::FrontmatterTooLarge
             | DiagnosticCode::FrontmatterNonStringKey
             | DiagnosticCode::FrontmatterTagStripped
             | DiagnosticCode::FrontmatterIntegerOutOfRange
@@ -138,7 +144,8 @@ mod tests {
     const fn after(code: DiagnosticCode) -> Option<DiagnosticCode> {
         match code {
             DiagnosticCode::FrontmatterUnclosed => Some(DiagnosticCode::FrontmatterParseFailed),
-            DiagnosticCode::FrontmatterParseFailed => Some(DiagnosticCode::FrontmatterNonStringKey),
+            DiagnosticCode::FrontmatterParseFailed => Some(DiagnosticCode::FrontmatterTooLarge),
+            DiagnosticCode::FrontmatterTooLarge => Some(DiagnosticCode::FrontmatterNonStringKey),
             DiagnosticCode::FrontmatterNonStringKey => Some(DiagnosticCode::FrontmatterTagStripped),
             DiagnosticCode::FrontmatterTagStripped => {
                 Some(DiagnosticCode::FrontmatterIntegerOutOfRange)
