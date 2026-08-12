@@ -52,8 +52,9 @@ pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
 ///
 /// The walk is the vault's, narrowed to one subtree: facts carry vault-relative
 /// paths, exclusion roots are the vault's own, and a link's containment is
-/// judged against the vault root. A subtree that is itself excluded is not
-/// entered and yields exactly its own skip notation.
+/// judged against the vault root. A subtree the vault walk does not descend to
+/// is not entered and yields exactly the skip the vault walk states at the
+/// component that stops it.
 pub fn walk_subtree(
     root: &Path,
     relative: &Path,
@@ -74,17 +75,68 @@ pub fn walk_subtree(
         });
         return Ok(walk);
     }
-    let access = root.join(subtree.as_path());
-    let fd = openat(
-        &walk.root_fd,
-        subtree.as_path(),
-        directory_flags(),
-        Mode::empty(),
-    )
-    .map_err(|source| environment_errno("opening directory", &access, source))?;
-    walk.stack
-        .push(DirectoryFrontier::new(Arc::new(fd), subtree.as_path()));
+    match open_subtree(&walk, &subtree)? {
+        Frontier::Open(fd) => walk
+            .stack
+            .push(DirectoryFrontier::new(fd, subtree.as_path())),
+        Frontier::Skipped(skipped) => walk.skipped = Some(skipped),
+    }
     Ok(walk)
+}
+
+/// The subtree frontier, or the skip that stands in place of it.
+enum Frontier {
+    Open(Arc<OwnedFd>),
+    Skipped(SkipFact),
+}
+
+/// Descends to the subtree one component at a time, deciding each component the
+/// way the vault walk decides the entries it descends through: a name the vault
+/// walk skips ends the descent at that name's own skip, so a subtree walk reads
+/// nothing under a name the vault walk never enters.
+///
+/// A single multi-component open would resolve the intermediate names in the
+/// kernel, where `O_NOFOLLOW` binds only the last of them.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
+fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
+    let mut directory = walk.root_fd.clone();
+    let mut traversed = PathBuf::new();
+    for component in subtree.as_path().components() {
+        let name = component.as_os_str();
+        traversed.push(name);
+        let access = walk.root.join(&traversed);
+        let path = walk
+            .normalizer
+            .normalize(&traversed)
+            .expect("a leading run of a normalized path's components is normalized");
+        if is_shadow_name(name) {
+            return Ok(Frontier::Skipped(SkipFact {
+                path,
+                reason: SkipReason::Shadow,
+            }));
+        }
+        let metadata = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|source| environment_errno("stating", &access, source))?;
+        if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) == EntryKind::Symlink
+        {
+            let kind = classify_link(
+                &walk.root_fd,
+                path.as_path(),
+                &directory,
+                name,
+                &walk.normalizer,
+            )?;
+            return Ok(Frontier::Skipped(SkipFact {
+                path,
+                reason: SkipReason::SymbolicLink(kind),
+            }));
+        }
+        directory = Arc::new(
+            openat(&directory, name, directory_flags(), Mode::empty())
+                .map_err(|source| environment_errno("opening directory", &access, source))?,
+        );
+    }
+    Ok(Frontier::Open(directory))
 }
 
 /// The vault-identified walk state both entry points start from, with no
@@ -1172,6 +1224,35 @@ mod tests {
                 Some(SkipReason::HostExclusion)
             )]
         );
+    }
+
+    /// **The bar on a subtree reached through a link.** The vault walk enters no
+    /// symbolic link, so a subtree walk named through one reads nothing either
+    /// and yields the same skip at the same name.
+    ///
+    /// The forbidden shape is resolving the subtree in one open, where
+    /// `O_NOFOLLOW` binds only the last component: the walk would then enumerate
+    /// files under a name the vault walk never admits, and every one of them
+    /// would be spelled from a vault root it cannot be read through.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a linked ancestor.
+    fn a_subtree_walk_named_through_a_link_yields_the_link_s_own_skip() {
+        let scratch = Scratch::new("walk-subtree-linked-ancestor");
+        scratch.directory("vault/real/sub");
+        scratch.place("real/sub/doc.md", b"a document under a linked name");
+        std::os::unix::fs::symlink("real", scratch.at("link")).expect("link");
+
+        let facts = paths(walk_subtree(&scratch.at(""), Path::new("link/sub"), &[]).expect("walk"));
+        assert_eq!(
+            facts,
+            vec![(
+                PathBuf::from("link"),
+                Some(SkipReason::SymbolicLink(LinkKind::InVaultDirectory))
+            )]
+        );
+
+        let itself = paths(walk_subtree(&scratch.at(""), Path::new("link"), &[]).expect("walk"));
+        assert_eq!(itself, facts, "a linked subtree root is the same skip");
     }
 
     /// **The bar on a subtree walk's containment.** A link is judged against the

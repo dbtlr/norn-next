@@ -2453,6 +2453,44 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **The bar on a dirty root named through a link.** A watcher backend that
+    /// follows links reports paths through one, and a directory it names is
+    /// still a directory to `path_kind`. The heal it schedules converges on the
+    /// rows the vault heal holds, which under a link is none.
+    ///
+    /// The forbidden shape is deriving documents there. The vault walk enters no
+    /// link, so every such document would be a row the next vault heal prunes,
+    /// and its bytes cannot be read back through the vault root at all — the
+    /// increment would fail the reconcile again on every event for that root.
+    #[cfg(unix)]
+    #[test]
+    fn a_scoped_subtree_heal_named_through_a_link_reads_what_the_vault_heal_reads() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("scoped-subtree-linked-ancestor");
+        fs::create_dir_all(f.vault().join("real/sub")).unwrap();
+        fs::write(f.vault().join("real/sub/doc.md"), "doc").unwrap();
+        symlink("real", f.vault().join("link")).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let vault_heal = stored_paths(&mut attachment.store);
+        assert_eq!(vault_heal, ["real/sub/doc.md"]);
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "link/sub"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .expect("a dirty root behind a link to converge rather than fail the reconcile");
+
+        assert_eq!(stored_paths(&mut attachment.store), vault_heal);
+        ops.detach(&name, attachment);
+    }
+
     /// The subtree heal reads paths through the same seam the vault heal does,
     /// so a spelling the grammar refuses inside a scope is quarantined there
     /// too.
