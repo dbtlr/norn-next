@@ -91,6 +91,7 @@ pub mod write;
 mod faults;
 mod hash;
 mod identity;
+mod open;
 mod read;
 mod refusal;
 #[cfg(test)]

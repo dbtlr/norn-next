@@ -1,8 +1,13 @@
-//! Atomic configured-file observation.
+//! Atomic observation of one file below one anchor directory.
 
+use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Mode, OFlags, open};
+
 use crate::hash::{ContentHash, read_bytes_and_hash};
+use crate::open::{Reached, Unreached, open_regular_at};
 use crate::refusal::{Refusal, environment};
 
 /// What kind of filesystem object a watcher invalidation root names now.
@@ -40,7 +45,8 @@ pub struct ReadAndHash {
 }
 
 impl ReadAndHash {
-    /// The configured path whose file was opened.
+    /// The path that was opened, spelled as the caller named it: the anchor
+    /// with the relative name below it.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -61,65 +67,81 @@ impl ReadAndHash {
     }
 }
 
-/// Opens `path` once and returns the bytes and hash produced by one read.
+/// Reads the regular file `relative` names below `anchor`, once.
 ///
-/// A missing or dangling name, an unreadable file, and a name that does not
-/// identify a regular file are environmental refusals naming `path`.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns configured-file access.
-pub fn read_and_hash(path: &Path) -> Result<ReadAndHash, Refusal> {
-    read_optional_and_hash(path)?.ok_or_else(|| {
-        environment(
-            "opening",
-            path,
-            &std::io::Error::from(std::io::ErrorKind::NotFound),
-        )
+/// The read is [contained](crate::open): no component of `relative` is followed
+/// through a symbolic link, and a name that is not a regular file is refused
+/// rather than opened for content. A caller that wants an absent name to be an
+/// answer rather than a refusal wants [`read_optional_and_hash`].
+///
+/// `anchor` itself is resolved as the caller spelled it. It is the boundary the
+/// read cannot reach past, not a name this crate re-derives.
+pub fn read_and_hash(anchor: &Path, relative: &Path) -> Result<ReadAndHash, Refusal> {
+    let path = anchor.join(relative);
+    match observe(anchor, relative, &path)? {
+        Observed::Read(read) => Ok(read),
+        Observed::Nothing(unreached) => {
+            Err(environment(unreached.operation(), &path, unreached.error()))
+        }
+    }
+}
+
+/// Reads the regular file `relative` names below `anchor`, or answers that
+/// there is no such file to read.
+///
+/// Same containment as [`read_and_hash`], and the difference is what a name
+/// that reaches no regular file means. Here it is an answer: a deletion the
+/// watcher is telling the caller about, a name that turned into a pipe or a
+/// directory, and a name reached only through a symbolic link are all *nothing
+/// to read*, and they are one answer because a caller converging on what a
+/// walk of the anchor holds converges the same way for every one of them — a
+/// walk yields no file at any of those names either.
+///
+/// A machine failure is still a refusal. A directory this account cannot open
+/// and a descriptor table that is full say nothing about whether a document is
+/// there, and reporting them as absence would let a transient fault delete
+/// derived state.
+pub fn read_optional_and_hash(
+    anchor: &Path,
+    relative: &Path,
+) -> Result<Option<ReadAndHash>, Refusal> {
+    let path = anchor.join(relative);
+    Ok(match observe(anchor, relative, &path)? {
+        Observed::Read(read) => Some(read),
+        Observed::Nothing(_) => None,
     })
 }
 
-/// Read one regular file atomically, or report an absent name without turning
-/// a watcher deletion into an environmental refusal.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-pub fn read_optional_and_hash(path: &Path) -> Result<Option<ReadAndHash>, Refusal> {
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && std::fs::symlink_metadata(path).is_err() =>
-        {
-            return Ok(None);
-        }
-        Err(error) => {
-            return Err({
-                let operation = if error.kind() == std::io::ErrorKind::NotFound
-                    && std::fs::symlink_metadata(path)
-                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                {
-                    "resolving dangling symbolic link at"
-                } else {
-                    "opening"
-                };
-                environment(operation, path, &error)
-            });
-        }
+/// One observation, before either caller decides what an unreached name means.
+enum Observed {
+    Read(ReadAndHash),
+    Nothing(Unreached),
+}
+
+#[allow(clippy::disallowed_types)] // norn-fs owns file handles.
+fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refusal> {
+    let anchor_fd = open(
+        anchor,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY,
+        Mode::empty(),
+    )
+    .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
+    let reached = open_regular_at(anchor_fd.as_fd(), relative)
+        .map_err(|errno| environment("opening", path, &errno_error(errno)))?;
+    let fd = match reached {
+        Reached::Regular(fd) => fd,
+        Reached::Nothing(unreached) => return Ok(Observed::Nothing(unreached)),
     };
-    let metadata = file
-        .metadata()
-        .map_err(|error| environment("stating", path, &error))?;
-    if !metadata.is_file() {
-        return Err(environment(
-            "reading",
-            path,
-            &std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "the name does not identify a regular file",
-            ),
-        ));
-    }
+    let mut file = std::fs::File::from(fd);
     let (bytes, content_hash) =
         read_bytes_and_hash(&mut file).map_err(|error| environment("reading", path, &error))?;
-    Ok(Some(ReadAndHash {
+    Ok(Observed::Read(ReadAndHash {
         path: path.to_owned(),
         bytes,
         content_hash,
     }))
+}
+
+fn errno_error(errno: rustix::io::Errno) -> io::Error {
+    io::Error::from_raw_os_error(errno.raw_os_error())
 }
