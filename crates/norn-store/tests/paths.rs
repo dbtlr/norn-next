@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use norn_store::{ClassKey, DirectoryPrefix, DocumentPath, StoreError, class_probe, suffix_probe};
+use norn_store::{
+    ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, StoreError, class_probe, suffix_probe,
+};
 
 /// The one range a single-reduction probe opens.
 fn only_range(target: &str) -> (String, String) {
@@ -139,6 +141,61 @@ fn every_refused_spelling_still_renders_to_a_place() {
             "`{path}` rendered to `{}`, which names a different number of segments",
             rendered.as_str()
         );
+        // The marker is what tells a rendered place from a place only an
+        // admitted spelling reaches. A caller that has to revisit the places a
+        // rendering can name reads exactly this — see `Pending::vacated_places`
+        // in `norn-host` — so a refusal answered without the marker would leave
+        // that caller passing over the place silently.
+        assert!(
+            rendered.carries_marker(),
+            "`{path}` rendered to `{}`, which no reader can tell from a spelling the grammar \
+             admits",
+            rendered.as_str()
+        );
+    }
+}
+
+/// **A rendering marks inside the segment it answers**, so the run of segments
+/// ahead of the first marked one is the vault's own spelling.
+///
+/// That is what makes [`DocumentPath::unrendered_ancestor`] a real ancestor: a
+/// caller searching for the spellings that render to a place walks it, and a
+/// rendering that marked somewhere else would send that walk down a subtree the
+/// candidates are not in.
+#[test]
+fn a_rendering_names_an_ancestor_the_vault_spells_the_same_way() {
+    for (path, _) in UNNORMALIZED.iter().copied() {
+        let rendered = DocumentPath::rendered(Path::new(path));
+        let ancestor = rendered.unrendered_ancestor();
+        assert!(
+            !ancestor.contains(RENDERED_MARKER),
+            "`{path}` rendered to `{}`, whose ancestor `{ancestor}` is itself rendered",
+            rendered.as_str()
+        );
+        assert!(
+            ancestor.is_empty() || rendered.as_str().starts_with(&format!("{ancestor}/")),
+            "`{path}` rendered to `{}`, which `{ancestor}` is no segment-aligned prefix of",
+            rendered.as_str()
+        );
+        // The ancestor addresses the vault, not the rendering: every segment of
+        // it has to be the segment the spelling itself carries there.
+        let depth = ancestor.split('/').count();
+        let spelled: String = path.split('/').take(depth).collect::<Vec<_>>().join("/");
+        assert!(
+            ancestor.is_empty() || ancestor == spelled,
+            "`{path}` rendered to an ancestor `{ancestor}` the vault spells `{spelled}`"
+        );
+    }
+}
+
+/// A spelling the grammar admits is its own unrendered ancestor, which is what
+/// makes the ancestor of a place with no marker the whole path.
+#[test]
+fn a_spelling_the_grammar_admits_is_its_own_unrendered_ancestor() {
+    for path in ["glossary.md", "docs/norn/glossary.md", ".gitignore"] {
+        let read = DocumentPath::new(path).expect("a document path");
+        assert!(!read.carries_marker());
+        assert_eq!(read.unrendered_ancestor(), path);
     }
 }
 

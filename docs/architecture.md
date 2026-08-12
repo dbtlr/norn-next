@@ -162,6 +162,18 @@ resolving the situation correctly: the environment is broken, the stored state i
 discarding a sound database would destroy work to fix nothing. **Rung 3 is for damaged
 state, never for a hostile environment.**
 
+**Enumeration and open are two observations of a moving vault.** A heal walks the tree and
+then opens what the walk named, and a foreign edit can remove or replace an enumerated path
+in between. That window is ordinary churn rather than a broken environment, so it converges
+instead of refusing: the answer is the one a walk begun now holds, and it is one answer for
+a name that was deleted and for a name that a directory, a link or a pipe took — no document
+is there, so the row standing at it is pruned and nothing is derived for it. Only the
+machine's own failures — a denied directory, an exhausted descriptor table, a failing device
+— still refuse at that window, which is what keeps the permission-loss row above true. The
+walk's own paging of a directory is a narrower window and does not converge yet: an entry
+that is unlinked or changes kind between the listing that named it and the stat that reads
+it refuses there.
+
 **Quarantine is per document; refusal is per vault.** See
 [ADR 0018](decisions/0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md),
 which supersedes ADR 0013. A
@@ -194,7 +206,19 @@ collision is one key holding one row, and the **document wins**: while it stands
 quarantined document's finding is withheld rather than filed over a readable document, so
 for as long as the collision lasts nothing records that the quarantined document cannot be
 read. The trade is deliberate — a finding at that place would call a document that derived
-unreadable — and it clears when the colliding document leaves. Recovery needs no second
+unreadable — and **the heal that removes the colliding document is the one that clears
+it**: the deaths that vacate rendered places send the heal back, after its last increment,
+to read the roots those places sit under, and every refused spelling those readings meet is
+quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
+is what that revisit exists to prevent. **A producer replaces the findings it re-derives and
+no others.** A scope that reads paths and not bytes — the revisit, and the sweep of a root
+the grammar poisons — concludes what a spelling alone decides, so a quarantine about the
+document standing at a place it files at is left where it is; a scope that derives documents
+reads a place whole and replaces it whole. **The revisit is opportunistic, and it is owed
+once per heal rather than once per removal**: its increments are already committed, so a
+directory it cannot open ends that root's reading rather than refusing the heal, and a place
+left unread that way keeps its finding withheld until a later heal reads it again — the same
+honesty the paging window above states, for the same reason. Recovery needs no second
 mechanism: a document that reads again is an ordinary derivation, and the increment's own
 findings discard takes the finding with it.
 
@@ -232,8 +256,9 @@ The contract is stated whole and filled shape by shape, as each builder lands. T
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
 connection — and four named statements carry an index bar through it: suffix candidates,
-findings in a class, and the class- and subject-scoped findings discards. None of those is a
-query shape's bar. **No builder compiles wire params to SQL yet**, so no query shape carries
+findings in a class, and the class- and subject-scoped findings discards, the subject
+discard in both the whole form and the form narrowed to the kinds a producer re-derives.
+None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no query shape carries
 its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate per PR, and no query
 shape carries a timing or a memory bar.
 

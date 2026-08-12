@@ -11,7 +11,7 @@ use norn_fs::{
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
 };
 use norn_store::{
-    BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
+    BlockFact, Change, DirectoryPrefix, DiscardScope, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
     SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
@@ -701,56 +701,106 @@ fn heal_documents(
 ) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
+    let mut vacated = Vacated::default();
+    merge_walk(
+        store,
+        root,
+        exclusions,
+        walk,
+        sensitivity,
+        HealScope::Vault,
+        policy,
+        progress,
+        &mut vacated,
+    )?;
+    revisit_vacated(store, root, exclusions, policy, &mut vacated)
+}
+
+/// Converge the rows a scope addresses against the files a walk of it yields.
+///
+/// This is the one merge. The vault heal and every scoped subtree heal differ
+/// in what they walk and in which rows they page, and in nothing else: a walked
+/// file the store has no row for is derived, a row the walk no longer reaches is
+/// pruned, one whose content hash moved is re-derived, and a spelling the
+/// grammar refuses is quarantined wherever it appears.
+///
+/// The walk arrives as an iterator of facts rather than as a [`norn_fs::Walk`],
+/// because enumeration and open are two observations of a tree other writers are
+/// editing and the merge is what has to hold that gap: a caller can hand over
+/// facts gathered before the vault moved, and what the merge does with a file
+/// that is no longer there is the same thing it does with a file the walk never
+/// yielded.
+#[allow(clippy::too_many_arguments)]
+fn merge_walk<I>(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    facts: I,
+    sensitivity: norn_fs::CaseSensitivity,
+    scope: HealScope<'_>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    vacated: &mut Vacated,
+) -> Result<(), JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
+{
     let order = store_order(sensitivity);
-    let mut files = walk
+    let mut files = facts
         .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
-                Some(Ok(file))
+            Ok(norn_fs::WalkFact::File(file)) => {
+                is_markdown(file.path().as_path()).then_some(Ok(file))
             }
-            Ok(norn_fs::WalkFact::File(_)) => None,
             Ok(norn_fs::WalkFact::Skipped(_)) => None,
-            Err(e) => Some(Err(e)),
+            Err(error) => Some(Err(error)),
         })
         .peekable();
     let mut after: Option<DocumentPath> = None;
     let mut stored = Vec::new();
     let mut index = 0usize;
     let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, vacated);
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
-            stored = pending
-                .store
-                .begin_request()
-                .stored_documents_after_ordered(after.as_ref(), policy.store_page_size, order)
-                .map_err(store_effect)?;
+            stored = scope.page(pending.store, after.as_ref(), policy, order)?;
             index = 0;
             exhausted = stored.is_empty();
         }
         let fs_path = next_nameable(&mut files, &mut pending)?;
-        let db_path = stored.get(index).map(|d| d.path.as_str().to_owned());
+        let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                if read.content_hash().to_string() != stored[index].content_hash {
-                    pending.rederive(
-                        Path::new(&fp),
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                        Some(&stored[index].path),
-                    );
+                let read = open_enumerated(&mut files)?;
+                match read {
+                    Some(read) if read.content_hash().to_string() != stored[index].content_hash => {
+                        pending.rederive(
+                            Path::new(&fp),
+                            &fp,
+                            read.bytes(),
+                            read.content_hash().to_string(),
+                            Some(&stored[index].path),
+                        );
+                    }
+                    Some(_) => {}
+                    // The file went away between this walk's enumeration and
+                    // this open. A walk begun now holds no file here, so the
+                    // convergent answer is the one that walk's merge would
+                    // reach: the row goes, exactly as it does for a name the
+                    // walk never yielded.
+                    None => pending.push(Change::Death {
+                        path: stored[index].path.clone(),
+                        provenance: Provenance::HealPrune,
+                    }),
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
             }
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                if let Some(read) = open_enumerated(&mut files)? {
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                }
             }
             (_, Some(_)) => {
                 let path = stored[index].path.clone();
@@ -762,9 +812,9 @@ fn heal_documents(
                 });
             }
             (Some(fp), None) => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                if let Some(read) = open_enumerated(&mut files)? {
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                }
             }
         }
         if pending.is_full() {
@@ -774,6 +824,26 @@ fn heal_documents(
         progress.report(healed, None);
     }
     pending.flush()
+}
+
+/// Read the file the merge is standing on, or answer that it is no longer
+/// there.
+///
+/// The iterator is advanced past the fact whatever the open reaches, because
+/// the merge has finished with that name either way. An absence is a foreign
+/// edit landing in the window between enumeration and open; a machine failure
+/// still refuses, so a denied directory or an exhausted descriptor table never
+/// reads as a deletion.
+fn open_enumerated<I>(files: &mut Peekable<I>) -> Result<Option<norn_fs::ReadFile>, JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::FileFact, norn_fs::WalkError>>,
+{
+    files
+        .next()
+        .expect("peeked")
+        .map_err(effect)?
+        .read_optional()
+        .map_err(effect)
 }
 
 fn scoped_increment(
@@ -787,7 +857,8 @@ fn scoped_increment(
     let normalizer = norn_fs::PathNormalizer::detect(root).map_err(effect)?;
     let sensitivity = normalizer.case_sensitivity();
     let excluded = norn_fs::Exclusions::new(&normalizer, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut vacated = Vacated::default();
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut vacated);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         if excluded.excludes(relative) {
@@ -812,7 +883,15 @@ fn scoped_increment(
                 pending.flush()?;
                 match scope {
                     Some(scope) => {
-                        heal_subtree(pending.store, root, scope, policy, progress, exclusions)?;
+                        heal_subtree(
+                            pending.store,
+                            root,
+                            scope,
+                            policy,
+                            progress,
+                            exclusions,
+                            pending.vacated,
+                        )?;
                     }
                     None => {
                         quarantine_subtree(
@@ -822,6 +901,7 @@ fn scoped_increment(
                             policy,
                             progress,
                             exclusions,
+                            pending.vacated,
                         )?;
                     }
                 }
@@ -836,10 +916,13 @@ fn scoped_increment(
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
                         pending.store,
+                        root,
+                        exclusions,
                         scope,
                         policy,
                         progress,
                         store_order(sensitivity),
+                        pending.vacated,
                     )?;
                 }
                 continue;
@@ -864,10 +947,13 @@ fn scoped_increment(
         pending.flush()?;
         prune_descendants_and_aliases(
             pending.store,
+            root,
+            exclusions,
             &document_path,
             policy,
             progress,
             sensitivity,
+            pending.vacated,
         )?;
         if !is_markdown(path) {
             continue;
@@ -921,7 +1007,8 @@ fn scoped_increment(
         }
         progress.report((index + 1) as u64, Some(dirty.len() as u64));
     }
-    pending.flush()
+    pending.flush()?;
+    revisit_vacated(store, root, exclusions, policy, &mut vacated)
 }
 
 /// Converge a dirty directory that addresses no stored rows at all.
@@ -930,9 +1017,11 @@ fn scoped_increment(
 /// spoil — and each of those spoils every path beneath it too, since a
 /// descendant's spelling carries the root's own segments. **So there is nothing
 /// here to prune**: no document under such a root is storable, and a row under
-/// it is one the store never held. What is left is to read what the vault holds,
-/// through the seam every walked file's identity is read through, so a spelling
-/// the grammar does admit is derived rather than special-cased.
+/// it is one the store never held. **And there is nothing here to derive**: a
+/// path the walk yields is a path the store cannot name either. What is left is
+/// to say so, one finding per walked document, through the seam every walked
+/// file's identity is read through — so the refusal each path carries is derived
+/// from the path rather than restated from the root.
 fn quarantine_subtree(
     store: &mut Store,
     vault_root: &Path,
@@ -940,9 +1029,20 @@ fn quarantine_subtree(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    // Nothing under this root derives, so every finding here is read from a
+    // path — and the places they land at are renderings, outside the root this
+    // walk enters. What stands at such a place is another producer's.
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    )
+    .reading_spellings();
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -952,23 +1052,13 @@ fn quarantine_subtree(
         if !is_markdown(&path) {
             continue;
         }
-        match document_path(&path) {
-            Ok(document) => {
-                let read = file.read().map_err(effect)?;
-                let standing = pending
-                    .store
-                    .begin_request()
-                    .stored_document(&document)
-                    .map_err(store_effect)?;
-                pending.rederive(
-                    &path,
-                    document.as_str(),
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                    standing.as_ref().map(|_| &document),
-                );
-            }
-            Err(quarantine) => pending.quarantine(&path, quarantine),
+        // Every walked path carries the root's own segments, and the root is one
+        // a backslash, a control byte or bytes that are not UTF-8 spoil — each
+        // of which refuses every path that carries it. So the walk under such a
+        // root names no document, and reading identity here is what derives that
+        // rather than restating it.
+        if let Err(quarantine) = document_path(&path) {
+            pending.quarantine(&path, quarantine);
         }
         healed += 1;
         if pending.is_full() {
@@ -982,12 +1072,10 @@ fn quarantine_subtree(
 /// Converge a dirty directory the store can range, by merging its walk against
 /// the rows it addresses.
 ///
-/// The merge is the vault heal's, narrowed to one root: a walked file the store
-/// has no row for is derived, a row the walk no longer reaches is pruned, and a
-/// spelling the grammar refuses is quarantined as it is anywhere else. The scope
-/// is what makes the prune half reachable for a directory whose own leaf reduces
-/// to a refused stem — it names no document and still addresses every row
-/// beneath it.
+/// The merge is the vault heal's, narrowed to one root. The scope is what makes
+/// the prune half reachable for a directory whose own leaf reduces to a refused
+/// stem — it names no document and still addresses every row beneath it.
+#[allow(clippy::too_many_arguments)]
 fn heal_subtree(
     store: &mut Store,
     vault_root: &Path,
@@ -995,113 +1083,72 @@ fn heal_subtree(
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
-    let prefix = scope.as_str();
-    let relative_root = Path::new(prefix);
+    let scope = HealScope::from(scope);
+    let relative_root = Path::new(scope.as_str());
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
-    let order = store_order(sensitivity);
-    let mut files = walk
-        .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) => {
-                is_markdown(file.path().as_path()).then_some(Ok(file))
-            }
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .peekable();
-    let mut after = None;
-    let mut stored = Vec::new();
-    let mut index = 0;
-    let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size);
-    let mut healed = 0;
-    loop {
-        if index == stored.len() && !exhausted {
-            stored = scope.page(pending.store, after.as_ref(), policy, order)?;
-            index = 0;
-            exhausted = stored.is_empty();
-        }
-        let fs_path = next_nameable(&mut files, &mut pending)?;
-        let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
-        match (fs_path, db_path) {
-            (None, None) => break,
-            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                if read.content_hash().to_string() != stored[index].content_hash {
-                    pending.rederive(
-                        Path::new(&fp),
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                        Some(&stored[index].path),
-                    );
-                }
-                after = Some(stored[index].path.clone());
-                index += 1;
-            }
-            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
-            }
-            (_, Some(_)) => {
-                let path = stored[index].path.clone();
-                after = Some(path.clone());
-                index += 1;
-                pending.push(Change::Death {
-                    path,
-                    provenance: Provenance::HealPrune,
-                });
-            }
-            (Some(fp), None) => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
-            }
-        }
-        if pending.is_full() {
-            pending.flush()?;
-        }
-        healed += 1;
-        progress.report(healed, None);
-    }
-    pending.flush()
+    merge_walk(
+        store,
+        vault_root,
+        exclusions,
+        walk,
+        sensitivity,
+        scope,
+        policy,
+        progress,
+        vacated,
+    )
 }
 
-/// The stored rows a dirty directory addresses, which is what a scoped heal
-/// merges against and what a scoped prune ranges over.
+/// The rows one dirty root addresses.
 ///
-/// A root the grammar admits carries its own row and its descendants; a
+/// **A scope that names a root is what the scoped legs take, and it cannot
+/// spell the whole vault.** A prune ranges over every row its scope addresses
+/// and takes each of them, so a scope reading "everything" there would be a
+/// dirty path deleting the vault's derived state; keeping the two apart in the
+/// type is what makes that unspellable rather than merely unreached.
+///
+/// A dirty root the grammar admits carries its own row and its descendants; a
 /// directory that names no document carries only descendants, and reaching them
 /// is the whole reason the second variant exists. A spelling neither admits
-/// addresses nothing, and is why callers take an `Option` of this.
+/// addresses nothing, and is why the scoped callers take an `Option` of this.
 #[derive(Clone, Copy)]
 enum SubtreeScope<'a> {
     Subtree(&'a DocumentPath),
     Prefix(&'a DirectoryPrefix),
 }
 
-impl SubtreeScope<'_> {
+/// The stored rows a heal addresses, which is what its merge runs against.
+///
+/// The vault heal addresses every row; every other leg addresses one root's,
+/// which is what [`SubtreeScope`] names.
+#[derive(Clone, Copy)]
+enum HealScope<'a> {
+    Vault,
+    Subtree(&'a DocumentPath),
+    Prefix(&'a DirectoryPrefix),
+}
+
+impl<'a> From<SubtreeScope<'a>> for HealScope<'a> {
+    fn from(scope: SubtreeScope<'a>) -> Self {
+        match scope {
+            SubtreeScope::Subtree(root) => HealScope::Subtree(root),
+            SubtreeScope::Prefix(prefix) => HealScope::Prefix(prefix),
+        }
+    }
+}
+
+impl HealScope<'_> {
     /// The vault-relative spelling the walk is rooted at and the stored paths
-    /// beneath it open with.
+    /// beneath it open with. The vault's own root is the empty spelling, which
+    /// is what a walk of the whole vault is rooted at.
     fn as_str(&self) -> &str {
         match self {
-            SubtreeScope::Subtree(root) => root.as_str(),
-            SubtreeScope::Prefix(prefix) => prefix.as_str(),
+            HealScope::Vault => "",
+            HealScope::Subtree(root) => root.as_str(),
+            HealScope::Prefix(prefix) => prefix.as_str(),
         }
     }
 
@@ -1115,13 +1162,16 @@ impl SubtreeScope<'_> {
     ) -> Result<Vec<StoredDocument>, JobFailure> {
         let request = store.begin_request();
         match self {
-            SubtreeScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
+            HealScope::Vault => {
+                request.stored_documents_after_ordered(after, policy.store_page_size, order)
+            }
+            HealScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
                 root,
                 after,
                 policy.store_page_size,
                 order,
             ),
-            SubtreeScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
+            HealScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
                 prefix,
                 after,
                 policy.store_page_size,
@@ -1132,16 +1182,27 @@ impl SubtreeScope<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_subtree_ordered(
     store: &mut Store,
+    vault_root: &Path,
+    exclusions: &[PathBuf],
     scope: SubtreeScope<'_>,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     order: StoredPathOrder,
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
+    let scope = HealScope::from(scope);
     let mut after = None;
     let mut healed = 0;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    );
     loop {
         let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
@@ -1164,16 +1225,26 @@ fn prune_subtree_ordered(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_descendants_and_aliases(
     store: &mut Store,
+    vault_root: &Path,
+    exclusions: &[PathBuf],
     root: &DocumentPath,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     sensitivity: norn_fs::CaseSensitivity,
+    vacated: &mut Vacated,
 ) -> Result<(), JobFailure> {
     let mut after = None;
     let mut pruned = 0;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(
+        store,
+        policy.changeset_size,
+        vault_root,
+        exclusions,
+        vacated,
+    );
     loop {
         let page = pending
             .store
@@ -1232,13 +1303,12 @@ where
         }
         let file = files.next().expect("peeked").map_err(effect)?;
         let path = file.path().as_path().to_owned();
-        pending.quarantine(
-            &path,
-            Quarantine {
-                cause: Undecodable::PathBytes,
-                problem: format!("`{}` is not valid UTF-8", path.display()),
-            },
-        );
+        // The identity seam states the cause, so a path reached here and the
+        // same path reached through the reading of a vacated root carry one
+        // account of it, whichever of them the store records.
+        if let Err(quarantine) = document_path(&path) {
+            pending.quarantine(&path, quarantine);
+        }
         if pending.is_full() {
             pending.flush()?;
         }
@@ -1320,6 +1390,133 @@ struct Quarantine {
     problem: String,
 }
 
+/// The roots one job's deaths owe a reading of.
+///
+/// A finding is withheld while a document row stands at its subject, so the
+/// death that vacates a rendered place is what frees the findings about the
+/// spellings rendering there. **Death is final within a job** — no later
+/// increment puts a row back at a place an earlier one killed — so the readings
+/// those deaths owe are owed once, after the job's last flush, rather than once
+/// per flush: removing a directory whose own name carries the marker vacates a
+/// place per row beneath it, and one reading of the root they share answers
+/// every one of them however many pages the removal took.
+///
+/// **What is held is the roots rather than the places**, which is what keeps a
+/// job's residency off the number of rows it kills: one entry per directory a
+/// vacated place sits under, which counts the vault's rendered names rather than
+/// its documents. A reading files a finding for every refused spelling beneath
+/// its root, whether or not this job freed the place it renders to. What that
+/// costs is bounded by what the reading re-derives: the recording withholds
+/// every finding a document row still stands at, and the discard it carries to a
+/// place takes the spelling kinds it is re-filing there and nothing else, so a
+/// quarantine about the document occupying that place stands through a reading
+/// that was never about it.
+#[derive(Default)]
+struct Vacated {
+    roots: BTreeSet<String>,
+}
+
+impl Vacated {
+    /// Take the roots a changeset's deaths free a reading of.
+    ///
+    /// Only a place carrying the rendering marker can have withheld a finding: a
+    /// finding is withheld when a document row stands at its subject, a subject
+    /// is a rendering, and a rendering of a spelling the grammar refuses carries
+    /// the marker. A subject the grammar admits as it is written belongs to the
+    /// document at that path, whose own row dies in the same changeset as the
+    /// finding that replaces it.
+    ///
+    /// The root a place is read from is its deepest ancestor carrying no marker,
+    /// which is as narrow as the search can be: a candidate's segments above the
+    /// first rendered one are that place's own segments, spelled the same way,
+    /// because rendering a segment is what puts the marker there.
+    fn absorb(&mut self, changes: &[Change]) {
+        for change in changes {
+            match change {
+                Change::Death { path, .. } if path.carries_marker() => {
+                    self.roots.insert(path.unrendered_ancestor().to_owned());
+                }
+                Change::Death { .. } | Change::Upsert(_) => {}
+            }
+        }
+    }
+
+    /// The roots to read, with every root another one already reaches dropped.
+    ///
+    /// A reading yields every file beneath its root, so a root under another
+    /// root is one that root's reading already covers and reading it too would
+    /// read the same subtree twice. Sorted order puts a root ahead of everything
+    /// beneath it, so the roots kept so far are the only ones a later root can
+    /// be under.
+    fn into_readings(self) -> Vec<String> {
+        let mut readings: Vec<String> = Vec::new();
+        for root in self.roots {
+            if !readings.iter().any(|kept| reading_reaches(kept, &root)) {
+                readings.push(root);
+            }
+        }
+        readings
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many readings of a vacated root this thread has started.
+    ///
+    /// The grouping is what keeps a job's readings off the count of rows it
+    /// kills and off the count of flushes that kill them, and the count of
+    /// readings is the only place that shows: a job whose reading is per death
+    /// or per flush files the same findings this one does, at the cost the case
+    /// in `tests` holds.
+    static REVISIT_READINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_reading() {
+    REVISIT_READINGS.with(|readings| readings.set(readings.get() + 1));
+}
+
+#[cfg(not(test))]
+fn count_reading() {}
+
+/// Whether a reading rooted at `root` yields everything a reading rooted at
+/// `inner` yields.
+///
+/// The vault root is the empty spelling and reaches every path. Any other root
+/// reaches the paths whose spelling continues past it at a segment boundary,
+/// which is what keeps a directory from reaching a sibling whose name it opens.
+fn reading_reaches(root: &str, inner: &str) -> bool {
+    root.is_empty()
+        || inner == root
+        || inner
+            .strip_prefix(root)
+            .is_some_and(|below| below.starts_with('/'))
+}
+
+/// Read the roots a job's deaths freed and record what those readings file.
+///
+/// This runs after the job's last flush, and **nothing may flush after it**: the
+/// reading's findings are recorded by the drain here, and a flush that followed
+/// would find the queue already empty while its own increment discarded them.
+fn revisit_vacated(
+    store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
+    policy: ProductionPolicy,
+    vacated: &mut Vacated,
+) -> Result<(), JobFailure> {
+    let readings = std::mem::take(vacated).into_readings();
+    if readings.is_empty() {
+        return Ok(());
+    }
+    // The reading files findings and pushes no change, so the accumulator it
+    // carries — this job's own, emptied above — is one nothing adds to.
+    let mut pending =
+        Pending::new(store, policy.changeset_size, root, exclusions, vacated).reading_spellings();
+    pending.revisit(&readings)?;
+    pending.record_findings()
+}
+
 /// What one heal scope has derived and not yet committed: the changeset being
 /// filled, and the findings its quarantined documents record.
 ///
@@ -1334,6 +1531,16 @@ struct Quarantine {
 /// second mechanism.
 struct Pending<'s> {
     store: &'s mut Store,
+    /// The vault root every path in this scope is relative to, which is what a
+    /// revisit of a vacated place is read from.
+    root: &'s Path,
+    /// The roots a walk of this vault does not read, so a revisit reads exactly
+    /// the documents the vault heal reads.
+    exclusions: &'s [PathBuf],
+    /// The job's account of what its flushes vacated, which outlives this scope:
+    /// a scoped increment runs several scopes, and the reading they owe is one
+    /// reading after the last of them.
+    vacated: &'s mut Vacated,
     changes: Vec<Change>,
     quarantined: Vec<FindingFacts>,
     /// The subjects this scope has already re-derived, so a second finding at
@@ -1344,21 +1551,58 @@ struct Pending<'s> {
     /// count rather than its size, and it is strictly smaller than what those
     /// same defects put in the findings table.
     replaced: BTreeSet<DocumentPath>,
+    /// What this scope's first record at a place replaces there, which is what
+    /// this scope reads.
+    ///
+    /// A scope that derives documents opens the bytes at the paths it walks, so
+    /// it concludes any cause a quarantine carries and replaces the place whole.
+    /// The two scopes that derive nothing — the reading of a vacated root, and
+    /// the sweep of a root the grammar poisons — open no bytes at all: they read
+    /// paths, so what they conclude is what a spelling alone decides and that is
+    /// all they replace. A quarantine about the document standing at a place
+    /// such a scope files at is a finding it did not read and does not re-file,
+    /// and taking it would delete a true statement about a real document until
+    /// an unrelated vault heal.
+    rederives: DiscardScope<'static>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
     /// covers.
     bound: usize,
 }
 
+/// The finding kinds a path alone decides, which is what a reading of a place's
+/// spellings re-derives: the two ways [`document_path`] refuses a spelling.
+const SPELLING_KINDS: [FindingKind; 2] = [
+    FindingKind::PathBytesNotUtf8,
+    FindingKind::PathNamesNoDocument,
+];
+
 impl<'s> Pending<'s> {
-    fn new(store: &'s mut Store, bound: usize) -> Self {
+    fn new(
+        store: &'s mut Store,
+        bound: usize,
+        root: &'s Path,
+        exclusions: &'s [PathBuf],
+        vacated: &'s mut Vacated,
+    ) -> Self {
         Pending {
             store,
+            root,
+            exclusions,
+            vacated,
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
             replaced: BTreeSet::new(),
+            rederives: DiscardScope::EveryKind,
             bound,
         }
+    }
+
+    /// The same scope, recording as a reading of spellings rather than as a
+    /// derivation of documents.
+    fn reading_spellings(mut self) -> Self {
+        self.rederives = DiscardScope::Kinds(&SPELLING_KINDS);
+        self
     }
 
     fn push(&mut self, change: Change) {
@@ -1436,24 +1680,38 @@ impl<'s> Pending<'s> {
         self.changes.len() >= self.bound || self.quarantined.len() >= self.bound
     }
 
-    /// Apply the changeset, then re-derive what its quarantines say.
+    /// Apply the changeset, then record what its quarantines say.
     ///
     /// Findings go after the increment because the increment's own subject
     /// discard would otherwise take them, and because a document that derived is
     /// then readable: a place a real document occupies is that document's, and a
     /// finding there would call a document that just derived unreadable.
+    ///
+    /// The places the increment **vacated** are the other half of that
+    /// exclusion: while a document stood at a rendered spelling, every finding
+    /// filed there was withheld, and the paths those findings are about are not
+    /// paths the increment names. The roots to read for them go to the job,
+    /// which reads each of them once after its last flush — a row this increment
+    /// kills is a row no later one revives, so a reading here would be a reading
+    /// per flush of an answer that does not change.
     fn flush(&mut self) -> Result<(), JobFailure> {
         if !self.changes.is_empty() {
+            self.vacated.absorb(&self.changes);
             self.store
                 .begin_request()
                 .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
                 .map_err(store_effect)?;
         }
+        self.record_findings()
+    }
+
+    /// Record every finding waiting in this scope, emptying the queue.
+    ///
+    /// The revisit calls this whenever it fills the bound as well as at its own
+    /// end, which is what keeps a queue filled by a reading of the vault inside
+    /// the bound the changeset beside it holds to.
+    fn record_findings(&mut self) -> Result<(), JobFailure> {
         for finding in self.quarantined.drain(..) {
-            // The first finding this scope files at a subject replaces what
-            // stood there, which is how a cause that changed stops being
-            // reported twice; the ones after it append.
-            let replace = self.replaced.insert(finding.path.clone());
             let mut request = self.store.begin_request();
             if request
                 .stored_document(&finding.path)
@@ -1462,12 +1720,88 @@ impl<'s> Pending<'s> {
             {
                 continue;
             }
-            if replace {
+            // The first finding this scope **records** at a subject replaces
+            // what this scope re-derives there, which is how a cause that
+            // changed stops being reported twice; the ones after it append,
+            // because two spellings can render to one place and each is a
+            // document somebody has to fix. A withheld finding records nothing
+            // and so takes no turn.
+            if self.replaced.insert(finding.path.clone()) {
                 request
-                    .discard_findings_about(&finding.path)
+                    .discard_findings_about(&finding.path, self.rederives)
                     .map_err(store_effect)?;
             }
             request.record_finding(&finding).map_err(store_effect)?;
+        }
+        Ok(())
+    }
+
+    /// Read the roots this job's deaths freed and quarantine every path beneath
+    /// them the grammar refuses.
+    ///
+    /// **One reading per root**, however many places died under it and however
+    /// many flushes killed them: removing a directory whose own name is rendered
+    /// costs one reading rather than one per row or one per store page. Each
+    /// root is a vacated place's deepest ancestor carrying no marker, which is
+    /// as narrow as the search can be — a candidate's segments above the first
+    /// rendered one are that place's own segments, spelled the same way, because
+    /// rendering a segment is what puts the marker there.
+    ///
+    /// **The reading is opportunistic: its own filesystem failures end it rather
+    /// than the job.** The increments are committed before it runs, so a refusal
+    /// here would discard the findings queued beside it and consume the deaths
+    /// that ask for them — leaving the withheld finding unreachable until an
+    /// unrelated vault heal. A reading that fails leaves what a heal with no
+    /// revisit leaves instead: a finding still withheld, and a place the next
+    /// heal reads. It leaves one thing more where it had already filed at a
+    /// place — that place's spellings are re-derived from what the reading
+    /// reached, so a second spelling standing there that the reading never got
+    /// to is a finding the discard takes and the next vault heal files again.
+    /// The record withholds wherever a document row stands, so a place this
+    /// reading discards at holds no row to withhold that heal's filing.
+    fn revisit(&mut self, roots: &[String]) -> Result<(), JobFailure> {
+        for start in roots {
+            count_reading();
+            // The vault's own root is walked as the vault, because a subtree
+            // walk is named by a relative path and the root is named by none.
+            let reading = if start.is_empty() {
+                walk(self.root, self.exclusions)
+            } else {
+                walk_subtree(self.root, Path::new(start), self.exclusions)
+            };
+            // A root that is gone, that is no longer a directory, or that this
+            // account cannot open holds no candidate this reading can reach.
+            let Ok(reading) = reading else { continue };
+            for fact in reading {
+                let file = match fact {
+                    Ok(norn_fs::WalkFact::File(file)) => file,
+                    Ok(norn_fs::WalkFact::Skipped(_)) => continue,
+                    // A walk yields nothing after an error, so a failed fact is
+                    // the end of this root's reading.
+                    Err(_) => break,
+                };
+                let path = file.path().as_path().to_owned();
+                if !is_markdown(&path) {
+                    continue;
+                }
+                let Err(quarantine) = document_path(&path) else {
+                    continue;
+                };
+                // Every refused spelling this reading meets is filed, and the
+                // recording after it decides which ones stand: a place a
+                // document row still occupies withholds its finding there, so
+                // the reading needs no account of which places its job freed.
+                // What this reading re-derives at a place is that place's
+                // spellings — the discard the first finding there carries takes
+                // the spelling findings an earlier job or this job's own merge
+                // recorded, and every spelling the reading meets is filed over
+                // them. A quarantine about the document occupying that place is
+                // read from bytes this reading never opens, so it stands.
+                self.quarantine(&path, quarantine);
+                if self.is_full() {
+                    self.record_findings()?;
+                }
+            }
         }
         Ok(())
     }
@@ -2413,6 +2747,631 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **Removing a collision files the finding it was withholding.** A finding
+    /// is withheld for as long as a readable document stands at its subject,
+    /// and the path such a finding is *about* is not a path the increment that
+    /// removes the document names — nothing dirties a file nobody edited. So
+    /// the increment that vacates the place is the one that reads it again.
+    ///
+    /// The forbidden shape is a finding that waits: the vault holds a document
+    /// norn cannot name, nothing says so, and the statement arrives only when
+    /// some unrelated demand or heal happens to reach that path.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_rendering_collision_files_the_finding_it_withheld() {
+        let f = Fixture::new("collision-cleared");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        // The collision goes, reported as the one path a watcher has news
+        // about: the quarantined spelling was not edited and is in no batch.
+        fs::remove_file(f.vault().join("bad\u{fffd}name.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            stored_paths(&mut attachment.store).is_empty(),
+            "the removed document kept its row"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// The same revisit under a directory, which is as narrow as the reading of
+    /// a vacated place gets: the segments above the rendered one are the vault's
+    /// own spellings, so nothing above them is read.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_collision_under_a_directory_files_the_finding_it_withheld() {
+        let f = Fixture::new("collision-cleared-nested");
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/bad\u{fffd}name.md"), "real").unwrap();
+        fs::write(f.vault().join("elsewhere.md"), "untouched").unwrap();
+        if !write_or_report(&f.vault().join("folder/bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            findings_at(&mut attachment.store, "folder/bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        fs::remove_file(f.vault().join("folder/bad\u{fffd}name.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "folder/bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["elsewhere.md"],
+            "the removed document kept its row"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "folder/bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// **Every spelling that renders to a vacated place is filed, however many
+    /// there are.** Two paths can differ in the character the grammar refuses
+    /// and still render to one place, and each of them is a document somebody
+    /// has to fix — so the reading files them all rather than the first one, and
+    /// it does that without holding a whole vault's worth of findings: the bound
+    /// the changeset keeps is the bound the reading keeps.
+    ///
+    /// The changeset size is one, so the reading cannot reach its own end before
+    /// the bound it fills.
+    #[cfg(unix)]
+    #[test]
+    fn a_revisit_files_every_spelling_that_renders_to_the_vacated_place() {
+        let f = Fixture::new("collision-cleared-many");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        if !write_or_report(&f.vault().join("bad\u{1}name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the findings, so this proves nothing"
+        );
+
+        fs::remove_file(f.vault().join("bad\u{fffd}name.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 1).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "document/path-names-no-document",
+                "document/path-names-no-document"
+            ],
+            "one spelling's finding stood in for both"
+        );
+        assert_eq!(finding_total(&mut attachment.store), 2);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A reading replaces the spellings it read and nothing else.** The
+    /// reading files at every refused spelling beneath its root, so it reaches
+    /// places no death of this job's freed — and the first finding it records at
+    /// a place replaces what stood there. What it re-derives is spellings: it
+    /// continues past every path the grammar admits and never opens a byte. A
+    /// quarantine about the document standing at that place is therefore a
+    /// finding this reading is not re-filing, and taking it would delete a true
+    /// statement about a real document until an unrelated vault heal.
+    ///
+    /// The vault here holds a marker-named document whose bytes do not decode
+    /// and a refused spelling that renders to that same place, and the job that
+    /// runs is about neither of them.
+    #[cfg(unix)]
+    #[test]
+    fn a_reading_leaves_the_content_quarantine_standing_at_a_place_it_files_at() {
+        let f = Fixture::new("collision-cleared-unrelated");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("other\u{fffd}doc.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // A place this job vacates, which is what owes the reading. It is not
+        // the collided place and the reading is not about it.
+        fs::remove_file(f.vault().join("other\u{fffd}doc.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "other\u{fffd}doc.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "an unrelated job's reading took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the reading filed a second copy of the spelling it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The sweep of a poisoned root replaces the spellings it read and nothing
+    /// else**, for the reason the reading does: it derives no document, so every
+    /// finding it files is read from a path.
+    ///
+    /// The place its findings land at sits outside the root it walks — a
+    /// rendering names a place, and the directory whose own name is that place
+    /// is a directory this walk never enters. So a quarantine standing there is
+    /// one this sweep neither read nor re-files.
+    #[cfg(unix)]
+    #[test]
+    fn a_poisoned_root_sweep_leaves_the_content_quarantine_standing_at_a_place_it_files_at() {
+        let f = Fixture::new("poisoned-root-collision");
+        fs::create_dir(f.vault().join("bad\u{fffd}dir")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}dir/note.md"), UNDECODABLE).unwrap();
+        let poisoned = f.vault().join("bad\\dir");
+        if fs::create_dir(&poisoned).is_err() {
+            eprintln!("skipped: this filesystem does not create `{poisoned:?}`");
+            return;
+        }
+        if !write_or_report(&poisoned.join("note.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/note.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The dirty root names no document and no prefix, which is the sweep
+        // this case is about.
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\dir"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/note.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the sweep took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the sweep filed a second copy of the spelling it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **Places vacated under one root are read together.** Removing a directory
+    /// whose own name carries the marker vacates a place per row beneath it, and
+    /// every one of those places has the same unrendered ancestor — the vault
+    /// root — so one reading files the findings all of them withheld.
+    ///
+    /// What this case holds is the finding, not the count of readings: a job
+    /// that read once per death would file exactly what is asserted here, and
+    /// the count is held by the cases that read it either side of a job.
+    ///
+    /// The merge reaches the surviving colliding path as well, and one path with
+    /// one cause is one finding however many ways the job reached it: the
+    /// reading re-derives that place's spellings, discarding the spelling
+    /// findings the merge recorded there before filing what it read.
+    #[cfg(unix)]
+    #[test]
+    fn removing_the_rows_under_a_rendered_directory_files_one_finding_per_spelling() {
+        let f = Fixture::new("collision-cleared-rendered-directory");
+        let folder = f.vault().join("fold\u{fffd}er");
+        fs::create_dir(&folder).unwrap();
+        for index in 0..4 {
+            fs::write(folder.join(format!("note{index}.md")), "real").unwrap();
+        }
+        fs::write(folder.join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&folder.join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store).len(), 5);
+        assert!(
+            findings_at(&mut attachment.store, "fold\u{fffd}er/bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        // Every document the directory held goes, and the directory itself is
+        // the one root a watcher reports.
+        fs::remove_file(folder.join("bad\u{fffd}name.md")).unwrap();
+        for index in 0..4 {
+            fs::remove_file(folder.join(format!("note{index}.md"))).unwrap();
+        }
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            stored_paths(&mut attachment.store).is_empty(),
+            "the removed documents kept their rows"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "fold\u{fffd}er/bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// **One reading per root a job vacated, whatever it took to vacate it.**
+    /// The reading is what the convergence costs, and it costs a walk of the
+    /// root: a job that starts one per death, or one per flush, pays the root's
+    /// size times the rows it removed, so removing a directory of notes reads
+    /// the vault once per page of them.
+    ///
+    /// The two forbidden shapes are both a reading per something the removal
+    /// counts. This case holds both at once: the changeset bound and the store
+    /// page are two, so seven rows die across four flushes with several deaths
+    /// in each, and either shape starts more than one reading. The finding the
+    /// reading files is asserted beside the count, because a job that starts no
+    /// reading at all also starts fewer than two.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_reads_a_vacated_root_once_however_many_flushes_vacate_it() {
+        let f = Fixture::new("collision-cleared-one-reading");
+        let folder = f.vault().join("fold\u{fffd}er");
+        fs::create_dir(&folder).unwrap();
+        for index in 0..6 {
+            fs::write(folder.join(format!("note{index}.md")), "real").unwrap();
+        }
+        fs::write(folder.join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&folder.join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(stored_paths(&mut attachment.store).len(), 7);
+        assert!(
+            findings_at(&mut attachment.store, "fold\u{fffd}er/bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        for index in 0..6 {
+            fs::remove_file(folder.join(format!("note{index}.md"))).unwrap();
+        }
+        fs::remove_file(folder.join("bad\u{fffd}name.md")).unwrap();
+        let before = revisit_readings();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "fold\u{fffd}er"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            revisit_readings() - before,
+            1,
+            "the job read one root more than once"
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A root another root already reaches is not read again.** A reading
+    /// yields every file beneath its root, so a job that vacated a place at the
+    /// vault root has already read every directory under it — and reading one of
+    /// them again would read the same files a second time.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_that_vacates_nested_roots_reads_only_the_outer_one() {
+        let f = Fixture::new("collision-cleared-nested-roots");
+        fs::create_dir(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}one.md"), "a real document").unwrap();
+        fs::write(
+            f.vault().join("folder/bad\u{fffd}two.md"),
+            "a real document",
+        )
+        .unwrap();
+        if !write_or_report(&f.vault().join("bad\\one.md"), b"body") {
+            return;
+        }
+        if !write_or_report(&f.vault().join("folder/bad\\two.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 0);
+
+        fs::remove_file(f.vault().join("bad\u{fffd}one.md")).unwrap();
+        fs::remove_file(f.vault().join("folder/bad\u{fffd}two.md")).unwrap();
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let dirty = ["bad\u{fffd}one.md", "folder/bad\u{fffd}two.md"]
+            .into_iter()
+            .map(|dirty| normalizer.normalize(Path::new(dirty)).unwrap())
+            .collect();
+        let before = revisit_readings();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty,
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            revisit_readings() - before,
+            1,
+            "the vault's own reading was not the one the directory's root took"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "one reading did not reach both vacated places"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The reading of a vacated place is opportunistic, and the increment it
+    /// follows is already committed.** A directory it cannot open is not a
+    /// reason to refuse the event: refusing would roll back nothing — the rows
+    /// are applied — while dropping the findings queued beside them and
+    /// consuming the death that asks for the reading at all, leaving the
+    /// withheld finding unreachable until an unrelated vault heal.
+    ///
+    /// The forbidden shape is a per-document event that depends on every
+    /// directory in the vault being readable by this account.
+    #[cfg(unix)]
+    #[test]
+    fn a_revisit_that_cannot_read_a_directory_still_commits_its_increment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("collision-cleared-denied");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), "a real document").unwrap();
+        fs::write(f.vault().join("keep.md"), "kept").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        // A directory the heal never saw, sorting after the place the reading is
+        // about: the reading reaches its candidate and then meets a root it
+        // cannot open.
+        let denied = f.vault().join("zz-denied");
+        fs::create_dir(&denied).unwrap();
+        fs::write(denied.join("inner.md"), "unreachable").unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&denied).is_ok() {
+            eprintln!("skipped: this account reads a mode-000 directory");
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+            ops.detach(&name, attachment);
+            return;
+        }
+
+        fs::remove_file(f.vault().join("bad\u{fffd}name.md")).unwrap();
+        let increment = scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        );
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+        increment.expect("a directory the reading cannot open refused the event");
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["keep.md"],
+            "the removed document kept its row"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+            "the reading dropped what it had already reached"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The window between a heal's enumeration and its open is ordinary
+    /// churn.** A vault the walk read a moment ago is a vault other writers are
+    /// still editing, and a file that went away in between is not a broken
+    /// environment: the convergent answer is the one a walk begun now holds, so
+    /// the row goes and no document is derived where no file is left.
+    ///
+    /// The forbidden shape is an environmental refusal, which leaves the entry
+    /// untrusted over an ordinary edit and waits for a demand to repair it.
+    ///
+    /// **The window is staged rather than raced.** One walk's facts are
+    /// gathered, the vault is edited, and the merge that opens them runs after —
+    /// which is exactly the ordering the window has, with no timing in it.
+    #[test]
+    fn documents_deleted_between_enumeration_and_open_converge_on_their_absence() {
+        let f = Fixture::watcherless("heal-open-window");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("vanishing.md"), "here for now").unwrap();
+        let mut store = Store::open(f.root.join("window.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(stored_paths(&mut store), ["steady.md", "vanishing.md"]);
+
+        // A file the store has no row for, so the two arms that derive and the
+        // arm that re-derives all meet a name that is gone.
+        fs::write(f.vault().join("fresh.md"), "fresh").unwrap();
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        fs::remove_file(f.vault().join("fresh.md")).unwrap();
+        fs::remove_file(f.vault().join("vanishing.md")).unwrap();
+
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut Vacated::default(),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+        assert_eq!(finding_total(&mut store), 0);
+    }
+
+    /// The other half of the same window: a name that is still there and is no
+    /// longer a regular file. A walk begun now descends into the directory and
+    /// yields no file at that name, which is what the row converges on.
+    #[test]
+    fn a_document_replaced_by_a_directory_between_enumeration_and_open_prunes_its_row() {
+        let f = Fixture::watcherless("heal-open-window-replace");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("swapped.md"), "a document for now").unwrap();
+        let mut store = Store::open(f.root.join("replace.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        fs::remove_file(f.vault().join("swapped.md")).unwrap();
+        fs::create_dir(f.vault().join("swapped.md")).unwrap();
+
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut Vacated::default(),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+    }
+
     /// Bytes no Markdown document can be read from.
     const UNDECODABLE: &[u8] = b"ok \xff\xfe not utf8\n";
 
@@ -2799,6 +3758,24 @@ mod tests {
 
     fn finding_total(store: &mut Store) -> u64 {
         store.begin_request().pillars().unwrap().findings
+    }
+
+    /// The kinds standing at a place, in kind order rather than in the order
+    /// they were written: what a case about which causes stand is about is the
+    /// set, and a re-derived cause is re-recorded and moves.
+    fn sorted_kinds(store: &mut Store, at: &str) -> Vec<String> {
+        let mut kinds: Vec<String> = findings_at(store, at)
+            .into_iter()
+            .map(|finding| finding.kind)
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    }
+
+    /// The readings of a vacated root this thread has started, which a case
+    /// reads either side of a job to count the ones that job started.
+    fn revisit_readings() -> usize {
+        REVISIT_READINGS.with(std::cell::Cell::get)
     }
 
     /// Writes a name the vault holds and the document-path grammar refuses, or
@@ -4164,12 +5141,27 @@ mod tests {
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         let pruned_root = DocumentPath::new("folder").unwrap();
+        let pruned_exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        // The leg accrues the roots its deaths owe a reading of, and the job
+        // around it is what reads them; this case is that job.
+        let mut vacated = Vacated::default();
         prune_subtree_ordered(
             &mut attachment.store,
+            f.vault().as_path(),
+            &pruned_exclusions,
             SubtreeScope::Subtree(&pruned_root),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
             StoredPathOrder::Sensitive,
+            &mut vacated,
+        )
+        .unwrap();
+        revisit_vacated(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &pruned_exclusions,
+            ProductionPolicy::new(8, 2).unwrap(),
+            &mut vacated,
         )
         .unwrap();
         fs::write(f.vault().join("after.md"), "after").unwrap();

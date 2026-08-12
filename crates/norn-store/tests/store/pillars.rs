@@ -11,10 +11,11 @@ use crate::common::{
     path, record_death, vector, violation, write_document, write_documents,
 };
 use norn_store::{
-    CANDIDATE_HEAD, CandidateFact, ExplainedStatement, Provenance, StoreError, class_probe,
-    induced_failure, suffix_probe,
+    CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
+    class_probe, induced_failure, suffix_probe,
 };
 use norn_testkit::explain::{PlanRow, QueryPlan};
+use norn_wire::FindingKind;
 
 /// The plan the store reported for one of its named statements, in the shape the
 /// harness asserts over. The pairing is the store's: a plan bar over SQL nobody
@@ -654,12 +655,30 @@ fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
     // seeks rather than that many reads of the table.
     let subject_discard = plan(
         request
-            .emitted_plan(ExplainedStatement::SubjectDiscard(&path("one/glossary.md")))
+            .emitted_plan(ExplainedStatement::SubjectDiscard(
+                &path("one/glossary.md"),
+                DiscardScope::EveryKind,
+            ))
             .expect("a query plan"),
     );
     subject_discard.assert_no_full_scan_of("findings");
     subject_discard.assert_searches("findings");
     subject_discard.assert_uses_index("findings_path");
+
+    // Naming kinds narrows what the discard takes and not how it reaches it: the
+    // path is the seek in both forms and the kinds filter the rows it reached,
+    // so a producer that re-derives part of a subject pays the same seek.
+    let kind_discard = plan(
+        request
+            .emitted_plan(ExplainedStatement::SubjectDiscard(
+                &path("one/glossary.md"),
+                DiscardScope::Kinds(&[FindingKind::PathNamesNoDocument]),
+            ))
+            .expect("a query plan"),
+    );
+    kind_discard.assert_no_full_scan_of("findings");
+    kind_discard.assert_searches("findings");
+    kind_discard.assert_uses_index("findings_path");
 
     // A two-reduction probe is two seeks rather than one wider read.
     let two = plan(
@@ -1065,7 +1084,7 @@ fn re_deriving_a_subject_is_a_discard_and_a_record() {
     // Everything about the subject goes, whichever axis put it there, and
     // nothing about any other subject does.
     let invalidation = request
-        .discard_findings_about(&path("one.md"))
+        .discard_findings_about(&path("one.md"), DiscardScope::EveryKind)
         .expect("discarding a subject");
     assert_eq!(invalidation.findings_discarded, 2);
     assert!(
@@ -1100,12 +1119,75 @@ fn re_deriving_a_subject_is_a_discard_and_a_record() {
     // ordinary first pass.
     assert_eq!(
         request
-            .discard_findings_about(&path("never/spoken.md"))
+            .discard_findings_about(&path("never/spoken.md"), DiscardScope::EveryKind)
             .expect("discarding an untouched subject")
             .findings_discarded,
         0
     );
     assert_eq!(request.counters().get("findings_discarded"), Some(2));
+}
+
+/// **A producer replaces the kinds it re-derives and leaves the rest.** Two
+/// producers can speak about one subject — one reads a path, the other reads the
+/// bytes at it — and only one of them is re-deriving when it discards. Taking
+/// the whole subject there would delete a finding nobody is about to record
+/// again, so the scope a caller names is what its discard reaches.
+#[test]
+fn re_deriving_some_of_a_subjects_kinds_leaves_the_rest_standing() {
+    let scratch = Scratch::new("subject-kind-maintenance");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    // One subject, two kinds: `violation` is read from bytes and `ambiguity`
+    // from a path.
+    request
+        .record_finding(&violation("one.md"))
+        .expect("recording a finding");
+    request
+        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .expect("recording a finding");
+
+    let invalidation = request
+        .discard_findings_about(
+            &path("one.md"),
+            DiscardScope::Kinds(&[FindingKind::PathNamesNoDocument]),
+        )
+        .expect("discarding one kind about a subject");
+    assert_eq!(invalidation.findings_discarded, 1);
+    assert_eq!(
+        request
+            .stored_findings(&path("one.md"))
+            .expect("reading findings")
+            .iter()
+            .map(|finding| finding.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["document/body-bytes-not-utf8"],
+        "the discard took a kind its caller does not re-derive"
+    );
+
+    // Recording the kind that was discarded leaves one copy of each, which is
+    // discard-then-record holding per kind rather than per subject.
+    request
+        .record_finding(&ambiguity("one.md", "glossary", "glossary/", &[], 3))
+        .expect("recording a finding");
+    assert_eq!(
+        request
+            .stored_findings(&path("one.md"))
+            .expect("reading findings")
+            .len(),
+        2
+    );
+
+    // A scope that names no kind re-derives nothing and so takes nothing: an
+    // empty list is not a wider discard.
+    assert_eq!(
+        request
+            .discard_findings_about(&path("one.md"), DiscardScope::Kinds(&[]))
+            .expect("discarding no kind about a subject")
+            .findings_discarded,
+        0
+    );
+    assert_eq!(request.counters().get("findings_discarded"), Some(1));
 }
 
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is

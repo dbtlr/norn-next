@@ -53,6 +53,7 @@
 
 use std::collections::BTreeSet;
 
+use norn_wire::FindingKind;
 use rusqlite::{
     Connection, OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter,
 };
@@ -396,16 +397,27 @@ impl<'a> Request<'a> {
     /// reaches it, and discard-then-record — the idempotence story every finding
     /// producer is held to — has no other door for that caller.
     ///
+    /// `scope` is how much of the subject the caller is re-deriving. A producer
+    /// that concludes every cause a subject can carry discards
+    /// [`DiscardScope::EveryKind`]; one that concludes some of them names those
+    /// kinds, so its discard takes what it is about to record again and leaves
+    /// what another producer read. Discard-then-record holds either way, because
+    /// what a caller replaces is exactly what it ranged over.
+    ///
     /// A finding goes **whole**, memberships included, and the count is findings
     /// rather than rows.
     pub fn discard_findings_about(
         &mut self,
         path: &DocumentPath,
+        scope: DiscardScope<'_>,
     ) -> Result<Invalidation, StoreError> {
         let discarded = self
             .store
             .connection
-            .execute(SUBJECT_DISCARD_SQL, params![path.as_str()])
+            .execute(
+                &subject_discard_sql(scope),
+                params_from_iter(subject_discard_parameters(path, scope)),
+            )
             .map_err(|error| error::sql("discarding a path's findings", error))?
             as u64;
         self.counters.add(Counter::FindingsDiscarded, discarded);
@@ -942,7 +954,7 @@ impl<'a> Request<'a> {
                 findings_in_class_sql(probe.range_count())
             }
             ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
-            ExplainedStatement::SubjectDiscard(_) => SUBJECT_DISCARD_SQL.to_string(),
+            ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
         };
         let read = |row: &Row<'_>| {
             Ok(Ok(PlanStep {
@@ -962,10 +974,10 @@ impl<'a> Request<'a> {
                 read,
                 "explaining an emitted statement",
             )?,
-            ExplainedStatement::SubjectDiscard(path) => Self::read_all(
+            ExplainedStatement::SubjectDiscard(path, scope) => Self::read_all(
                 &self.store.connection,
                 &explained,
-                params![path.as_str()],
+                params_from_iter(subject_discard_parameters(path, scope)),
                 read,
                 "explaining an emitted statement",
             )?,
@@ -1097,9 +1109,25 @@ pub enum ExplainedStatement<'a> {
     /// over a probe a caller named, and [`Request::apply_increment`] runs it
     /// over each class its changed paths are in.
     ClassDiscard(&'a SuffixProbe),
-    /// The subject-scoped discard [`Request::apply_increment`] runs once per
-    /// changed path.
-    SubjectDiscard(&'a DocumentPath),
+    /// The subject-scoped discard: [`Request::apply_increment`] runs it whole
+    /// once per changed path, and [`Request::discard_findings_about`] runs it
+    /// over the kinds a caller is re-deriving.
+    SubjectDiscard(&'a DocumentPath, DiscardScope<'a>),
+}
+
+/// How much of a subject a discard takes.
+///
+/// A discard is one half of discard-then-record, so what it takes is what the
+/// caller is about to record again. A producer that reads a place's every cause
+/// replaces the subject whole; a producer that reads some of them replaces those
+/// kinds, and a finding another producer recorded there stands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscardScope<'a> {
+    /// Every finding about the subject, whichever producer recorded it and
+    /// whatever it says.
+    EveryKind,
+    /// The findings of these kinds and no others.
+    Kinds(&'a [FindingKind]),
 }
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
@@ -1163,6 +1191,36 @@ pub(crate) fn class_discard_sql(ranges: usize) -> String {
 /// [`Request::apply_increment`]. It seeks `findings_path`, which is the index
 /// that keeps the discard costing the path's own findings rather than the table.
 pub(crate) const SUBJECT_DISCARD_SQL: &str = "DELETE FROM findings WHERE path = ?1";
+
+/// The subject discard a scope runs: the whole subject, or the subject narrowed
+/// to the kinds it names.
+///
+/// The path predicate is the same seek in both forms — the kind list filters the
+/// rows that seek already reached — so a producer that re-derives part of a
+/// subject pays what a producer that re-derives all of it pays. A scope naming
+/// no kind renders the empty list SQLite reads as matching nothing, which is
+/// what re-deriving nothing takes.
+fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
+    let DiscardScope::Kinds(kinds) = scope else {
+        return SUBJECT_DISCARD_SQL.to_string();
+    };
+    let placeholders = (0..kinds.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<String>>()
+        .join(", ");
+    format!("{SUBJECT_DISCARD_SQL} AND kind IN ({placeholders})")
+}
+
+/// The subject and the kinds in the order [`subject_discard_sql`] numbers them.
+fn subject_discard_parameters<'a>(path: &'a DocumentPath, scope: DiscardScope<'a>) -> Vec<&'a str> {
+    let kinds = match scope {
+        DiscardScope::EveryKind => [].as_slice(),
+        DiscardScope::Kinds(kinds) => kinds,
+    };
+    std::iter::once(path.as_str())
+        .chain(kinds.iter().map(|kind| kind.as_str()))
+        .collect()
+}
 
 /// The predicate one probe's ranges open over `column`: a half-open range per
 /// range, `OR`ed, each bound its own parameter.
