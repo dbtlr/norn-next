@@ -72,49 +72,72 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         strip: StripReport::default(),
     };
 
-    let Some(after_open) = strip_opening_fence(after_bom) else {
+    if strip_opening_fence(after_bom).is_none() {
+        return absent();
+    }
+
+    let Some(block) = closed_block(content) else {
+        diagnostics.push(Diagnostic::warning(
+            DiagnosticCode::FrontmatterUnclosed,
+            "frontmatter opening delimiter has no closing delimiter",
+        ));
         return absent();
     };
 
-    let mut offset = content.len() - after_open.len();
-    let yaml_start = offset;
-    for line in after_open.split_inclusive('\n') {
-        if !is_fence(line) {
-            offset += line.len();
-            continue;
+    let mut strip = StripReport::default();
+    let value = match parse_block(&content[block.yaml.clone()]) {
+        Ok(parsed) => Some(from_yaml(
+            parsed,
+            &mut String::new(),
+            diagnostics,
+            &mut strip,
+        )),
+        Err(refusal) => {
+            diagnostics.push(refusal.into_diagnostic());
+            None
         }
-
-        let range = yaml_start..offset;
-        let body_start = offset + line.len();
-        let body = &content[body_start..];
-        let mut strip = StripReport::default();
-        let value = match parse_block(&content[range.clone()]) {
-            Ok(parsed) => Some(from_yaml(
-                parsed,
-                &mut String::new(),
-                diagnostics,
-                &mut strip,
-            )),
-            Err(refusal) => {
-                diagnostics.push(refusal.into_diagnostic());
-                None
-            }
-        };
-        return Extraction {
-            value,
-            range: Some(range),
-            body,
-            body_start,
-            byte_order_mark,
-            strip,
-        };
+    };
+    Extraction {
+        value,
+        range: Some(block.yaml),
+        body: &content[block.body_start..],
+        body_start: block.body_start,
+        byte_order_mark,
+        strip,
     }
+}
 
-    diagnostics.push(Diagnostic::warning(
-        DiagnosticCode::FrontmatterUnclosed,
-        "frontmatter opening delimiter has no closing delimiter",
-    ));
-    absent()
+/// Where a closed leading block's YAML and the body after it sit.
+pub(crate) struct ClosedBlock {
+    /// The byte range of the YAML between the delimiters.
+    pub(crate) yaml: Range<usize>,
+    /// The byte offset the body starts at, past the closing delimiter's line.
+    pub(crate) body_start: usize,
+}
+
+/// Locate the leading block by its delimiters alone, without parsing it.
+///
+/// No parser sees the block here, so this answers how long a block is even
+/// when it is past [`FRONTMATTER_MAX_BYTES`] — which is what lets a caller
+/// holding candidate bytes ask whether they carry a block anything reads.
+/// `None` covers both a document that opens no block and one whose block never
+/// closes: neither holds a block whose bytes are addressable.
+pub(crate) fn closed_block(content: &str) -> Option<ClosedBlock> {
+    let after_bom = content.strip_prefix(BOM).unwrap_or(content);
+    let after_open = strip_opening_fence(after_bom)?;
+
+    let yaml_start = content.len() - after_open.len();
+    let mut offset = yaml_start;
+    for line in after_open.split_inclusive('\n') {
+        if is_fence(line) {
+            return Some(ClosedBlock {
+                yaml: yaml_start..offset,
+                body_start: offset + line.len(),
+            });
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// The bytes after an opening `---` fence, or `None` when `text` does not open

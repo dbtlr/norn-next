@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use crate::body::BodyScan;
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::frontmatter::extract::{BOM, extract};
+use crate::frontmatter::extract::{BOM, FRONTMATTER_MAX_BYTES, closed_block, extract};
 use crate::frontmatter::fields::{Field, ValueStyle, classify_value, field_spans, reparse};
 use crate::frontmatter::render::{
     RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
@@ -73,6 +73,17 @@ pub enum EditError {
     PostImageMismatch {
         field: String,
     },
+    /// The edit lands a frontmatter block past
+    /// [`FRONTMATTER_MAX_BYTES`](crate::FRONTMATTER_MAX_BYTES), which is
+    /// longer than the block this crate reads.
+    ///
+    /// The written bytes would be well-formed and no read would ever turn
+    /// them back into fields, so the block is refused before it is written and
+    /// the refusal names the bound rather than accusing the splice.
+    FrontmatterPastBound {
+        bytes: usize,
+        bound: usize,
+    },
     /// The document a section replace produced does not read back as
     /// intended — the frontmatter moved, the addressed heading no longer
     /// resolves to the content it was given, or a heading the body already had
@@ -116,6 +127,11 @@ impl fmt::Display for EditError {
                 f,
                 "the edited document does not read back with the section {heading:?} as intended, \
                  so the edit was refused"
+            ),
+            EditError::FrontmatterPastBound { bytes, bound } => write!(
+                f,
+                "the edit writes a frontmatter block of {bytes} bytes, and a block past {bound} \
+                 bytes is not read"
             ),
         }
     }
@@ -477,8 +493,13 @@ impl<'a> Document<'a> {
     /// closing delimiter; a document with no block at all gets one, placed
     /// after any byte-order mark. The result is re-read before it is returned,
     /// and an edit that does not read back as intended refuses.
+    ///
+    /// Growing the block past [`FRONTMATTER_MAX_BYTES`] refuses too, and with
+    /// its own error: past the bound no read turns the block back into fields,
+    /// which is the bound speaking rather than the splice going wrong.
     pub fn set_field(&self, field: &str, value: &Value) -> Result<String, EditError> {
         let edited = self.spliced_set(field, value)?;
+        refuse_past_bound(&edited)?;
         let mut expected = self.mapping()?.unwrap_or_default();
         expected.insert(field, value.clone());
         self.verify(&edited, field, &expected)?;
@@ -822,6 +843,25 @@ fn literal_text_offset(written: &str, text: &str) -> Option<usize> {
 /// The frontmatter value `source` holds, without locating its fields.
 fn frontmatter_of(source: &str) -> Option<Value> {
     extract(source, &mut Vec::new()).value
+}
+
+/// Refuse `edited` when the block it carries is past
+/// [`FRONTMATTER_MAX_BYTES`].
+///
+/// The block is measured by its delimiters rather than by re-reading it,
+/// because a block past the bound is exactly the one no read produces a value
+/// for: asking the reader would only say the fields are gone, and this says
+/// which rule took them.
+fn refuse_past_bound(edited: &str) -> Result<(), EditError> {
+    match closed_block(edited) {
+        Some(block) if block.yaml.len() > FRONTMATTER_MAX_BYTES => {
+            Err(EditError::FrontmatterPastBound {
+                bytes: block.yaml.len(),
+                bound: FRONTMATTER_MAX_BYTES,
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// `source` with `range` replaced by `replacement`, allocated once at the size
