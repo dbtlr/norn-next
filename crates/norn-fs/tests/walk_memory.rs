@@ -139,7 +139,10 @@ fn drain_in_child(root: &Path) {
     for fact in walk(root, &[]).expect("starting the measured walk") {
         let fact = fact.expect("draining the measured walk");
         if let WalkFact::File(file) = fact {
-            let read = file.read().expect("reading a measured file");
+            let read = file
+                .read_optional()
+                .expect("reading a measured file")
+                .expect("a measured file nothing else is editing");
             std::hint::black_box(read.content_hash());
             std::hint::black_box(read.bytes().len());
         }

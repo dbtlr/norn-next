@@ -285,32 +285,37 @@ impl FileFact {
         &self.stat
     }
 
-    /// Opens once, reads the bytes once, and hashes exactly those returned bytes.
+    /// Opens once, reads the bytes once, and hashes exactly those returned
+    /// bytes — or answers that there is no file at this name to read.
     ///
     /// Consuming the fact makes a second read through this observation
     /// unspellable. The returned stat comes from the held descriptor and may
     /// differ from the traversal-time stat if another writer replaced the name.
     ///
     /// The path is resolved from the walk's own root descriptor, so a fact this
-    /// walk yielded is read through the tree it walked. A name that has stopped
-    /// identifying a regular file since it was yielded — replaced by a link, a
-    /// pipe or a directory, or removed — is a refusal here rather than an
-    /// answer: the fact stated that a document was there, and only the walk that
-    /// produces facts may state that one is gone.
+    /// walk yielded is read through the tree it walked.
+    ///
+    /// **A name that has stopped identifying a regular file since it was
+    /// yielded is an answer, not a refusal.** Removed, replaced by a link, by a
+    /// pipe or by a directory are one answer — *nothing to read here* — because
+    /// a walk begun now yields no file at that name in any of those cases
+    /// either, so a caller converging on what the tree holds converges the same
+    /// way for all of them. Enumeration and open are separate observations of a
+    /// tree other writers are editing, and the window between them is ordinary
+    /// churn rather than a broken environment.
+    ///
+    /// A machine failure is still a refusal. A directory this account cannot
+    /// open and a descriptor table that is full say nothing about whether a
+    /// document is there, and reporting them as absence would let a transient
+    /// fault delete derived state.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
-    pub fn read(self) -> Result<ReadFile, WalkError> {
+    pub fn read_optional(self) -> Result<Option<ReadFile>, WalkError> {
         let access = self.root.join(self.path.as_path());
         let fd = match open_regular_at(self.root_fd.as_fd(), self.path.as_path())
             .map_err(|source| environment(source.operation(), &access, source.into_error()))?
         {
             Reached::Regular(fd) => fd,
-            Reached::Nothing(unreached) => {
-                return Err(environment(
-                    unreached.operation(),
-                    &access,
-                    unreached.into_error(),
-                ));
-            }
+            Reached::Nothing(_) => return Ok(None),
         };
         let mut file = fs::File::from(fd);
         let metadata = file
@@ -318,12 +323,12 @@ impl FileFact {
             .map_err(|source| environment("stating", &access, source))?;
         let (bytes, content_hash) = read_bytes_and_hash(&mut file)
             .map_err(|source| environment("reading", &access, source))?;
-        Ok(ReadFile {
+        Ok(Some(ReadFile {
             path: self.path,
             stat: stat(&metadata),
             bytes,
             content_hash,
-        })
+        }))
     }
 }
 
@@ -908,7 +913,10 @@ mod tests {
         let WalkFact::File(file) = fact else {
             panic!("file was skipped")
         };
-        let read = file.read().expect("read");
+        let read = file
+            .read_optional()
+            .expect("read")
+            .expect("the file the walk just yielded");
         assert_eq!(read.bytes(), b"one observation");
         assert_eq!(read.content_hash(), ContentHash::of(read.bytes()));
         assert_eq!(read.stat().len, read.bytes().len() as u64);
@@ -1052,9 +1060,17 @@ mod tests {
         );
     }
 
+    /// **The window between enumeration and open is ordinary churn.** A name
+    /// the walk yielded as a file and a replacement written before the open are
+    /// two observations of a tree other writers are editing, and the second one
+    /// is the current truth: no file is there to read.
+    ///
+    /// The forbidden shape is a refusal, which would report a foreign edit as a
+    /// broken environment and hold the read open against a pipe nobody writes
+    /// to.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: replacing a deferred name.
-    fn a_deferred_file_replaced_by_a_fifo_refuses_without_blocking() {
+    fn a_deferred_file_replaced_by_a_fifo_answers_absence_without_blocking() {
         let scratch = Scratch::new("walk-file-fifo-swap");
         scratch.place("note.md", b"first");
         let fact = walk(&scratch.at(""), &[])
@@ -1072,8 +1088,64 @@ mod tests {
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo failed");
 
-        let error = file.read().expect_err("a fifo is not document content");
-        assert!(error.to_string().contains("note.md"), "{error}");
+        assert!(
+            file.read_optional()
+                .expect("a replaced name is not a machine failure")
+                .is_none(),
+            "a fifo at a deferred name read as document content"
+        );
+    }
+
+    /// The same window, closed by a deletion rather than by a replacement: the
+    /// file the walk enumerated is gone before the open reaches it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing a deferred name.
+    fn a_deferred_file_deleted_before_its_open_answers_absence() {
+        let scratch = Scratch::new("walk-file-delete-race");
+        scratch.place("note.md", b"first");
+        let fact = walk(&scratch.at(""), &[])
+            .expect("walk")
+            .next()
+            .expect("one fact")
+            .expect("file fact");
+        let WalkFact::File(file) = fact else {
+            panic!("file was skipped")
+        };
+        fs::remove_file(scratch.at("note.md")).expect("remove the enumerated file");
+
+        assert!(
+            file.read_optional()
+                .expect("a deleted name is not a machine failure")
+                .is_none(),
+            "a deleted document read as content"
+        );
+    }
+
+    /// The same window, closed by a directory taking the name. A walk begun now
+    /// descends into it and yields no file there, which is what the absence
+    /// converges on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: replacing a deferred name.
+    fn a_deferred_file_replaced_by_a_directory_answers_absence() {
+        let scratch = Scratch::new("walk-file-directory-race");
+        scratch.place("note.md", b"first");
+        let fact = walk(&scratch.at(""), &[])
+            .expect("walk")
+            .next()
+            .expect("one fact")
+            .expect("file fact");
+        let WalkFact::File(file) = fact else {
+            panic!("file was skipped")
+        };
+        fs::remove_file(scratch.at("note.md")).expect("remove original");
+        fs::create_dir(scratch.at("note.md")).expect("a directory takes the name");
+
+        assert!(
+            file.read_optional()
+                .expect("a replaced name is not a machine failure")
+                .is_none(),
+            "a directory at a deferred name read as document content"
+        );
     }
 
     #[test]
@@ -1312,7 +1384,11 @@ mod tests {
         let WalkFact::File(file) = fact else {
             panic!("the present file was treated as a skip")
         };
-        let error = file.read().expect_err("an unreadable present file");
+        // A denied file is the machine refusing, not the name answering: the
+        // document is there and this account cannot read it.
+        let error = file
+            .read_optional()
+            .expect_err("an unreadable present file");
         assert!(error.to_string().contains("blocked.md"), "{error}");
         scratch.set_mode(&blocked, 0o600);
     }

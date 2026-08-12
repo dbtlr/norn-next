@@ -143,11 +143,6 @@ impl Unreached {
     pub(crate) fn error(&self) -> &io::Error {
         &self.error
     }
-
-    /// The same error, for a refusal that takes ownership of it.
-    pub(crate) fn into_error(self) -> io::Error {
-        self.error
-    }
 }
 
 /// Opens the regular file `relative` names below the already-open `anchor`.

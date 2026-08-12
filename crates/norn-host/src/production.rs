@@ -701,15 +701,43 @@ fn heal_documents(
 ) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
+    merge_walk(store, walk, sensitivity, HealScope::Vault, policy, progress)
+}
+
+/// Converge the rows a scope addresses against the files a walk of it yields.
+///
+/// This is the one merge. The vault heal and every scoped subtree heal differ
+/// in what they walk and in which rows they page, and in nothing else: a walked
+/// file the store has no row for is derived, a row the walk no longer reaches is
+/// pruned, one whose content hash moved is re-derived, and a spelling the
+/// grammar refuses is quarantined wherever it appears.
+///
+/// The walk arrives as an iterator of facts rather than as a [`norn_fs::Walk`],
+/// because enumeration and open are two observations of a tree other writers are
+/// editing and the merge is what has to hold that gap: a caller can hand over
+/// facts gathered before the vault moved, and what the merge does with a file
+/// that is no longer there is the same thing it does with a file the walk never
+/// yielded.
+#[allow(clippy::too_many_arguments)]
+fn merge_walk<I>(
+    store: &mut Store,
+    facts: I,
+    sensitivity: norn_fs::CaseSensitivity,
+    scope: HealScope<'_>,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+) -> Result<(), JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
+{
     let order = store_order(sensitivity);
-    let mut files = walk
+    let mut files = facts
         .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) if is_markdown(file.path().as_path()) => {
-                Some(Ok(file))
+            Ok(norn_fs::WalkFact::File(file)) => {
+                is_markdown(file.path().as_path()).then_some(Ok(file))
             }
-            Ok(norn_fs::WalkFact::File(_)) => None,
             Ok(norn_fs::WalkFact::Skipped(_)) => None,
-            Err(e) => Some(Err(e)),
+            Err(error) => Some(Err(error)),
         })
         .peekable();
     let mut after: Option<DocumentPath> = None;
@@ -720,37 +748,44 @@ fn heal_documents(
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
-            stored = pending
-                .store
-                .begin_request()
-                .stored_documents_after_ordered(after.as_ref(), policy.store_page_size, order)
-                .map_err(store_effect)?;
+            stored = scope.page(pending.store, after.as_ref(), policy, order)?;
             index = 0;
             exhausted = stored.is_empty();
         }
         let fs_path = next_nameable(&mut files, &mut pending)?;
-        let db_path = stored.get(index).map(|d| d.path.as_str().to_owned());
+        let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
         match (fs_path, db_path) {
             (None, None) => break,
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                if read.content_hash().to_string() != stored[index].content_hash {
-                    pending.rederive(
-                        Path::new(&fp),
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                        Some(&stored[index].path),
-                    );
+                let read = open_enumerated(&mut files)?;
+                match read {
+                    Some(read) if read.content_hash().to_string() != stored[index].content_hash => {
+                        pending.rederive(
+                            Path::new(&fp),
+                            &fp,
+                            read.bytes(),
+                            read.content_hash().to_string(),
+                            Some(&stored[index].path),
+                        );
+                    }
+                    Some(_) => {}
+                    // The file went away between this walk's enumeration and
+                    // this open. A walk begun now holds no file here, so the
+                    // convergent answer is the one that walk's merge would
+                    // reach: the row goes, exactly as it does for a name the
+                    // walk never yielded.
+                    None => pending.push(Change::Death {
+                        path: stored[index].path.clone(),
+                        provenance: Provenance::HealPrune,
+                    }),
                 }
                 after = Some(stored[index].path.clone());
                 index += 1;
             }
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                if let Some(read) = open_enumerated(&mut files)? {
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                }
             }
             (_, Some(_)) => {
                 let path = stored[index].path.clone();
@@ -762,9 +797,9 @@ fn heal_documents(
                 });
             }
             (Some(fp), None) => {
-                let file = files.next().expect("peeked").map_err(effect)?;
-                let read = file.read().map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                if let Some(read) = open_enumerated(&mut files)? {
+                    pending.derive(&fp, read.bytes(), read.content_hash().to_string());
+                }
             }
         }
         if pending.is_full() {
@@ -774,6 +809,26 @@ fn heal_documents(
         progress.report(healed, None);
     }
     pending.flush()
+}
+
+/// Read the file the merge is standing on, or answer that it is no longer
+/// there.
+///
+/// The iterator is advanced past the fact whatever the open reaches, because
+/// the merge has finished with that name either way. An absence is a foreign
+/// edit landing in the window between enumeration and open; a machine failure
+/// still refuses, so a denied directory or an exhausted descriptor table never
+/// reads as a deletion.
+fn open_enumerated<I>(files: &mut Peekable<I>) -> Result<Option<norn_fs::ReadFile>, JobFailure>
+where
+    I: Iterator<Item = Result<norn_fs::FileFact, norn_fs::WalkError>>,
+{
+    files
+        .next()
+        .expect("peeked")
+        .map_err(effect)?
+        .read_optional()
+        .map_err(effect)
 }
 
 fn scoped_increment(
@@ -803,8 +858,8 @@ fn scoped_increment(
             .to_str()
             .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
         let scope = match (&identity, &prefix) {
-            (Ok(root), _) => Some(SubtreeScope::Subtree(root)),
-            (Err(_), Some(prefix)) => Some(SubtreeScope::Prefix(prefix)),
+            (Ok(root), _) => Some(HealScope::Subtree(root)),
+            (Err(_), Some(prefix)) => Some(HealScope::Prefix(prefix)),
             (Err(_), None) => None,
         };
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
@@ -954,19 +1009,32 @@ fn quarantine_subtree(
         }
         match document_path(&path) {
             Ok(document) => {
-                let read = file.read().map_err(effect)?;
                 let standing = pending
                     .store
                     .begin_request()
                     .stored_document(&document)
                     .map_err(store_effect)?;
-                pending.rederive(
-                    &path,
-                    document.as_str(),
-                    read.bytes(),
-                    read.content_hash().to_string(),
-                    standing.as_ref().map(|_| &document),
-                );
+                match file.read_optional().map_err(effect)? {
+                    Some(read) => pending.rederive(
+                        &path,
+                        document.as_str(),
+                        read.bytes(),
+                        read.content_hash().to_string(),
+                        standing.as_ref().map(|_| &document),
+                    ),
+                    // Gone between this walk's enumeration and this open, so
+                    // what is left to say about the name is what a walk begun
+                    // now says: nothing is there, and any row is the vault heal's
+                    // to prune here as well.
+                    None => {
+                        if standing.is_some() {
+                            pending.push(Change::Death {
+                                path: document,
+                                provenance: Provenance::HealPrune,
+                            });
+                        }
+                    }
+                }
             }
             Err(quarantine) => pending.quarantine(&path, quarantine),
         }
@@ -982,126 +1050,47 @@ fn quarantine_subtree(
 /// Converge a dirty directory the store can range, by merging its walk against
 /// the rows it addresses.
 ///
-/// The merge is the vault heal's, narrowed to one root: a walked file the store
-/// has no row for is derived, a row the walk no longer reaches is pruned, and a
-/// spelling the grammar refuses is quarantined as it is anywhere else. The scope
-/// is what makes the prune half reachable for a directory whose own leaf reduces
-/// to a refused stem — it names no document and still addresses every row
-/// beneath it.
+/// The merge is the vault heal's, narrowed to one root. The scope is what makes
+/// the prune half reachable for a directory whose own leaf reduces to a refused
+/// stem — it names no document and still addresses every row beneath it.
 fn heal_subtree(
     store: &mut Store,
     vault_root: &Path,
-    scope: SubtreeScope<'_>,
+    scope: HealScope<'_>,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let prefix = scope.as_str();
-    let relative_root = Path::new(prefix);
+    let relative_root = Path::new(scope.as_str());
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
-    let order = store_order(sensitivity);
-    let mut files = walk
-        .filter_map(|fact| match fact {
-            Ok(norn_fs::WalkFact::File(file)) => {
-                is_markdown(file.path().as_path()).then_some(Ok(file))
-            }
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .peekable();
-    let mut after = None;
-    let mut stored = Vec::new();
-    let mut index = 0;
-    let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size);
-    let mut healed = 0;
-    loop {
-        if index == stored.len() && !exhausted {
-            stored = scope.page(pending.store, after.as_ref(), policy, order)?;
-            index = 0;
-            exhausted = stored.is_empty();
-        }
-        let fs_path = next_nameable(&mut files, &mut pending)?;
-        let db_path = stored.get(index).map(|row| row.path.as_str().to_owned());
-        match (fs_path, db_path) {
-            (None, None) => break,
-            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                if read.content_hash().to_string() != stored[index].content_hash {
-                    pending.rederive(
-                        Path::new(&fp),
-                        &fp,
-                        read.bytes(),
-                        read.content_hash().to_string(),
-                        Some(&stored[index].path),
-                    );
-                }
-                after = Some(stored[index].path.clone());
-                index += 1;
-            }
-            (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
-            }
-            (_, Some(_)) => {
-                let path = stored[index].path.clone();
-                after = Some(path.clone());
-                index += 1;
-                pending.push(Change::Death {
-                    path,
-                    provenance: Provenance::HealPrune,
-                });
-            }
-            (Some(fp), None) => {
-                let read = files
-                    .next()
-                    .expect("peeked")
-                    .map_err(effect)?
-                    .read()
-                    .map_err(effect)?;
-                pending.derive(&fp, read.bytes(), read.content_hash().to_string());
-            }
-        }
-        if pending.is_full() {
-            pending.flush()?;
-        }
-        healed += 1;
-        progress.report(healed, None);
-    }
-    pending.flush()
+    merge_walk(store, walk, sensitivity, scope, policy, progress)
 }
 
-/// The stored rows a dirty directory addresses, which is what a scoped heal
-/// merges against and what a scoped prune ranges over.
+/// The stored rows a heal addresses, which is what its merge runs against and
+/// what a scoped prune ranges over.
 ///
-/// A root the grammar admits carries its own row and its descendants; a
-/// directory that names no document carries only descendants, and reaching them
-/// is the whole reason the second variant exists. A spelling neither admits
-/// addresses nothing, and is why callers take an `Option` of this.
+/// The vault heal addresses every row. A dirty root the grammar admits carries
+/// its own row and its descendants; a directory that names no document carries
+/// only descendants, and reaching them is the whole reason the third variant
+/// exists. A spelling none of them admits addresses nothing, and is why the
+/// scoped callers take an `Option` of this.
 #[derive(Clone, Copy)]
-enum SubtreeScope<'a> {
+enum HealScope<'a> {
+    Vault,
     Subtree(&'a DocumentPath),
     Prefix(&'a DirectoryPrefix),
 }
 
-impl SubtreeScope<'_> {
+impl HealScope<'_> {
     /// The vault-relative spelling the walk is rooted at and the stored paths
-    /// beneath it open with.
+    /// beneath it open with. The vault's own root is the empty spelling, which
+    /// is what a walk of the whole vault is rooted at.
     fn as_str(&self) -> &str {
         match self {
-            SubtreeScope::Subtree(root) => root.as_str(),
-            SubtreeScope::Prefix(prefix) => prefix.as_str(),
+            HealScope::Vault => "",
+            HealScope::Subtree(root) => root.as_str(),
+            HealScope::Prefix(prefix) => prefix.as_str(),
         }
     }
 
@@ -1115,13 +1104,16 @@ impl SubtreeScope<'_> {
     ) -> Result<Vec<StoredDocument>, JobFailure> {
         let request = store.begin_request();
         match self {
-            SubtreeScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
+            HealScope::Vault => {
+                request.stored_documents_after_ordered(after, policy.store_page_size, order)
+            }
+            HealScope::Subtree(root) => request.stored_documents_in_subtree_after_ordered(
                 root,
                 after,
                 policy.store_page_size,
                 order,
             ),
-            SubtreeScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
+            HealScope::Prefix(prefix) => request.stored_documents_under_after_ordered(
                 prefix,
                 after,
                 policy.store_page_size,
@@ -1134,7 +1126,7 @@ impl SubtreeScope<'_> {
 
 fn prune_subtree_ordered(
     store: &mut Store,
-    scope: SubtreeScope<'_>,
+    scope: HealScope<'_>,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
     order: StoredPathOrder,
@@ -2411,6 +2403,100 @@ mod tests {
             "a document that derived was called unreadable"
         );
         ops.detach(&name, attachment);
+    }
+
+    /// **The window between a heal's enumeration and its open is ordinary
+    /// churn.** A vault the walk read a moment ago is a vault other writers are
+    /// still editing, and a file that went away in between is not a broken
+    /// environment: the convergent answer is the one a walk begun now holds, so
+    /// the row goes and no document is derived where no file is left.
+    ///
+    /// The forbidden shape is an environmental refusal, which leaves the entry
+    /// untrusted over an ordinary edit and waits for a demand to repair it.
+    ///
+    /// **The window is staged rather than raced.** One walk's facts are
+    /// gathered, the vault is edited, and the merge that opens them runs after —
+    /// which is exactly the ordering the window has, with no timing in it.
+    #[test]
+    fn documents_deleted_between_enumeration_and_open_converge_on_their_absence() {
+        let f = Fixture::watcherless("heal-open-window");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("vanishing.md"), "here for now").unwrap();
+        let mut store = Store::open(f.root.join("window.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(stored_paths(&mut store), ["steady.md", "vanishing.md"]);
+
+        // A file the store has no row for, so the two arms that derive and the
+        // arm that re-derives all meet a name that is gone.
+        fs::write(f.vault().join("fresh.md"), "fresh").unwrap();
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        fs::remove_file(f.vault().join("fresh.md")).unwrap();
+        fs::remove_file(f.vault().join("vanishing.md")).unwrap();
+
+        merge_walk(
+            &mut store,
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+        assert_eq!(finding_total(&mut store), 0);
+    }
+
+    /// The other half of the same window: a name that is still there and is no
+    /// longer a regular file. A walk begun now descends into the directory and
+    /// yields no file at that name, which is what the row converges on.
+    #[test]
+    fn a_document_replaced_by_a_directory_between_enumeration_and_open_prunes_its_row() {
+        let f = Fixture::watcherless("heal-open-window-replace");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("swapped.md"), "a document for now").unwrap();
+        let mut store = Store::open(f.root.join("replace.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        fs::remove_file(f.vault().join("swapped.md")).unwrap();
+        fs::create_dir(f.vault().join("swapped.md")).unwrap();
+
+        merge_walk(
+            &mut store,
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
     /// Bytes no Markdown document can be read from.
@@ -4166,7 +4252,7 @@ mod tests {
         let pruned_root = DocumentPath::new("folder").unwrap();
         prune_subtree_ordered(
             &mut attachment.store,
-            SubtreeScope::Subtree(&pruned_root),
+            HealScope::Subtree(&pruned_root),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),
             StoredPathOrder::Sensitive,

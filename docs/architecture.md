@@ -162,6 +162,15 @@ resolving the situation correctly: the environment is broken, the stored state i
 discarding a sound database would destroy work to fix nothing. **Rung 3 is for damaged
 state, never for a hostile environment.**
 
+**Enumeration and open are two observations of a moving vault.** A heal walks the tree and
+then opens what the walk named, and a foreign edit can remove or replace an enumerated path
+in between. That window is ordinary churn rather than a broken environment, so it converges
+instead of refusing: the answer is the one a walk begun now holds, and it is one answer for
+a name that was deleted and for a name that a directory, a link or a pipe took — no document
+is there, so the row standing at it is pruned and nothing is derived for it. Only the
+machine's own failures — a denied directory, an exhausted descriptor table, a failing device
+— still refuse, which is what keeps the permission-loss row above true.
+
 **Quarantine is per document; refusal is per vault.** See
 [ADR 0018](decisions/0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md),
 which supersedes ADR 0013. A
