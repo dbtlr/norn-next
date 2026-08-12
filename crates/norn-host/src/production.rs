@@ -13,7 +13,7 @@ use norn_fs::{
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
-    SchemaPin, Span, Store, StoredDocument, StoredPathOrder, TagFact, TagSource,
+    SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
 use norn_text::{Document, SourceSpan, Value};
 use norn_wire::{FindingKind, MaintainerIdentity, Severity};
@@ -22,6 +22,16 @@ use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, Snap
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
+/// How long an attachment goes between verifications of its own derived state.
+///
+/// An authored bound rather than a measured one. `PRAGMA integrity_check` reads
+/// the whole database, so the cadence is what keeps that a background cost
+/// rather than a recurring one: it runs on the bounded lifecycle worker pool,
+/// never on the request path, and an entry pays it once an hour whatever its
+/// query traffic. Shorter would spend a full scan to shorten a window nothing
+/// is racing; longer would leave silent damage standing across a working day.
+pub const STORE_VERIFICATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
 /// Maximum time one lifecycle worker may wait for watcher coverage to become live.
 ///
 /// This is operational containment, not a performance threshold. Loaded runs
@@ -105,6 +115,14 @@ pub struct ProductionAttachment {
     _own_writes: OwnWrites,
     _shadows: ShadowHome,
     last_shadow_sweep: Instant,
+    /// When the store last answered for its own consistency.
+    ///
+    /// Logical damage is silent: a full-text index that stopped agreeing with
+    /// the column it indexes, a value outside a closed vocabulary, a foreign key
+    /// pointing at a row that is gone. None of it fails a read that does not
+    /// touch it, so nothing meets it until a client's query does — which is why
+    /// the question is asked on a schedule instead.
+    last_store_verification: Instant,
 }
 
 type WatchEntrypoint = fn(&Path, &Path) -> Result<(Subscription, OwnWrites), WatchError>;
@@ -171,7 +189,7 @@ impl ProductionEntryOps {
         store
             .begin_request()
             .pin_vault_schema(observed.bytes(), &observed.content_hash().to_string())
-            .map_err(effect)
+            .map_err(store_effect)
     }
 
     fn heal(
@@ -223,10 +241,25 @@ impl ProductionEntryOps {
             .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
             .map_err(watcher)?;
+        self.heal_under_coverage(attachment, progress)
+    }
+
+    /// Run one hash-authoritative heal against coverage that is already live,
+    /// keeping the facts the watcher reports while it runs.
+    ///
+    /// The synchronization boundary is not crossed again here, because it is
+    /// not a property that expires: coverage proven synchronized when it was
+    /// installed is still the coverage this heal runs under. What is re-read is
+    /// the vault, and that is the point.
+    fn heal_under_coverage(
+        &self,
+        attachment: &mut ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<(), JobFailure> {
         attachment
             .subscription
             .as_ref()
-            .expect("synchronized subscription remains installed")
+            .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .begin_heal();
         let result = self.heal(attachment, progress);
         let observed = attachment
@@ -237,6 +270,52 @@ impl ProductionEntryOps {
             .map_err(watcher)?;
         attachment.heal_observed.merge(observed);
         result
+    }
+
+    /// Discard damaged derived state and derive it again from the vault — heal
+    /// rung 3, with the vault as the truth it rebuilds against.
+    ///
+    /// **The equivalence claim is that this is the from-scratch derivation.**
+    /// The database the store hands back is the one a create produces, holding
+    /// no row; the heal that follows is the same hash-authoritative walk an
+    /// attach over an empty database runs, reading every document under the
+    /// registered root through the same code path. There is nothing here that a
+    /// first attach does not do, which is what makes the result equal to a first
+    /// attach's rather than merely close to it.
+    ///
+    /// The verification afterwards is the other half: a rebuilt database that
+    /// cannot answer for itself is not derived state anything may be published
+    /// over, and reporting damage here rather than `Ready` is what keeps a
+    /// second damaged store from being served as a sound one.
+    ///
+    /// Coverage stands through all of it. The watcher and the maintainer lock
+    /// were not what was damaged, and the facts the watcher reports during the
+    /// heal are kept exactly as an attach keeps them.
+    fn rung_three(
+        &self,
+        mut attachment: ProductionAttachment,
+        progress: &ProgressReporter<ProductionAttachment>,
+    ) -> Result<ProductionAttachment, JobFailure> {
+        // Opening the derived state a read answers from is prologue work that
+        // counts no document, which is the phase an attach installs it under.
+        progress.installing_coverage();
+        attachment.store = attachment
+            .store
+            .discard_and_reopen()
+            .map_err(store_effect)?;
+        attachment.last_store_verification = Instant::now();
+        self.heal_under_coverage(&mut attachment, progress)?;
+        attachment
+            .store
+            .verify_integrity()
+            .map_err(store_effect)
+            .map_err(|failure| match failure {
+                JobFailure::StoreDamaged(detail) => JobFailure::StoreDamaged(format!(
+                    "a store rebuilt from the vault is still damaged: {detail}"
+                )),
+                other => other,
+            })?;
+        Ok(attachment)
     }
 }
 
@@ -340,7 +419,7 @@ impl EntryOps for ProductionEntryOps {
         let schema = Self::schema_path(registration);
         let (subscription, own_writes) =
             Self::start_watch(registration, &schema).map_err(watcher)?;
-        let store = Store::open(derived.join("store.sqlite3")).map_err(effect)?;
+        let store = Store::open(derived.join("store.sqlite3")).map_err(store_effect)?;
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
             maintainership,
@@ -350,9 +429,19 @@ impl EntryOps for ProductionEntryOps {
             _own_writes: own_writes,
             _shadows: shadows,
             last_shadow_sweep: Instant::now(),
+            last_store_verification: Instant::now(),
         };
-        self.synchronize_and_heal(&mut attachment, progress)?;
-        Ok(attachment)
+        // The open resolves damage it can see in the store schema, and the heal
+        // is where damage in the pages under it is met: a corrupt page an open
+        // never read is met by the first read that does. Rung 3 runs here
+        // rather than being reported, because an attach that reported it would
+        // be answered by another attach that opened the same file and met the
+        // same page.
+        match self.synchronize_and_heal(&mut attachment, progress) {
+            Ok(()) => Ok(attachment),
+            Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
+            Err(failure) => Err(failure),
+        }
     }
 
     fn reconcile(
@@ -426,8 +515,21 @@ impl EntryOps for ProductionEntryOps {
         poll_subscription(attachment)
     }
 
+    fn rebuild(
+        &self,
+        _: &VaultName,
+        attachment: Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure> {
+        if !attachment.maintainership.still_current().map_err(effect)? {
+            return Err(JobFailure::LostMaintainership);
+        }
+        self.rung_three(attachment, progress)
+    }
+
     fn maintenance_due(&self, _: &VaultName, attachment: &Self::Attachment) -> bool {
         attachment.last_shadow_sweep.elapsed() >= norn_fs::SHADOW_AGE_THRESHOLD
+            || attachment.last_store_verification.elapsed() >= STORE_VERIFICATION_INTERVAL
     }
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
@@ -439,6 +541,13 @@ impl EntryOps for ProductionEntryOps {
         // attachment or force a full heal; try again at the next normal cadence.
         let _ = attachment._shadows.sweep(norn_fs::SHADOW_AGE_THRESHOLD);
         attachment.last_shadow_sweep = Instant::now();
+        // The store's own consistency is the other maintenance question, and it
+        // is asked here for the same reason the sweep is: it is bounded work
+        // off the request path. A verdict of damage is **not** swallowed the way
+        // a failed sweep is — a sweep that did not run leaves derived state
+        // sound, and this is the one caller that learns it is not.
+        attachment.store.verify_integrity().map_err(store_effect)?;
+        attachment.last_store_verification = Instant::now();
         Ok(())
     }
 
@@ -502,7 +611,7 @@ fn heal_documents(
                 .store
                 .begin_request()
                 .stored_documents_after_ordered(after.as_ref(), policy.store_page_size, order)
-                .map_err(effect)?;
+                .map_err(store_effect)?;
             index = 0;
             exhausted = stored.is_empty();
         }
@@ -657,7 +766,7 @@ fn scoped_increment(
                     .store
                     .begin_request()
                     .stored_document(&document_path)
-                    .map_err(effect)?;
+                    .map_err(store_effect)?;
                 if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
                     pending.rederive(
                         path,
@@ -716,7 +825,7 @@ fn quarantine_subtree(
                     .store
                     .begin_request()
                     .stored_document(&document)
-                    .map_err(effect)?;
+                    .map_err(store_effect)?;
                 pending.rederive(
                     &path,
                     document.as_str(),
@@ -885,7 +994,7 @@ impl SubtreeScope<'_> {
                 order,
             ),
         }
-        .map_err(effect)
+        .map_err(store_effect)
     }
 }
 
@@ -941,7 +1050,7 @@ fn prune_descendants_and_aliases(
                 policy.store_page_size,
                 store_order(sensitivity),
             )
-            .map_err(effect)?;
+            .map_err(store_effect)?;
         if page.is_empty() {
             break;
         }
@@ -1191,7 +1300,7 @@ impl<'s> Pending<'s> {
             self.store
                 .begin_request()
                 .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
-                .map_err(effect)?;
+                .map_err(store_effect)?;
         }
         for finding in self.quarantined.drain(..) {
             // The first finding this scope files at a subject replaces what
@@ -1201,7 +1310,7 @@ impl<'s> Pending<'s> {
             let mut request = self.store.begin_request();
             if request
                 .stored_document(&finding.path)
-                .map_err(effect)?
+                .map_err(store_effect)?
                 .is_some()
             {
                 continue;
@@ -1209,9 +1318,9 @@ impl<'s> Pending<'s> {
             if replace {
                 request
                     .discard_findings_about(&finding.path)
-                    .map_err(effect)?;
+                    .map_err(store_effect)?;
             }
-            request.record_finding(&finding).map_err(effect)?;
+            request.record_finding(&finding).map_err(store_effect)?;
         }
         Ok(())
     }
@@ -1336,8 +1445,43 @@ fn map_value(value: &Value) -> FrontmatterValue {
 fn environmental(message: impl Into<String>) -> JobFailure {
     JobFailure::Environmental(message.into())
 }
-fn effect(error: impl std::fmt::Display) -> JobFailure {
+
+/// A refusal that is environmental by construction: the vault's filesystem, or
+/// the machine under it, said no.
+///
+/// **The bound is the seam.** [`effect`] takes only errors carrying this trait,
+/// so a store refusal cannot reach [`JobFailure::Environmental`] by being
+/// handed to the same helper as a walk that could not list a directory. Store
+/// refusals go through [`store_effect`], which is the one place a damaged
+/// database is told apart from a broken environment — and a new store call site
+/// that reaches for `effect` does not compile.
+trait EnvironmentalFailure: fmt::Display {}
+
+impl EnvironmentalFailure for std::io::Error {}
+impl EnvironmentalFailure for norn_fs::Refusal {}
+impl EnvironmentalFailure for norn_fs::WalkError {}
+impl EnvironmentalFailure for &norn_fs::WalkError {}
+impl EnvironmentalFailure for norn_fs::PathError {}
+impl EnvironmentalFailure for norn_fs::NormalizerError {}
+impl EnvironmentalFailure for norn_fs::ExclusionError {}
+
+fn effect(error: impl EnvironmentalFailure) -> JobFailure {
     environmental(error.to_string())
+}
+
+/// The failure class a store refusal belongs to.
+///
+/// Damaged derived state and a refused operation are two failures with two
+/// resolutions, and this is where the store's verdict becomes the lifecycle's.
+/// Damage reaches the database-side heal rung; everything else is the
+/// environment refusing, which the entry answers by staying untrusted and
+/// saying so. Flattening the first onto the second is a loop: a corrupt page
+/// answers a retry exactly as it answered the operation before it.
+fn store_effect(error: StoreError) -> JobFailure {
+    match error.damage() {
+        Some(damage) => JobFailure::StoreDamaged(damage.to_string()),
+        None => environmental(error.to_string()),
+    }
 }
 fn watcher(error: WatchError) -> JobFailure {
     JobFailure::WatcherTerminal(error)
@@ -1367,6 +1511,7 @@ mod tests {
     use super::*;
     use crate::AttachMode;
     use norn_config::registry::{SchemaSource, VaultRoot};
+    use norn_store::OpenOutcome;
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
@@ -2099,6 +2244,231 @@ mod tests {
             .iter()
             .map(|row| row.path.as_str().to_owned())
             .collect()
+    }
+
+    /// **A store whose pages are corrupt reaches rung 3 at the attach that meets
+    /// them, and what it derives is a from-scratch build.**
+    ///
+    /// The open resolves damage it can see in the store schema, and this
+    /// corruption is not in the store schema: the file opens as the shape this
+    /// build writes, and the first read of a document page is where SQLite
+    /// refuses. Reporting that would send the entry back through an attach that
+    /// opens the same file and meets the same page.
+    #[test]
+    fn a_corrupt_store_at_attach_reaches_rung_three_and_derives_the_vault_again() {
+        let f = Fixture::new("attach-damage");
+        write_a_vault_of_documents(&f, 120);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+
+        let attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        ops.detach(&name, attachment);
+        corrupt_the_document_pages(&database);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            *attachment.store.open_outcome(),
+            OpenOutcome::Created,
+            "the attach served the corrupt file rather than discarding it"
+        );
+        attachment
+            .store
+            .verify_integrity()
+            .expect("a store rung 3 rebuilt");
+        assert_eq!(
+            every_stored_fact(&mut attachment.store),
+            from_scratch(&f, "attach-damage-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **Logical damage is silent, so the scheduled verification is what meets
+    /// it — and the verdict is not swallowed the way a failed sweep is.**
+    ///
+    /// A full-text index that stopped agreeing with the column it indexes
+    /// answers reads about text no document holds. No read fails, so nothing
+    /// else in the warm cycle can report it.
+    #[test]
+    fn scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
+        let f = Fixture::new("silent-damage");
+        write_a_vault_of_documents(&f, 8);
+        let (ops, name) = f.ops(64);
+        let policy = ProductionPolicy::new(64, 2).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        ops.maintain(&name, &mut attachment)
+            .expect("a store nothing has damaged");
+
+        // The triggers are the only thing that writes the index, so a body edit
+        // behind their back is a disagreement nothing else notices.
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DROP TRIGGER documents_fts_update;
+             UPDATE documents SET body = 'an entirely different body'",
+        )
+        .unwrap();
+
+        let failure = ops
+            .maintain(&name, &mut attachment)
+            .expect_err("a full-text index that stopped agreeing with its column");
+        let JobFailure::StoreDamaged(detail) = &failure else {
+            panic!("the damage was reported as {failure:?} rather than as damaged state");
+        };
+        assert!(!detail.is_empty(), "the damage was not named");
+
+        // Rung 3, run as the lifecycle runs it, over coverage that stands.
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 over a damaged store");
+        assert_eq!(*attachment.store.open_outcome(), OpenOutcome::Created);
+        assert_eq!(
+            every_stored_fact(&mut attachment.store),
+            from_scratch(&f, "silent-damage-oracle", policy),
+            "the rebuild derived something a from-scratch build does not"
+        );
+        ops.maintain(&name, &mut attachment)
+            .expect("a store rung 3 rebuilt");
+        ops.detach(&name, attachment);
+    }
+
+    /// **Rung 3 keeps the coverage it runs under.** The watcher and the
+    /// maintainer lock are not what was damaged, so a rebuild is not a
+    /// re-attach: what it replaces is the derived state between them, and the
+    /// facts the watcher reports while it runs are kept exactly as an attach
+    /// keeps them.
+    #[test]
+    fn rung_three_replaces_the_store_and_keeps_the_maintainership_around_it() {
+        let f = Fixture::new("rebuild-keeps-coverage");
+        write_a_vault_of_documents(&f, 4);
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+        assert!(
+            attachment.maintainership.still_current().unwrap(),
+            "the attach did not take maintainership"
+        );
+
+        // A document the damaged store never held, so a rebuild that derived
+        // nothing would be visible in the rows rather than only in the file.
+        fs::write(f.vault().join("arrived.md"), "# Arrived\n").unwrap();
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DROP TRIGGER documents_fts_delete; DELETE FROM documents",
+        )
+        .unwrap();
+
+        let mut attachment = ops
+            .rebuild(&name, attachment, &progress)
+            .expect("rung 3 over a damaged store");
+        assert_eq!(attachment.store.path(), database.as_path());
+        assert!(
+            attachment.maintainership.still_current().unwrap(),
+            "rung 3 gave up the maintainer lock it was not asked to give up"
+        );
+        assert!(
+            attachment.subscription.is_some(),
+            "rung 3 gave up the watcher coverage it was not asked to give up"
+        );
+        assert!(
+            stored_paths(&mut attachment.store).contains(&"arrived.md".to_string()),
+            "the rebuild derived the vault as it stands rather than the vault the damaged store held"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// Every fact the store holds about every document it holds, in path order.
+    ///
+    /// This is the shape two derivations are compared as. It reads the rows a
+    /// read answers from rather than a summary of them, so two stores agreeing
+    /// here agree about content hashes, links, tags, headings, blocks and the
+    /// frontmatter projection alike.
+    fn every_stored_fact(store: &mut Store) -> Vec<norn_store::StoredFacts> {
+        let paths: Vec<DocumentPath> = store
+            .begin_request()
+            .stored_documents_after_ordered(None, 500, StoredPathOrder::Sensitive)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.path)
+            .collect();
+        paths
+            .iter()
+            .map(|path| {
+                store
+                    .begin_request()
+                    .stored_facts(path)
+                    .unwrap()
+                    .expect("a document the store just listed")
+            })
+            .collect()
+    }
+
+    /// The derivation a first attach over this vault produces, built by the
+    /// same heal against a database of its own.
+    ///
+    /// It is the oracle every rung-3 case is judged against, and it is the heal
+    /// rather than a restatement of what the heal ought to find: a rebuild that
+    /// stopped agreeing with a from-scratch derivation would have to disagree
+    /// with this.
+    fn from_scratch(
+        f: &Fixture,
+        label: &str,
+        policy: ProductionPolicy,
+    ) -> Vec<norn_store::StoredFacts> {
+        let mut store = Store::open(f.root.join(format!("{label}.sqlite3"))).unwrap();
+        let registration = f.registration();
+        let progress = ProgressReporter::disconnected();
+        ProductionEntryOps::pin_schema(&mut store, &registration).unwrap();
+        let shadows = ShadowHome::resolve(
+            registration.root.as_path(),
+            &f.root.join("scratch-tmp"),
+            &maintainership_key(
+                &ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap(),
+                &registration.name,
+            ),
+        )
+        .unwrap();
+        heal_documents(
+            &mut store,
+            registration.root.as_path(),
+            &exclusions(&registration, &shadows),
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        every_stored_fact(&mut store)
+    }
+
+    /// Overwrite the pages a database keeps its documents in, leaving the store
+    /// schema an open reads intact.
+    ///
+    /// A database is created holding its store schema, and every page written
+    /// after that is appended past it, so the tail is documents and the head is
+    /// the schema. This is real corruption rather than an injected verdict: what
+    /// the store meets is a page SQLite refuses to read.
+    fn corrupt_the_document_pages(database: &Path) {
+        let mut bytes = fs::read(database).unwrap();
+        let head = bytes.len() / 2;
+        assert!(head > 0, "the database is empty");
+        for byte in bytes.iter_mut().skip(head) {
+            *byte = 0x5a;
+        }
+        fs::write(database, &bytes).unwrap();
+    }
+
+    /// A vault with enough documents that its store outgrows the pages it was
+    /// created holding.
+    fn write_a_vault_of_documents(f: &Fixture, count: usize) {
+        for index in 0..count {
+            fs::write(
+                f.vault().join(format!("note-{index:03}.md")),
+                format!("# Note {index}\n\nA paragraph about [[note-000]] and #tagging.\n"),
+            )
+            .unwrap();
+        }
     }
 
     fn findings_at(store: &mut Store, at: &str) -> Vec<norn_store::StoredFinding> {
@@ -2847,6 +3217,15 @@ mod tests {
     impl EntryOps for CountedAttach {
         type Attachment = ProductionAttachment;
 
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+
         fn attach(
             &self,
             registration: &Registration,
@@ -3322,6 +3701,15 @@ mod tests {
 
     impl EntryOps for HeldReconcile {
         type Attachment = ProductionAttachment;
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
+
         fn attach(
             &self,
             registration: &Registration,
@@ -3560,6 +3948,15 @@ mod tests {
 
     impl EntryOps for BlockedRecovery {
         type Attachment = ProductionAttachment;
+
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: Self::Attachment,
+            progress: &ProgressReporter<Self::Attachment>,
+        ) -> Result<Self::Attachment, JobFailure> {
+            self.inner.rebuild(name, attachment, progress)
+        }
 
         fn attach(
             &self,
