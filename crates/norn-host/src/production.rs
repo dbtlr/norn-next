@@ -1522,18 +1522,36 @@ mod tests {
 
     struct Fixture {
         root: PathBuf,
-        // Every case built on a fixture attaches a real vault, and an
-        // attachment installs a real platform watcher. The lease makes this
-        // process's watcher the only live one on the machine, and it is held
-        // for the fixture's whole life because the attachment's is inside it.
-        _watcher_lease: norn_testkit::isolation::Lease,
+        // A case that attaches a real vault installs a real platform watcher.
+        // The lease makes this process's watcher the only live one on the
+        // machine, and it is held for the fixture's whole life because the
+        // attachment's is inside it. A case that stands its own reports up
+        // installs no watcher and takes no lease, so the machine's one live
+        // watcher stays available to the cases that need it.
+        _watcher_lease: Option<norn_testkit::isolation::Lease>,
     }
     impl Fixture {
         fn new(label: &str) -> Self {
-            let lease = norn_testkit::isolation::Lease::hold(
-                norn_testkit::isolation::REAL_WATCHER,
-                lease_budget(),
-            );
+            Self::rooted(
+                label,
+                Some(norn_testkit::isolation::Lease::hold(
+                    norn_testkit::isolation::REAL_WATCHER,
+                    lease_budget(),
+                )),
+            )
+        }
+
+        /// A fixture for a case that installs no platform watcher.
+        ///
+        /// The tree and its removal are what such a case wants — a vault
+        /// directory to detect case behavior against, gone when the case ends
+        /// however it ends — and the machine-wide watcher lease is what it
+        /// does not.
+        fn watcherless(label: &str) -> Self {
+            Self::rooted(label, None)
+        }
+
+        fn rooted(label: &str, watcher_lease: Option<norn_testkit::isolation::Lease>) -> Self {
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1544,7 +1562,7 @@ mod tests {
             fs::write(root.join("vault/.norn/schema.yaml"), "version: 1\n").unwrap();
             Self {
                 root,
-                _watcher_lease: lease,
+                _watcher_lease: watcher_lease,
             }
         }
         fn vault(&self) -> PathBuf {
@@ -3859,9 +3877,14 @@ mod tests {
 
     /// The invalidation root a noted fact carries, for the facts that are one.
     ///
-    /// The roots these facts render are vault-relative paths this process
-    /// normalized, so the rendering round-trips: nothing here is a path the
-    /// platform handed over as bytes that are not a path.
+    /// What comes back is the [`Path::display`] spelling [`root_fact`] wrote,
+    /// which is the root itself for a UTF-8 name and a replacement-character
+    /// rendering of any other — and `norn_fs` normalizes a non-UTF-8 name
+    /// rather than refusing it, because a Unix path is bytes. So the roots a
+    /// condition judges here are exact for UTF-8 spellings, which is what the
+    /// awaited paths are: a case awaits a `DocumentPath`, and that type is
+    /// UTF-8. A root that is not is judged as its rendering rather than as its
+    /// name.
     fn noted_root(fact: &str) -> Option<&Path> {
         fact.strip_prefix(ROOT_FACT).map(Path::new)
     }
@@ -3870,16 +3893,18 @@ mod tests {
     ///
     /// Two reports answer yes and they are not the same answer. An
     /// invalidation root at or above the path is the backend naming it, and
-    /// at-or-above is [`norn_testkit::invalidation::covers`] — the workspace's
-    /// one spelling of that containment, which the `norn-fs` watcher cases ask
-    /// of the same reports. A vault-wide rescan names nothing and covers
-    /// everything, because it is the backend saying the exact path set was
-    /// lost — and a case whose outcome is that a reconcile happened is
-    /// answered by either, since a reconcile of a rescan reaches the path too.
+    /// at-or-above is [`norn_testkit::invalidation::at_or_above`] — the
+    /// workspace's one spelling of that containment, which the `norn-fs`
+    /// watcher cases ask of the same reports. A vault-wide rescan names
+    /// nothing and covers everything, because it is the backend saying the
+    /// exact path set was lost — and a case whose outcome is that a reconcile
+    /// happened is answered by either, since a reconcile of a rescan reaches
+    /// the path too.
     fn absorbed_covers(absorbed: &norn_testkit::wait::Absorbed, path: &Path) -> bool {
         absorbed.saw(VAULT_RESCAN)
             || absorbed.saw_any(|fact| {
-                noted_root(fact).is_some_and(|root| norn_testkit::invalidation::covers(root, path))
+                noted_root(fact)
+                    .is_some_and(|root| norn_testkit::invalidation::at_or_above(root, path))
             })
     }
 
@@ -3897,16 +3922,8 @@ mod tests {
     /// difference between at-or-above and exact equality is visible.
     #[test]
     fn an_absorbed_root_above_the_awaited_document_covers_it() {
-        let root = std::env::temp_dir().join(format!(
-            "norn-host-absorbed-covers-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(root.join("notes")).unwrap();
-        let normalizer = norn_fs::PathNormalizer::detect(&root).unwrap();
+        let f = Fixture::watcherless("absorbed-covers");
+        let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
         let normalize = |relative: &str| normalizer.normalize(Path::new(relative)).unwrap();
 
         // `notes/note` is a byte prefix of the awaited document and no
@@ -3949,7 +3966,6 @@ mod tests {
             applied.iter().all(|batch| batch.rescans().is_empty()),
             "a rescan answered a condition this case drives per-path"
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Reconcile settled batches until `condition` holds, under one budget.

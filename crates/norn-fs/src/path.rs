@@ -219,6 +219,13 @@ impl NormalizedPath {
     /// In-crate: [`Exclusions`](crate::Exclusions) is the exported way to ask
     /// what a root contains, so a host cannot spell a second answer out of this
     /// primitive.
+    ///
+    /// A test asking whether a *reported* root reaches a path is asking a
+    /// different question — both sides are values one harness run collected,
+    /// with no volume behind them — and it is answered outside this crate, by
+    /// `norn_testkit::invalidation::at_or_above`. Neither answer is the other's
+    /// substitute: this one carries the vault's proven case behavior, that one
+    /// carries none.
     pub(crate) fn starts_with(&self, root: &Self) -> bool {
         let (path, prefix) = (self.key.as_bytes(), root.key.as_bytes());
         path.starts_with(prefix) && matches!(path.get(prefix.len()), None | Some(b'/'))
