@@ -2504,6 +2504,11 @@ mod tests {
             from_scratch(&f, "silent-damage-oracle", policy),
             "the rebuild derived something a from-scratch build does not"
         );
+        assert_eq!(
+            findings_at(&mut attachment.store, "unreadable.md").len(),
+            1,
+            "the rebuild derived no finding, so the equality above compared none"
+        );
         attachment.store_verification_due = Instant::now();
         ops.maintain(&name, &mut attachment)
             .expect("a store rung 3 rebuilt");
