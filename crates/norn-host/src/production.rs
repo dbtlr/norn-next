@@ -2363,6 +2363,57 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// The direction a user causes: a document that derived and served queries
+    /// has an oversized block written into it. The standing row dies with the
+    /// increment — recorded as a quarantine, so nothing reads it as the
+    /// document leaving the vault — and the finding stands where the row was.
+    #[test]
+    fn a_document_rewritten_past_the_bound_loses_its_row_to_a_quarantine() {
+        let f = Fixture::new("quarantine-frontmatter-size-onset");
+        fs::write(f.vault().join("note.md"), "---\ntitle: note\n---\n# body\n").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"]
+        );
+        assert_eq!(finding_total(&mut attachment.store), 0);
+
+        fs::write(
+            f.vault().join("note.md"),
+            unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES * 4),
+        )
+        .unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        let findings = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].kind, "document/frontmatter-too-large");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_eq!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .expect("a tombstone")
+                .provenance,
+            Provenance::Quarantine
+        );
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn a_second_heal_of_a_quarantined_document_records_one_finding() {
         let f = Fixture::new("quarantine-idempotent");
