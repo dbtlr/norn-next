@@ -811,11 +811,17 @@ impl DemandedWork {
     ///
     /// The reconcile arm rests on where the untrusted reasons are written:
     /// every writer of a watcher loss or an environmental refusal against an
-    /// entry holding coverage sets `recovery_required` beside it. An overflow
-    /// is the one reason that stands without one, and rereading the facts is
+    /// entry holding coverage sets `recovery_required` beside it, and every
+    /// writer of damaged derived state sets `rebuild_required`. An overflow is
+    /// the one reason that stands without either, and rereading the facts is
     /// what clears an overflow. The assertion says that invariant out loud, so
-    /// a writer that stops pairing the two is caught here rather than by an
-    /// entry a reconcile drove to Ready over a cause nothing addressed.
+    /// a writer that stops pairing a reason with the work it owes is caught
+    /// here rather than by an entry a reconcile drove to Ready over a cause
+    /// nothing addressed.
+    ///
+    /// Damage is read before a recovery because it dominates one: a store that
+    /// will not answer answers no better after coverage is installed over it
+    /// again, so an entry owing both owes the rung that resolves the store.
     fn owed_by<A: SnapshotSource>(state: &EntryState<A>) -> Self {
         if !state.coverage.in_hand() {
             Self::Attach

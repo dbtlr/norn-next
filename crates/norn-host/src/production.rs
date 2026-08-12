@@ -299,24 +299,56 @@ impl ProductionEntryOps {
         // Opening the derived state a read answers from is prologue work that
         // counts no document, which is the phase an attach installs it under.
         progress.installing_coverage();
-        attachment.store = attachment
-            .store
-            .discard_and_reopen()
-            .map_err(store_effect)?;
+        // The store is consumed here, so the attachment is not whole again
+        // until the reopen lands. A failure between the two gives back what is
+        // left in the order a detach gives it back: coverage first and the
+        // maintainer lock last, so no second maintainer takes this vault while
+        // a watch over it still stands.
+        match attachment.store.discard_and_reopen() {
+            Ok(store) => attachment.store = store,
+            Err(error) => {
+                drop(attachment.subscription);
+                drop(attachment.maintainership);
+                return Err(store_effect(error));
+            }
+        }
         attachment.last_store_verification = Instant::now();
-        self.heal_under_coverage(&mut attachment, progress)?;
-        attachment
-            .store
-            .verify_integrity()
-            .map_err(store_effect)
-            .map_err(|failure| match failure {
-                JobFailure::StoreDamaged(detail) => JobFailure::StoreDamaged(format!(
-                    "a store rebuilt from the vault is still damaged: {detail}"
-                )),
-                other => other,
-            })?;
-        Ok(attachment)
+        let derived = self
+            .heal_under_coverage(&mut attachment, progress)
+            .and_then(|()| {
+                attachment
+                    .store
+                    .verify_integrity()
+                    .map_err(store_effect)
+                    .map_err(|failure| match failure {
+                        JobFailure::StoreDamaged(detail) => JobFailure::StoreDamaged(format!(
+                            "a store rebuilt from the vault is still damaged: {detail}"
+                        )),
+                        other => other,
+                    })
+            });
+        match derived {
+            Ok(()) => Ok(attachment),
+            Err(failure) => {
+                release(attachment);
+                Err(failure)
+            }
+        }
     }
+}
+
+/// Give back everything an attachment holds, in the order it has to be given
+/// back.
+///
+/// Coverage ends first and the maintainer lock last: a lock released while a
+/// watch over the vault still stands is a window another process takes
+/// maintainership in while this one is still reporting facts about the tree.
+/// The store is closed between them, which is where a throwaway store's file
+/// goes.
+fn release(attachment: ProductionAttachment) {
+    drop(attachment.subscription);
+    let _ = attachment.store.close();
+    drop(attachment.maintainership);
 }
 
 /// The roots inside a vault a walk of it does not read: staged shadows wherever
@@ -552,9 +584,7 @@ impl EntryOps for ProductionEntryOps {
     }
 
     fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
-        drop(attachment.subscription);
-        let _ = attachment.store.close();
-        drop(attachment.maintainership);
+        release(attachment);
     }
 }
 

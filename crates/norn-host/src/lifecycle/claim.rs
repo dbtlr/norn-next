@@ -332,7 +332,7 @@
 //! supersedes first — `refuse_conflict`, `Host::drop`, the `poll_watchers`
 //! failure arms — has taken the entry past every epoch an attach could be
 //! standing at before it opens one. A move that supersedes nothing — the
-//! Recover, Reconcile and Maintenance failure arms, and `Job::Detach` — is the
+//! Recover, Rebuild, Reconcile and Maintenance failure arms, and `Job::Detach` — is the
 //! leg standing at the entry's own current epoch, and one epoch admits one leg,
 //! so there is no attach there to publish. The `debug_assert!` at the top of
 //! `finish_release` is where that argument stops being prose.
