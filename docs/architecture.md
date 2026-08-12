@@ -169,7 +169,10 @@ instead of refusing: the answer is the one a walk begun now holds, and it is one
 a name that was deleted and for a name that a directory, a link or a pipe took — no document
 is there, so the row standing at it is pruned and nothing is derived for it. Only the
 machine's own failures — a denied directory, an exhausted descriptor table, a failing device
-— still refuse, which is what keeps the permission-loss row above true.
+— still refuse at that window, which is what keeps the permission-loss row above true. The
+walk's own paging of a directory is a narrower window and does not converge yet: an entry
+that is unlinked or changes kind between the listing that named it and the stat that reads
+it refuses there.
 
 **Quarantine is per document; refusal is per vault.** See
 [ADR 0018](decisions/0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md),

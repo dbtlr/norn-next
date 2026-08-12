@@ -1392,4 +1392,46 @@ mod tests {
         assert!(error.to_string().contains("blocked.md"), "{error}");
         scratch.set_mode(&blocked, 0o600);
     }
+
+    /// **A denied ancestor is the machine refusing, not the name answering.**
+    /// Permission revoked on a directory between the walk that enumerated a file
+    /// under it and the open that reads it says nothing about whether the
+    /// document is there — and reading it as absence would let a permission loss
+    /// prune every row beneath that directory.
+    ///
+    /// This is the half of the absence/refusal split the deletion and
+    /// replacement cases do not reach: those revoke the *name*, and this revokes
+    /// the *account's* reach on a name that never moved.
+    #[test]
+    fn a_denied_ancestor_directory_refuses_the_open_it_stands_over() {
+        let scratch = Scratch::new("walk-unreadable-ancestor");
+        let folder = scratch.directory("vault/folder");
+        scratch.place("folder/note.md", b"present under a directory");
+
+        let fact = walk(&scratch.at(""), &[])
+            .expect("walk")
+            .find_map(|fact| match fact.expect("the enumerated file") {
+                WalkFact::File(file) => Some(file),
+                WalkFact::Skipped(_) => None,
+            })
+            .expect("one file fact");
+        scratch.set_mode(&folder, 0o000);
+
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+        // Proves the arranged refusal is real for this account.
+        let actually_blocked = fs::File::open(scratch.at("folder/note.md")).is_err();
+        assert!(
+            actually_blocked,
+            "this account reads through a mode-000 directory, so the refusal case proves nothing"
+        );
+
+        // The mode goes back before the assertion, so a failure here leaves a
+        // readable tree behind rather than an undeletable one.
+        let outcome = fact.read_optional();
+        scratch.set_mode(&folder, 0o755);
+        let Err(error) = outcome else {
+            panic!("a document under a denied ancestor read as an absence")
+        };
+        assert!(error.to_string().contains("note.md"), "{error}");
+    }
 }
