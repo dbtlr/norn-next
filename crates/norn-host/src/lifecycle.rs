@@ -2061,13 +2061,16 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     //
                     // No poll implementation reports damage today:
                     // `ProductionEntryOps::poll` reads the maintainer lock and
-                    // the watcher queue and touches no store. What reaches this
-                    // route is the Layer 4 plan-apply poll, which settles a
-                    // batch by confirming its own writes against the content
-                    // hashes the store holds — a store read on the poll path,
-                    // and the first one that can meet a corrupt page there.
-                    // Until it lands, this arm is exercised by the fake ops
-                    // alone.
+                    // the watcher queue and touches no store, so the fake ops
+                    // are what exercise this route. It stands because the
+                    // verdict is the seam's, not one leg's: `JobFailure` is one
+                    // vocabulary across every `EntryOps` method, and the
+                    // lifecycle decides what each word means wherever it can
+                    // arrive. Folding damage into the environmental arm above
+                    // would be the decision, and it is the wrong one — a poll
+                    // that ever reported damage would be answered by the
+                    // recovery ladder that re-installs coverage over the same
+                    // database.
                     Err(JobFailure::StoreDamaged(detail)) => {
                         state.claim.drop_marker();
                         state.claim.end_poll(epoch);
