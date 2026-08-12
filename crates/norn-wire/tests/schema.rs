@@ -302,7 +302,8 @@ fn a_finding_kind_advertises_its_flat_namespaced_string() {
         sorted([
             "document/path-bytes-not-utf8",
             "document/path-names-no-document",
-            "document/body-bytes-not-utf8"
+            "document/body-bytes-not-utf8",
+            "document/frontmatter-too-large"
         ])
     );
     // The derived schema enumerates the enum itself, so holding ALL equal to

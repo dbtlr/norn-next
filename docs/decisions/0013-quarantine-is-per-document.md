@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md
 date: 2026-08-03
 ---
 
