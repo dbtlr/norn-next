@@ -39,6 +39,9 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
             .map(|cause| UntrustedReason::watcher_lost(cause, "the watch ended")),
     );
     reasons.push(UntrustedReason::environmental_refusal("the disk is full"));
+    reasons.push(UntrustedReason::store_damaged(
+        "the database disk image is malformed",
+    ));
     reasons
 }
 

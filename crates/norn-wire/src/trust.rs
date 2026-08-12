@@ -40,6 +40,16 @@
 //! itself; [`UntrustedReason::WatcherLost`] is coverage that ended, and the
 //! entry re-heals when a client demands it. One word for both would make a
 //! state that recovers on its own indistinguishable from one that waits.
+//!
+//! **A broken environment and damaged derived state are two reasons for the
+//! same shape of reason.** [`UntrustedReason::EnvironmentalRefusal`] says the
+//! stored state is sound and the environment is not, so the resolution is the
+//! environment being fixed and the work being tried again.
+//! [`UntrustedReason::StoreDamaged`] says the opposite: the vault is sound and
+//! the derivation over it is not, so trying the same work again resolves
+//! nothing and the entry discards its derived state and builds it from the
+//! vault instead. One word for both would publish a state that resumes by
+//! itself as one that waits on a machine somebody has to repair.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -204,6 +214,17 @@ pub enum UntrustedReason {
         /// code are what a client branches on.
         detail: String,
     },
+    /// The derived state is damaged: the database is not one this build wrote,
+    /// its pages are corrupt, or it holds values no reader will accept. The
+    /// vault is sound and the derivation over it is not, so the entry discards
+    /// the database and derives it again from the vault. It resumes on its own.
+    #[non_exhaustive]
+    StoreDamaged {
+        /// The damage in words, for a person reading a message or a log.
+        /// Clients never match on it: the reason's `kind` is what a client
+        /// branches on.
+        detail: String,
+    },
 }
 
 impl UntrustedReason {
@@ -218,6 +239,13 @@ impl UntrustedReason {
     /// The environment refused the work, described by `detail`.
     pub fn environmental_refusal(detail: impl Into<String>) -> Self {
         UntrustedReason::EnvironmentalRefusal {
+            detail: detail.into(),
+        }
+    }
+
+    /// The derived state is damaged, described by `detail`.
+    pub fn store_damaged(detail: impl Into<String>) -> Self {
+        UntrustedReason::StoreDamaged {
             detail: detail.into(),
         }
     }

@@ -478,6 +478,29 @@ impl Store {
         self.torn_down = true;
         Ok(())
     }
+
+    /// Discard the database and open a store on the one that replaces it — heal
+    /// rung 3 for damage found after the open.
+    ///
+    /// The open resolves damage it finds for itself, so this is the spelling
+    /// for damage a *later* operation met: a page that read corrupt under a
+    /// warm increment, a full-text index that stopped agreeing with the column
+    /// it indexes, a value outside a closed vocabulary. None of those are
+    /// visible to an open, which reads the store schema and nothing else.
+    ///
+    /// Consuming the store is what makes the order safe. The connection to the
+    /// damaged file is closed before the file is removed, so nothing writes
+    /// back to it afterwards and no sidecar SQLite would have deleted on close
+    /// belongs to the database that takes its place. The store handed back is
+    /// the same file in the same mode, holding what a fresh create holds:
+    /// **nothing**. Everything the discarded database held is derived state,
+    /// and the caller's next act is deriving it again from the vault.
+    pub fn discard_and_reopen(self) -> Result<Self, StoreError> {
+        let path = self.path.clone();
+        let mode = self.mode;
+        self.discard()?;
+        Self::open_in_mode(&path, mode)
+    }
 }
 
 /// What a database says about the store schema it was written under.

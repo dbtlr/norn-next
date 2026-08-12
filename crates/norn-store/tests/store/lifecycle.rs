@@ -9,9 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use norn_store::{OpenOutcome, RebuildReason, Store, StoreError, StoreMode, ddl, induced_failure};
+use norn_store::{
+    OpenOutcome, RebuildReason, Store, StoreError, StoreMode, StoredPathOrder, ddl, induced_failure,
+};
 
-use crate::common::{Scratch, document, path, write_document};
+use crate::common::{Scratch, document, path, write_document, write_documents};
 
 /// Write bytes at `path`, preparing its parent.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a file a store has to judge.
@@ -305,6 +307,102 @@ fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
             .expect("reading a document")
             .is_some(),
         "the refusal discarded a database it could not even read"
+    );
+}
+
+/// **Damage an open cannot see is damage a later operation meets, and it is
+/// reported as damage there too.** An open reads the store schema and nothing
+/// else, so pages holding documents are judged by the reads and writes that
+/// touch them — and a corrupt page reported as the refused operation would be
+/// indistinguishable from a full disk to every caller of it.
+#[test]
+fn a_corrupt_page_an_open_never_reads_is_damage_at_the_read_that_meets_it() {
+    let scratch = Scratch::new("warm-corruption");
+    let database = scratch.database();
+
+    let mut store = Store::open(&database).expect("creating a store");
+    let documents: Vec<_> = (0..200)
+        .map(|index| {
+            document(
+                &format!("notes/note-{index:04}.md"),
+                &format!("hash-{index}"),
+                &format!("a body of prose for note {index}\n").repeat(24),
+            )
+        })
+        .collect();
+    write_documents(&mut store.begin_request(), &documents);
+    drop(store);
+
+    // The store schema sits in the pages a database is created with, and the
+    // documents written after it are appended past them: overwriting the tail
+    // leaves the schema an open reads intact and damages the rows a read
+    // returns.
+    let mut bytes = read_file(&database);
+    let schema_pages = bytes.len() / 2;
+    for byte in bytes.iter_mut().skip(schema_pages) {
+        *byte = 0x5a;
+    }
+    write_file(&database, &bytes);
+
+    let mut store = Store::open(&database).expect("opening over intact store schema pages");
+    assert_eq!(
+        *store.open_outcome(),
+        OpenOutcome::Reused,
+        "the open read the damaged pages after all, so this case no longer stands over the \
+         reads that meet them"
+    );
+
+    let error = store
+        .begin_request()
+        .stored_documents_after_ordered(None, 64, StoredPathOrder::Sensitive)
+        .expect_err("a read over corrupt pages");
+    let damage = error.damage().unwrap_or_else(|| {
+        panic!("the corruption was reported as {error:?} rather than as damage")
+    });
+    assert!(!damage.is_empty(), "the damage was not named");
+
+    // Rung 3 for damage found after the open: the file goes, and the store the
+    // caller derives into again is the one a create produces.
+    let mut rebuilt = store
+        .discard_and_reopen()
+        .expect("discarding a damaged store");
+    assert_eq!(*rebuilt.open_outcome(), OpenOutcome::Created);
+    assert_eq!(rebuilt.path(), database.as_path());
+    assert_eq!(rebuilt.mode(), StoreMode::Durable);
+    assert_eq!(
+        rebuilt
+            .begin_request()
+            .stored_documents_after_ordered(None, 64, StoredPathOrder::Sensitive)
+            .expect("reading a rebuilt store"),
+        Vec::new(),
+        "the rebuilt store holds rows the discarded database held"
+    );
+    rebuilt.verify_integrity().expect("a rebuilt store");
+}
+
+/// A store the environment refuses is not discarded by the same route: a
+/// refusal that is not damage leaves [`StoreError::damage`] answering nothing,
+/// which is what keeps a sound database out of rung 3.
+#[test]
+fn a_refusal_that_is_not_damage_reports_no_damage() {
+    let scratch = Scratch::new("no-damage");
+    let mut store = scratch.open();
+
+    let error = store
+        .begin_request()
+        .stored_documents_after_ordered(None, 0, StoredPathOrder::Sensitive)
+        .expect_err("a page bound of zero");
+    assert_eq!(error.damage(), None, "{error:?}");
+
+    induced_failure::execute_out_of_band(&mut store, "PRAGMA query_only = ON")
+        .expect("arranging a connection that cannot write");
+    let error = store
+        .verify_integrity()
+        .expect_err("a verification that cannot write its full-text check");
+    assert_eq!(
+        error.damage(),
+        None,
+        "a database nothing can write to was reported as damaged state"
     );
 }
 
