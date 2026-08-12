@@ -130,8 +130,15 @@ impl Seen {
     /// that changed; a stream the platform has starved reports nothing, and a
     /// rescan admitting that the path set was lost is the one report that
     /// proves neither.
+    ///
+    /// At-or-above is [`norn_testkit::invalidation::covers`], which is the
+    /// workspace's one spelling of it: the host's absorbing waits ask the same
+    /// question of the same reports, and the two suites answer it with one
+    /// function so that the name means one thing in both.
     fn reported(&self, path: &Path) -> bool {
-        self.roots.iter().any(|root| path.starts_with(root))
+        self.roots
+            .iter()
+            .any(|root| norn_testkit::invalidation::covers(root, path))
     }
 
     /// What the collector has taken so far, for a wait that is about to fail.
