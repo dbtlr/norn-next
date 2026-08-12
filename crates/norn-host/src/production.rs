@@ -1717,7 +1717,11 @@ impl<'s> Pending<'s> {
     /// that ask for them — leaving the withheld finding unreachable until an
     /// unrelated vault heal. A reading that fails leaves what a heal with no
     /// revisit leaves instead: a finding still withheld, and a place the next
-    /// heal reads.
+    /// heal reads. It leaves one thing more where it had already filed at a
+    /// place — that place is re-derived from what the reading reached, so a
+    /// second spelling standing there that the reading never got to is a finding
+    /// the discard takes and the next vault heal files again, since no row
+    /// stands at a place a death vacated.
     fn revisit(&mut self, roots: &[String]) -> Result<(), JobFailure> {
         for start in roots {
             count_reading();
