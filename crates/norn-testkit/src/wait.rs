@@ -511,6 +511,18 @@ impl Absorbed {
     pub fn saw(&self, fact: &str) -> bool {
         self.facts.contains(fact)
     }
+
+    /// Whether any report so far carried a fact `judge` accepts.
+    ///
+    /// [`saw`](Self::saw) asks by name, which is the question a caller that
+    /// knows the whole rendering asks. This asks by shape, for a fact that
+    /// carries a value inside its rendering — a path a report named — where
+    /// what is being asked about is that value rather than the line. The
+    /// rendering stays the caller's either way: it wrote the fact, so it is
+    /// what reads the value back out.
+    pub fn saw_any(&self, mut judge: impl FnMut(&str) -> bool) -> bool {
+        self.facts.iter().any(|fact| judge(fact))
+    }
 }
 
 impl fmt::Display for Absorbed {
@@ -1004,6 +1016,18 @@ mod tests {
 
     fn absorbing_budget() -> Budget {
         Budget::new(Duration::from_secs(5), PROBE)
+    }
+
+    /// A fact carrying a value is asked about by that value, and a fact whose
+    /// rendering the judge does not accept answers nothing.
+    #[test]
+    fn a_fact_is_asked_about_by_shape_as_well_as_by_name() {
+        let mut absorbed = Absorbed::default();
+        absorbed.note("root notes/today.md");
+        absorbed.note("the schema was invalidated");
+        assert!(absorbed.saw_any(|fact| fact.strip_prefix("root ") == Some("notes/today.md")));
+        assert!(!absorbed.saw_any(|fact| fact.strip_prefix("root ") == Some("notes")));
+        assert!(!Absorbed::default().saw_any(|_| true));
     }
 
     /// **The bar the absorbing idiom stands on.** One change reported across

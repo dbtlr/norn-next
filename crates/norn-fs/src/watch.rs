@@ -98,6 +98,21 @@ impl Batch {
             ..Self::default()
         }
     }
+    /// One settled invalidation of a vault path, and no other fact.
+    ///
+    /// The root stands for its own entry and every descendant of it, which is
+    /// the shape a coalesced backend event settles into. The batch's fields
+    /// are private, so this constructor is the one way a consumer outside this
+    /// crate stands a per-path invalidation up without a coalescer: the host's
+    /// absorbing-wait cases, which drive a pump with the reports they name
+    /// rather than the ones a platform happens to deliver, are its present
+    /// callers.
+    pub fn vault_change(root: NormalizedPath) -> Self {
+        Self {
+            vault_roots: BTreeSet::from([root]),
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
@@ -916,9 +931,13 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             path.strip_prefix(&state.root)
                 .ok()
                 .and_then(|p| state.normalizer.normalize(p).ok())
-                .is_some_and(|event| {
-                    event == *schema || schema.as_path().starts_with(event.as_path())
-                }),
+                // An event at or above the schema reaches it: the file itself,
+                // or a directory whose replacement substitutes the file with
+                // no event naming it. `NormalizedPath::starts_with` answers
+                // both, on the vault's comparison key, so the configured
+                // spelling and the reported one agree on case exactly as far
+                // as the volume does.
+                .is_some_and(|event| schema.starts_with(&event)),
             false,
         ),
         SchemaLocation::External {
@@ -1100,6 +1119,7 @@ mod tests {
 
     use crate::ContentHash;
     use crate::identity::post_state;
+    use crate::path::CaseSensitivity;
     use crate::scratch::Scratch;
 
     fn normalizer() -> PathNormalizer {
@@ -1131,6 +1151,19 @@ mod tests {
             PathBuf::from("/vault"),
             normalizer(),
             schema,
+            Arc::new(Mutex::new(Ledger::default())),
+        )))
+    }
+
+    /// A state whose in-vault schema is `schema`, on a vault with stated case
+    /// behavior, so a case names the spellings and the behavior judging them
+    /// rather than inheriting the volume this suite happens to run on.
+    fn state_with_in_vault_schema(sensitivity: CaseSensitivity, schema: &str) -> Arc<Mutex<State>> {
+        let normalizer = PathNormalizer::for_sensitivity(sensitivity);
+        Arc::new(Mutex::new(State::new(
+            PathBuf::from("/vault"),
+            normalizer.clone(),
+            SchemaLocation::InVault(normalizer.normalize(Path::new(schema)).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
         )))
     }
@@ -1567,6 +1600,46 @@ mod tests {
             ]
         );
         assert!(batch.schema_dirty);
+    }
+
+    /// **An event above a nested in-vault schema reaches it.** A schema below
+    /// the vault root has directories between the two, and an event at one of
+    /// them can put a different file behind the schema's name without naming
+    /// the file. Which spellings of that directory reach the schema is the
+    /// vault's case behavior — the same behavior that decides whether an event
+    /// names the schema outright — and a component short of a directory name
+    /// reaches nothing.
+    #[test]
+    fn an_event_above_an_in_vault_schema_marks_it_on_the_vault_case_behavior() {
+        for (sensitivity, spelling, reaches) in [
+            (CaseSensitivity::Sensitive, "/vault/Notes", true),
+            (CaseSensitivity::Sensitive, "/vault/Notes/schema.yml", true),
+            (CaseSensitivity::Sensitive, "/vault/notes", false),
+            (CaseSensitivity::Insensitive, "/vault/Notes", true),
+            (CaseSensitivity::Insensitive, "/vault/notes", true),
+            (
+                CaseSensitivity::Insensitive,
+                "/vault/notes/schema.yml",
+                true,
+            ),
+            (CaseSensitivity::Insensitive, "/vault/notes-archive", false),
+        ] {
+            let state = state_with_in_vault_schema(sensitivity, "Notes/schema.yml");
+            ingest(
+                &state,
+                Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(spelling.into())),
+            );
+
+            let mut locked = state.lock().unwrap();
+            let marked = locked
+                .pending
+                .as_mut()
+                .is_some_and(|pending| pending.batch.schema_dirty);
+            assert_eq!(
+                marked, reaches,
+                "{sensitivity:?} vault, event at {spelling}"
+            );
+        }
     }
 
     #[test]

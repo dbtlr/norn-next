@@ -24,6 +24,11 @@
 //! documents a fixture profile generates, without the suite holding a
 //! temporary tree to get them.
 //!
+//! [`invalidation`] is assistance of the same kind, for a judgment two suites
+//! in different crates make about the same reports: whether a watcher's
+//! invalidation root reaches a path. Answering it here is what keeps the two
+//! from drifting into two meanings of one name.
+//!
 //! The measurement machinery is the same shape: [`counters`] compares counter
 //! readings, [`explain`] states plan assertions over emitted SQL, [`scale`]
 //! expresses the size-independence pair, [`process`] spawns a child under
@@ -62,6 +67,7 @@ pub mod corpus;
 pub mod counters;
 pub mod explain;
 pub mod generated;
+pub mod invalidation;
 pub mod invariants;
 pub mod isolation;
 mod json;
