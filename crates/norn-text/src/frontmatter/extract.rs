@@ -6,7 +6,8 @@
 //! mark included, so a splice computed from them lands where it was measured.
 //!
 //! A block is read only up to [`FRONTMATTER_MAX_BYTES`], which is what bounds
-//! what one document costs to read.
+//! what the block costs to read. Reading the body is separately linear in the
+//! body's own length and this bound says nothing about it.
 
 use std::ops::Range;
 
@@ -19,7 +20,7 @@ pub(crate) const BOM: &str = "\u{feff}";
 /// The largest frontmatter block this crate reads, in bytes, counted between
 /// the delimiters.
 ///
-/// The bound is what holds the cost of reading one document. The YAML scanner
+/// The bound is the ceiling on what reading one block costs. The YAML scanner
 /// behind this seam is superlinear in the length of a block — a block that
 /// nests flow collections costs time quadratic in its own length, so a document
 /// that looks ordinary can carry a block worth seconds of CPU — and length is
@@ -28,6 +29,11 @@ pub(crate) const BOM: &str = "\u{feff}";
 /// where a block is a few hundred bytes of title, dates, status and tags, so no
 /// authored frontmatter comes near it and the shapes that do are not
 /// frontmatter anybody wrote.
+///
+/// A ceiling is all it is: inside the bound the cost still turns on the shape
+/// of the block, and a nested one at the bound costs about two orders of
+/// magnitude more than an ordinary mapping of the same length. What the bound
+/// removes is the unbounded case, not the spread.
 ///
 /// A block past the bound is refused rather than parsed or truncated: the
 /// document carries no frontmatter value and a
@@ -206,8 +212,8 @@ impl BlockRefusal {
 ///
 /// This is the one place document text reaches a YAML parser, so it is where
 /// [`FRONTMATTER_MAX_BYTES`] is enforced: a block past the bound is refused
-/// here and no parser sees it, which is what keeps the cost of reading one
-/// document bounded by the bound rather than by what the block is shaped like.
+/// here and no parser sees it, which is what keeps one parse's cost under the
+/// ceiling the bound sets rather than growing with the block's own length.
 ///
 /// `<<` is a merge directive rather than a field: the mapping it names is
 /// folded into the one holding it, and the value model — which addresses

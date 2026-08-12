@@ -19,8 +19,14 @@ finding.
 behind the parse seam costs time quadratic in block length on nested flow collections, so
 one ordinary-looking document can carry a block worth seconds of CPU on a worker that has a
 whole vault to heal. Length is the input that decides how far that goes, so length is what is
-bounded; a depth or time bound would add machinery to reach a ceiling the length bound
-already sets. The bound is authored rather than measured — it is two orders of magnitude past
+bounded. What that buys is a ceiling and not a flat cost, and the residual is recorded rather
+than claimed away: measured in release at the bound, an ordinary mapping reads in about three
+milliseconds and the worst nesting in about a quarter of a second, so shape still spans two
+orders of magnitude under the bound. The parser's own recursion limit does not help — it
+refuses such a block, but only after paying the scan that costs the quarter second. A depth
+bound would cut that residual and is not taken here: a quarter second, once, on a document
+nobody authored is a cost the heal absorbs, and the bound already removes the unbounded case.
+The bound is authored rather than measured — it is two orders of magnitude past
 the largest block authored documents carry, so no real frontmatter approaches it and a
 machine that gets faster does not move it.
 
