@@ -488,13 +488,18 @@ impl Store {
     /// it indexes, a value outside a closed vocabulary. None of those are
     /// visible to an open, which reads the store schema and nothing else.
     ///
-    /// Consuming the store is what makes the order safe. The connection to the
-    /// damaged file is closed before the file is removed, so nothing writes
-    /// back to it afterwards and no sidecar SQLite would have deleted on close
-    /// belongs to the database that takes its place. The store handed back is
-    /// the same file in the same mode, holding what a fresh create holds:
-    /// **nothing**. Everything the discarded database held is derived state,
-    /// and the caller's next act is deriving it again from the vault.
+    /// Consuming the store is what makes the order safe, and the order is
+    /// unlink-then-close: [`Store::discard`] removes the file and its sidecars
+    /// while this connection is still open, and the connection closes when that
+    /// call drops the store it consumed. The unlink is safe under POSIX inode
+    /// semantics — the open connection keeps the discarded pages reachable to
+    /// itself alone, so a close-time checkpoint writes to an inode nothing can
+    /// name and creates no `-wal` or `-shm` at the paths the replacement will
+    /// use. The reopen below runs strictly after that close, so the store handed
+    /// back is the same path in the same mode with no sidecar of the discarded
+    /// database beside it, holding what a fresh create holds: **nothing**.
+    /// Everything the discarded database held is derived state, and the caller's
+    /// next act is deriving it again from the vault.
     pub fn discard_and_reopen(self) -> Result<Self, StoreError> {
         let path = self.path.clone();
         let mode = self.mode;
@@ -833,15 +838,9 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
         .unchecked_transaction()
         .map_err(|error| error::sql("opening the store schema transaction", error))?;
     for statement in ddl::statements() {
-        transaction
-            .execute_batch(&statement)
-            .map_err(|error| StoreError::Sql {
-                operation: "creating the store schema",
-                message: format!(
-                    "`{}`: {error}",
-                    statement.lines().next().unwrap_or(&statement)
-                ),
-            })?;
+        transaction.execute_batch(&statement).map_err(|error| {
+            error::sql_at_statement("creating the store schema", &statement, error)
+        })?;
     }
     let digest =
         schema_digest(&transaction).map_err(|error| error::sql("digesting the schema", error))?;
