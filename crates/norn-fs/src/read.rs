@@ -127,7 +127,7 @@ fn observe(anchor: &Path, relative: &Path, path: &Path) -> Result<Observed, Refu
     )
     .map_err(|errno| environment("opening directory", anchor, &errno_error(errno)))?;
     let reached = open_regular_at(anchor_fd.as_fd(), relative)
-        .map_err(|errno| environment("opening", path, &errno_error(errno)))?;
+        .map_err(|error| environment(error.operation(), path, &error.into_error()))?;
     let fd = match reached {
         Reached::Regular(fd) => fd,
         Reached::Nothing(unreached) => return Ok(Observed::Nothing(unreached)),

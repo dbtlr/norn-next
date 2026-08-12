@@ -23,7 +23,7 @@
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, openat, statat};
 use rustix::io::Errno;
@@ -122,10 +122,27 @@ impl Unreached {
 /// `relative` is resolved component by component from `anchor`, and nothing
 /// above `anchor` is consulted: the descent can only reach names the anchor
 /// directory contains, transitively, through real directories.
-pub(crate) fn open_regular_at(anchor: BorrowedFd<'_>, relative: &Path) -> Result<Reached, Errno> {
+///
+/// Only ordinary names descend. A component that names a filesystem root, a
+/// platform prefix or a parent directory is refused before any of it is opened,
+/// because none of the three is a name below the anchor: `openat` resolves an
+/// absolute name from the filesystem root and ignores the descriptor it was
+/// handed, and `..` walks out of the anchor with `O_NOFOLLOW` set and no error
+/// to report. Refusing them is what makes the containment above a property of
+/// this function rather than of whoever calls it.
+pub(crate) fn open_regular_at(
+    anchor: BorrowedFd<'_>,
+    relative: &Path,
+) -> Result<Reached, OpenError> {
     let mut components = relative.components().peekable();
     let mut descended: Option<OwnedFd> = None;
     while let Some(component) = components.next() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                return Err(OpenError::Uncontained);
+            }
+        }
         let name = component.as_os_str();
         let last = components.peek().is_none();
         let opened = {
@@ -159,6 +176,40 @@ pub(crate) fn open_regular_at(anchor: BorrowedFd<'_>, relative: &Path) -> Result
     Ok(Reached::Nothing(Unreached::not_regular()))
 }
 
+/// What stops an open that is not a fact about a name on the filesystem.
+#[derive(Debug)]
+pub(crate) enum OpenError {
+    /// The machine refused: a denied directory, a full descriptor table, a
+    /// failing device.
+    Machine(Errno),
+    /// The relative path is not a name below the anchor at all.
+    Uncontained,
+}
+
+impl From<Errno> for OpenError {
+    fn from(errno: Errno) -> Self {
+        Self::Machine(errno)
+    }
+}
+
+impl OpenError {
+    /// What was being attempted, in words that complete "… failed".
+    pub(crate) fn operation(&self) -> &'static str {
+        "opening"
+    }
+
+    /// The failure stated as the error a refusal carries.
+    pub(crate) fn into_error(self) -> io::Error {
+        match self {
+            Self::Machine(errno) => io::Error::from_raw_os_error(errno.raw_os_error()),
+            Self::Uncontained => io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path leaves the directory it is read from",
+            ),
+        }
+    }
+}
+
 /// Separates the facts about names from the machine's own failures.
 ///
 /// A refused component is asked about by name, because which error `O_NOFOLLOW`
@@ -167,7 +218,7 @@ pub(crate) fn open_regular_at(anchor: BorrowedFd<'_>, relative: &Path) -> Result
 /// nothing in the common case — it happens only where an open already failed —
 /// and it is what lets the refusal name the condition an operator has to fix.
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault stat.
-fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reached, Errno> {
+fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reached, OpenError> {
     match errno {
         Errno::NOENT => Ok(Reached::Nothing(Unreached::missing(errno))),
         Errno::LOOP => Ok(Reached::Nothing(Unreached::symbolic_link())),
@@ -179,6 +230,6 @@ fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reache
                 _ => Unreached::not_a_directory(),
             },
         )),
-        other => Err(other),
+        other => Err(OpenError::Machine(other)),
     }
 }

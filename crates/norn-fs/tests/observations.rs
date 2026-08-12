@@ -164,6 +164,41 @@ fn no_component_below_the_anchor_is_followed_through_a_link() {
     );
 }
 
+/// **The bar on what a relative name may say.** Containment is this seam's own
+/// property, not a promise about the callers it has today. A name that is not
+/// below the anchor is refused before anything is opened: an absolute name
+/// resolves from the filesystem root and ignores the descriptor it is handed,
+/// and a parent name walks out of the anchor with nothing to report.
+///
+/// It is a refusal rather than absence, because a caller that spelled such a
+/// path is wrong about what it asked for — answering "nothing is there" would
+/// have it converge on that answer and delete what it has.
+#[test]
+fn a_name_that_leaves_the_anchor_is_refused_rather_than_resolved() {
+    let scratch = Scratch::new("uncontained");
+    let anchor = scratch.0.join("vault");
+    fs::create_dir(&anchor).expect("anchor directory");
+    fs::write(scratch.0.join("outside.md"), b"outside").expect("outside canary");
+    let absolute = scratch.0.join("outside.md");
+
+    for relative in [Path::new("../outside.md"), absolute.as_path()] {
+        let refusal = read_optional_and_hash(&anchor, relative)
+            .expect_err("a path that leaves the anchor must refuse");
+        assert!(
+            matches!(&refusal, Refusal::Environment { kind, .. }
+                if *kind == std::io::ErrorKind::InvalidInput),
+            "{refusal:?}"
+        );
+        assert!(
+            read_and_hash(&anchor, relative)
+                .expect_err("a path that leaves the anchor must refuse")
+                .to_string()
+                .contains("leaves the directory"),
+            "the refusal does not say what is wrong with the path"
+        );
+    }
+}
+
 /// **The bar on a name that is not a regular file.** Opening it must not wait
 /// on anybody: a FIFO with no writer holds an ordinary `open` until one arrives,
 /// which parks the worker that read it for as long as the pipe sits there.

@@ -301,7 +301,7 @@ impl FileFact {
     pub fn read(self) -> Result<ReadFile, WalkError> {
         let access = self.root.join(self.path.as_path());
         let fd = match open_regular_at(self.root_fd.as_fd(), self.path.as_path())
-            .map_err(|source| environment_errno("opening", &access, source))?
+            .map_err(|source| environment(source.operation(), &access, source.into_error()))?
         {
             Reached::Regular(fd) => fd,
             Reached::Nothing(unreached) => {
