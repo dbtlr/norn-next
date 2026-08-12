@@ -80,6 +80,7 @@
 //! server's lock manager offers. A vault on a network mount has the guarantees
 //! that mount provides rather than the ones stated here.
 
+pub mod exclusion;
 pub mod lock;
 pub mod path;
 pub mod shadow;
@@ -95,6 +96,7 @@ mod refusal;
 #[cfg(test)]
 mod scratch;
 
+pub use exclusion::{Excluded, ExclusionError, Exclusions};
 pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
@@ -107,7 +109,7 @@ pub use shadow::{
 };
 pub use walk::{
     FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
-    WalkFact, walk,
+    WalkFact, walk, walk_subtree,
 };
 pub use watch::{
     Batch, OwnWrites, RescanScope, Subscription, SubscriptionState, WatchError, watch,

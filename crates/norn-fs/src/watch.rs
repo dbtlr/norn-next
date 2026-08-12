@@ -19,9 +19,9 @@ use notify::event::{CreateKind, EventKind, ModifyKind};
 use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::PostState;
+use crate::exclusion::Exclusions;
 use crate::hash::hashed_from;
 use crate::path::{NormalizedPath, PathError, PathNormalizer};
-use crate::shadow::FALLBACK;
 use crate::write::{Landed, Moved, Vacated};
 
 /// A trailing quiet period that closes a naturally settled batch.
@@ -785,6 +785,7 @@ struct Pending {
 struct State {
     root: PathBuf,
     normalizer: PathNormalizer,
+    exclusions: Exclusions,
     schema: SchemaLocation,
     ledger: Arc<Mutex<Ledger>>,
     pending: Option<Pending>,
@@ -799,9 +800,12 @@ impl State {
         schema: SchemaLocation,
         ledger: Arc<Mutex<Ledger>>,
     ) -> Self {
+        let exclusions =
+            Exclusions::new(&normalizer, &[]).expect("an empty root list refuses nothing");
         Self {
             root,
             normalizer,
+            exclusions,
             schema,
             ledger,
             pending: None,
@@ -954,7 +958,7 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
         state.rescan(RescanScope::Vault);
         return;
     };
-    if is_mechanism(&normalized) {
+    if state.exclusions.excludes(&normalized) {
         return;
     }
     let batch = state.batch();
@@ -965,11 +969,6 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             batch.rescans.insert(RescanScope::Vault);
         }
     }
-}
-
-fn is_mechanism(path: &NormalizedPath) -> bool {
-    let candidate = path.as_path();
-    candidate == Path::new(FALLBACK) || candidate.starts_with(Path::new(FALLBACK))
 }
 
 fn run_coalescer(
