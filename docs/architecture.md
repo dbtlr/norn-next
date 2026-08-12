@@ -103,6 +103,31 @@ At the first release, version 1 freezes as the first migratable baseline. From t
 **migrations pillar is the store schema evolution path**, and rebuild-from-zero narrows to the
 second trigger alone.
 
+**The store types damage; the host routes it.** An open resolves the damage it can see for
+itself, and it can see only the store schema — so a page that reads corrupt under a warm
+increment, a full-text index that stopped agreeing with the column it indexes, or a value
+outside a closed vocabulary is damage a *later* operation meets. Every such refusal is typed
+as damaged state at the operation that met it, and the driver codes that qualify are the
+store's judgment to make because SQLite is the store's to own. What the host does with the
+verdict is the rung: trust is withdrawn under a reason of its own, the store is consumed and
+its file discarded, a database is created in its place, and the vault is derived into it by
+the same heal an attach runs. **A damaged verdict never re-enters the lower rungs** — a
+retry, or coverage re-installed over the same database, meets the same page again — so the
+requirement damage sets dominates the one a broken environment sets wherever both stand.
+Watcher coverage and the maintainer lock stand through the rung: neither is what was damaged.
+
+**An attach runs the rung inline, and publishes no verdict for it.** An entry holding no
+coverage owes an attach before it owes a rung, so a verdict published from an attach would
+be answered by a second attach against the same file and the same page. The attach that
+meets damage in its own heal therefore resolves it where it stands, and a rung-3 run reached
+that way is not observable in the trust stream — the same silence a rebuild-from-zero at open
+time already carries. What a client sees is Warming, then Ready. Every other route publishes
+the verdict, because every other route is an entry that holds the store the rung will replace.
+
+**Silent damage is asked about on a schedule.** The verification that compares the database
+against itself is the only thing that meets damage no read fails on, so it runs as bounded
+lifecycle maintenance beside the shadow sweep — off the request path, never per request.
+
 **Every rung is to be reached by a test, across two suites**, and one of the two is built.
 Each suite below says where it stands.
 
@@ -127,7 +152,7 @@ these two rows wait on is the heal-side injection they are stated over.
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
-| Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt. |
+| Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt — by the open where the corruption is in the store schema, and by the host's rung-3 leg where a warm read, a warm write or the scheduled verification is what met it. |
 | Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
 **Refusal is resolution.** Rung 3's second trigger reads "any state the lower rungs cannot
@@ -248,7 +273,10 @@ Two mechanisms carry trust, and both are contract:
   host's own dispatch; coverage that *ended* — a failed backend, a vault root that left the
   watch — is terminal, and the entry stays untrusted until a client demands it back. The two
   carry different `norn-wire` reasons, because a state that recovers by itself and a state
-  that waits are not one fact.
+  that waits are not one fact. **Damaged derived state is a third reason on the same
+  principle**: the environment refusing and the store being damaged resume differently — one
+  waits for a machine to be fixed, the other discards the derived state and builds it from
+  the vault on the entry's own dispatch — so they are not one word either.
 
   Watcher registration alone does not establish trust. A subscription first reports control
   state as `Synchronizing`, then `Live` only after its backend proves coverage over every

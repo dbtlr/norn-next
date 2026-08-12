@@ -103,6 +103,24 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
+    /// Discard damaged derived state and build it from the vault again — heal
+    /// rung 3, reached where an implementation reported
+    /// [`JobFailure::StoreDamaged`].
+    ///
+    /// The attachment arrives by value because the store inside it is consumed:
+    /// the connection to the damaged database closes, the file goes, and what
+    /// the attachment holds afterwards is the database a create produces with
+    /// the vault derived into it. Watcher coverage and maintainership stand
+    /// through it — neither is what was damaged — so this is not a re-attach.
+    ///
+    /// A failure here gives nothing back: the implementation releases what the
+    /// attachment held, and the entry publishes over coverage it no longer has.
+    fn rebuild(
+        &self,
+        name: &VaultName,
+        attachment: Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<Self::Attachment, JobFailure>;
     /// Nonblocking read of at most one settled watcher batch.
     fn poll(
         &self,
@@ -230,6 +248,12 @@ fn reporter<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressRep
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobFailure {
     Environmental(String),
+    /// The derived state is damaged, and no repetition of the work that met it
+    /// resolves that. The store the entry holds is not a store any read can be
+    /// answered from, so what the entry owes is the database-side heal rung —
+    /// discard, and derive again from the vault — rather than the recovery a
+    /// broken environment owes.
+    StoreDamaged(String),
     WatcherTerminal(WatchError),
     LostMaintainership,
     MaintainerContended(MaintainerIdentity),
@@ -335,6 +359,7 @@ impl<A: SnapshotSource> Entry<A> {
                 reader: None,
                 pending: Batch::default(),
                 recovery_required: false,
+                rebuild_required: false,
                 recovery_demands: 0,
                 recovery_generation: 0,
                 identity_refused: None,
@@ -382,6 +407,16 @@ struct EntryState<A: SnapshotSource> {
     reader: Option<Arc<A::Reader>>,
     pending: Batch,
     recovery_required: bool,
+    /// Whether the entry's derived state is damaged and owes the database-side
+    /// heal rung.
+    ///
+    /// It is set beside every publication of [`UntrustedReason::StoreDamaged`]
+    /// and cleared by the rebuild that resolves it, and it dominates
+    /// `recovery_required` wherever both stand: a store that will not answer
+    /// answers no better after coverage is installed over it again, so a
+    /// recovery run against damaged state is the loop this flag exists to keep
+    /// the entry out of.
+    rebuild_required: bool,
     /// The live demand leases asking for the recovery the entry currently owes.
     recovery_demands: usize,
     /// Which recovery requirement the demands above were raised against. A
@@ -447,10 +482,51 @@ impl<A: SnapshotSource> EntryState<A> {
         self.recovery_required = true;
     }
 
+    /// Owe the database-side heal rung, and no recovery: a rebuild is what
+    /// resolves damaged state, and a recovery run beside it would re-install
+    /// coverage over a store that answers nothing.
+    fn require_rebuild(&mut self) {
+        self.rebuild_required = true;
+        self.recovery_required = false;
+        self.retire_recovery_demands();
+    }
+
+    /// Whether the entry owes a rung of the ladder, which is work no ordinary
+    /// reconcile stands in for.
+    ///
+    /// The readers of this are the sites that would otherwise publish `Ready`,
+    /// publish a warming state, or schedule ordinary work over an entry whose
+    /// coverage or whose derived state is not what those states claim.
+    fn owes_a_rung(&self) -> bool {
+        self.recovery_required || self.rebuild_required
+    }
+
+    /// Owe no rebuild. Called where the derived state the entry holds is one a
+    /// build from the vault has just produced.
+    fn clear_rebuild(&mut self) {
+        self.rebuild_required = false;
+    }
+
     /// Owe no recovery. The demands that were waiting on one retire with it.
     fn clear_recovery(&mut self) {
         self.recovery_required = false;
         self.retire_recovery_demands();
+    }
+
+    /// Owe neither rung. Called where the coverage the requirements were raised
+    /// against is not the coverage the entry holds any more: it has gone back
+    /// to [`EntryOps::detach`], or an attach installed one nothing has said
+    /// anything about yet.
+    ///
+    /// The two flags clear together because they are set against one thing. A
+    /// rebuild requirement left standing across such a move names a store this
+    /// entry no longer holds, and [`EntryState::owes_a_rung`] is what every
+    /// publisher of `Ready` and every producer of ordinary work reads: an entry
+    /// publishing `Ready` while a stale requirement stands is one no watcher
+    /// poll and no maintenance tick ever schedules against again.
+    fn clear_rung_requirements(&mut self) {
+        self.clear_recovery();
+        self.clear_rebuild();
     }
 
     fn retire_recovery_demands(&mut self) {
@@ -498,6 +574,22 @@ impl<A: SnapshotSource> EntryState<A> {
         );
         self.reader = attachment.open_reader().map(Arc::new);
         self.coverage.install(attachment);
+    }
+
+    /// Park the coverage a rung-3 rebuild handed back, and mint the reader that
+    /// coverage serves reads from.
+    ///
+    /// The store inside this coverage is not the store the standing handle was
+    /// minted from: the rung discards the damaged database and opens the one
+    /// that replaces it, so a handle kept across it reads a file nothing links
+    /// to any more. Letting go and minting again are one move here for the
+    /// reason [`EntryState::install_coverage`] gives: the lock that installs
+    /// the coverage is the lock that publishes the trust label a read pairs the
+    /// handle with.
+    fn remint_coverage(&mut self, leg: u64, attachment: A) {
+        self.close_reader();
+        self.reader = attachment.open_reader().map(Arc::new);
+        self.coverage.park_by(leg, attachment);
     }
 
     /// Let go of the reader this entry's coverage minted, because that
@@ -651,6 +743,7 @@ fn duplicate_root_detail(conflict: &AliasConflict) -> String {
 enum Job {
     Attach(VaultName, u64),
     Recover(VaultName, u64),
+    Rebuild(VaultName, u64),
     Reconcile(VaultName, u64),
     Maintenance(VaultName, u64),
     Detach(VaultName, u64),
@@ -661,6 +754,7 @@ impl Job {
         match self {
             Self::Attach(_, epoch)
             | Self::Recover(_, epoch)
+            | Self::Rebuild(_, epoch)
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
             | Self::Detach(_, epoch) => *epoch,
@@ -671,6 +765,7 @@ impl Job {
         match self {
             Self::Attach(name, _)
             | Self::Recover(name, _)
+            | Self::Rebuild(name, _)
             | Self::Reconcile(name, _)
             | Self::Maintenance(name, _)
             | Self::Detach(name, _) => name,
@@ -739,6 +834,7 @@ fn trust_for_pending_reconcile(pending: &Batch) -> TrustState {
 enum DemandedWork {
     Attach,
     Recover,
+    Rebuild,
     Reconcile,
 }
 
@@ -747,14 +843,22 @@ impl DemandedWork {
     ///
     /// The reconcile arm rests on where the untrusted reasons are written:
     /// every writer of a watcher loss or an environmental refusal against an
-    /// entry holding coverage sets `recovery_required` beside it. An overflow
-    /// is the one reason that stands without one, and rereading the facts is
+    /// entry holding coverage sets `recovery_required` beside it, and every
+    /// writer of damaged derived state sets `rebuild_required`. An overflow is
+    /// the one reason that stands without either, and rereading the facts is
     /// what clears an overflow. The assertion says that invariant out loud, so
-    /// a writer that stops pairing the two is caught here rather than by an
-    /// entry a reconcile drove to Ready over a cause nothing addressed.
+    /// a writer that stops pairing a reason with the work it owes is caught
+    /// here rather than by an entry a reconcile drove to Ready over a cause
+    /// nothing addressed.
+    ///
+    /// Damage is read before a recovery because it dominates one: a store that
+    /// will not answer answers no better after coverage is installed over it
+    /// again, so an entry owing both owes the rung that resolves the store.
     fn owed_by<A: SnapshotSource>(state: &EntryState<A>) -> Self {
         if !state.coverage.in_hand() {
             Self::Attach
+        } else if state.rebuild_required {
+            Self::Rebuild
         } else if state.recovery_required {
             Self::Recover
         } else {
@@ -776,11 +880,13 @@ impl DemandedWork {
         match self {
             Self::Attach => Job::Attach(name.clone(), epoch),
             Self::Recover => Job::Recover(name.clone(), epoch),
+            Self::Rebuild => Job::Rebuild(name.clone(), epoch),
             Self::Reconcile => Job::Reconcile(name.clone(), epoch),
         }
     }
 
-    /// What the entry publishes while this work is scheduled and running.
+    /// What the entry publishes while this work is scheduled and running, or
+    /// `None` where what already stands is what the work runs under.
     ///
     /// An attach and a recover both establish coverage before they read a
     /// document, so the phase they warm under is the prologue that counts
@@ -788,12 +894,21 @@ impl DemandedWork {
     /// reads documents from the first instant, so what it warms out of is the
     /// facts standing in the entry — an overflow until the rescan among them is
     /// reread, and the document side of the ladder otherwise.
-    fn scheduled_state(self, pending: &Batch) -> TrustState {
+    ///
+    /// A rebuild publishes nothing of its own, and that is the honest reading:
+    /// the entry said its derived state was damaged, and it is damaged until
+    /// the rung that resolves it has. Warming over the verdict would retire the
+    /// reason before anything addressed it, and leave a caller unable to tell a
+    /// vault being derived again from one that never lost its store.
+    fn scheduled_state(self, pending: &Batch) -> Option<TrustState> {
         match self {
-            Self::Attach | Self::Recover => {
-                TrustState::warming(WarmingPhase::InstallingCoverage, 0, None)
-            }
-            Self::Reconcile => trust_for_pending_reconcile(pending),
+            Self::Attach | Self::Recover => Some(TrustState::warming(
+                WarmingPhase::InstallingCoverage,
+                0,
+                None,
+            )),
+            Self::Rebuild => None,
+            Self::Reconcile => Some(trust_for_pending_reconcile(pending)),
         }
     }
 }
@@ -802,7 +917,9 @@ impl DemandedWork {
 /// publishing the state that work warms under.
 fn schedule_demand<A: SnapshotSource>(state: &mut EntryState<A>, name: &VaultName) -> Job {
     let work = DemandedWork::owed_by(state);
-    state.trust = work.scheduled_state(&state.pending);
+    if let Some(scheduled) = work.scheduled_state(&state.pending) {
+        state.trust = scheduled;
+    }
     state.claim.schedule(|epoch| work.job(name, epoch))
 }
 
@@ -949,7 +1066,10 @@ fn finish_release<O: EntryOps>(
     state.coverage.released_by(epoch);
     state.detach_in_flight = false;
     state.pending = Batch::default();
-    state.clear_recovery();
+    // The derived state a damage verdict was about is with the ops, and an
+    // attach opens the database again from nothing: a requirement kept here
+    // would name a store this entry no longer holds.
+    state.clear_rung_requirements();
     // A job that lost the attachment to this leg left its marker behind for a
     // later tick, and the resources it was scheduled against have gone back:
     // the marker ends with the coverage, because a job nothing holds the entry
@@ -1108,7 +1228,9 @@ fn refuse_conflict<O: EntryOps>(shared: &Arc<Shared<O>>, conflict: &AliasConflic
     for (entry, state) in entries.iter().zip(&mut states) {
         state.claim.invalidate();
         state.pending = Batch::default();
-        state.clear_recovery();
+        // Every route below ends with the entry's coverage back at the ops, so
+        // neither rung is owed against the store the conflict took away.
+        state.clear_rung_requirements();
         state.identity_refused = None;
         state.duplicate_root = Some(conflict.clone());
         if state.detach_in_flight {
@@ -1188,6 +1310,12 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         state.claim.invalidate();
         state.pending.merge(Batch::rescan(RescanScope::Vault));
         state.require_recovery();
+        // The coverage reaches the ops on both routes below, so a rebuild the
+        // entry owed is owed against a store it is not holding any more. What
+        // it owes from here is the recovery raised above, and a requirement
+        // left standing beside that one is one nothing clears: this path gives
+        // its coverage back without the release that would.
+        state.clear_rebuild();
         park_identity_refusal(&mut state, detail);
         // The refusal opens no release window, so the reader is let go of
         // here: the coverage reaches the ops on both routes below — given up
@@ -1860,7 +1988,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                     Ok(None) => {
                         state.claim.end_poll(epoch);
                         state.coverage.park_by(epoch, attachment);
-                        if maintenance_due && !state.recovery_required {
+                        if maintenance_due && !state.owes_a_rung() {
                             schedule = Some(
                                 state
                                     .claim
@@ -1872,7 +2000,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.claim.end_poll(epoch);
                         let rescan = !batch.rescans().is_empty();
                         state.pending.merge(batch);
-                        if !state.recovery_required {
+                        if !state.owes_a_rung() {
                             state.trust = if rescan {
                                 TrustState::untrusted(UntrustedReason::WatcherOverflow)
                             } else {
@@ -1880,7 +2008,7 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             };
                         }
                         state.coverage.park_by(epoch, attachment);
-                        if !state.recovery_required {
+                        if !state.owes_a_rung() {
                             schedule = Some(
                                 state
                                     .claim
@@ -1922,6 +2050,38 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.trust =
                             TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                         state.coverage.park_by(epoch, attachment);
+                    }
+                    // Damaged derived state is not what a poll retries into.
+                    // The entry keeps its coverage — the watcher and the
+                    // maintainer lock are not what was damaged — publishes the
+                    // damage, and schedules the rung that resolves it. No
+                    // rescan is merged and no recovery is owed: the rebuild's
+                    // own heal reads the whole vault, which is more than any
+                    // rescan asks for.
+                    //
+                    // No poll implementation reports damage today:
+                    // `ProductionEntryOps::poll` reads the maintainer lock and
+                    // the watcher queue and touches no store, so the fake ops
+                    // are what exercise this route. It stands because the
+                    // verdict is the seam's, not one leg's: `JobFailure` is one
+                    // vocabulary across every `EntryOps` method, and the
+                    // lifecycle decides what each word means wherever it can
+                    // arrive. Folding damage into the environmental arm above
+                    // would be the decision, and it is the wrong one — a poll
+                    // that ever reported damage would be answered by the
+                    // recovery ladder that re-installs coverage over the same
+                    // database.
+                    Err(JobFailure::StoreDamaged(detail)) => {
+                        state.claim.drop_marker();
+                        state.claim.end_poll(epoch);
+                        state.require_rebuild();
+                        state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                        state.coverage.park_by(epoch, attachment);
+                        schedule = Some(
+                            state
+                                .claim
+                                .schedule(|epoch| Job::Rebuild(name.clone(), epoch)),
+                        );
                     }
                 }
                 // A leg that is releasing the entry schedules nothing against
@@ -2113,6 +2273,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
     let name = match &job {
         Job::Attach(name, _)
         | Job::Recover(name, _)
+        | Job::Rebuild(name, _)
         | Job::Reconcile(name, _)
         | Job::Maintenance(name, _)
         | Job::Detach(name, _) => name,
@@ -2242,7 +2403,12 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
                     state.install_coverage(attachment);
-                    state.clear_recovery();
+                    // The coverage is this attach's, and what any earlier
+                    // requirement was raised against went back with the release
+                    // that preceded it. Both clear here so nothing the entry
+                    // owed about a store it no longer holds stands beside a
+                    // trust label published over a store it does.
+                    state.clear_rung_requirements();
                     state.identity_refused = None;
                     state.maintainer_contended = None;
                     state.duplicate_root = None;
@@ -2276,6 +2442,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::Environmental(detail)) => {
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                }
+                // An attach runs rung 3 against the database it opened, so
+                // damage reaching here is damage that rung could not resolve.
+                // The attach acquired nothing and there is no store to rebuild
+                // against: what stands is the verdict, and a demand answers it
+                // with another attach that opens the file again.
+                Err(JobFailure::StoreDamaged(detail)) => {
+                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
                 }
             }
             None
@@ -2371,6 +2545,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
                 }
+                Err(JobFailure::StoreDamaged(detail)) => {
+                    state.require_rebuild();
+                    state.coverage.park_by(epoch, attachment);
+                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    next = Some(
+                        state
+                            .claim
+                            .hand_on(|epoch| Job::Rebuild(name.clone(), epoch)),
+                    );
+                }
             }
             drop(state);
             // The watcher this leg drained reported that the root stopped
@@ -2381,6 +2565,106 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
             if let Some(job) = next {
                 dispatch_handoff(shared, entry, epoch, job);
+            }
+            None
+        }
+        Job::Rebuild(name, epoch) => {
+            // Rung 3 runs against coverage the entry already holds: the watcher
+            // and the maintainer lock are not what was damaged, so this leg
+            // neither installs them nor reads the root again. What it replaces
+            // is the derived state between them.
+            let attachment = {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if !state.claim.stands_at(epoch) {
+                    return None;
+                }
+                state.pin();
+                let Some(attachment) = state.coverage.take(epoch) else {
+                    state.unpin();
+                    restore_lost_claim(&mut state, Job::Rebuild(name.clone(), epoch));
+                    return None;
+                };
+                attachment
+            };
+            let mut observed = Batch::default();
+            let mut handoff_saturated = false;
+            let rebuilt = match shared
+                .ops
+                .rebuild(&name, attachment, &reporter(entry, epoch))
+            {
+                Ok(mut attachment) => match drain_observed(&shared.ops, &name, &mut attachment) {
+                    Ok((batch, saturated)) => {
+                        observed = batch;
+                        handoff_saturated = saturated;
+                        Ok(attachment)
+                    }
+                    Err(_) => Err(Some(attachment)),
+                },
+                // The rebuild consumed the attachment and the store inside it,
+                // so what the entry holds is nothing.
+                Err(_) => Err(None),
+            };
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.unpin();
+            if !state.claim.stands_at(epoch) {
+                // The entry moved on while this leg ran. Coverage it still has
+                // goes back where the leg ends; coverage the rebuild consumed
+                // is accounted for here, because no leg-end will find it to
+                // give back.
+                return match rebuilt {
+                    Ok(attachment) => Some(attachment),
+                    Err(held @ Some(_)) => held,
+                    Err(None) => {
+                        state.coverage.released_by(epoch);
+                        None
+                    }
+                };
+            }
+            match rebuilt {
+                Ok(attachment) => {
+                    state.claim.release();
+                    state.pending.merge(observed);
+                    // The store inside this coverage is not the store the
+                    // entry's reader was minted from, so the handle is minted
+                    // again here: this is the one leg that swaps an attached
+                    // entry's coverage for another.
+                    state.remint_coverage(epoch, attachment);
+                    // The derived state the entry holds is one this leg built
+                    // from the vault, so the damage the verdict named is gone
+                    // with the file it was in. The verdict is retired here
+                    // whatever follows: an entry that went on saying it was
+                    // damaged while a detach queued behind it would be stating
+                    // a fact about a file that no longer exists.
+                    state.clear_rebuild();
+                    state.trust = TrustState::Ready;
+                    let next = if state.detach_due {
+                        schedule_due_detach(&mut state, &name)
+                    } else if state.pending.is_empty() && !handoff_saturated {
+                        None
+                    } else {
+                        state.trust = trust_for_pending_reconcile(&state.pending);
+                        Some(
+                            state
+                                .claim
+                                .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
+                        )
+                    };
+                    drop(state);
+                    if let Some(job) = next {
+                        dispatch_handoff(shared, entry, epoch, job);
+                    }
+                }
+                // Rung 3 could not run, or the watcher could not be drained
+                // afterwards. Either way this leg is holding an entry it cannot
+                // put back into service, so the resources go back and the entry
+                // says it is holding nothing. A demand answers that with an
+                // attach, which opens the database again and reports for itself
+                // what it finds there.
+                Err(held) => {
+                    begin_release(&mut state);
+                    drop(state);
+                    finish_release(shared, entry, &name, epoch, held);
+                }
             }
             None
         }
@@ -2455,7 +2739,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         break None;
                     } else if state.pending.is_empty() {
                         state.claim.release();
-                        if !state.recovery_required {
+                        if !state.owes_a_rung() {
                             state.trust = TrustState::Ready;
                         }
                         break None;
@@ -2507,6 +2791,21 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     if let Some(job) = next {
                         dispatch_handoff(shared, entry, epoch, job);
                     }
+                    break None;
+                }
+                // The facts this reconcile took are gone with it, and nothing
+                // is merged back for them: the rebuild's heal reads the vault
+                // whole, so every path the lost batch named is read again by
+                // the leg that follows this one.
+                Err(JobFailure::StoreDamaged(detail)) => {
+                    state.coverage.park_by(epoch, attachment);
+                    state.require_rebuild();
+                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    let next = state
+                        .claim
+                        .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+                    drop(state);
+                    dispatch_handoff(shared, entry, epoch, next);
                     break None;
                 }
             }
@@ -2594,6 +2893,19 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
+                }
+                // Maintenance is where a verification the warm path never runs
+                // asks the database about itself, so this is the arm damage
+                // nothing else meets arrives through.
+                Err(JobFailure::StoreDamaged(detail)) => {
+                    state.coverage.park_by(epoch, attachment);
+                    state.require_rebuild();
+                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    next = Some(
+                        state
+                            .claim
+                            .hand_on(|epoch| Job::Rebuild(name.clone(), epoch)),
+                    );
                 }
             }
             drop(state);
@@ -2842,12 +3154,30 @@ mod tests {
         attach_roots: Mutex<BTreeMap<VaultName, VaultRoot>>,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
+        rebuilds: AtomicUsize,
         reconciles: AtomicUsize,
         terminal_attach: std::sync::atomic::AtomicBool,
         terminal_recover: std::sync::atomic::AtomicBool,
         terminal_reconcile: std::sync::atomic::AtomicBool,
         environmental_recover: std::sync::atomic::AtomicBool,
         environmental_reconcile: std::sync::atomic::AtomicBool,
+        /// The vault whose next reconcile reports damaged derived state, and
+        /// the vault whose next maintenance does. Each names one vault and is
+        /// taken by the leg that reports it, so a case reads what one entry
+        /// does about a verdict against it — and what its siblings do about a
+        /// verdict that was never theirs.
+        damaged_reconcile_at: Mutex<Option<VaultName>>,
+        damaged_maintenance_at: Mutex<Option<VaultName>>,
+        /// Report the rebuild itself as damaged, which is rung 3 failing to
+        /// resolve what it was scheduled for.
+        damaged_rebuild: std::sync::atomic::AtomicBool,
+        /// The vaults a rebuild has run against, in the order it ran.
+        rebuilt_vaults: Mutex<Vec<VaultName>>,
+        /// Hold the rebuild open, so the state the entry publishes while rung 3
+        /// runs is a state a case can read rather than one it has to catch.
+        block_rebuild: std::sync::atomic::AtomicBool,
+        rebuild_started: std::sync::atomic::AtomicBool,
+        rebuild_release: std::sync::atomic::AtomicBool,
         /// The maintainership a leg reports it has lost, one leg per flag.
         /// Every one of them is a teardown: the leg gives the entry back and
         /// the entry stops being attached.
@@ -2914,6 +3244,18 @@ mod tests {
             .is_ok()
     }
 
+    impl FakeOps {
+        /// Coverage over this fake's ledger, in the configuration the case
+        /// asked for. Every leg that hands coverage out builds it here, so a
+        /// case reads one ledger whichever leg minted the handle.
+        fn coverage(&self) -> FakeCoverage {
+            FakeCoverage {
+                readers: Arc::clone(&self.readers),
+                mints: !self.coverage_mints_no_reader.load(Ordering::SeqCst),
+            }
+        }
+    }
+
     impl EntryOps for Arc<FakeOps> {
         type Attachment = FakeCoverage;
 
@@ -2945,15 +3287,12 @@ mod tests {
                     MaintainerIdentity::unknown(),
                 ));
             }
-            Ok(FakeCoverage {
-                readers: Arc::clone(&self.readers),
-                mints: !self.coverage_mints_no_reader.load(Ordering::SeqCst),
-            })
+            Ok(self.coverage())
         }
 
         fn reconcile(
             &self,
-            _: &VaultName,
+            name: &VaultName,
             _: &mut FakeCoverage,
             _: ReconcileWork,
             _: &ProgressReporter<FakeCoverage>,
@@ -2974,6 +3313,11 @@ mod tests {
             if self.environmental_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::Environmental("refused".into()));
             }
+            if takes_the_vault(&self.damaged_reconcile_at, name) {
+                return Err(JobFailure::StoreDamaged(
+                    "the database disk image is malformed".into(),
+                ));
+            }
             if self.lost_reconcile.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
             }
@@ -2983,6 +3327,35 @@ mod tests {
                 ));
             }
             Ok(())
+        }
+
+        fn rebuild(
+            &self,
+            name: &VaultName,
+            attachment: FakeCoverage,
+            progress: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
+            self.rebuilds.fetch_add(1, Ordering::SeqCst);
+            self.rebuilt_vaults
+                .lock()
+                .expect("rebuilt vaults poisoned")
+                .push(name.clone());
+            progress.installing_coverage();
+            if self.block_rebuild.load(Ordering::SeqCst) {
+                self.rebuild_started.store(true, Ordering::SeqCst);
+                wait_for_release("rebuild_release", &self.rebuild_release);
+            }
+            if self.damaged_rebuild.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::StoreDamaged("still damaged".into()));
+            }
+            // The rung consumes the coverage it was handed and answers with
+            // coverage over the database that replaced the damaged one, which
+            // is what the production rung does to the store inside its
+            // attachment. What the caller gets back therefore mints a reader
+            // of its own, and the one it was handed mints nothing again.
+            drop(attachment);
+            Ok(self.coverage())
         }
 
         fn recover(
@@ -3080,7 +3453,7 @@ mod tests {
             self.maintenance_due.swap(false, Ordering::SeqCst)
         }
 
-        fn maintain(&self, _: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
+        fn maintain(&self, name: &VaultName, _: &mut FakeCoverage) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.maintenances.fetch_add(1, Ordering::SeqCst);
             if self.block_maintenance.load(Ordering::SeqCst) {
@@ -3089,6 +3462,11 @@ mod tests {
             }
             if self.lost_maintenance.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::LostMaintainership);
+            }
+            if takes_the_vault(&self.damaged_maintenance_at, name) {
+                return Err(JobFailure::StoreDamaged(
+                    "the full-text index disagrees with the documents it indexes".into(),
+                ));
             }
             if self.contend_maintenance.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
@@ -3529,6 +3907,18 @@ mod tests {
     /// gate that expired first would let the job run on under a case still
     /// asserting it is parked, and the failure would land on whatever the job
     /// touched next rather than here.
+    /// Whether an arrangement naming one vault names this one, taking it where
+    /// it does. One-shot, so a leg reports the verdict once and the entry's
+    /// answer to it is what the rest of the case reads.
+    fn takes_the_vault(arranged: &Mutex<Option<VaultName>>, name: &VaultName) -> bool {
+        let mut arranged = arranged.lock().expect("an arranged vault poisoned");
+        if arranged.as_ref() == Some(name) {
+            *arranged = None;
+            return true;
+        }
+        false
+    }
+
     fn wait_for_release(label: &str, flag: &std::sync::atomic::AtomicBool) -> Budget {
         wait_for_marker(label, flag, held_open_wait_budget())
     }
@@ -4452,6 +4842,83 @@ mod tests {
             1,
             "a refused entry re-attached"
         );
+    }
+
+    /// **A rung requirement does not outlive the store it was raised against.**
+    /// A damage verdict arms a rebuild against the coverage the entry holds. A
+    /// registry refusal then hands that coverage straight to the ops without
+    /// the release that would retire the requirement, and what the entry owes
+    /// from there is the recovery the refusal raises: no rebuild reaches a
+    /// store no entry is holding.
+    ///
+    /// The requirement is what every producer of ordinary work reads. An entry
+    /// that carried it across the give-back would re-attach, publish Ready over
+    /// a database nothing has said anything about, and never schedule a
+    /// reconcile or a maintenance leg again, because both producers ask
+    /// `owes_a_rung` first.
+    #[test]
+    fn a_rebuild_requirement_does_not_outlive_the_coverage_a_refusal_gives_back() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let entry = host
+            .shared
+            .entries
+            .get(&name)
+            .expect("the vault is registered");
+        {
+            // The state a maintenance or poll verdict of damage leaves behind:
+            // the entry holds its coverage and owes the rung against it.
+            let mut state = entry.gate.lock().unwrap();
+            state.require_rebuild();
+            state.trust = TrustState::untrusted(UntrustedReason::store_damaged("malformed"));
+        }
+
+        refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
+        {
+            let mut state = entry.gate.lock().unwrap();
+            assert!(
+                state.recovery_required,
+                "the refused entry owes no recovery"
+            );
+            assert!(
+                !state.rebuild_required,
+                "the entry owes a rung against a store the refusal handed to the ops"
+            );
+            state.retire_registry_parks();
+        }
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                !state.owes_a_rung(),
+                "an entry publishing Ready owes a rung no producer of ordinary work runs past"
+            );
+        }
+
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+        ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+        wait_until(
+            "the re-attached entry to absorb a watcher batch",
+            lifecycle_wait_budget(),
+            || {
+                if ops.reconciles.load(Ordering::SeqCst) > reconciles {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "{} reconciles, standing at {:?}",
+                        ops.reconciles.load(Ordering::SeqCst),
+                        host.state(&name)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(lease);
     }
 
     /// A refusal reaching an entry whose release is already under way leaves
@@ -5891,6 +6358,255 @@ mod tests {
         drop(lease);
     }
 
+    /// **A damaged store reaches rung 3 without passing through the
+    /// environmental ladder.** The sequence is the whole assertion: Ready, then
+    /// the damage published under its own reason, then the prologue of the
+    /// rebuild, then Ready again — and no recovery anywhere in it.
+    ///
+    /// A recovery re-installs coverage and re-heals against the same database,
+    /// so an entry answering damage that way meets the same verdict every time
+    /// round. What makes that impossible is not the ordering below but the
+    /// requirement the verdict sets: `rebuild_required` dominates
+    /// `recovery_required`, so the work the entry owes is the rebuild whichever
+    /// door asks for it.
+    #[test]
+    fn a_damaged_store_reaches_rung_three_and_never_the_recovery_ladder() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        *ops.damaged_reconcile_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.block_rebuild.store(true, Ordering::SeqCst);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+
+        wait_for_state(
+            &host,
+            &name,
+            TrustState::untrusted(UntrustedReason::store_damaged(
+                "the database disk image is malformed",
+            )),
+        );
+        // The rebuild is the entry's own work rather than work a demand has to
+        // ask for: nothing was demanded between the verdict and this leg.
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            Some(TrustState::untrusted(UntrustedReason::store_damaged(
+                "the database disk image is malformed"
+            ))),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+        ops.rebuild_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(ops.rebuilds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the damaged store was answered by the ladder that cannot resolve it"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "rung 3 tore the attachment down and built another"
+        );
+    }
+
+    /// The verdict maintenance reports reaches the same rung. Maintenance is
+    /// where the verification the warm path never runs asks the database about
+    /// itself, so it is the leg silent damage arrives through.
+    #[test]
+    fn damage_found_by_scheduled_maintenance_reaches_rung_three() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        *ops.damaged_maintenance_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        wait_until(
+            "the entry to reach Ready through the rung the verdict schedules",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuilds.load(Ordering::SeqCst) == 1
+                    && host.state(&name) == Some(TrustState::Ready)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "{} rebuilds, standing at {:?}",
+                        ops.rebuilds.load(Ordering::SeqCst),
+                        host.state(&name)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    }
+
+    /// **The handle an entry serves reads from is minted from the store the
+    /// rung left standing.** Rung 3 is the one leg that swaps an attached
+    /// entry's coverage for other coverage, so the reader minted over the
+    /// discarded database ends where that database does and the replacement
+    /// mints the handle the entry publishes Ready over. A handle kept across
+    /// the rung answers every later read from a file the rung unlinked.
+    #[test]
+    fn a_rebuild_ends_the_reader_over_the_discarded_store_and_mints_another() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.readers.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(ops.readers.closed.load(Ordering::SeqCst), 0);
+
+        *ops.damaged_maintenance_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        wait_until(
+            "the entry to reach Ready through the rung the verdict schedules",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuilds.load(Ordering::SeqCst) == 1
+                    && host.state(&name) == Some(TrustState::Ready)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "{} rebuilds, standing at {:?}",
+                        ops.rebuilds.load(Ordering::SeqCst),
+                        host.state(&name)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(
+            ops.readers.closed.load(Ordering::SeqCst),
+            1,
+            "the handle over the database the rung discarded still stands"
+        );
+        assert_eq!(
+            ops.readers.opened.load(Ordering::SeqCst),
+            2,
+            "the entry publishes Ready over coverage that minted no handle"
+        );
+        assert!(
+            reader_stands(&host, &name),
+            "an entry publishing Ready holds no reader for a read to run on"
+        );
+        drop(lease);
+    }
+
+    /// **Damage is contained to the entry it was found in.** One vault's
+    /// derived state is one file, and a sibling serving from its own is not
+    /// what a corrupt page is about: the sibling stays Ready, and no rung runs
+    /// against it.
+    #[test]
+    fn a_damaged_store_leaves_its_sibling_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let damaged = VaultName::new("damaged").unwrap();
+        let sibling = VaultName::new("sibling").unwrap();
+        let registry = RegistryRead::from_entries([
+            RegistryEntry::new(
+                damaged.clone(),
+                VaultRoot::new("/tmp/norn-host-damaged-vault").unwrap(),
+            ),
+            RegistryEntry::new(
+                sibling.clone(),
+                VaultRoot::new("/tmp/norn-host-sibling-vault").unwrap(),
+            ),
+        ]);
+        let host = Host::new(
+            registry,
+            Arc::clone(&ops),
+            LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 2,
+                watch_poll_interval: Duration::from_millis(2),
+            },
+        )
+        .unwrap();
+        drop(host.demand(&damaged, AttachMode::Durable).unwrap());
+        drop(host.demand(&sibling, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &damaged, TrustState::Ready);
+        wait_for_state(&host, &sibling, TrustState::Ready);
+
+        *ops.damaged_reconcile_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(damaged.clone());
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+        wait_until(
+            "the damaged entry to come back through its rebuild",
+            lifecycle_wait_budget(),
+            || {
+                if ops.rebuilds.load(Ordering::SeqCst) >= 1
+                    && host.state(&damaged) == Some(TrustState::Ready)
+                {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!(
+                        "{} rebuilds, the damaged entry at {:?}",
+                        ops.rebuilds.load(Ordering::SeqCst),
+                        host.state(&damaged)
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(
+            *ops.rebuilt_vaults.lock().expect("rebuilt vaults poisoned"),
+            vec![damaged.clone()],
+            "a rung ran against a vault whose derived state nothing said was damaged"
+        );
+        assert_eq!(
+            host.state(&sibling),
+            Some(TrustState::Ready),
+            "one vault's damaged store withdrew another vault"
+        );
+    }
+
+    /// **Rung 3 that cannot resolve the damage gives the entry back rather than
+    /// running again.** A rebuild that meets damage in the database it just
+    /// created has nothing left to discard, and the resources it holds go back:
+    /// the entry says it is holding nothing, and the attach a demand asks for is
+    /// what opens a database again.
+    #[test]
+    fn a_rebuild_that_is_still_damaged_releases_the_entry_rather_than_looping() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        *ops.damaged_reconcile_at
+            .lock()
+            .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.damaged_rebuild.store(true, Ordering::SeqCst);
+        report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
+
+        wait_for_state(&host, &name, TrustState::Unattached);
+        settle();
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            1,
+            "the failed rung ran again against an entry holding nothing"
+        );
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            0,
+            "the rebuild consumed the attachment itself"
+        );
+    }
+
     #[test]
     fn failed_recover_cannot_be_bypassed_by_a_later_watcher_fact() {
         let ops = Arc::new(FakeOps::default());
@@ -6313,6 +7029,16 @@ mod tests {
         ) -> Result<FakeCoverage, JobFailure> {
             Ok(FakeCoverage::default())
         }
+        /// No case here damages a store, so the coverage comes straight
+        /// back: rung 3 over derived state nothing damaged is the identity.
+        fn rebuild(
+            &self,
+            _: &VaultName,
+            attachment: FakeCoverage,
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
+            Ok(attachment)
+        }
         fn reconcile(
             &self,
             _: &VaultName,
@@ -6401,6 +7127,16 @@ mod tests {
                 self.b_started.store(true, Ordering::SeqCst);
             }
             Ok(FakeCoverage::default())
+        }
+        /// No case here damages a store, so the coverage comes straight
+        /// back: rung 3 over derived state nothing damaged is the identity.
+        fn rebuild(
+            &self,
+            _: &VaultName,
+            attachment: FakeCoverage,
+            _: &ProgressReporter<FakeCoverage>,
+        ) -> Result<FakeCoverage, JobFailure> {
+            Ok(attachment)
         }
         fn reconcile(
             &self,
@@ -9056,6 +9792,7 @@ mod tests {
         match job {
             Job::Attach(..) => Some(DemandedWork::Attach),
             Job::Recover(..) => Some(DemandedWork::Recover),
+            Job::Rebuild(..) => Some(DemandedWork::Rebuild),
             Job::Reconcile(..) => Some(DemandedWork::Reconcile),
             Job::Maintenance(..) | Job::Detach(..) => None,
         }

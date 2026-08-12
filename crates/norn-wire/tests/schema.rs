@@ -125,7 +125,12 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
     let schema = schema_of::<UntrustedReason>();
     assert_eq!(
         sorted(tag_constants(&schema, "kind")),
-        sorted(["watcher_overflow", "watcher_lost", "environmental_refusal"])
+        sorted([
+            "watcher_overflow",
+            "watcher_lost",
+            "environmental_refusal",
+            "store_damaged",
+        ])
     );
 }
 
