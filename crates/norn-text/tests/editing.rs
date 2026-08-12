@@ -640,6 +640,34 @@ fn a_tab_indented_sequence_does_not_parse_and_refuses_every_edit() {
     );
 }
 
+/// A block past [`norn_text::FRONTMATTER_MAX_BYTES`] was never read, so there
+/// is no mapping to write into and every edit refuses. The refusal matters
+/// more than the read does: an edit that took the block for absent would
+/// synthesize a *second* block above the first, and the re-read would find the
+/// synthesized one and approve.
+#[test]
+fn an_oversized_block_refuses_every_edit_rather_than_writing_a_second_block() {
+    let mut block = String::from("a: ");
+    while block.len() < norn_text::FRONTMATTER_MAX_BYTES + 1 {
+        block.push('x');
+    }
+    block.push('\n');
+    let source = format!("---\n{block}---\nbody\n");
+    let document = Document::parse(&source);
+    assert_eq!(document.frontmatter(), None);
+    assert!(
+        document
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == DiagnosticCode::FrontmatterTooLarge)
+    );
+    assert_eq!(
+        set(&source, "title", Value::String("x".into())),
+        Err(EditError::FrontmatterUnreadable)
+    );
+    assert_eq!(remove(&source, "a"), Err(EditError::FrontmatterUnreadable));
+}
+
 /// A stub carrying a trailing comment takes a scalar and refuses a sequence,
 /// and the asymmetry is not an oversight. A scalar splices into the insertion
 /// point between the colon and the comment, so the comment stays put. A
