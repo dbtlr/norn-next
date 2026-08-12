@@ -13,7 +13,8 @@ use norn_fs::{
 use norn_store::{
     BlockFact, Change, DirectoryPrefix, DocumentFacts, DocumentPath, FindingFacts,
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
-    SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact, TagSource,
+    RENDERED_MARKER, SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact,
+    TagSource,
 };
 use norn_text::{DiagnosticCode, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, MaintainerIdentity, Severity};
@@ -701,7 +702,16 @@ fn heal_documents(
 ) -> Result<(), JobFailure> {
     let walk = walk(root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
-    merge_walk(store, walk, sensitivity, HealScope::Vault, policy, progress)
+    merge_walk(
+        store,
+        root,
+        exclusions,
+        walk,
+        sensitivity,
+        HealScope::Vault,
+        policy,
+        progress,
+    )
 }
 
 /// Converge the rows a scope addresses against the files a walk of it yields.
@@ -721,6 +731,8 @@ fn heal_documents(
 #[allow(clippy::too_many_arguments)]
 fn merge_walk<I>(
     store: &mut Store,
+    root: &Path,
+    exclusions: &[PathBuf],
     facts: I,
     sensitivity: norn_fs::CaseSensitivity,
     scope: HealScope<'_>,
@@ -744,7 +756,7 @@ where
     let mut stored = Vec::new();
     let mut index = 0usize;
     let mut exhausted = false;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions);
     let mut healed = 0;
     loop {
         if index == stored.len() && !exhausted {
@@ -842,7 +854,7 @@ fn scoped_increment(
     let normalizer = norn_fs::PathNormalizer::detect(root).map_err(effect)?;
     let sensitivity = normalizer.case_sensitivity();
     let excluded = norn_fs::Exclusions::new(&normalizer, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
         if excluded.excludes(relative) {
@@ -891,6 +903,8 @@ fn scoped_increment(
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
                         pending.store,
+                        root,
+                        exclusions,
                         scope,
                         policy,
                         progress,
@@ -919,6 +933,8 @@ fn scoped_increment(
         pending.flush()?;
         prune_descendants_and_aliases(
             pending.store,
+            root,
+            exclusions,
             &document_path,
             policy,
             progress,
@@ -997,7 +1013,7 @@ fn quarantine_subtree(
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -1064,7 +1080,16 @@ fn heal_subtree(
     let relative_root = Path::new(scope.as_str());
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     let sensitivity = walk.case_sensitivity();
-    merge_walk(store, walk, sensitivity, scope, policy, progress)
+    merge_walk(
+        store,
+        vault_root,
+        exclusions,
+        walk,
+        sensitivity,
+        scope,
+        policy,
+        progress,
+    )
 }
 
 /// The stored rows a heal addresses, which is what its merge runs against and
@@ -1126,6 +1151,8 @@ impl HealScope<'_> {
 
 fn prune_subtree_ordered(
     store: &mut Store,
+    vault_root: &Path,
+    exclusions: &[PathBuf],
     scope: HealScope<'_>,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
@@ -1133,7 +1160,7 @@ fn prune_subtree_ordered(
 ) -> Result<(), JobFailure> {
     let mut after = None;
     let mut healed = 0;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
     loop {
         let page = scope.page(pending.store, after.as_ref(), policy, order)?;
         if page.is_empty() {
@@ -1158,6 +1185,8 @@ fn prune_subtree_ordered(
 
 fn prune_descendants_and_aliases(
     store: &mut Store,
+    vault_root: &Path,
+    exclusions: &[PathBuf],
     root: &DocumentPath,
     policy: ProductionPolicy,
     progress: &Healing<'_, ProductionAttachment>,
@@ -1165,7 +1194,7 @@ fn prune_descendants_and_aliases(
 ) -> Result<(), JobFailure> {
     let mut after = None;
     let mut pruned = 0;
-    let mut pending = Pending::new(store, policy.changeset_size);
+    let mut pending = Pending::new(store, policy.changeset_size, vault_root, exclusions);
     loop {
         let page = pending
             .store
@@ -1326,6 +1355,12 @@ struct Quarantine {
 /// second mechanism.
 struct Pending<'s> {
     store: &'s mut Store,
+    /// The vault root every path in this scope is relative to, which is what a
+    /// revisit of a vacated place is read from.
+    root: &'s Path,
+    /// The roots a walk of this vault does not read, so a revisit reads exactly
+    /// the documents the vault heal reads.
+    exclusions: &'s [PathBuf],
     changes: Vec<Change>,
     quarantined: Vec<FindingFacts>,
     /// The subjects this scope has already re-derived, so a second finding at
@@ -1343,9 +1378,11 @@ struct Pending<'s> {
 }
 
 impl<'s> Pending<'s> {
-    fn new(store: &'s mut Store, bound: usize) -> Self {
+    fn new(store: &'s mut Store, bound: usize, root: &'s Path, exclusions: &'s [PathBuf]) -> Self {
         Pending {
             store,
+            root,
+            exclusions,
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
             replaced: BTreeSet::new(),
@@ -1434,18 +1471,22 @@ impl<'s> Pending<'s> {
     /// discard would otherwise take them, and because a document that derived is
     /// then readable: a place a real document occupies is that document's, and a
     /// finding there would call a document that just derived unreadable.
+    ///
+    /// The places the increment **vacated** are read again between the two, for
+    /// the other half of that exclusion: while a document stood at a rendered
+    /// spelling, every finding filed there was withheld, and the paths those
+    /// findings are about are not paths the increment names. So the increment
+    /// that removes the document is the increment that files them.
     fn flush(&mut self) -> Result<(), JobFailure> {
         if !self.changes.is_empty() {
+            let vacated = self.vacated_places();
             self.store
                 .begin_request()
                 .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
                 .map_err(store_effect)?;
+            self.revisit(vacated)?;
         }
         for finding in self.quarantined.drain(..) {
-            // The first finding this scope files at a subject replaces what
-            // stood there, which is how a cause that changed stops being
-            // reported twice; the ones after it append.
-            let replace = self.replaced.insert(finding.path.clone());
             let mut request = self.store.begin_request();
             if request
                 .stored_document(&finding.path)
@@ -1454,7 +1495,12 @@ impl<'s> Pending<'s> {
             {
                 continue;
             }
-            if replace {
+            // The first finding this scope **records** at a subject replaces
+            // what stood there, which is how a cause that changed stops being
+            // reported twice; the ones after it append, because two spellings
+            // can render to one place and each is a document somebody has to
+            // fix. A withheld finding records nothing and so takes no turn.
+            if self.replaced.insert(finding.path.clone()) {
                 request
                     .discard_findings_about(&finding.path)
                     .map_err(store_effect)?;
@@ -1462,6 +1508,112 @@ impl<'s> Pending<'s> {
             request.record_finding(&finding).map_err(store_effect)?;
         }
         Ok(())
+    }
+
+    /// The places this changeset's deaths free for a finding to stand at.
+    ///
+    /// Only a place spelled with [`RENDERED_MARKER`] can have withheld one: a
+    /// finding is withheld when a document row stands at its subject, a subject
+    /// is a rendering, and a rendering that differs from the spelling it was
+    /// read from carries the marker. A subject the grammar admits as it is
+    /// written belongs to the document at that path, whose own row dies in the
+    /// same changeset as the finding that replaces it.
+    fn vacated_places(&self) -> Vec<DocumentPath> {
+        self.changes
+            .iter()
+            .filter_map(|change| match change {
+                Change::Death { path, .. } if path.as_str().contains(RENDERED_MARKER) => {
+                    Some(path.clone())
+                }
+                Change::Death { .. } | Change::Upsert(_) => None,
+            })
+            .collect()
+    }
+
+    /// Read each vacated place again and quarantine every path the vault holds
+    /// that renders to it.
+    ///
+    /// The walk is rooted at the deepest ancestor of the place that carries no
+    /// marker, which is as narrow as the search can be: a candidate's segments
+    /// above the first rendered one are that place's own segments, spelled the
+    /// same way, because rendering a segment is what puts the marker there. A
+    /// root that is no longer a directory holds no candidate and is not walked.
+    fn revisit(&mut self, vacated: Vec<DocumentPath>) -> Result<(), JobFailure> {
+        for place in vacated {
+            let ancestor = unrendered_ancestor(place.as_str());
+            let root = self.root.join(ancestor);
+            if norn_fs::path_kind(&root).map_err(effect)? != norn_fs::PathKind::Directory {
+                continue;
+            }
+            // The vault's own root is walked as the vault, because a subtree
+            // walk is named by a relative path and the root is named by none.
+            let reading = if ancestor.is_empty() {
+                walk(self.root, self.exclusions)
+            } else {
+                walk_subtree(self.root, Path::new(ancestor), self.exclusions)
+            };
+            for fact in reading.map_err(effect)? {
+                let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
+                    continue;
+                };
+                let path = file.path().as_path().to_owned();
+                if !is_markdown(&path) {
+                    continue;
+                }
+                let Err(quarantine) = document_path(&path) else {
+                    continue;
+                };
+                if DocumentPath::rendered(&path) != place {
+                    continue;
+                }
+                self.quarantine_once(&path, quarantine);
+            }
+        }
+        Ok(())
+    }
+
+    /// File a revisited path's finding unless this flush already holds it.
+    ///
+    /// A vault heal reaches a colliding path through its own merge as well as
+    /// through the revisit that frees the place, and one path with one cause is
+    /// one finding however many ways it was reached.
+    fn quarantine_once(&mut self, path: &Path, quarantine: Quarantine) {
+        self.quarantine(path, quarantine);
+        let filed = self.quarantined.pop().expect("a finding was just filed");
+        if !self
+            .quarantined
+            .iter()
+            .any(|standing| standing.path == filed.path && standing.detail == filed.detail)
+        {
+            self.quarantined.push(filed);
+        }
+    }
+}
+
+/// The longest ancestor of a rendered place whose segments are spelled the way
+/// the vault spells them.
+///
+/// Rendering is per segment, so every segment before the first one carrying
+/// [`RENDERED_MARKER`] is a name the vault holds as written — and a path with no
+/// marker at all is its own spelling, which is why the whole path is the answer
+/// then.
+fn unrendered_ancestor(place: &str) -> &str {
+    match place
+        .split('/')
+        .position(|segment| segment.contains(RENDERED_MARKER))
+    {
+        None => place,
+        Some(0) => "",
+        // The separator before the rendered segment is what the length of the
+        // ancestor stops one short of.
+        Some(rendered) => {
+            let spanned: usize = place
+                .split('/')
+                .take(rendered)
+                .map(|segment| segment.len() + 1)
+                .sum();
+            &place[..spanned - 1]
+        }
     }
 }
 
@@ -2405,6 +2557,106 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **Removing a collision files the finding it was withholding.** A finding
+    /// is withheld for as long as a readable document stands at its subject,
+    /// and the path such a finding is *about* is not a path the increment that
+    /// removes the document names — nothing dirties a file nobody edited. So
+    /// the increment that vacates the place is the one that reads it again.
+    ///
+    /// The forbidden shape is a finding that waits: the vault holds a document
+    /// norn cannot name, nothing says so, and the statement arrives only when
+    /// some unrelated demand or heal happens to reach that path.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_rendering_collision_files_the_finding_it_withheld() {
+        let f = Fixture::new("collision-cleared");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), "a real document").unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        // The collision goes, reported as the one path a watcher has news
+        // about: the quarantined spelling was not edited and is in no batch.
+        fs::remove_file(f.vault().join("bad\u{fffd}name.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            stored_paths(&mut attachment.store).is_empty(),
+            "the removed document kept its row"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// The same revisit under a directory, which is as narrow as the reading of
+    /// a vacated place gets: the segments above the rendered one are the vault's
+    /// own spellings, so nothing above them is read.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_collision_under_a_directory_files_the_finding_it_withheld() {
+        let f = Fixture::new("collision-cleared-nested");
+        fs::create_dir_all(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/bad\u{fffd}name.md"), "real").unwrap();
+        fs::write(f.vault().join("elsewhere.md"), "untouched").unwrap();
+        if !write_or_report(&f.vault().join("folder/bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert!(
+            findings_at(&mut attachment.store, "folder/bad\u{fffd}name.md").is_empty(),
+            "the collision did not withhold the finding, so this proves nothing"
+        );
+
+        fs::remove_file(f.vault().join("folder/bad\u{fffd}name.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "folder/bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["elsewhere.md"],
+            "the removed document kept its row"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "folder/bad\u{fffd}name.md")
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["document/path-names-no-document"],
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        ops.detach(&name, attachment);
+    }
+
     /// **The window between a heal's enumeration and its open is ordinary
     /// churn.** A vault the walk read a moment ago is a vault other writers are
     /// still editing, and a file that went away in between is not a broken
@@ -2447,6 +2699,8 @@ mod tests {
 
         merge_walk(
             &mut store,
+            f.vault().as_path(),
+            &[],
             enumerated.into_iter(),
             sensitivity,
             HealScope::Vault,
@@ -2488,6 +2742,8 @@ mod tests {
 
         merge_walk(
             &mut store,
+            f.vault().as_path(),
+            &[],
             enumerated.into_iter(),
             sensitivity,
             HealScope::Vault,
@@ -4250,8 +4506,11 @@ mod tests {
 
         fs::remove_dir_all(f.vault().join("folder")).unwrap();
         let pruned_root = DocumentPath::new("folder").unwrap();
+        let pruned_exclusions = exclusions(&attachment.registration, &attachment._shadows);
         prune_subtree_ordered(
             &mut attachment.store,
+            f.vault().as_path(),
+            &pruned_exclusions,
             HealScope::Subtree(&pruned_root),
             ProductionPolicy::new(8, 2).unwrap(),
             &progress.healing(),

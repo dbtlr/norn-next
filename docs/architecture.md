@@ -203,9 +203,12 @@ collision is one key holding one row, and the **document wins**: while it stands
 quarantined document's finding is withheld rather than filed over a readable document, so
 for as long as the collision lasts nothing records that the quarantined document cannot be
 read. The trade is deliberate — a finding at that place would call a document that derived
-unreadable — and it clears when the colliding document leaves. Recovery needs no second
-mechanism: a document that reads again is an ordinary derivation, and the increment's own
-findings discard takes the finding with it.
+unreadable — and **the increment that removes the colliding document is the one that clears
+it**: a death that vacates a rendered place sends the heal back to read that place, and
+every path the vault holds that renders there is quarantined then and there. Waiting for a
+demand or for unrelated work to reach the quarantined path is what that revisit exists to
+prevent. Recovery needs no second mechanism: a document that reads again is an ordinary
+derivation, and the increment's own findings discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
