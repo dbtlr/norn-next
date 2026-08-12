@@ -2570,12 +2570,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.coverage.park_by(epoch, attachment);
                     // The derived state the entry holds is one this leg built
                     // from the vault, so the damage the verdict named is gone
-                    // with the file it was in.
+                    // with the file it was in. The verdict is retired here
+                    // whatever follows: an entry that went on saying it was
+                    // damaged while a detach queued behind it would be stating
+                    // a fact about a file that no longer exists.
                     state.clear_rebuild();
+                    state.trust = TrustState::Ready;
                     let next = if state.detach_due {
                         schedule_due_detach(&mut state, &name)
                     } else if state.pending.is_empty() && !handoff_saturated {
-                        state.trust = TrustState::Ready;
                         None
                     } else {
                         state.trust = trust_for_pending_reconcile(&state.pending);
