@@ -33,6 +33,7 @@
 //! serves it. What is here is the engineering fact: which path, and what about
 //! it was wrong.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -211,6 +212,27 @@ pub(crate) fn environment(operation: &'static str, path: &Path, error: &std::io:
         kind: error.kind(),
         raw_os_error: error.raw_os_error(),
         message: error.to_string(),
+    }
+}
+
+/// The same refusal, naming the one component of `path` the error is about.
+///
+/// A path is several names and an error is about one of them: which name is a
+/// link, which directory is denied, which name nothing is at. The kind and the
+/// error number stay the operating system's own, so a caller still decides on
+/// the classification rather than on the sentence.
+pub(crate) fn environment_at(
+    operation: &'static str,
+    path: &Path,
+    component: &OsStr,
+    error: &std::io::Error,
+) -> Refusal {
+    Refusal::Environment {
+        operation,
+        path: path.to_path_buf(),
+        kind: error.kind(),
+        raw_os_error: error.raw_os_error(),
+        message: format!("{error}: {}", Path::new(component).display()),
     }
 }
 

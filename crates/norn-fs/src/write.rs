@@ -906,16 +906,22 @@ fn refuse_symlink(path: &Path) -> Result<(), Refusal> {
 /// Open `path` for reading and hand back its handle and its metadata, or `None`
 /// when nothing is there.
 ///
-/// `O_NOFOLLOW` closes the window the link check leaves open: a symbolic link
-/// planted between that check and this open fails the open rather than being
-/// read through, and the failure reads as the refusal the check would have
-/// given.
+/// Three flags carry the same discipline the read seam states in
+/// [`crate::open`]. `O_NOFOLLOW` closes the window the link check leaves open: a
+/// symbolic link planted between that check and this open fails the open rather
+/// than being read through, and the failure reads as the refusal the check would
+/// have given. `O_NONBLOCK` is what keeps a FIFO at a document's name from
+/// holding this call inside `open` until somebody writes to the pipe — a
+/// precondition that never returns is a caller parked forever. And the kind is
+/// proven through the handle before any content is read, so a pipe, a device or
+/// a directory at a document's name is refused rather than measured as document
+/// bytes.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn opened_for_reading(path: &Path) -> Result<Option<(std::fs::File, std::fs::Metadata)>, Refusal> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,
@@ -928,6 +934,16 @@ fn opened_for_reading(path: &Path) -> Result<Option<(std::fs::File, std::fs::Met
         Err(error) => return Err(environment("opening", path, &error)),
     };
     let metadata = observed_metadata(&file, path)?;
+    if !metadata.file_type().is_file() {
+        return Err(environment(
+            "reading",
+            path,
+            &std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the name does not identify a regular file",
+            ),
+        ));
+    }
     Ok(Some((file, metadata)))
 }
 
@@ -1998,6 +2014,49 @@ mod tests {
         assert_eq!(
             refusal,
             Refusal::SymlinkDestination { path: link.clone() },
+            "{refusal}"
+        );
+    }
+
+    /// **The bar on a name that is not a regular file.** A precondition is a
+    /// statement about a document, and a pipe at a document's name is not one.
+    /// It is refused, and refused without waiting: opening a FIFO for reading
+    /// holds the caller until somebody writes to the pipe, and the caller here
+    /// is whatever thread asked for the write.
+    ///
+    /// Driven through the verb rather than the open, because the prologue every
+    /// precondition-bearing verb runs is what has to carry this. The forbidden
+    /// shapes are an open without `O_NONBLOCK`, which parks that thread for as
+    /// long as the pipe is there, and a read that never asks what it opened,
+    /// which measures a device's bytes as a document's.
+    #[test]
+    fn a_pipe_at_a_destination_refuses_the_precondition_without_waiting() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let scratch = Scratch::new("write-fifo");
+            let path = scratch.at("note.md");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("run mkfifo");
+            assert!(made.success(), "mkfifo failed");
+            let refusal = write_where(
+                &path,
+                b"new",
+                Precondition::Replace(ContentHash::of(b"old")),
+                scratch.shadows(),
+                Faults::NONE,
+            )
+            .expect_err("a pipe is not a document to replace");
+            let _ = sender.send(refusal);
+        });
+
+        let refusal = receiver
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the write never returned: a pipe at the destination held it inside open");
+        assert!(
+            matches!(&refusal, Refusal::Environment { kind, .. }
+                if *kind == std::io::ErrorKind::InvalidData),
             "{refusal}"
         );
     }

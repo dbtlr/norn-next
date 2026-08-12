@@ -610,8 +610,19 @@ What the two spellings say is not the same thing:
 What must stay aligned is the discipline, and a change to either spelling is judged
 against it:
 
-- **`O_NOFOLLOW` on the lock-file open.** A symlink planted at the lock name is refused,
-  never followed to a file nothing else guards.
+- **A link at a name is refused, never followed.** On the lock-file open a symlink
+  planted at the lock name is refused rather than followed to a file nothing else guards,
+  and the same discipline binds the anchored read seam — every document and schema
+  `norn-fs` reads for content: the read is anchored at a directory and reaches the name
+  below it one component at a time, with `O_NOFOLLOW` on each, so a link anywhere in the
+  path ends the read instead of redirecting it. The anchor is the boundary rather than a
+  name inside it, so it alone is resolved exactly as spelled. The mutation verbs'
+  precondition open is not yet anchored: it holds the link and regular-file rule at the
+  final name only, and its ancestor components are resolved by the kernel. What an operator sees: a vault whose `.norn` or
+  `.norn/schema.yaml` is a symlink does not attach, a configured `schema_source` that
+  names a symlink does not either, and the refusal names the component that stopped the
+  read. One schema shared across vaults is spelled as a `schema_source` naming the file
+  itself.
 - **The handle-versus-name identity recheck.** An advisory lock follows the file, so
   after it is taken the handle's `(device, inode)` is compared against what the name
   resolves to now; a mismatch drops the handle and takes the lock again, bounded by a

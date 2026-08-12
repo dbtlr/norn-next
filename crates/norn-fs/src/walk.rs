@@ -22,17 +22,18 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, readlinkat, statat};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, open, openat, readlinkat, statat};
 
 use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
+use crate::open::{Reached, directory_flags, open_regular_at};
 use crate::path::{NormalizedPath, NormalizerError, PathError, PathNormalizer};
 use crate::shadow::is_shadow_name;
 
@@ -289,25 +290,32 @@ impl FileFact {
     /// Consuming the fact makes a second read through this observation
     /// unspellable. The returned stat comes from the held descriptor and may
     /// differ from the traversal-time stat if another writer replaced the name.
+    ///
+    /// The path is resolved from the walk's own root descriptor, so a fact this
+    /// walk yielded is read through the tree it walked. A name that has stopped
+    /// identifying a regular file since it was yielded — replaced by a link, a
+    /// pipe or a directory, or removed — is a refusal here rather than an
+    /// answer: the fact stated that a document was there, and only the walk that
+    /// produces facts may state that one is gone.
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // norn-fs owns vault handles and reads.
     pub fn read(self) -> Result<ReadFile, WalkError> {
         let access = self.root.join(self.path.as_path());
-        let fd = open_regular(&self.root_fd, self.path.as_path())
-            .map_err(|source| environment_errno("opening", &access, source))?;
+        let fd = match open_regular_at(self.root_fd.as_fd(), self.path.as_path())
+            .map_err(|source| environment(source.operation(), &access, source.into_error()))?
+        {
+            Reached::Regular(fd) => fd,
+            Reached::Nothing(unreached) => {
+                return Err(environment(
+                    unreached.operation(),
+                    &access,
+                    unreached.into_error(),
+                ));
+            }
+        };
         let mut file = fs::File::from(fd);
         let metadata = file
             .metadata()
             .map_err(|source| environment("stating", &access, source))?;
-        if !metadata.is_file() {
-            return Err(environment(
-                "reading",
-                &access,
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "the name no longer identifies a regular file",
-                ),
-            ));
-        }
         let (bytes, content_hash) = read_bytes_and_hash(&mut file)
             .map_err(|source| environment("reading", &access, source))?;
         Ok(ReadFile {
@@ -728,34 +736,6 @@ fn resolve_relative_target(link: &Path, target: &Path) -> Option<PathBuf> {
         }
     }
     Some(parts.into_iter().collect())
-}
-
-fn directory_flags() -> OFlags {
-    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW
-}
-
-fn open_regular(root: &Arc<OwnedFd>, relative: &Path) -> Result<OwnedFd, rustix::io::Errno> {
-    let mut directory = root.clone();
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        let name = component.as_os_str();
-        if components.peek().is_some() {
-            directory = Arc::new(openat(&directory, name, directory_flags(), Mode::empty())?);
-            continue;
-        }
-        let fd = openat(
-            &directory,
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        )?;
-        let metadata = rustix::fs::fstat(&fd)?;
-        if FileType::from_raw_mode(metadata.st_mode as _) != FileType::RegularFile {
-            return Err(rustix::io::Errno::INVAL);
-        }
-        return Ok(fd);
-    }
-    Err(rustix::io::Errno::INVAL)
 }
 
 fn classify_file_type(kind: FileType) -> EntryKind {
