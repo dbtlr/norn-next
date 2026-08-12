@@ -161,12 +161,20 @@ impl ProductionEntryOps {
     /// The directory a schema read is anchored at, and the name it reaches
     /// below it.
     ///
-    /// The default schema is inside the vault, so the vault root anchors it and
-    /// every component below is contained: `.norn/schema.yaml` is read through
-    /// the vault's own directories or not at all. A configured source is a path
-    /// the operator wrote down, and the directory holding it is what contains
-    /// it — the schema is the file at that name, never what a link at that name
-    /// points to.
+    /// One rule decides both modes: **what an operator wrote down is resolved as
+    /// written, and what norn appends to it is contained.** A configured source
+    /// is a whole path an operator chose, so the directory holding it is the
+    /// anchor and only the file's own name is refused as a link. The default is
+    /// the vault root — which the operator wrote down — plus the two names norn
+    /// appends, so `.norn` and `schema.yaml` are both read through the vault's
+    /// own directories or not at all.
+    ///
+    /// That makes a link at either of those two names an attach that refuses,
+    /// naming the component. It is the same statement the read seam makes about
+    /// a document: the schema is the file at the name inside the vault, never
+    /// what something in the vault points at. An operator sharing one schema
+    /// across vaults says so in the registry, where the path is theirs and is
+    /// read as spelled.
     fn schema_anchor(registration: &Registration) -> Result<(PathBuf, PathBuf), JobFailure> {
         let Some(source) = registration.schema_source.as_ref() else {
             return Ok((
@@ -700,10 +708,26 @@ fn scoped_increment(
                     );
                 }
             }
-            None => pending.push(Change::Death {
-                path: document_path,
-                provenance: Provenance::WatcherRemoval,
-            }),
+            // A death is news about a row, so it is recorded only where one
+            // stands. A spelling that reaches nothing and never had a row is a
+            // spelling the vault heal does not produce either — a path resolved
+            // through a link by the watcher backend, a name that stopped being a
+            // regular file between the kind above and the read — and a tombstone
+            // there would state the removal of a document this vault never held,
+            // at a path no heal ever prunes.
+            None => {
+                let standing = pending
+                    .store
+                    .begin_request()
+                    .stored_document(&document_path)
+                    .map_err(effect)?;
+                if standing.is_some() {
+                    pending.push(Change::Death {
+                        path: document_path,
+                        provenance: Provenance::WatcherRemoval,
+                    });
+                }
+            }
         }
         if pending.is_full() {
             pending.flush()?;
@@ -2533,6 +2557,11 @@ mod tests {
     /// derives a row at a spelling the vault walk never yields — which the next
     /// vault heal prunes, so the two halves oscillate for as long as the link
     /// and the events naming it are there.
+    ///
+    /// Absence is the whole answer, and a tombstone is asserted against for
+    /// that reason: a watcher that resolves links reports every edit under one
+    /// through it, and a death per edit would record the removal of documents
+    /// this vault never held, at paths no heal ever reaches to prune.
     #[cfg(unix)]
     #[test]
     fn a_scoped_increment_of_a_file_named_through_a_link_derives_no_row() {
@@ -2559,6 +2588,15 @@ mod tests {
         .expect("a dirty file behind a link to converge rather than fail the reconcile");
 
         assert_eq!(stored_paths(&mut attachment.store), vault_heal);
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("link/sub/doc.md").unwrap())
+                .unwrap()
+                .is_none(),
+            "a death was recorded at a spelling that never held a document"
+        );
         ops.detach(&name, attachment);
     }
 
@@ -2611,6 +2649,103 @@ mod tests {
         assert!(
             outcome.contains("regular file"),
             "the refusal does not name what is wrong with the schema: {outcome}"
+        );
+    }
+
+    /// **The bar on a link at a name norn appends.** The default schema is the
+    /// vault root plus two names this crate chose, and both of those are read
+    /// through the vault's own directories: a link at either is refused, and the
+    /// refusal names which one, because that is the name an operator has to fix.
+    ///
+    /// This is a statement about the vault rather than about the operator's
+    /// registry, and the two differ deliberately — a shared schema is spelled as
+    /// a `schema_source`, where the whole path is the operator's own and is read
+    /// as written. The forbidden shape is following the link: a file inside a
+    /// synced, multi-writer vault would then decide what every document in it
+    /// means.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_whose_default_schema_name_is_a_link_refuses_and_names_it() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("schema-name-link");
+        fs::create_dir_all(f.root.join("shared")).unwrap();
+        fs::write(f.root.join("shared/schema.yaml"), "version: 1\n").unwrap();
+        let schema = f.vault().join(IN_VAULT_SCHEMA_PATH);
+        fs::remove_file(&schema).unwrap();
+        symlink(f.root.join("shared/schema.yaml"), &schema).unwrap();
+
+        let (ops, _) = f.ops(2);
+        let failure = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .err()
+            .expect("a link at the schema name is not schema bytes");
+        let stated = format!("{failure:?}");
+        assert!(
+            stated.contains("symbolic link") && stated.contains("schema.yaml"),
+            "the refusal does not name the link or the name it is at: {stated}"
+        );
+    }
+
+    /// **The bar on a link at the directory norn appends.** The same rule one
+    /// component higher: `.norn` is a name this crate appends to the operator's
+    /// root, so it is a directory inside the vault or the attach refuses. A
+    /// descent that followed it would read a schema from a tree the vault root
+    /// does not contain.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_whose_default_schema_directory_is_a_link_refuses_and_names_it() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("schema-directory-link");
+        fs::create_dir_all(f.root.join("shared")).unwrap();
+        fs::write(f.root.join("shared/schema.yaml"), "version: 1\n").unwrap();
+        fs::remove_dir_all(f.vault().join(".norn")).unwrap();
+        symlink(f.root.join("shared"), f.vault().join(".norn")).unwrap();
+
+        let (ops, _) = f.ops(2);
+        let failure = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .err()
+            .expect("a link at the schema directory is not a way into the vault");
+        let stated = format!("{failure:?}");
+        assert!(
+            stated.contains("symbolic link") && stated.contains(".norn"),
+            "the refusal does not name the link or the name it is at: {stated}"
+        );
+    }
+
+    /// **The bar on a configured source that is a link.** The registry's path is
+    /// the operator's, so the directory holding it is the anchor — and the
+    /// schema is the file at the name they wrote, never what a link at that name
+    /// points to. A link there has this process read one file while the watcher
+    /// covering the configured name reports on another.
+    ///
+    /// The refusal is the seam's, and this is the case that keeps it reachable:
+    /// a later change that canonicalized the source before splitting it would
+    /// restore link-following with every other case still green.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_whose_configured_schema_source_is_a_link_refuses_and_names_it() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("schema-source-link");
+        fs::create_dir_all(f.root.join("shared")).unwrap();
+        fs::write(f.root.join("shared/schema.yaml"), "version: 1\n").unwrap();
+        let configured = f.root.join("linked-schema.yaml");
+        symlink(f.root.join("shared/schema.yaml"), &configured).unwrap();
+
+        let mut registration = f.registration();
+        registration.schema_source = Some(SchemaSource::new(configured).unwrap());
+        let (ops, _) = f.ops(2);
+        let failure = ops
+            .attach(&registration, &ProgressReporter::disconnected())
+            .err()
+            .expect("a link at the configured schema name is not schema bytes");
+        let stated = format!("{failure:?}");
+        assert!(
+            stated.contains("symbolic link") && stated.contains("linked-schema.yaml"),
+            "the refusal does not name the link or the name it is at: {stated}"
         );
     }
 
