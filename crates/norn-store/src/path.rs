@@ -227,6 +227,55 @@ impl DocumentPath {
         &self.path
     }
 
+    /// Whether this path carries [`RENDERED_MARKER`] anywhere in it.
+    ///
+    /// This is what a caller asks to tell a place a rendering can name from one
+    /// only a spelling the grammar admits can reach: [`DocumentPath::rendered`]
+    /// answers every refusal by putting the marker in the segment it answers, so
+    /// a place with no marker is nothing's rendering. A real document whose own
+    /// name carries the marker answers `true` as well — that is the collision
+    /// `rendered` documents, one key holding one row, and the key alone does not
+    /// say which side spelled it.
+    pub fn carries_marker(&self) -> bool {
+        self.path.contains(RENDERED_MARKER)
+    }
+
+    /// The longest ancestor of this path whose segments are spelled the way the
+    /// vault spells them.
+    ///
+    /// Rendering is per segment, so every segment before the first one carrying
+    /// [`RENDERED_MARKER`] is a name the vault holds as written — which is what
+    /// makes this the narrowest root a search for the spellings rendering to
+    /// this place can start from. A path with no marker at all is its own
+    /// spelling throughout, so the whole path is the answer; a path whose first
+    /// segment carries the marker has no such ancestor but the vault root, which
+    /// is the empty spelling.
+    ///
+    /// The answer is always a segment-aligned prefix of the path, and it stays
+    /// one only because a rendering marks inside the segment it answers. The
+    /// corpus in `tests/paths.rs` is what holds the two together.
+    pub fn unrendered_ancestor(&self) -> &str {
+        match self
+            .path
+            .split(SEPARATOR)
+            .position(|segment| segment.contains(RENDERED_MARKER))
+        {
+            None => &self.path,
+            Some(0) => "",
+            // The separator before the marked segment is what the length of the
+            // ancestor stops one short of.
+            Some(marked) => {
+                let spanned: usize = self
+                    .path
+                    .split(SEPARATOR)
+                    .take(marked)
+                    .map(|segment| segment.len() + SEPARATOR.len_utf8())
+                    .sum();
+                &self.path[..spanned - SEPARATOR.len_utf8()]
+            }
+        }
+    }
+
     /// The segment-reversed key a suffix probe ranges over.
     pub fn suffix_key(&self) -> &str {
         &self.suffix_key
