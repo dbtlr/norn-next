@@ -138,8 +138,8 @@ discarding a sound database would destroy work to fix nothing. **Rung 3 is for d
 state, never for a hostile environment.**
 
 **Quarantine is per document; refusal is per vault.** See
-[ADR 0013](decisions/0013-quarantine-is-per-document.md) and
-[ADR 0018](decisions/0018-an-unread-frontmatter-block-is-an-undecodable-document.md). A
+[ADR 0018](decisions/0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md),
+which supersedes ADR 0013. A
 document norn cannot decode — path bytes that are not UTF-8, a path spelling the
 document-path grammar refuses, a body that is not UTF-8, or a frontmatter block past the
 bound the text layer reads — is a fact about one document rather than about the vault, so it
