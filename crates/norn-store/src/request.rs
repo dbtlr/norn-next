@@ -398,7 +398,7 @@ impl<'a> Request<'a> {
     /// producer is held to — has no other door for that caller.
     ///
     /// `scope` is how much of the subject the caller is re-deriving. Every
-    /// caller through this door names kinds today, because what a finding
+    /// producer through this door names kinds, because what a finding
     /// replaces at its subject is what the act that derived it read and no act
     /// reads a place's every cause at once; a caller that does concludes them
     /// all and discards [`DiscardScope::EveryKind`]. Discard-then-record holds
@@ -1119,9 +1119,9 @@ pub enum ExplainedStatement<'a> {
 /// How much of a subject a discard takes.
 ///
 /// A discard is one half of discard-then-record, so what it takes is what the
-/// caller is about to record again. A producer that reads a place's every cause
-/// replaces the subject whole; a producer that reads some of them replaces those
-/// kinds, and a finding another producer recorded there stands.
+/// caller is about to record again: the kinds its deriving act read, with a
+/// finding another producer recorded there left standing. Each arm states who
+/// takes its form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscardScope<'a> {
     /// Every finding about the subject, whichever producer recorded it and
