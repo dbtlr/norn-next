@@ -137,7 +137,8 @@ pub use body::BodyScan;
 pub use diagnostic::{Diagnostic, DiagnosticCode};
 pub use document::{Document, EditError, FieldText, frontmatter_reads_back};
 pub use frontmatter::{
-    FRONTMATTER_MAX_BYTES, Field, RenderError, ScalarContext, ValueStyle, render_document,
+    BlockRefusal, FRONTMATTER_MAX_BYTES, Field, RenderError, ScalarContext, ValueStyle,
+    render_document,
 };
 pub use heading::{Heading, slugify};
 pub use line_ending::LineEnding;

@@ -19,11 +19,24 @@
 //! client enumerates and dispatches on are flat `namespace/what-happened`
 //! strings, and they live in the wire registries — what the host refused, what
 //! a finding is filed under. A diagnostic code carries no namespace and
-//! crosses no seam: what a consumer sends on is what it derives from a note —
-//! the count of frontmatter-scoped ones, which is what separates a document
-//! with no frontmatter block from one whose block did not read — never the
-//! code itself. A note that has to reach a client is a refusal or a finding,
-//! and both of those are spelled in a registry rather than here.
+//! crosses no seam: what a consumer sends on is derived from a note, never the
+//! code itself, and a note that has to reach a client is a refusal or a finding
+//! spelled in a registry rather than here.
+//!
+//! Two things are derived from notes today, and both are answers the codes give
+//! rather than spellings a caller matches:
+//!
+//! - The count of frontmatter-scoped notes, which a derived row carries.
+//! - Whether the block was read by nothing, which
+//!   [`DiagnosticCode::refuses_the_block`] answers per code.
+//!
+//! **The second is not how a consumer outside this crate asks that question.**
+//! [`Document::frontmatter_refusal`](crate::Document::frontmatter_refusal) is
+//! the state a caller branches on — a typed reason, carried on the document
+//! rather than recovered by scanning a list — and the code below is how the
+//! note that states the same thing is spelled. The two are one answer:
+//! [`BlockRefusal::code`](crate::BlockRefusal::code) is the mapping, and the
+//! predicate here is what holds the code list to it.
 
 use std::fmt;
 
@@ -74,6 +87,29 @@ impl DiagnosticCode {
     /// with no block apart from a document whose block did not read, so the
     /// answer belongs to the code rather than to a caller matching on how the
     /// code is spelled.
+    /// Whether the note this code files says the block was read by nothing.
+    ///
+    /// A code answering `true` is a code that reports an unread block: no field
+    /// of it is known, and the document's frontmatter value is absent because
+    /// nothing parsed rather than because nothing was written. The rest report
+    /// something a forgiving read worked around inside a block it did read.
+    ///
+    /// The answer belongs to the code because it is what holds this list to
+    /// [`BlockRefusal`](crate::BlockRefusal): a code minted for a new way of
+    /// leaving a block unread states so here, and the state the document
+    /// carries is the same answer typed.
+    pub const fn refuses_the_block(self) -> bool {
+        match self {
+            DiagnosticCode::FrontmatterUnclosed
+            | DiagnosticCode::FrontmatterParseFailed
+            | DiagnosticCode::FrontmatterTooLarge => true,
+            DiagnosticCode::FrontmatterNonStringKey
+            | DiagnosticCode::FrontmatterTagStripped
+            | DiagnosticCode::FrontmatterIntegerOutOfRange
+            | DiagnosticCode::FrontmatterNotEditable => false,
+        }
+    }
+
     pub const fn frontmatter_scoped(self) -> bool {
         match self {
             DiagnosticCode::FrontmatterUnclosed
@@ -214,6 +250,50 @@ mod tests {
             assert_eq!(note.code, code);
             assert_eq!(note.to_string(), format!("{}: a note", code.as_str()));
         }
+    }
+
+    /// Every refusal a block can carry. The match below is over the enum, so a
+    /// variant added without a place in this census does not compile.
+    fn every_refusal() -> Vec<crate::BlockRefusal> {
+        use crate::BlockRefusal;
+
+        let census = vec![
+            BlockRefusal::Unclosed,
+            BlockRefusal::TooLarge { bytes: 1 },
+            BlockRefusal::Unreadable {
+                problem: "a problem".to_string(),
+            },
+        ];
+        for refusal in &census {
+            match refusal {
+                BlockRefusal::Unclosed
+                | BlockRefusal::TooLarge { .. }
+                | BlockRefusal::Unreadable { .. } => {}
+            }
+        }
+        census
+    }
+
+    /// The codes that report an unread block are exactly the codes the refusal
+    /// states are filed under. A code claiming the predicate that no refusal
+    /// files under would say a block went unread where the state says it did
+    /// not, and a refusal filed under a code that denies it would be an unread
+    /// block a consumer counting codes cannot see.
+    #[test]
+    fn the_codes_that_report_an_unread_block_are_the_refusals_own_codes() {
+        let mut predicated: Vec<&str> = every_code()
+            .into_iter()
+            .filter(|code| code.refuses_the_block())
+            .map(DiagnosticCode::as_str)
+            .collect();
+        let mut filed: Vec<&str> = every_refusal()
+            .iter()
+            .map(|refusal| refusal.code().as_str())
+            .collect();
+        predicated.sort_unstable();
+        filed.sort_unstable();
+        filed.dedup();
+        assert_eq!(predicated, filed);
     }
 
     /// Every code this crate raises today names the frontmatter block, which
