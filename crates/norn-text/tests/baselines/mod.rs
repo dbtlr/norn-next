@@ -16,12 +16,11 @@
 //! Every band below is over a flat mapping of a stated key count — two of them
 //! reading it with `Document::parse` and one deriving every field text out of a
 //! block already parsed — best of five timed samples after three warm ones.
-//! Repeated local
-//! readings cover **macos-arm64**, in both the pinned toolchain's unoptimized
-//! build — which is what the lane runs — and its optimized one. The lane's
-//! first hosted run on `ubuntu-latest` x86_64-glibc is what produces the hosted
-//! readings; until it does, the values here are the local ones with headroom
-//! over them.
+//! Repeated local readings cover **macos-arm64**, in both the pinned
+//! toolchain's unoptimized build — which is what the lane runs — and its
+//! optimized one. The lane's first hosted run on `ubuntu-latest` x86_64-glibc
+//! is what produces the hosted readings; until it does, the values here are the
+//! local ones with headroom over them.
 //!
 //! The ratio is the value worth reading. A ceiling passes anything that fits
 //! under it, and the defect this suite exists to catch is a *shape*: a cost

@@ -269,7 +269,7 @@ fn deriving_every_field_text_stays_linear_in_field_count() {
     let reading = baselines::per_mille(whole.as_nanos() as u64, split.as_nanos() as u64);
 
     baselines::record(
-        "frontmatter parse and text derive against key count",
+        "frontmatter text derive against key count",
         &[
             ("keys, split four ways", split_keys.to_string()),
             (
