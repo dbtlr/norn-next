@@ -55,6 +55,7 @@
 //! - **Duplicate keys** are not a value-model question at all: the block is
 //!   not well-formed, so it does not parse and no value exists.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -172,6 +173,10 @@ impl From<f64> for Value {
 /// short strings costs more in hashing and allocation than the scan does in
 /// comparisons — while giving up the ordering that makes an edit preserve key
 /// order.
+///
+/// A scan is right for a lookup and wrong for a *walk*: a caller that resolves
+/// every key of a mapping pays one scan per key, which is quadratic in key
+/// count. [`KeyIndex`] is what such a caller takes instead.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mapping {
     entries: Vec<(String, Value)>,
@@ -219,9 +224,20 @@ impl Mapping {
     /// `insert` does to find an existing one. The parse boundary is the caller:
     /// a block with two entries under one key is not well-formed and never
     /// reaches the value model.
+    ///
+    /// The uniqueness this relies on is checked by [`Mapping::keys_are_unique`]
+    /// once the mapping is built, rather than per call: a scan per append is the
+    /// quadratic this method exists to avoid.
     pub(crate) fn append_unique(&mut self, key: String, value: Value) {
-        debug_assert!(!self.contains_key(&key), "append_unique on a repeated key");
         self.entries.push((key, value));
+    }
+
+    /// Whether every key in this mapping occurs exactly once — the invariant
+    /// [`Mapping::append_unique`] is handed rather than enforces, checked in one
+    /// pass over the built mapping.
+    pub(crate) fn keys_are_unique(&self) -> bool {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+        self.entries.iter().all(|(key, _)| seen.insert(key))
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -237,6 +253,42 @@ impl Mapping {
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(key, _)| key.as_str())
+    }
+}
+
+/// A by-key view of a [`Mapping`], borrowed from it, for a caller that resolves
+/// every key rather than a few.
+///
+/// [`Mapping::get`] is a scan over the mapping's entries, so resolving `n` keys
+/// through it costs `n` scans — quadratic in the key count, and the block's byte
+/// bound caps how far that goes without flattening it. Building this view is one
+/// pass and one hash per entry, and every lookup through it is then constant, so
+/// a walk of the whole mapping stays linear in its key count. What it costs is
+/// one borrowed key reference and one borrowed value reference per entry, held
+/// for the walk.
+///
+/// It is a view and not a cache: it borrows the mapping, so a mapping cannot be
+/// mutated while one stands and no index can outlive or disagree with the
+/// entries it was built from.
+pub(crate) struct KeyIndex<'a> {
+    by_key: HashMap<&'a str, &'a Value>,
+}
+
+impl<'a> KeyIndex<'a> {
+    /// Index `map` by key. Keys in a [`Mapping`] are unique, so every entry is
+    /// reachable through the result.
+    pub(crate) fn of(map: &'a Mapping) -> Self {
+        KeyIndex {
+            by_key: map.iter().collect(),
+        }
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&'a Value> {
+        self.by_key.get(key).copied()
+    }
+
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.by_key.contains_key(key)
     }
 }
 
@@ -361,6 +413,10 @@ pub(crate) fn from_yaml(
                 path.truncate(mark);
                 map.append_unique(key, value);
             }
+            debug_assert!(
+                map.keys_are_unique(),
+                "a parsed mapping reaching the value model repeats a key"
+            );
             Value::Map(map)
         }
         serde_yaml::Value::Tagged(tagged) => {

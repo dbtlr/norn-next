@@ -190,6 +190,39 @@ fn a_block_at_the_bound_parses_and_one_byte_past_it_is_refused() {
     assert_eq!(document.frontmatter(), None);
 }
 
+/// The split resolves every scanned key line against the parsed mapping, and a
+/// block at the bound carries hundreds of them: each gets its own field, in
+/// document order, and each field's value reads back as what the key holds.
+#[test]
+fn a_block_at_the_bound_splits_into_one_field_per_key() {
+    let block = block_of(norn_text::FRONTMATTER_MAX_BYTES);
+    let source = document_of(&block);
+    let document = Document::parse(&source);
+
+    let keys: Vec<&str> = match document.frontmatter() {
+        Some(Value::Map(map)) => map.keys().collect(),
+        other => panic!("expected a mapping, got {other:?}"),
+    };
+    assert!(keys.len() > 900, "the bound admits {} keys", keys.len());
+    let named: Vec<&str> = document
+        .fields()
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(named, keys, "one field per key, in document order");
+
+    let texts = document.field_texts();
+    assert!(
+        texts.is_empty(),
+        "every value in this block is an integer, so none of them is a text"
+    );
+    let last = document.fields().last().expect("a final field");
+    assert_eq!(
+        &source[last.value_range.clone().expect("a scalar value span")],
+        "1"
+    );
+}
+
 /// The refusal is the same shape every other block refusal has: no value, the
 /// block's range still reported, the body still read, and the note carrying
 /// the parser-free account of what was refused. Nothing is truncated — a

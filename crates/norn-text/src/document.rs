@@ -17,7 +17,7 @@ use crate::link::{Link, parse_wikilinks_in_text};
 use crate::section::{SectionAddress, SectionError, SectionSpan};
 use crate::span::LineCursor;
 use crate::tag::{Tag, frontmatter_tag_name};
-use crate::value::{Mapping, Value};
+use crate::value::{KeyIndex, Mapping, Value};
 
 /// The one frontmatter field whose strings are read as tags.
 const TAGS_FIELD: &str = "tags";
@@ -279,9 +279,13 @@ impl<'a> Document<'a> {
         let Some(Value::Map(map)) = &self.frontmatter else {
             return Vec::new();
         };
+        // One lookup per field, so the mapping is indexed once rather than
+        // scanned per field: a block at the byte bound holds thousands of
+        // fields, and a scan each is quadratic in how many there are.
+        let parsed_keys = KeyIndex::of(map);
         let mut texts = Vec::new();
         for field in &self.fields {
-            match map.get(&field.name) {
+            match parsed_keys.get(&field.name) {
                 Some(Value::String(text)) => texts.push(FieldText {
                     field: &field.name,
                     text,
