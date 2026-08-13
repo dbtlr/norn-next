@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
@@ -2058,16 +2058,21 @@ struct Walked {
 /// defective documents to re-answer a question the store answers by key.
 #[derive(Default)]
 struct Filed {
-    sides: BTreeSet<(DocumentPath, Decided)>,
+    places: BTreeMap<DocumentPath, BTreeSet<Decided>>,
 }
 
 impl Filed {
     fn insert(&mut self, subject: &DocumentPath, decided: Decided) {
-        self.sides.insert((subject.clone(), decided));
+        self.places
+            .entry(subject.clone())
+            .or_default()
+            .insert(decided);
     }
 
     fn holds(&self, subject: &DocumentPath, decided: Decided) -> bool {
-        self.sides.contains(&(subject.clone(), decided))
+        self.places
+            .get(subject)
+            .is_some_and(|sides| sides.contains(&decided))
     }
 }
 
@@ -2200,14 +2205,16 @@ fn close_job(
 /// every side, because a producer that never walks a place is one whose findings
 /// no walk can conclude.
 ///
-/// The page and the discard are both keyed by the subject, so this costs one
-/// ordered pass over the findings a scope holds plus one seek per side it takes
-/// — the findings table's size rather than the vault's — and a converged vault
-/// takes nothing.
+/// The page and the discard are both keyed by the subject, so a scope costs one
+/// ordered pass over the findings it holds plus one seek per side it takes — the
+/// findings table's size rather than the vault's, and smaller than the row page
+/// the same leg already reads over the documents — and a converged vault takes
+/// nothing. A job scoped to many dirty paths pays that per path, as its row
+/// prune does.
 fn prune_unaccounted(
     store: &mut Store,
     policy: ProductionPolicy,
-    account: &mut Account,
+    account: &Account,
 ) -> Result<(), JobFailure> {
     for walked in &account.walked {
         let mut after: Option<DocumentPath> = None;
