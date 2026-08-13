@@ -250,7 +250,9 @@ impl Mapping {
     /// a block full of keys would pay. At or under it the pass compares
     /// instead: a handful of short strings is fewer comparisons than a table
     /// costs to allocate and hash into, and this runs on every mapping of every
-    /// block that is read.
+    /// block that is read. What the check costs is therefore paid by the block
+    /// carrying many keys — one table, one pass — and not by the ordinary read,
+    /// which a scan over a few fields answers.
     pub(crate) fn repeated_key(&self) -> Option<&str> {
         if self.entries.len() > HASH_ABOVE {
             let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
