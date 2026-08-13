@@ -29,9 +29,12 @@
 //!   [`FrontmatterNonStringKey`](crate::DiagnosticCode::FrontmatterNonStringKey)
 //!   diagnostic. Coercing it to the string `"1"` would invent a field the
 //!   document does not contain.
-//! - **An explicit tag** — `!foo bar` — is dropped and its value kept, with a
+//! - **An explicit tag** — `!foo bar` — is dropped and what it tagged is kept,
+//!   with a
 //!   [`FrontmatterTagStripped`](crate::DiagnosticCode::FrontmatterTagStripped)
-//!   diagnostic.
+//!   diagnostic. A key carries one the same way a value does: a tag is no part
+//!   of a key's name, so `!foo k` is the field `k` and the note says which of
+//!   the two the tag was on.
 //! - **An integer past `i64` but inside `u64`** is carried as a float, with a
 //!   [`FrontmatterIntegerOutOfRange`](crate::DiagnosticCode::FrontmatterIntegerOutOfRange)
 //!   diagnostic. Past `u64`, or below `i64`, the block does not parse at all:
@@ -447,7 +450,7 @@ pub(crate) fn from_yaml(
         serde_yaml::Value::Mapping(mapping) => {
             let mut map = Mapping::new();
             for (key, value) in mapping {
-                let Some(key) = key.as_str().map(str::to_string) else {
+                let Some(name) = key.as_str().map(str::to_string) else {
                     report.dropped_keys += 1;
                     diagnostics.push(
                         Diagnostic::warning(
@@ -463,10 +466,15 @@ pub(crate) fn from_yaml(
                 if !path.is_empty() {
                     path.push('.');
                 }
-                path.push_str(&key);
+                path.push_str(&name);
+                // A tag on a key names no part of the key, so the entry keeps
+                // its name and the tag is reported the way a tag on a value is.
+                if let serde_yaml::Value::Tagged(tagged) = &key {
+                    diagnostics.push(tag_stripped(&tagged.tag, "a key", path));
+                }
                 let value = from_yaml(value, path, diagnostics, report)?;
                 path.truncate(mark);
-                map.append(key, value);
+                map.append(name, value);
             }
             // A tag on a key is dropped by the strip above, so `!x k` and `k`
             // arrive as distinct nodes and leave as one name. The parser refuses
@@ -483,17 +491,21 @@ pub(crate) fn from_yaml(
             Ok(Value::Map(map))
         }
         serde_yaml::Value::Tagged(tagged) => {
-            diagnostics.push(
-                Diagnostic::warning(
-                    DiagnosticCode::FrontmatterTagStripped,
-                    "an explicit YAML tag was dropped and its value kept; the value model \
-                     carries no tags",
-                )
-                .with_detail(format!("`{}` {}", tagged.tag, location(path))),
-            );
+            diagnostics.push(tag_stripped(&tagged.tag, "a value", path));
             from_yaml(tagged.value, path, diagnostics, report)
         }
     }
+}
+
+/// The note an explicit tag is dropped with. `subject` names what carried it,
+/// because a key and its value are one place in the block and two tags.
+fn tag_stripped(tag: impl fmt::Display, subject: &str, path: &str) -> Diagnostic {
+    Diagnostic::warning(
+        DiagnosticCode::FrontmatterTagStripped,
+        "an explicit YAML tag was dropped and what it tagged was kept; the value model \
+         carries no tags",
+    )
+    .with_detail(format!("`{tag}` on {subject} {}", location(path)))
 }
 
 /// The account a repeated key is refused with, in the shape the parser behind

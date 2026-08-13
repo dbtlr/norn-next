@@ -419,14 +419,24 @@ fn a_repeated_key_among_many_refuses_the_block_too() {
 }
 
 /// A tag beside a key nothing else writes is stripped and its block read, so
-/// what the refusal above turns on is the repetition and not the tag.
+/// what the refusal above turns on is the repetition and not the tag. The strip
+/// is reported: a tag is dropped loudly wherever it sits, and a key whose name
+/// silently lost bytes is a field the document does not appear to hold.
 #[test]
 fn a_tagged_key_with_no_twin_reads() {
-    let document = Document::parse("---\n!x k: 1\nother: 2\n---\nbody\n");
+    let source = "---\n!x k: 1\nother: 2\n---\nbody\n";
+    let document = Document::parse(source);
     assert_eq!(document.frontmatter_refusal(), None);
-    let map = map_of("---\n!x k: 1\nother: 2\n---\nbody\n");
+    let map = map_of(source);
     assert_eq!(map.get("k"), Some(&Value::Int(1)));
     assert_eq!(map.get("other"), Some(&Value::Int(2)));
+
+    let stripped = document
+        .diagnostics()
+        .iter()
+        .find(|note| note.code == DiagnosticCode::FrontmatterTagStripped)
+        .expect("a tag dropped from a key is reported");
+    assert_eq!(stripped.detail.as_deref(), Some("`!x` on a key at `k`"));
 }
 
 // ── The bound on the block ───────────────────────────────────────────────
