@@ -88,7 +88,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
 
     let Some(block) = closed_block(content) else {
         let refusal = BlockRefusal::Unclosed;
-        diagnostics.push(refusal.clone().into_diagnostic());
+        diagnostics.push(refusal.to_diagnostic());
         return absent(Some(refusal));
     };
 
@@ -104,7 +104,7 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
             None,
         ),
         Err(refusal) => {
-            diagnostics.push(refusal.clone().into_diagnostic());
+            diagnostics.push(refusal.to_diagnostic());
             (None, Some(refusal))
         }
     };
@@ -193,6 +193,7 @@ pub(crate) const MERGE_KEY: &str = "<<";
 /// A note is filed alongside, because reading is forgiving and reports what it
 /// worked around. The note is prose plus a [`DiagnosticCode`] this crate's own
 /// consumers match on; this state is what crosses a seam.
+///
 /// Plain rather than `#[non_exhaustive]`: a consumer that has not decided what
 /// a new way of leaving a block unread means to it should fail to compile
 /// rather than fall into a default arm.
@@ -237,7 +238,7 @@ impl BlockRefusal {
     }
 
     /// The note this refusal is filed as.
-    pub(crate) fn into_diagnostic(self) -> Diagnostic {
+    pub(crate) fn to_diagnostic(&self) -> Diagnostic {
         let message = match self {
             BlockRefusal::Unclosed => "frontmatter opening delimiter has no closing delimiter",
             BlockRefusal::TooLarge { .. } => "frontmatter is larger than the block that is read",
