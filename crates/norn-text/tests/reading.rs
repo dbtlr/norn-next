@@ -378,6 +378,26 @@ fn a_key_repeated_below_the_top_level_refuses_the_block_too() {
     }
 }
 
+/// **A block of many keys is held to the same rule as a block of two.** The
+/// uniqueness check answers a mapping past a size through a table rather than a
+/// scan, which is a cost decision and not a different question: a repeat among
+/// dozens of keys refuses the block exactly as a repeat among two does.
+#[test]
+fn a_repeated_key_among_many_refuses_the_block_too() {
+    let mut source = String::from("---\n");
+    for index in 0..24 {
+        source.push_str(&format!("k{index}: {index}\n"));
+    }
+    source.push_str("!x k7: 99\n---\nbody\n");
+
+    assert_eq!(posture(&source), posture("---\nk: 1\n!x k: 2\n---\nbody\n"));
+    assert_eq!(
+        refusal_account(&source),
+        "duplicate entry with key \"k7\"",
+        "the account of a repeat among many keys names another one"
+    );
+}
+
 /// A tag beside a key nothing else writes is stripped and its block read, so
 /// what the refusal above turns on is the repetition and not the tag.
 #[test]

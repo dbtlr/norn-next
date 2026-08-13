@@ -579,6 +579,23 @@ mod tests {
         }
     }
 
+    /// **Both arms of the uniqueness check answer the same question.** The arm
+    /// a mapping takes is a cost decision, so a repeated key is found through
+    /// the scan a small mapping takes and through the table a large one takes
+    /// alike, and a mapping whose keys are distinct answers nothing on either
+    /// route. Nothing but this holds the hashing arm: a block of more keys than
+    /// [`HASH_ABOVE`] is refused by it alone.
+    #[test]
+    fn the_uniqueness_check_finds_a_repeated_key_through_either_arm() {
+        for filler in [0, HASH_ABOVE * 2] {
+            let map = with_a_repeated_key(filler);
+            assert_eq!(map.repeated_key(), Some("dup"), "{} entries", map.len());
+        }
+        for entries in [0, 1, HASH_ABOVE, HASH_ABOVE + 1, HASH_ABOVE * 2] {
+            assert_eq!(of_size(entries).repeated_key(), None, "{entries} entries");
+        }
+    }
+
     /// A mapping holding `entries` distinct keys.
     fn of_size(entries: usize) -> Mapping {
         let mut map = Mapping::new();
