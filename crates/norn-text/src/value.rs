@@ -267,9 +267,10 @@ impl Mapping {
 /// linear in its key count. What that costs is one borrowed key reference and
 /// one borrowed value reference per entry, held for the walk.
 ///
-/// Below [`HASH_ABOVE`] entries the view scans the mapping instead. A block of a
-/// handful of fields is what an ordinary document carries, and there the table's
-/// allocation and its hash per entry cost more than the comparisons they save.
+/// At [`HASH_ABOVE`] entries or fewer the view scans the mapping instead. A
+/// block of a handful of fields is what an ordinary document carries, and there
+/// the table's allocation and its hash per entry cost more than the comparisons
+/// they save.
 ///
 /// A key resolves to the **first** entry carrying it, which is what
 /// [`Mapping::get`] answers, so a walk through this view and a walk of
@@ -286,10 +287,14 @@ pub(crate) enum KeyIndex<'a> {
 
 /// The entry count above which a by-key view hashes rather than scans.
 ///
-/// A frontmatter block of this many fields costs at most a few hundred string
-/// comparisons to walk by scan, which is less than the table it would otherwise
-/// allocate and fill; past it the scan's square is what dominates the walk.
-const HASH_ABOVE: usize = 32;
+/// Both arms answer every key identically, so what this value picks is cost and
+/// never correctness. It sits where the two routes cost about the same in an
+/// optimized build: under it the comparisons a walk by scan makes are cheaper
+/// than allocating a table and hashing every key into it, and over it the scan's
+/// square is what dominates the walk. An ordinary document's block — title,
+/// dates, status, tags — holds fewer fields than this, so the common read
+/// allocates no table at all.
+const HASH_ABOVE: usize = 16;
 
 impl<'a> KeyIndex<'a> {
     pub(crate) fn of(map: &'a Mapping) -> Self {
@@ -522,8 +527,30 @@ mod tests {
         }
     }
 
-    /// Which arm a view takes is the entry count, so the case above covers both
-    /// rather than one of them twice.
+    /// A mapping holding `entries` distinct keys.
+    fn of_size(entries: usize) -> Mapping {
+        let mut map = Mapping::new();
+        for index in 0..entries {
+            map.append_unique(format!("k{index}"), Value::Int(0));
+        }
+        map
+    }
+
+    /// Which arm a view takes turns at [`HASH_ABOVE`] exactly: a mapping of that
+    /// many entries scans, and one entry more hashes. The boundary is what this
+    /// holds, so the constant cannot move without a diff a reviewer reads.
+    #[test]
+    fn the_arm_a_view_takes_turns_at_hash_above() {
+        let scanned = of_size(HASH_ABOVE);
+        let hashed = of_size(HASH_ABOVE + 1);
+        assert_eq!(scanned.len(), HASH_ABOVE);
+        assert_eq!(hashed.len(), HASH_ABOVE + 1);
+        assert!(matches!(KeyIndex::of(&scanned), KeyIndex::Scan(_)));
+        assert!(matches!(KeyIndex::of(&hashed), KeyIndex::Hashed(_)));
+    }
+
+    /// The fillers the repeated-key case walks sit on either side of that
+    /// boundary, so it covers both arms rather than one of them twice.
     #[test]
     fn a_small_mapping_scans_and_a_large_one_hashes() {
         let small = with_a_repeated_key(0);
