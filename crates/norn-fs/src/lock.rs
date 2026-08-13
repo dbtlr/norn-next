@@ -14,7 +14,7 @@
 //! editor's, not a sync client's, not a human's. There is no on-disk mutation
 //! lock and there will not be one: a vault is inherently multi-writer, so
 //! correctness against concurrent writers is carried by the hash preconditions
-//! in [`crate::write`], never by exclusion. A host serializes its *own*
+//! in [`crate::write`](mod@crate::write), never by exclusion. A host serializes its *own*
 //! mutations inside its own process.
 //!
 //! The inverse guarantee is worth stating as a bar rather than as a hope: **a

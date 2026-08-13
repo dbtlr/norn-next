@@ -292,7 +292,7 @@ impl ConfigDirs {
 ///
 /// The two spellable coordinates are carried as themselves. The data base is a
 /// whole absolute path and cannot be one component, so it is carried as a
-/// [digest](digest_component) of it — the one part a reader cannot spell back,
+/// digest (`digest_component`) of it — the one part a reader cannot spell back,
 /// which is why the other two are not folded in with it.
 ///
 /// Each part is one path component, which is what makes the key spellable as a

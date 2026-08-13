@@ -123,7 +123,7 @@ pub struct DocumentPath {
 impl DocumentPath {
     /// Read `path` as a vault-root-relative document path.
     ///
-    /// The refusals are [`segment_problem`]'s, plus the one a document has that
+    /// The refusals are `segment_problem`'s, plus the one a document has that
     /// a bare directory does not: a leaf whose extension-stripped stem is `.` or
     /// `..`, which names no ambiguity class. Each of them would produce a suffix
     /// key that addresses the wrong documents — or, for a control byte, a key
@@ -327,10 +327,10 @@ impl DocumentPath {
 /// to a `.` stem and is refused as a document path, while `..md/note.md` is an
 /// ordinary path the store keeps a row for — so the rows under such a directory
 /// need an address its own spelling cannot give them. This is that address: the
-/// same segment-aligned prefix range [`DocumentPath::descendant_bounds`] opens,
+/// same segment-aligned prefix range `DocumentPath::descendant_bounds` opens,
 /// taken from a spelling that is a directory and nothing more.
 ///
-/// The refusals are [`segment_problem`]'s and stop there, because a stem is a
+/// The refusals are `segment_problem`'s and stop there, because a stem is a
 /// document's property and a directory has none. A spelling those refusals
 /// reject poisons every path beneath it — no descendant of a segment carrying a
 /// backslash or a control byte is storable either — so refusing here is
