@@ -21,7 +21,11 @@ going, so the entry reaches `Ready` and serves every other document. The store h
 representable truth, so a document that stops decoding loses its store row; the row's death
 is recorded as a quarantine — a death of the derived row, not of the file. **The set is
 closed: a cause that is not one of the three named above is a refusal or the degradation
-below.**
+below.** The store's own projection bound is not a fourth outcome: it refuses a frontmatter
+value nesting deeper than the store projects, and that refusal would withdraw a whole
+increment rather than one document — so it stands above what any readable block can carry.
+The text layer stops nesting through a block first, and a block it will not read is the
+degradation below.
 
 **A wholly unread frontmatter block degrades: the row the act could derive, plus a standing
 finding.** A block that never closes, a block that is not well-formed YAML, and a block past the authored

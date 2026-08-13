@@ -4611,6 +4611,54 @@ mod tests {
     /// derive, carries no frontmatter projection, and names its cause — so no
     /// derived row answers *this document has no tags, no title, no aliases*
     /// about fields nothing read.
+    /// **The store's projection bound is not a fourth outcome a document can
+    /// reach.** The store refuses a frontmatter projection nesting past
+    /// `MAX_FRONTMATTER_DEPTH`, and that refusal would withdraw the whole
+    /// increment rather than one document — so the bound has to stand above what
+    /// any readable block can carry. The text layer refuses the deeper block
+    /// first, and a block it refuses is the degradation above: a row, and a
+    /// finding naming the cause. The ceiling is searched rather than assumed, so
+    /// either bound moving toward the other fails here.
+    #[test]
+    fn no_readable_block_nests_deeper_than_the_store_projects() {
+        let block_nesting = |depth: usize| {
+            let mut source = String::from("---\nk: ");
+            source.push_str(&"[".repeat(depth));
+            source.push_str(&"]".repeat(depth));
+            source.push_str("\n---\n# body\n");
+            source
+        };
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+        };
+
+        let refused = (1..=norn_store::MAX_FRONTMATTER_DEPTH)
+            .find(|depth| derive(&block_nesting(*depth)).unread_frontmatter.is_some())
+            .expect("the text layer reads every block the store's bound admits");
+        let deepest = derive(&block_nesting(refused - 1));
+        let projection = deepest
+            .facts
+            .frontmatter
+            .as_ref()
+            .expect("the deepest block the text layer reads produced no projection");
+        norn_store::canonical_json(projection)
+            .expect("the deepest block the text layer reads is past the store's bound");
+        assert_eq!(
+            derive(&block_nesting(refused))
+                .unread_frontmatter
+                .expect("the block past the ceiling was read")
+                .cause,
+            UnreadBlock::Unreadable,
+            "a block the text layer will not nest through took another outcome"
+        );
+    }
+
     #[test]
     fn every_wholly_unread_block_derives_its_body_facts_and_names_its_cause() {
         for (source, cause, kind) in [
