@@ -6,8 +6,8 @@
 //! compared against are authored per crate, beside the suite that asserts them.
 //!
 //! The renderings are integer arithmetic on purpose. A bar is a whole number of
-//! bytes or a ratio per mille, so a reading formatted through a float would
-//! print a value the comparison never made.
+//! bytes or nanoseconds, or a ratio per mille, so a reading formatted through a
+//! float would print a value the comparison never made.
 
 /// Bytes, rendered as mebibytes to two places.
 pub fn mebibytes(bytes: u64) -> String {
@@ -15,6 +15,15 @@ pub fn mebibytes(bytes: u64) -> String {
         "{}.{:02}",
         bytes / (1024 * 1024),
         bytes * 100 / (1024 * 1024) % 100
+    )
+}
+
+/// A duration, rendered as milliseconds to three places.
+pub fn milliseconds(duration: std::time::Duration) -> String {
+    format!(
+        "{}.{:03}",
+        duration.as_millis(),
+        duration.as_nanos() / 1_000 % 1_000
     )
 }
 
@@ -61,7 +70,16 @@ pub fn record(heading: &str, readings: &[(&str, String)]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mebibytes, multiple, per_mille};
+    use std::time::Duration;
+
+    use super::{mebibytes, milliseconds, multiple, per_mille};
+
+    #[test]
+    fn a_duration_renders_as_milliseconds_to_three_places() {
+        assert_eq!(milliseconds(Duration::ZERO), "0.000");
+        assert_eq!(milliseconds(Duration::from_millis(1)), "1.000");
+        assert_eq!(milliseconds(Duration::from_nanos(13_095_400)), "13.095");
+    }
 
     #[test]
     fn bytes_render_as_mebibytes_to_two_places() {
