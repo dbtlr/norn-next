@@ -204,10 +204,11 @@ body, headings, links, body tags — the frontmatter projection is absent, and a
 row. Where the body starts differs by cause: a closed block bounds its own bytes, so an
 oversized or unreadable one is skipped and contributes nothing, while an unclosed one bounds
 nothing and the document is body from its first byte — the links, headings and tags written in
-the lines that opened like a block are read as the document's own. The bound still refuses the block whole and nothing is truncated; what the refusal
-produces is that row and that finding rather than a removal. The finding closes on the
-ordinary derivation that finds the block readable again, so a document edited across the
-bound or across a typo moves its finding and never its row.
+the lines that opened like a block are read as the document's own. The bound still refuses
+the block whole and nothing is truncated; what the refusal produces is that row and that
+finding rather than a removal. The finding closes on the ordinary derivation that finds the
+block readable again, so a document edited across the bound or across a typo moves its
+finding and never its row.
 
 The store holds only representable truth, so a document that stops decoding **loses its store
 row**, and the finding is where its absence is stated. The row's death is recorded with the
