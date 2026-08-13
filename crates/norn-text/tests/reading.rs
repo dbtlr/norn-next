@@ -378,6 +378,26 @@ fn a_key_repeated_below_the_top_level_refuses_the_block_too() {
     }
 }
 
+/// **A block refused at the collapse reports the refusal and nothing else.**
+/// What the conversion stripped on its way to the collapse was stripped from a
+/// value the block never gets, so a note about it would describe a document no
+/// reader holds. A block the parser refuses reports one note; so does this one.
+#[test]
+fn a_block_refused_at_the_collapse_reports_only_the_refusal() {
+    for source in [
+        // A tagged value, whose strip is reported wherever a value survives it.
+        "---\na: !x 1\nk: 1\n!y k: 2\n---\nbody\n",
+        // A non-string key, whose entry is dropped with a note of its own.
+        "---\n1: dropped\nk: 1\n!y k: 2\n---\nbody\n",
+    ] {
+        assert_eq!(
+            codes(&Document::parse(source)),
+            ["frontmatter-parse-failed"],
+            "{source:?}"
+        );
+    }
+}
+
 /// **A block of many keys is held to the same rule as a block of two.** The
 /// uniqueness check answers a mapping past a size through a table rather than a
 /// scan, which is a cost decision and not a different question: a repeat among
