@@ -5,12 +5,12 @@
 //!
 //! # This is not where the determinism contract lives
 //!
-//! [`tree`] walks a directory and digests what it finds, which means its path
+//! [`tree()`] walks a directory and digests what it finds, which means its path
 //! keys are the names the filesystem hands back. On a filesystem that stores
 //! names in a fixed Unicode normalization form, those are not the names that
 //! were written. The contract digest is [`crate::Manifest::tree_digest`],
 //! built at emission from the generator's own strings; the crate docs explain
-//! why. Use [`tree`] to ask what is in a directory, never to ask whether a
+//! why. Use [`tree()`] to ask what is in a directory, never to ask whether a
 //! generation reproduced.
 
 use std::fs;
@@ -192,7 +192,7 @@ pub fn tree(root: &Path) -> io::Result<[u8; 32]> {
     Ok(hasher.finish())
 }
 
-/// [`tree`], rendered as hexadecimal.
+/// [`tree()`], rendered as hexadecimal.
 pub fn tree_hex(root: &Path) -> io::Result<String> {
     Ok(hex(&tree(root)?))
 }

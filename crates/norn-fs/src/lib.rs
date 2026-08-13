@@ -22,7 +22,7 @@
 //!
 //! # What is here
 //!
-//! - [`write`] — the compare-and-swap kernel: precondition, shadow, verify,
+//! - [`write`](mod@write) — the compare-and-swap kernel: precondition, shadow, verify,
 //!   swap. [`vacate`] and [`move_document`] are the same kernel with different
 //!   endings.
 //! - [`shadow`] — where a write's bytes wait, why they wait outside the vault,
@@ -32,7 +32,7 @@
 //!   reach what no home's key names.
 //! - [`lock`] — the maintainer lock: at most one host maintains one derived
 //!   store, and that is the *only* thing it decides.
-//! - [`walk`] — the streaming, deterministic filesystem inventory and its typed
+//! - [`walk`](mod@walk) — the streaming, deterministic filesystem inventory and its typed
 //!   skip notations.
 //! - `open` — the one contained open every read of a file's content goes
 //!   through: anchored at a directory, one component at a time, no link
