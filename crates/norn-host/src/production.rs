@@ -1443,16 +1443,89 @@ impl Decided {
 /// Every cause a quarantine carries, which is what the two scopes below are
 /// read off.
 ///
-/// The length is [`FindingKind::ALL`]'s because causes and kinds stand one to
-/// one — [`Undecodable::kind`] is that mapping — so a cause minted with a kind
-/// of its own grows the wire list and stops this literal from compiling until
-/// it is named here.
-const CAUSES: [Undecodable; FindingKind::ALL.len()] = [
+/// A cause absent from this list has its kind in neither scope, so a finding of
+/// it discards nothing it re-derives and stands beside its own previous copy at
+/// every heal. Two things hold the list to the enum: [`Undecodable::decided`]
+/// is exhaustive, so the next variant states its side or nothing compiles, and
+/// the classification below holds every kind the registry advertises to exactly
+/// one of this list and [`KINDS_NO_CAUSE_CARRIES`]. A cause minted under a kind
+/// an older cause already carries is reached by neither, and the ADR that
+/// closes the cause set at these four is what stands in front of one.
+const CAUSES: [Undecodable; 4] = [
     Undecodable::PathBytes,
     Undecodable::PathSpelling,
     Undecodable::BodyBytes,
     Undecodable::FrontmatterSize,
 ];
+
+/// The finding kinds no quarantine cause carries.
+///
+/// Quarantine is the only producer recording findings today, so the list is
+/// empty. A kind minted for another producer — an ambiguity a resolution reads,
+/// a field a schema refuses — is named here, which is the one line that keeps
+/// the classification below a reading of the registry rather than a claim that
+/// every kind the registry holds is a quarantine cause.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
+
+// Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
+// named as no cause's, and no two causes carry one kind. The registry is a
+// general one, so a kind minted for another producer is a growth this crate
+// answers by classifying it rather than by widening a scope no act re-derives.
+const _: () = {
+    let mut index = 0;
+    while index < FindingKind::ALL.len() {
+        let kind = FindingKind::ALL[index];
+        assert!(
+            causes_carrying(kind) + times_named_uncarried(kind) == 1,
+            "a finding kind is carried by no cause and named as no producer's, \
+             or is claimed twice"
+        );
+        index += 1;
+    }
+};
+
+/// Whether two kinds are the same one, which is the comparison a `const`
+/// context has instead of `PartialEq`.
+const fn same_kind(left: FindingKind, right: FindingKind) -> bool {
+    let (left, right) = (left.as_str().as_bytes(), right.as_str().as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// How many causes in [`CAUSES`] record findings under this kind.
+const fn causes_carrying(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if same_kind(CAUSES[index].kind(), kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// How many times [`KINDS_NO_CAUSE_CARRIES`] names this kind.
+const fn times_named_uncarried(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < KINDS_NO_CAUSE_CARRIES.len() {
+        if same_kind(KINDS_NO_CAUSE_CARRIES[index], kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
 
 /// How many causes [`Undecodable::decided`] puts on one side.
 const fn decided_count(decided: Decided) -> usize {
@@ -3337,18 +3410,19 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **Every cause is a finding kind, and the two discard scopes partition
-    /// them.** The scopes are read off [`CAUSES`] through
-    /// [`Undecodable::decided`], so a kind no cause claims is a kind no producer
-    /// re-derives — which is a copy of that finding per heal.
+    /// **The two discard scopes partition the causes.** The scopes are read off
+    /// [`CAUSES`] through [`Undecodable::decided`], so a cause whose kind falls
+    /// out of both is a cause no act re-derives — which is a copy of that
+    /// finding per heal — and a kind in both is one side taking the other's
+    /// work.
+    ///
+    /// The kinds a quarantine records are a subset of the registry rather than
+    /// the whole of it: what holds the two apart is the classification beside
+    /// [`CAUSES`], which a kind minted for another producer is named in.
     #[test]
-    fn the_quarantine_causes_partition_the_finding_kinds() {
-        let mut every: Vec<&str> = FindingKind::ALL.iter().map(FindingKind::as_str).collect();
-        every.sort_unstable();
-
-        let mut claimed: Vec<&str> = CAUSES.iter().map(|cause| cause.kind().as_str()).collect();
-        claimed.sort_unstable();
-        assert_eq!(claimed, every, "a finding kind no quarantine cause claims");
+    fn the_two_scopes_partition_the_quarantine_causes() {
+        let mut carried: Vec<&str> = CAUSES.iter().map(|cause| cause.kind().as_str()).collect();
+        carried.sort_unstable();
 
         let mut scoped: Vec<&str> = SPELLING_KINDS
             .iter()
@@ -3356,7 +3430,15 @@ mod tests {
             .map(FindingKind::as_str)
             .collect();
         scoped.sort_unstable();
-        assert_eq!(scoped, every, "a kind the two scopes do not partition");
+        assert_eq!(scoped, carried, "a cause the two scopes do not partition");
+
+        let registry: Vec<&str> = FindingKind::ALL.iter().map(FindingKind::as_str).collect();
+        for kind in &carried {
+            assert!(
+                registry.contains(kind),
+                "`{kind}` is a cause's kind the registry does not advertise"
+            );
+        }
     }
 
     /// **Places vacated under one root are read together.** Removing a directory
