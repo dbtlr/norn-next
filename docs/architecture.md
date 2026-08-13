@@ -148,10 +148,11 @@ these two rows wait on is the heal-side injection they are stated over.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves a quarantine recorded — where the path already had a row — with no finding beside it until the next heal re-derives the path and records one. A tear inside one changeset is injected today; a tear at a chunk boundary is the suite's to reach. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it until the next heal re-derives the path and records one. A tear inside one changeset is injected today; a tear at a chunk boundary is the suite's to reach. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
+| A document whose frontmatter block is read by nothing | **Degraded at rung 2.** The document keeps the row the act could derive — identity and body facts, no frontmatter projection — and a document-scoped finding naming the cause stands beside that row until an ordinary re-derivation finds the block readable. |
 | Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt — by the open where the corruption is in the store schema, and by the host's rung-3 leg where a warm read, a warm write or the scheduled verification is what met it. |
 | Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
@@ -175,15 +176,14 @@ that is unlinked or changes kind between the listing that named it and the stat 
 it refuses there.
 
 **Quarantine is per document; refusal is per vault.** See
-[ADR 0018](decisions/0018-quarantine-cause-classes-are-closed-and-carry-the-unread-block.md),
-which supersedes ADR 0013. A
-document norn cannot decode — path bytes that are not UTF-8, a path spelling the
-document-path grammar refuses, a body that is not UTF-8, or a frontmatter block past the
-bound the text layer reads — is a fact about one document rather than about the vault, so it
-never withdraws the vault. The rung-2 heal skips its facts, records a finding naming the path
-and the cause class — withheld while a rendering collision stands, as below — and keeps
-going; the entry reaches `Ready` and serves every other document.
-Every rung-2 path answers the four cause classes the same way: the full tree heal, a scoped
+[ADR 0019](decisions/0019-quarantine-is-for-nothing-derivable-causes.md), which supersedes
+ADR 0018. A document norn can derive nothing from — path bytes that are not UTF-8, a path
+spelling the document-path grammar refuses, or a body that is not UTF-8 — is a fact about one
+document rather than about the vault, so it never withdraws the vault. The rung-2 heal skips
+its facts, records a finding naming the path and the cause class — withheld while a rendering
+collision stands, as below — and keeps going; the entry reaches `Ready` and serves every
+other document.
+Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
 subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
 grammar refuses splits by what it still addresses, because naming no document and holding no
 document are different things. A spelling refused only for the stem its leaf reduces to —
@@ -195,46 +195,70 @@ backslash, a control byte, bytes that are not UTF-8 — spoils every path beneat
 document under it is storable and there is no row to prune; the warm path reads what is under
 it and quarantines what it finds.
 
-The store holds only representable truth, so a document that stops decoding **loses its
-store row**, and the finding is where its absence is stated. The row's death is recorded
-with the quarantine provenance, which says the derived row died and the file did not; a
-prune or a removal would say the path left the vault. A quarantined path is filed under the
-path the vault spells it, and under a rendering of that spelling where the grammar admits no
-such path. **A rendering names a place, never an identity**: no document is *derived* under
-one, though the vault may genuinely hold a document whose own name is that place. That
-collision is one key holding one row, and the **document wins**: while it stands there, the
-quarantined document's finding is withheld rather than filed over a readable document, so
-for as long as the collision lasts nothing records that the quarantined document cannot be
-read. The trade is deliberate — a finding at that place would call a document that derived
-unreadable — and **the heal that removes the colliding document is the one that clears
-it**: the deaths that vacate rendered places send the heal back, after its last increment,
-to read the roots those places sit under, and every refused spelling those readings meet is
-quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
-is what that revisit exists to prevent. **A finding a producer records replaces the findings
-it re-derives and no others, and the unit that carries that scope is the finding rather than
-the job.** What a quarantine replaces at the place it is filed at is decided by what the act
-that derived it read. An act that read a path and opened no bytes — the revisit, the sweep
-of a root the grammar poisons, a dirty path the grammar refuses — concludes what a spelling
-alone decides, so a quarantine about the document standing at that place is left where it
-is. An act that opened a document's bytes and refused them concludes what those bytes say,
-so the findings about the refused spellings rendering onto the same place are left where
-they are. Each side is the causes it can conclude, read off the cause the finding states, so
-neither side can take the other's work without re-deriving it. **One discard still takes a
-place whole, and exclusivity rather than re-derivation is what licenses it**: the increment
-runs it once per changed path, because a change that writes a row at a place is a change
-that makes it a place no finding may stand at. A findings model that let a document-scoped
-note stand beside a row would owe that discard a scope too. **A finding whose subject the
-vault no longer holds is reached by neither side**: nothing reads a path that left, so no
-walk re-derives what stands at its place and no discard takes it, and it stands until a
-schema re-pin empties the table the vault-wide walk then fills again. That is the standing
-gap in this convergence, and the collision above is where it is most visible — the document
-whose bytes were refused can leave while a refused spelling still renders onto its place.
-**The revisit is opportunistic, and it is owed once per heal rather than once per removal**:
-its increments are already committed, so a directory it cannot open ends that root's reading
-rather than refusing the heal, and a place left unread that way keeps its finding withheld
-until a later heal reads it again — the same honesty the paging window above states, for the
-same reason. Recovery needs no second mechanism: a document that reads again is an ordinary
-derivation, and the increment's own findings discard takes the finding with it.
+**A document whose frontmatter block is read by nothing degrades rather than quarantining.**
+A block that never closes, a block that is not well-formed, and a block past the authored
+`FRONTMATTER_MAX_BYTES` bound are one situation under three causes: the block is unread, so
+the document's fields are unknown rather than empty. The act derives what it could — identity,
+body, headings, links, body tags — the frontmatter projection is absent, and a
+**document-scoped finding** naming the cause stands at the document's own path, beside its
+row. The bound still refuses the block whole and nothing is truncated; what the refusal
+produces is that row and that finding rather than a removal. The finding closes on the
+ordinary derivation that finds the block readable again, so a document edited across the
+bound or across a typo moves its finding and never its row.
+
+The store holds only representable truth, so a document that stops decoding **loses its store
+row**, and the finding is where its absence is stated. The row's death is recorded with the
+quarantine provenance, which says the derived row died and the file did not; a prune or a removal
+would say the path left the vault. A quarantined path is filed under the path the vault spells it,
+and under a rendering of that spelling where the grammar admits no such path. **A rendering names
+a place, never an identity**: no document is *derived* under one, though the vault may genuinely
+hold a document whose own name is that place. That collision is one key holding one row, and the
+**document wins**: while it stands there, the quarantined document's place-scoped finding is
+withheld rather than filed over a readable document, so for as long as the collision lasts nothing
+records that the quarantined document cannot be read. The trade is deliberate — a finding at that
+place would call a document that derived unreadable — and **the heal that removes the colliding
+document is the one that clears it**: the deaths that vacate rendered places send the heal back,
+after its last increment, to read the roots those places sit under, and every refused spelling
+those readings meet is quarantined then. Waiting for a demand or for unrelated work to reach the
+quarantined path is what that revisit exists to prevent.
+
+**Findings carry two scopes, and one thing separates them: whether a document row at the subject
+withholds the finding.** A **place-scoped** finding — every quarantine — says nothing is derived
+at its subject, so a readable document standing there withholds it, as the collision above does. A
+**document-scoped** finding — every unread block — is about the document derived at its subject,
+so the row standing there is what it describes and nothing withholds it. A kind says which it is,
+in the same registry that spells it, so a producer recording one and a client reading one read one
+answer. **A finding a producer records replaces the findings it re-derives and no others, and the
+unit that carries that scope is the finding rather than the job.** What a quarantine replaces at
+the place it is filed at is decided by what the act that derived it read. An act that read a path
+and opened no bytes — the revisit, the sweep of a root the grammar poisons, a dirty path the
+grammar refuses — concludes what a spelling alone decides, so a quarantine about the document
+standing at that place is left where it is. An act that opened a document's bytes and refused them
+concludes what those bytes say, so the findings about the refused spellings rendering onto the
+same place are left where they are. Each side is the causes it can conclude, read off the cause
+the finding states, so neither side can take the other's work without re-deriving it. **One
+discard still takes a place whole, and what licenses it is one reason per scope**: the increment
+runs it once per changed path, because a change that writes a row there ends every place-scoped
+finding at that place — none of which anything could read for as long as that row stands — and
+takes the document-scoped ones the act that wrote the row concluded by reading the document.
+Recording follows the increment inside one flush, so concluding and refiling is one act: a block
+still unread is stated again where it stood, and a block that reads is stated nowhere. **A finding
+whose subject the vault no longer holds is reached by neither side**: nothing reads a path that
+left, so no walk re-derives what stands at its place and no discard takes it, and it stands until
+a schema re-pin empties the table the vault-wide walk then fills again. That is the standing gap
+in this convergence, and the collision above is where it is most visible — the document whose
+bytes were refused can leave while a refused spelling still renders onto its place. **A schema
+re-pin discards a document-scoped finding that the walk after it does not file again**, which is
+the second gap in the same family: the re-pin invalidates every finding and the vault-wide walk
+that follows is hash-authoritative, so it re-derives a place-scoped finding at every path no row
+stands at and reaches a document-scoped one only where that document's content hash moved. Such a
+finding therefore returns when the document next changes rather than with the walk. **The revisit
+is opportunistic, and it is owed once per heal rather than once per removal**: its increments are
+already committed, so a directory it cannot open ends that root's reading rather than refusing the
+heal, and a place left unread that way keeps its finding withheld until a later heal reads it
+again — the same honesty the paging window above states, for the same reason. Recovery needs no
+second mechanism: a document that reads again is an ordinary derivation, and the increment's own
+findings discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
@@ -373,7 +397,7 @@ contract.
 
 | Crate | Owns | Earned by |
 |---|---|---|
-| `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. **Every enumerable code lives in one registry here** — refusal codes and finding kinds alike — under one grammar: a flat `namespace/what-happened` string is what a client branches on, a nested typed reason is structure inside a code rather than a code, a note a layer files about its own reading of one document is not a code and does not cross this seam, and an advisory `detail` string is prose no client matches on. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
+| `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. **Every enumerable code lives in one registry here** — refusal codes and finding kinds alike — under one grammar: a flat `namespace/what-happened` string is what a client branches on, a nested typed reason is structure inside a code rather than a code, a note a layer files about its own reading of one document is not a code and does not cross this seam, and an advisory `detail` string is prose no client matches on. A finding kind also carries the scope its findings stand at, so whether a document row at a subject withholds a finding is one answer the producer and the client read from the same registry. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
 | `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, both link families (wikilink and inline Markdown, one fact shape carrying family, protocol and title, from which the resolution mode derives — protocol first, family second), `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Frontmatter string values are scanned for wikilinks only. Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". **A frontmatter block is read only up to an authored byte bound** (`FRONTMATTER_MAX_BYTES`), because the YAML scanner behind the seam is quadratic in block length on nested flow collections; a block past it is refused unparsed, so what a block costs to read has the ceiling the bound sets rather than growing with the block's own length — a ceiling, not a flat cost: inside the bound a nested block still costs about two orders of magnitude more than an ordinary mapping of the same length. Inside the bound, reading an ordinary mapping is **linear in its key count**, and so is deriving every field's strings back out of it: both places a block's keys are all resolved — the field split, over each scanned key line, and the text derive, over each field — go through a by-key view of the parsed mapping rather than a scan of it, and the soak lane bars both shapes by taking one whole block against four blocks of a quarter its keys. The `#tag` family is committed to graduate past syntax in two steps, in that order: the facet `norn-store` enforces belongs to the vault schema's content model and binds with it, and the query surface that reads the facet — whose shape the verb charter decides — comes after. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
 | `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-entry flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-prefix, redundant separators — so every consumer compares normalized identity instead of deriving its own. **A vault's own mechanism files are part of "everything that touches the vault filesystem"**: the maintainer lock file and the shadow home — one of each per registration, keyed by data base, channel and vault name — rather than among documents. The lock file is in the norn data root; the home is under the data root too unless the vault is on another filesystem, where it falls back under the vault root carrying that same key, so two registrations over one root stage into two homes and neither sweeps the other's. Creating, reading, writing and sweeping them is `norn-fs`'s — no other crate reaches them. Watcher coverage for an entry is three edges: the vault root tree recursively; the root's own parent non-recursively, which is the only edge that can report the root name being removed or renamed — coverage ending rather than a change inside the vault; and, when the entry's configured schema source sits outside the vault, that source's parent, added only when neither of the first two already reaches it. Filesystem facts only; not a general event bus. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
 | `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, the read builders (wire params → emitted SQL, not built) with the snapshot read handles they run on, and — behind an off-by-default feature, so a shipped build carries none of it — the arrangements the induced-failure suite reaches a rung or a refusal through from outside. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
@@ -876,10 +900,12 @@ schema-keyed tables — whether it arrives as a hand edit the watcher observes o
 future verb, and it invalidates nothing outside those tables. The re-pin discards the
 schema-keyed rows and names no paths, so the re-derivation that records them again is the
 vault-wide walk. That walk is hash-authoritative: it reads every markdown, non-excluded path
-no document row stands at — which is every path a finding stands at whose subject the vault
-still holds — and beyond the schema-keyed rows it re-derives only a document that drifted
-since it was last derived, which any reconcile owed anyway. A finding whose path left the
-vault is filed again by nothing, which is why the re-pin's discard is where it ends.
+no document row stands at — which is every path a **place-scoped** finding stands at whose
+subject the vault still holds — and beyond the schema-keyed rows it re-derives only a
+document that drifted since it was last derived, which any reconcile owed anyway. Two kinds
+of finding are outside what it files again: one whose path left the vault, which is why the
+re-pin's discard is where such a finding ends, and a **document-scoped** one standing at a
+path whose document did not drift, which returns when that document next changes.
 
 **Mutation — everything is a plan.**
 
