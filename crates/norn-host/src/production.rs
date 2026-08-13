@@ -1423,6 +1423,12 @@ enum Decided {
 impl Decided {
     /// The kinds an act of this side re-derives at the place it files at, which
     /// is exactly what recording its finding discards there.
+    ///
+    /// Every quarantine files through this one mapping — the merge walk's
+    /// refused spellings and refused documents, the sweep of a poisoned root,
+    /// the reading of a vacated one, and the dirty-path loop — so a job that
+    /// read both sides of a place re-derives both and takes neither, and the
+    /// two scopes tell apart only where an act reaches one side alone.
     const fn rederives(self) -> DiscardScope<'static> {
         match self {
             Decided::BySpelling => DiscardScope::Kinds(&SPELLING_KINDS),
