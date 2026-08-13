@@ -4664,7 +4664,9 @@ mod tests {
     /// wrote it.** The text layer refuses the block either way, so the row, the
     /// body facts, the note count and the cause a finding is filed under agree
     /// between a document whose duplicate the parser sees and one whose keys
-    /// only collapse into a single name.
+    /// only collapse into a single name. Both accounts name the repeated key;
+    /// how precisely each places it is the text layer's contract, not this
+    /// layer's.
     #[test]
     fn a_repeated_key_degrades_alike_whether_or_not_a_tag_spelled_it() {
         let derive = |source: &str| {
@@ -4702,11 +4704,17 @@ mod tests {
                 "document/frontmatter-unreadable"
             );
         }
-        assert_eq!(
-            plain.unread_frontmatter.expect("refused").problem,
-            tagged.unread_frontmatter.expect("refused").problem,
-            "the two spellings account for the refusal differently"
-        );
+        for (spelling, derived) in [("plain", plain), ("tagged", tagged)] {
+            let problem = derived
+                .unread_frontmatter
+                .expect("refused")
+                .problem
+                .expect("a refusal the reader accounted for");
+            assert!(
+                problem.contains("duplicate entry with key \"k\""),
+                "the {spelling} duplicate's finding does not name the repeated key: {problem:?}"
+            );
+        }
     }
 
     /// **The store's projection bound is not a fourth outcome a document can

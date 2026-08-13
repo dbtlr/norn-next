@@ -499,6 +499,11 @@ pub(crate) fn from_yaml(
 /// The account a repeated key is refused with, in the shape the parser behind
 /// this seam states its own duplicate refusal in: the key, prefixed by the path
 /// to the mapping holding it wherever that is not the top level.
+///
+/// The parser's own account also places the entry — `at line 2 column 3` — and
+/// this one does not. A collapse is reached after the parse, which is where the
+/// spans were, so what the two spellings of a repeated key share is the key and
+/// the path and not a byte of position.
 fn duplicate_entry(path: &str, key: &str) -> String {
     let entry = format!("duplicate entry with key {key:?}");
     if path.is_empty() {

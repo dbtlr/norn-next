@@ -236,11 +236,18 @@ fn a_refusal_carries_the_decoder_s_account_of_the_block() {
 
 // ── A key written twice ──────────────────────────────────────────────────
 
-/// Everything a consumer of a read document can see about it.
-fn posture(source: &str) -> (Option<BlockRefusal>, Vec<String>, bool, String) {
+/// Everything a consumer of a read document can see about it, with a refusal
+/// reduced to its class. What the account of a refusal says is compared
+/// separately, by [`refusal_account`], because the two refusals of a repeated
+/// key know different amounts about where it is.
+fn posture(source: &str) -> (Option<&'static str>, Vec<String>, bool, String) {
     let document = Document::parse(source);
     (
-        document.frontmatter_refusal().cloned(),
+        document.frontmatter_refusal().map(|refusal| match refusal {
+            BlockRefusal::Unclosed => "unclosed",
+            BlockRefusal::TooLarge { .. } => "too large",
+            BlockRefusal::Unreadable { .. } => "unreadable",
+        }),
         codes(&document)
             .iter()
             .map(|code| (*code).to_string())
@@ -250,24 +257,33 @@ fn posture(source: &str) -> (Option<BlockRefusal>, Vec<String>, bool, String) {
     )
 }
 
+/// The account an unreadable block carries.
+fn refusal_account(source: &str) -> String {
+    match Document::parse(source).frontmatter_refusal() {
+        Some(BlockRefusal::Unreadable { problem }) => problem.clone(),
+        other => panic!("{source:?} is not an unreadable block: {other:?}"),
+    }
+}
+
 /// **A tag is invisible for uniqueness.** A key written twice refuses the
 /// block, and the spelling of the two keys is not part of the answer: the
 /// parser refuses the pair it sees as one key, and the pair it holds apart —
 /// a tagged key and a plain one, which the strip into the value model collapses
-/// into one name — is refused where they collapse. The document a reader gets
-/// is the same document either way, down to the account of the refusal.
+/// into one name — is refused where they collapse. The refusal class, the
+/// notes, the absent value and the body are the same document either way, and
+/// so is the account wherever the parser's own refusal has no position to add
+/// to it.
 #[test]
 fn a_key_written_twice_refuses_the_block_however_it_was_spelled() {
     let plain = posture("---\nk: 1\nk: 2\n---\nbody\n");
-    assert_eq!(
-        plain.0,
-        Some(BlockRefusal::Unreadable {
-            problem: "duplicate entry with key \"k\"".to_string()
-        })
-    );
+    assert_eq!(plain.0, Some("unreadable"));
     assert_eq!(plain.1, ["frontmatter-parse-failed"]);
     assert!(!plain.2, "a refused block produced a value");
     assert_eq!(plain.3, "body\n");
+    assert_eq!(
+        refusal_account("---\nk: 1\nk: 2\n---\nbody\n"),
+        "duplicate entry with key \"k\""
+    );
 
     for spelling in [
         "---\n!x k: 1\nk: 2\n---\nbody\n",
@@ -279,12 +295,59 @@ fn a_key_written_twice_refuses_the_block_however_it_was_spelled() {
             plain,
             "{spelling:?} degrades differently from the plain duplicate"
         );
+        assert_eq!(
+            refusal_account(spelling),
+            "duplicate entry with key \"k\"",
+            "{spelling:?} accounts for the refusal differently"
+        );
+    }
+}
+
+/// **The account places the repeated key only where the refusal held a
+/// position.** The parser knows the line and column its own duplicate sits at
+/// and says so; a pair that only collapses into one key collapses after every
+/// span the parse had, so the account it carries stops at the key and the path
+/// to the mapping holding it. What a reader sees of the document is the same
+/// either way — the account is more precise where more was known, never
+/// different about what is wrong.
+#[test]
+fn the_account_places_the_repeated_key_only_where_the_parser_refused() {
+    for (plain, tagged) in [
+        (
+            "---\n# a note\nk: 1\nk: 2\n---\nbody\n",
+            "---\n# a note\n!x k: 1\nk: 2\n---\nbody\n",
+        ),
+        (
+            "---\nouter:\n  k: 1\n  k: 2\n---\nbody\n",
+            "---\nouter:\n  !x k: 1\n  k: 2\n---\nbody\n",
+        ),
+        (
+            "---\nlist:\n  - k: 1\n    k: 2\n---\nbody\n",
+            "---\nlist:\n  - !x k: 1\n    k: 2\n---\nbody\n",
+        ),
+    ] {
+        assert_eq!(
+            posture(plain),
+            posture(tagged),
+            "{tagged:?} degrades differently from {plain:?}"
+        );
+        let (placed, unplaced) = (refusal_account(plain), refusal_account(tagged));
+        assert!(
+            placed.starts_with(&unplaced),
+            "{placed:?} is not {unplaced:?} plus a position"
+        );
+        assert!(placed.contains(" at line "), "{placed:?} places nothing");
+        assert!(
+            !unplaced.contains(" at line "),
+            "{unplaced:?} places a key the collapse has no span for"
+        );
     }
 }
 
 /// The collapse is checked wherever a mapping is built, so a repeated key
 /// refuses the block at depth and whether the block wrote both entries or a
-/// merge contributed one of them.
+/// merge contributed one of them. The account names the mapping the repeat is
+/// in, by the path to it.
 #[test]
 fn a_key_repeated_below_the_top_level_refuses_the_block_too() {
     for (source, expected) in [
