@@ -946,7 +946,7 @@ fn scoped_increment(
             // has rows to prune wherever it addresses any, which a spelling no
             // prefix admits does not: such a spelling poisons every path beneath
             // it, so the range would be empty and none is opened.
-            norn_fs::PathKind::Missing | norn_fs::PathKind::Other => {
+            kind @ (norn_fs::PathKind::Missing | norn_fs::PathKind::Other) => {
                 pending.flush()?;
                 if let Some(scope) = scope {
                     prune_subtree_ordered(
@@ -959,6 +959,19 @@ fn scoped_increment(
                         store_order(sensitivity),
                         pending.account,
                     )?;
+                    // **A path that is not there is a scope read to its end.**
+                    // The kind is the whole reading — nothing is at that path and
+                    // so nothing is under it — which is what the row prune above
+                    // acts on, and the findings in that scope join it. A path
+                    // that is *something else* is a different answer: the walk
+                    // withholds a symbolic link and a device-like entry rather
+                    // than reading through it, so a leg that took the findings
+                    // under one would take what no walk of this vault reads.
+                    if kind == norn_fs::PathKind::Missing {
+                        pending
+                            .account
+                            .walked(HealScope::from(scope), store_order(sensitivity));
+                    }
                 }
                 continue;
             }
@@ -1974,11 +1987,16 @@ struct Account {
 }
 
 impl Account {
-    /// Record that a walk of `scope` enumerated its whole scope, so the job's
-    /// end may prune the findings that scope no longer accounts for.
+    /// Record that this job read `scope` to its end, so the job's end may prune
+    /// the findings that scope no longer accounts for.
     ///
-    /// A walk that refuses never reaches here: its error ends the job ahead of
-    /// the prune, which is what leaves every finding in its scope standing.
+    /// Two legs reach it, and both read a whole scope: a merge that enumerated
+    /// every entry its scope holds, and a dirty path the filesystem answers is
+    /// not there — an answer about that path and everything under it, which is
+    /// the same answer the row prune beside it acts on.
+    ///
+    /// A walk that refuses reaches neither: its error ends the job ahead of the
+    /// prune, which is what leaves every finding in its scope standing.
     fn walked(&mut self, scope: HealScope<'_>, order: StoredPathOrder) {
         self.walked.push(Walked {
             scope: scope.owned(),
@@ -4122,6 +4140,82 @@ mod tests {
             findings_at(&mut attachment.store, "other/bad.md").len(),
             1,
             "the scoped heal took a finding outside the scope it walked"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The path the deletion itself names is a scope too.** A watcher reports
+    /// the path an event happened at, and a document that left is a path the
+    /// filesystem answers is not there — an answer about that path and
+    /// everything under it. The rows in that scope die on it, and the findings
+    /// in it join them, so the deletion of a quarantined document converges
+    /// inside the job its own event raised.
+    #[test]
+    fn a_dirty_path_that_is_gone_takes_the_findings_its_scope_held() {
+        let f = Fixture::new("quarantine-deleted-dirty-path");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("other.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 2);
+
+        fs::remove_file(f.vault().join("bad.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            findings_at(&mut attachment.store, "bad.md").is_empty(),
+            "the finding stands at a path the increment read as gone"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "other.md").len(),
+            1,
+            "the increment took a finding outside the path its event named"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A path holding something norn does not read is not a path holding
+    /// nothing.** The walk names a symbolic link and a device-like entry and
+    /// never reads through one, so a finding at such a place is one no walk of
+    /// this vault re-derives — and the leg that answers a dirty path takes no
+    /// more than a walk of the same place would.
+    #[cfg(unix)]
+    #[test]
+    fn a_dirty_path_that_stopped_being_a_document_keeps_the_finding_at_its_place() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("quarantine-dirty-path-symlink");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "bad.md").len(), 1);
+
+        fs::remove_file(f.vault().join("bad.md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("bad.md")).unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad.md").len(),
+            1,
+            "the increment took a finding at a place it read nothing through"
         );
         ops.detach(&name, attachment);
     }

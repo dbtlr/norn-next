@@ -247,11 +247,21 @@ finding at that place — none of which anything could read for as long as that 
 takes the document-scoped ones the act that wrote the row concluded by reading the document.
 Recording follows the increment inside one flush, so concluding and refiling is one act: a block
 still unread is stated again where it stood, and a block that reads is stated nowhere. **A finding
-whose subject the vault no longer holds is reached by neither side**: nothing reads a path that
-left, so no walk re-derives what stands at its place and no discard takes it, and it stands until
-a schema re-pin empties the table the vault-wide walk then fills again. That is the standing gap
-in this convergence, and the collision above is where it is most visible — the document whose
-bytes were refused can leave while a refused spelling still renders onto its place. **A
+whose subject the vault no longer holds is reached by neither side, so the walk that enumerated
+its place is what takes it.** Nothing reads a path that left, so no act re-derives at its place
+and no discard reaches it — and a walk that enumerated a scope cleanly knows something no act at a
+path does: that nothing under that scope stands there at all. So a walk ends by taking, on each
+side, the findings whose subject its own scope holds and that nothing it read concluded — the same
+scope, in the same job-end recording that files what it did read, on the axis the rows are pruned
+on. **What licenses that is enumeration rather than absence.** Three things withhold it, and each
+of them leaves the finding standing: a walk that refused ends its job ahead of its own prune; a
+root the walk did not enter covers the places beneath it, so a finding under a withheld subtree
+survives whatever else the walk read; and a place is named by every spelling that renders onto it,
+so a walk rooted below that place's deepest unrendered ancestor read some of those spellings and
+never the rest and concludes nothing there. The collision is where the sides tell apart most
+clearly — the document whose bytes were refused can leave while a refused spelling still renders
+onto its place, and the walk that still reads that spelling ends the content findings there and
+leaves the spelling ones. **A
 document-scoped finding is converged as a pair with the row it stands beside**, because a
 hash-authoritative walk reaches it no other way: a place-scoped finding sits where no row does and
 so is read on every walk, while a document-scoped one sits where a row does and would be reached
@@ -302,9 +312,12 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and four named statements carry an index bar through it: suffix candidates,
-findings in a class, and the class- and subject-scoped findings discards, the subject
-discard in both the whole form and the form narrowed to the kinds a producer re-derives.
+connection — and five named statements carry an index bar through it: suffix candidates,
+findings in a class, the class- and subject-scoped findings discards — the subject
+discard in both the whole form and the form narrowed to the kinds a producer re-derives —
+and the page a walk reads its scope's unaccounted finding subjects through, whose bar is the
+weaker one its shape admits: an ordered pass over the findings index, never a read of the
+table, never a sorter, and an indexed seek per row for the document the place may hold.
 None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
 query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
 per PR, and no query shape carries a timing or a memory bar.
@@ -911,10 +924,12 @@ schema-keyed rows and names no paths, so the re-derivation that records them aga
 vault-wide walk. That walk is hash-authoritative: it reads every markdown, non-excluded path
 no document row stands at — which is every path a **place-scoped** finding stands at whose
 subject the vault still holds — and beyond the schema-keyed rows it re-derives only a
-document that drifted since it was last derived, which any reconcile owed anyway. Two kinds
-of finding are outside what it files again: one whose path left the vault, which is why the
-re-pin's discard is where such a finding ends, and a **document-scoped** one standing at a
-path whose document did not drift, which returns when that document next changes.
+document that drifted since it was last derived, which any reconcile owed anyway. A
+**document-scoped** finding is reached without a drift, because the row it stands beside states
+its own defect and the walk re-derives such a document when no finding stands at it. A finding
+whose path left the vault is outside what the walk files again, and is what the walk's own
+subject-axis prune takes: the place is inside the scope it enumerated, and nothing it read
+renders onto it.
 
 **Mutation — everything is a plan.**
 
