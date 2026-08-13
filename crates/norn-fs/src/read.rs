@@ -69,7 +69,7 @@ impl ReadAndHash {
 
 /// Reads the regular file `relative` names below `anchor`, once.
 ///
-/// The read is [contained](crate::open): no component of `relative` is followed
+/// The read is contained (`open`'s discipline): no component of `relative` is followed
 /// through a symbolic link, and a name that is not a regular file is refused
 /// rather than opened for content. A caller that wants an absent name to be an
 /// answer rather than a refusal wants [`read_optional_and_hash`].

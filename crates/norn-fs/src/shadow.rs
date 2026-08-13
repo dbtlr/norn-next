@@ -325,7 +325,7 @@ impl ShadowHome {
     /// **This home only, and never below it.** What the shadows of another key —
     /// or of no key at all — cost is bounded by [`sweep_fallback_root`] and
     /// [`sweep_fallback_tree`], on premises that do not need this home's lock.
-    /// Which entries are candidates is [`sweep_entries`]'s rule, and it is the
+    /// Which entries are candidates is `sweep_entries`'s rule, and it is the
     /// same at every tier.
     ///
     /// `older_than` is what makes this the same act at both of this home's
