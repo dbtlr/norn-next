@@ -31,6 +31,14 @@ frontmatter value is absent, and a **document-scoped finding naming the cause** 
 the document's own path beside its row. The document stays a document, and the unread block
 becomes a recorded, queryable defect a validator can surface so that somebody fixes it.
 
+**Where the body starts differs by cause, because two of the three causes have a block to
+skip and one does not.** A block past the bound and a block that is not well-formed are both
+closed, so their bytes are addressable and the body begins after the closing fence — the text
+inside contributes nothing. A block that never closes delimits nothing: no fence bounds it, so
+the document is body from its first byte, and the links, headings and tags read out of the
+lines that opened like a block are the document's own body facts. The finding says the block
+was read by nothing, which is true of all three; it does not say that the text is unread.
+
 **A document vanishing over a YAML typo misleads more queries than a partial row carrying a
 reachable signal does.** That is the trade, and it is why the exclusivity gives way rather
 than the row. Quarantine answers "norn does not know this document" by removing it, which is
@@ -62,6 +70,13 @@ and records what it concluded, in that order, inside one flush. Closure needs no
 mechanism either way — a block that reads again is an ordinary derivation whose discard takes
 the finding with it, and nothing refiles it.
 
+**The row and the finding beside it are what a heal converges, not the row alone.** A partial
+row is worth writing because a reachable signal stands beside it, so a row standing alone is
+not a smaller answer but the wrong one. The row states its own defect — an absent frontmatter
+projection beside a nonzero count of frontmatter-scoped diagnostics is a block nothing read —
+so a heal re-derives such a document whenever no document-scoped finding stands at it, rather
+than only when its bytes moved.
+
 **The bound itself is untouched.** A block past `FRONTMATTER_MAX_BYTES` is still refused
 unparsed and never truncated, for the cost reason ADR 0018 states and re-states here: reading
 a block is superlinear in its length, the bound is the ceiling on what one block costs, and a
@@ -80,15 +95,23 @@ layer reports — the refusal reason, beside the note it also files — rather t
 consumer recovers by scanning a note list for a code. A diagnostic code still crosses no
 seam.
 
-**A schema re-pin discards a co-resident finding that the walk after it does not refile.**
-The re-pin invalidates every finding, and the vault-wide walk that follows is
-hash-authoritative: it reads every path no document row stands at, and re-derives a path that
-has one only when its content hash moved. A place-scoped finding stands where no row does and
-is therefore refiled; a document-scoped finding stands where a row does, so it returns when
-the document next changes rather than with the walk. This is a convergence gap in the same
-family as a finding whose subject left the vault, and it is stated as one rather than
-answered here — the answer is a subject-axis pass over the findings table, which is where a
-future validator's findings, which also stand beside rows, will need it too.
+**A degraded row and its finding converge as a pair, which costs the heal one check a hash
+comparison cannot make.** A place-scoped finding is reached by a hash-authoritative walk for
+free: no row stands where one sits, so the walk reads that path whatever its bytes say. A
+document-scoped finding sits beside a row, so a walk comparing hashes alone would never
+restore one that left the table — and two ordinary events take one: a vault-schema re-pin,
+which discards every finding keyed by the fingerprint it replaced, and a process killed
+between a flush's increment and the recording after it. Either would leave the row asserting
+an absent frontmatter with nothing stating that the fields were never read, which is exactly
+the answer this decision exists to prevent. The row is what closes it — an absent frontmatter
+projection beside a nonzero frontmatter-scoped diagnostic count is a block nothing read — so a
+heal re-derives such a document when no document-scoped finding stands beside it. That costs
+one indexed findings lookup per defective document per heal, and a converged vault re-derives
+nothing.
+
+**A finding whose subject the vault no longer holds is still reached by nothing.** That gap is
+on the subject axis rather than this one — nothing reads a path that left, whatever scope the
+finding standing there carries — and this decision neither widens nor narrows it.
 
 **Inversion.** If partial rows prove untrustworthy in practice — queries answered from a row
 whose fields were never read, by callers that never look at the findings beside it — the

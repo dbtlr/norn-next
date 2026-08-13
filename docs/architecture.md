@@ -148,7 +148,7 @@ these two rows wait on is the heal-side injection they are stated over.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it until the next heal re-derives the path and records one. A tear inside one changeset is injected today; a tear at a chunk boundary is the suite's to reach. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it until the next heal records one. Each is reached without an edit to the file: no row stands at a quarantined path, so the walk reads it; a degraded row states its own defect, so the walk re-derives it when nothing stands beside it. A tear inside one changeset is injected today; a tear at a chunk boundary is the suite's to reach. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
@@ -201,7 +201,10 @@ A block that never closes, a block that is not well-formed, and a block past the
 the document's fields are unknown rather than empty. The act derives what it could — identity,
 body, headings, links, body tags — the frontmatter projection is absent, and a
 **document-scoped finding** naming the cause stands at the document's own path, beside its
-row. The bound still refuses the block whole and nothing is truncated; what the refusal
+row. Where the body starts differs by cause: a closed block bounds its own bytes, so an
+oversized or unreadable one is skipped and contributes nothing, while an unclosed one bounds
+nothing and the document is body from its first byte — the links, headings and tags written in
+the lines that opened like a block are read as the document's own. The bound still refuses the block whole and nothing is truncated; what the refusal
 produces is that row and that finding rather than a removal. The finding closes on the
 ordinary derivation that finds the block readable again, so a document edited across the
 bound or across a typo moves its finding and never its row.
@@ -247,12 +250,17 @@ whose subject the vault no longer holds is reached by neither side**: nothing re
 left, so no walk re-derives what stands at its place and no discard takes it, and it stands until
 a schema re-pin empties the table the vault-wide walk then fills again. That is the standing gap
 in this convergence, and the collision above is where it is most visible — the document whose
-bytes were refused can leave while a refused spelling still renders onto its place. **A schema
-re-pin discards a document-scoped finding that the walk after it does not file again**, which is
-the second gap in the same family: the re-pin invalidates every finding and the vault-wide walk
-that follows is hash-authoritative, so it re-derives a place-scoped finding at every path no row
-stands at and reaches a document-scoped one only where that document's content hash moved. Such a
-finding therefore returns when the document next changes rather than with the walk. **The revisit
+bytes were refused can leave while a refused spelling still renders onto its place. **A
+document-scoped finding is converged as a pair with the row it stands beside**, because a
+hash-authoritative walk reaches it no other way: a place-scoped finding sits where no row does and
+so is read on every walk, while a document-scoped one sits where a row does and would be reached
+only when that document's bytes moved. A vault-schema re-pin discards it and a process killed
+between a flush's increment and its recording never writes it, and either would leave a row
+asserting an absent frontmatter with nothing saying the fields were never read. So the row states
+its own defect — an absent frontmatter projection beside a nonzero count of frontmatter-scoped
+diagnostics is a block nothing read — and the walk re-derives such a document when no
+document-scoped finding stands at it. That is one indexed findings lookup per defective document
+per heal, and a converged vault re-derives nothing. **The revisit
 is opportunistic, and it is owed once per heal rather than once per removal**: its increments are
 already committed, so a directory it cannot open ends that root's reading rather than refusing the
 heal, and a place left unread that way keeps its finding withheld until a later heal reads it

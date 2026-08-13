@@ -775,16 +775,20 @@ where
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
                 let read = open_enumerated(&mut files)?;
                 match read {
-                    Some(read) if read.content_hash().to_string() != stored[index].content_hash => {
-                        pending.rederive(
-                            Path::new(&fp),
-                            &fp,
-                            read.bytes(),
-                            read.content_hash().to_string(),
-                            Some(&stored[index].path),
-                        );
+                    Some(read) => {
+                        let hash = read.content_hash().to_string();
+                        if hash != stored[index].content_hash
+                            || stands_without_its_finding(pending.store, &stored[index])?
+                        {
+                            pending.rederive(
+                                Path::new(&fp),
+                                &fp,
+                                read.bytes(),
+                                hash,
+                                Some(&stored[index].path),
+                            );
+                        }
                     }
-                    Some(_) => {}
                     // The file went away between this walk's enumeration and
                     // this open. A walk begun now holds no file here, so the
                     // convergent answer is the one that walk's merge would
@@ -825,6 +829,39 @@ where
         progress.report(healed, None);
     }
     pending.flush()
+}
+
+/// Whether this row is a degraded one whose finding is not standing beside it.
+///
+/// A heal is otherwise hash-authoritative: a path a row stands at is read again
+/// only when its bytes moved. That reaches a **place-scoped** finding whatever
+/// happened to it, because no row stands where one sits — but a
+/// **document-scoped** finding sits beside a row, so a heal that only compared
+/// hashes would never restore one that left the table. Two things take one:
+/// a vault-schema re-pin, which discards every finding keyed by the fingerprint
+/// it replaced, and a process killed between a flush's increment and the
+/// recording after it. Either leaves the row asserting an absent frontmatter
+/// with nothing stating that the fields were never read, which is the answer
+/// the degradation exists to prevent.
+///
+/// So the pair is what the heal converges, not the row alone. The row says
+/// which documents can owe a finding — an absent frontmatter projection beside
+/// a nonzero frontmatter-scoped diagnostic count is a block nothing read, and
+/// the same absence beside a zero count is a document with no block — so the
+/// findings read below costs one indexed lookup per **defective** document per
+/// heal, and a converged vault re-derives nothing.
+fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result<bool, JobFailure> {
+    if row.frontmatter.is_some() || row.frontmatter_diagnostic_count == 0 {
+        return Ok(false);
+    }
+    let standing = store
+        .begin_request()
+        .stored_findings(&row.path)
+        .map_err(store_effect)?;
+    Ok(!standing.iter().any(|finding| {
+        FindingKind::try_from(finding.kind.as_str())
+            .is_ok_and(|kind| kind.scope() == FindingScope::Document)
+    }))
 }
 
 /// Read the file the merge is standing on, or answer that it is no longer
@@ -972,7 +1009,13 @@ fn scoped_increment(
                     .begin_request()
                     .stored_document(&document_path)
                     .map_err(store_effect)?;
-                if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
+                let stale = match standing.as_ref() {
+                    None => true,
+                    Some(row) => {
+                        row.content_hash != hash || stands_without_its_finding(pending.store, row)?
+                    }
+                };
+                if stale {
                     pending.rederive(
                         path,
                         document_path.as_str(),
@@ -1882,16 +1925,20 @@ struct Pending<'s> {
     vacated: &'s mut Vacated,
     changes: Vec<Change>,
     queued: Vec<Queued>,
-    /// The places this scope has already re-derived, each paired with the side
-    /// it re-derived there, so a second finding of that side at one place
-    /// **appends** rather than replacing the first: two spellings can render to
-    /// one place, and each of them is a document somebody has to fix. A finding
-    /// of the other side discards its own kinds there, which are kinds no
-    /// finding of this side occupies.
+    /// The places this scope has already re-derived a **place-scoped** finding
+    /// at, each paired with the side it re-derived there, so a second finding of
+    /// that side at one place **appends** rather than replacing the first: two
+    /// spellings can render to one place, and each of them is a document
+    /// somebody has to fix. A finding of the other side discards its own kinds
+    /// there, which are kinds no finding of this side occupies.
     ///
-    /// It holds at most one entry per defective place per side, which is the
-    /// vault's defect count rather than its size, and it is no larger than what
-    /// those same defects put in the findings table.
+    /// Document-scoped findings are absent from it: the increment that wrote
+    /// their subject's row already ended everything standing there, so they
+    /// replace nothing and are entered nowhere.
+    ///
+    /// It holds at most one entry per refused spelling per side, which is the
+    /// vault's undecodable-document count rather than its size, and it is no
+    /// larger than what those same documents put in the findings table.
     replaced: BTreeSet<(DocumentPath, Decided)>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
@@ -2103,11 +2150,21 @@ impl<'s> Pending<'s> {
             // The other side's kinds are disjoint from this one's, so a finding
             // from it discards without reaching what was recorded here. A
             // withheld finding records nothing and so takes no turn.
-            let decided = cause.decided();
-            if self.replaced.insert((finding.path.clone(), decided)) {
-                request
-                    .discard_findings_about(&finding.path, decided.rederives())
-                    .map_err(store_effect)?;
+            //
+            // A **document-scoped** finding takes no turn either, and needs
+            // none: it is queued by the act that pushed the row at its subject,
+            // and the increment ahead of this loop ended every finding standing
+            // at each path it wrote a row to. There is nothing at the subject
+            // for a discard to reach, and nothing this scope can record there
+            // twice — one row is derived per path per flush, and it concludes
+            // the block's readability once.
+            if cause.kind().scope() == FindingScope::Place {
+                let decided = cause.decided();
+                if self.replaced.insert((finding.path.clone(), decided)) {
+                    request
+                        .discard_findings_about(&finding.path, decided.rederives())
+                        .map_err(store_effect)?;
+                }
             }
             request.record_finding(&finding).map_err(store_effect)?;
         }
@@ -4603,6 +4660,56 @@ mod tests {
         }
     }
 
+    /// **Where the body starts differs by cause.** A closed block bounds its own
+    /// bytes, so an unreadable one is skipped whole and nothing inside it is
+    /// read. A block that never closes bounds nothing, so the document is body
+    /// from its first byte and the links and tags written in the lines that
+    /// opened like a block are the document's own body facts. The finding says
+    /// the block was read by nothing; it does not say the text is unread.
+    #[test]
+    fn an_unclosed_block_bounds_nothing_so_its_text_reads_as_body() {
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+            .facts
+        };
+
+        let unclosed = derive("---\ntags: [alpha]\nlink: [[Some Target]]\nnote: #hashtag\n");
+        assert_eq!(unclosed.body_offset, 0, "an unclosed block bounded a body");
+        assert_eq!(
+            unclosed
+                .tags
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["hashtag"]
+        );
+        assert!(
+            unclosed.tags.iter().all(|t| t.source == TagSource::Body),
+            "a tag was attributed to a block nothing read"
+        );
+        assert_eq!(
+            unclosed
+                .links
+                .iter()
+                .map(|l| l.target.as_str())
+                .collect::<Vec<_>>(),
+            ["Some Target"]
+        );
+
+        // The same text inside a block that closes: the block is skipped whole,
+        // so none of it is read either as frontmatter or as body.
+        let closed = derive("---\ntags: [alpha]\nlink: [[Some Target]]\nnote: : :\n---\n# body\n");
+        assert!(closed.body_offset > 0, "a closed block bounded no body");
+        assert!(closed.tags.is_empty(), "a skipped block yielded a tag");
+        assert!(closed.links.is_empty(), "a skipped block yielded a link");
+    }
+
     /// The finding closes on the ordinary derivation that finds the block
     /// readable again: the increment's own subject discard takes it, and the
     /// act that wrote the row files nothing in its place.
@@ -4736,6 +4843,138 @@ mod tests {
         increment(&mut attachment);
         assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
         assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A degraded row never stands alone.** A vault-schema re-pin discards
+    /// every finding keyed by the fingerprint it replaced, and the walk after it
+    /// is otherwise hash-authoritative — so without the pair check the row would
+    /// keep answering with an absent frontmatter and nothing would state that
+    /// the fields were never read. The heal re-derives the document instead, and
+    /// the finding stands again under the new key.
+    #[test]
+    fn a_schema_re_pin_re_files_the_finding_beside_a_degraded_row() {
+        let f = Fixture::new("unread-block-schema-repin");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].kind, "document/frontmatter-unreadable");
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# edited by hand\n",
+        )
+        .unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::schema_change(),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let after = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(
+            after.len(),
+            1,
+            "the re-pin left the degraded row with no finding beside it"
+        );
+        assert_eq!(after[0].kind, "document/frontmatter-unreadable");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_ne!(
+            after[0].vault_schema_fingerprint, before[0].vault_schema_fingerprint,
+            "the edit did not move the pin, so this proves nothing"
+        );
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A flush torn between its increment and its recording converges.** The
+    /// row landed and the finding beside it did not, which is the state a
+    /// process killed in that window leaves. The row itself says its block was
+    /// read by nothing, so the next heal reads the document again and states the
+    /// cause again — no edit to the file is needed to reach it.
+    #[test]
+    fn a_heal_re_files_the_finding_a_torn_flush_never_recorded() {
+        let f = Fixture::new("unread-block-torn-flush");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
+
+        // What the tear leaves: the increment's own subject discard ran and the
+        // recording after it did not.
+        attachment
+            .store
+            .begin_request()
+            .discard_findings_about(
+                &DocumentPath::new("note.md").unwrap(),
+                norn_store::DiscardScope::EveryKind,
+            )
+            .unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let recovered = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the heal left a degraded row with no finding beside it"
+        );
+        assert_eq!(recovered[0].kind, "document/frontmatter-unreadable");
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A converged vault re-derives nothing.** The pair check reads the
+    /// findings standing at a degraded row and stops there when one is beside
+    /// it, so a heal over an unchanged vault leaves every generation where it
+    /// was — a degraded document is not re-written once per heal.
+    #[test]
+    fn a_heal_over_a_standing_pair_writes_nothing() {
+        let f = Fixture::new("unread-block-warm-zero");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let path = DocumentPath::new("note.md").unwrap();
+        let row = attachment
+            .store
+            .begin_request()
+            .stored_document(&path)
+            .unwrap()
+            .unwrap();
+        let finding = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(finding.len(), 1);
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let again = attachment
+            .store
+            .begin_request()
+            .stored_document(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            again.generation, row.generation,
+            "the second heal re-derived a document nothing changed"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "note.md")[0].generation,
+            finding[0].generation,
+            "the second heal re-filed a finding already standing"
+        );
         ops.detach(&name, attachment);
     }
 
