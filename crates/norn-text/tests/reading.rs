@@ -439,6 +439,7 @@ fn a_tagged_key_with_no_twin_reads() {
     assert_eq!(stripped.detail.as_deref(), Some("`!x` on a key at `k`"));
 }
 
+
 // ── The bound on the block ───────────────────────────────────────────────
 
 /// A block of `bytes` bytes that parses to a mapping, closed and well-formed.
@@ -957,11 +958,11 @@ fn a_merge_key_that_names_no_mapping_refuses_the_block() {
     assert_eq!(document.frontmatter(), None);
 }
 
-/// A tag makes `<<` no less the directive — a tag names no part of a key — and
-/// no more attributable: the block's lines are read as written, so a tagged
-/// directive is a line no field owns and none bounds. Folding it in would leave
-/// its bytes for a neighbouring field's edit to carry away and carrying it is
-/// the phantom `<<` field expansion exists to prevent, so the block is refused.
+/// A tag makes `<<` no less the directive — a tag names no part of a key — but
+/// a tag the parser keeps makes it one the fold cannot remove: the directive is
+/// removed by name and a tagged key is not that name, so the entry survives
+/// expansion and reaches the model as the phantom `<<` field the expansion
+/// exists to prevent. The block is refused instead.
 #[test]
 fn a_tagged_merge_key_refuses_the_block() {
     for source in [
@@ -980,6 +981,55 @@ fn a_tagged_merge_key_refuses_the_block() {
         assert_eq!(document.frontmatter(), None, "{source:?}");
         assert_eq!(document.body(), "body\n", "{source:?}");
     }
+}
+
+/// A tag the parser resolves — `!!merge`, `!!str`, or the verbatim form of
+/// either — is gone before a value exists, so the directive it was written on
+/// is a plain one to the fold and folds like one. The spelling survives in the
+/// block's text alone, which is where the per-field split reads past it: the
+/// line bounds the entry above it and no field's range absorbs it, exactly as
+/// for a directive written bare.
+#[test]
+fn a_merge_key_under_a_resolved_tag_folds_like_a_bare_one() {
+    // The anchor is on `anchor:`, so the directive does not depend on `base`
+    // and has to outlive its removal.
+    let bare = "---\nanchor: &b\n  keep: 1\nkeep: 0\nbase: 5\n<<: *b\n---\nbody\n";
+    for spelling in ["!!merge", "!!str", "!<tag:yaml.org,2002:merge>"] {
+        let source = bare.replace("\n<<: *b", &format!("\n{spelling} <<: *b"));
+        let document = Document::parse(&source);
+        assert_eq!(document.frontmatter_refusal(), None, "{source:?}");
+        assert!(
+            !document.fields().iter().any(|field| field.name == "<<"),
+            "{source:?}"
+        );
+        assert_eq!(
+            document.remove_field("base"),
+            Ok(source.replace("base: 5\n", "")),
+            "{source:?}"
+        );
+    }
+}
+
+/// A quoted key is a name, not a spelling: the parser keys the mapping by the
+/// bytes inside the quotes and no tag is written there. `"<<"` is the
+/// directive, and a quoted key that merely reads like a tagged one is an
+/// ordinary field of that exact name.
+#[test]
+fn a_quoted_key_that_reads_like_a_tagged_directive_is_a_field() {
+    let source = "---\n\"!!merge <<\": v\nbase: 5\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(
+        document
+            .fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["!!merge <<", "base"]
+    );
+    assert_eq!(
+        document.remove_field("base"),
+        Ok("---\n\"!!merge <<\": v\n---\nbody\n".to_string())
+    );
 }
 
 /// A merge line belongs to no field, so no field's range may absorb it. It

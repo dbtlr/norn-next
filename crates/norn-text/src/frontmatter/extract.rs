@@ -276,9 +276,10 @@ impl BlockRefusal {
 /// happens here, before a value exists, so the model holds the merged mapping
 /// and `<<` never becomes a field. A `<<` that names no mapping is not a merge
 /// and cannot be expanded, so the block is refused rather than read with a
-/// directive silently carried as a field. A `<<` under a tag is refused for the
-/// same reason: a tag is no part of a key's name, so the key is still the
-/// directive, and it is one no line of the block can be attributed to.
+/// directive silently carried as a field. A `<<` under a tag the parser keeps
+/// — `!x <<` — is refused for the same reason: the fold removes the directive
+/// by name and the parser keys a tagged node apart from a plain one, so that
+/// entry survives the fold and would reach the model as a field named `<<`.
 pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal> {
     if yaml.len() > FRONTMATTER_MAX_BYTES {
         return Err(BlockRefusal::TooLarge { bytes: yaml.len() });
@@ -310,13 +311,16 @@ pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal>
 /// merged source that carries a `<<` of its own is already expanded when it is
 /// folded in and no directive survives anywhere in the value.
 ///
-/// **A tagged directive refuses the block.** `!x <<` is the merge key — a tag
-/// names no part of a key — and it is one this fold cannot honour: the
-/// per-field split reads the block's lines as written, so a directive spelled
-/// with a tag is a line no field owns and no field bounds, and folding it in
-/// would leave its bytes inside a neighbouring field's range for that field's
-/// next edit to carry away. Carrying it instead is the phantom `<<` field the
-/// expansion exists to prevent, so neither reading is taken.
+/// **A directive under a tag the parser keeps refuses the block.** `!x <<` is
+/// the merge key — a tag names no part of a key — but it is one this fold
+/// cannot remove: the directive is removed by name and a tagged node is keyed
+/// apart from a plain one, so the entry survives expansion and reaches the
+/// model as a field named `<<` — the phantom the expansion exists to prevent.
+/// Refusing the block is the only other reading, so it is the one taken. A tag
+/// the parser resolves away instead — `!!merge <<`, `!!str <<` — leaves a key
+/// no part of the value can tell from a plain directive, and it folds like
+/// one; the tag survives only in the block's text, where the per-field split
+/// reads past it to keep the line bounding the entry above it.
 fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
     match value {
         serde_yaml::Value::Sequence(items) => items.iter_mut().try_for_each(expand_merges),

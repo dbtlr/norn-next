@@ -55,9 +55,11 @@
 //!   is a parsed key no line can be attributed to, so the block has no
 //!   trustworthy per-field split and every field edit in it refuses. A merge
 //!   contributing only keys the block already writes leaves it editable. A
-//!   directive written under a tag — `!x <<` — is the directive still, and one
-//!   no line of the block can be attributed to, so it refuses the block rather
-//!   than reaching the model as the field the name would otherwise make.
+//!   directive under a tag the parser keeps — `!x <<` — is the directive
+//!   still, but not one the fold can remove, so it refuses the block rather
+//!   than reaching the model as the field the name would otherwise make. A tag
+//!   the parser resolves away — `!!merge <<` — leaves the fold a plain
+//!   directive and never reaches here at all.
 //! - **A repeated key** costs the block its read rather than reaching the
 //!   model. Two spellings of one key are one key: the parser refuses `k: 1`
 //!   beside `k: 2` itself, and a pair it holds apart — `!x k: 1` beside
