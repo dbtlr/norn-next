@@ -397,12 +397,13 @@ impl<'a> Request<'a> {
     /// reaches it, and discard-then-record — the idempotence story every finding
     /// producer is held to — has no other door for that caller.
     ///
-    /// `scope` is how much of the subject the caller is re-deriving. A producer
-    /// that concludes every cause a subject can carry discards
-    /// [`DiscardScope::EveryKind`]; one that concludes some of them names those
-    /// kinds, so its discard takes what it is about to record again and leaves
-    /// what another producer read. Discard-then-record holds either way, because
-    /// what a caller replaces is exactly what it ranged over.
+    /// `scope` is how much of the subject the caller is re-deriving. Every
+    /// producer through this door names kinds, because what a finding
+    /// replaces at its subject is what the act that derived it read and no act
+    /// reads a place's every cause at once; a caller that does concludes them
+    /// all and discards [`DiscardScope::EveryKind`]. Discard-then-record holds
+    /// either way, because what a caller replaces is exactly what it ranged
+    /// over.
     ///
     /// A finding goes **whole**, memberships included, and the count is findings
     /// rather than rows.
@@ -1118,13 +1119,21 @@ pub enum ExplainedStatement<'a> {
 /// How much of a subject a discard takes.
 ///
 /// A discard is one half of discard-then-record, so what it takes is what the
-/// caller is about to record again. A producer that reads a place's every cause
-/// replaces the subject whole; a producer that reads some of them replaces those
-/// kinds, and a finding another producer recorded there stands.
+/// caller is about to record again: the kinds its deriving act read, with a
+/// finding another producer recorded there left standing. Each arm states who
+/// takes its form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscardScope<'a> {
     /// Every finding about the subject, whichever producer recorded it and
     /// whatever it says.
+    ///
+    /// This is the subject statement with no kind predicate on it, which is
+    /// what [`Request::apply_increment`] prepares and runs once per changed path:
+    /// findings and rows are mutually exclusive at a path, so a change that
+    /// writes a row there ends every finding standing at it. A caller reaching
+    /// [`Request::discard_findings_about`] names kinds instead, and this arm is
+    /// how the whole form's plan is read back through
+    /// [`ExplainedStatement::SubjectDiscard`].
     EveryKind,
     /// The findings of these kinds and no others.
     Kinds(&'a [FindingKind]),

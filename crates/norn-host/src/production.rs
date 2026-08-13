@@ -1034,15 +1034,16 @@ fn quarantine_subtree(
     let walk = walk_subtree(vault_root, relative_root, exclusions).map_err(effect)?;
     // Nothing under this root derives, so every finding here is read from a
     // path — and the places they land at are renderings, outside the root this
-    // walk enters. What stands at such a place is another producer's.
+    // walk enters. A content quarantine standing at such a place is read from
+    // bytes this sweep never opens, and each finding's own cause is what holds
+    // it out of the sweep's discards.
     let mut pending = Pending::new(
         store,
         policy.changeset_size,
         vault_root,
         exclusions,
         vacated,
-    )
-    .reading_spellings();
+    );
     let mut healed = 0;
     for fact in walk {
         let norn_fs::WalkFact::File(file) = fact.map_err(effect)? else {
@@ -1379,7 +1380,201 @@ impl Undecodable {
             Undecodable::FrontmatterSize => "its frontmatter block is past the bound that is read",
         }
     }
+
+    /// What an act has to read to conclude this cause.
+    ///
+    /// The match is exhaustive because the answer is what a finding of this
+    /// cause discards at its subject: a cause added without a side here has no
+    /// scope to file under, so the next variant states its side or nothing
+    /// compiles.
+    const fn decided(self) -> Decided {
+        match self {
+            // [`document_path`] reads the name and opens nothing, so these two
+            // are concluded wherever a path is in hand.
+            Undecodable::PathBytes | Undecodable::PathSpelling => Decided::BySpelling,
+            // These are read out of the file the place names, so concluding
+            // them means having opened it.
+            Undecodable::BodyBytes | Undecodable::FrontmatterSize => Decided::ByBytes,
+        }
+    }
 }
+
+/// What an act read to conclude a cause, which is what a finding of that cause
+/// replaces at the place it is filed at.
+///
+/// One place holds findings from both sides at once, because a rendering names
+/// a place rather than an identity: the content findings there are about the
+/// document the place names, and the spelling findings there are about the
+/// refused spellings that render onto it. An act concludes one side of that
+/// place and says nothing about the other, so its discard takes one side and
+/// leaves the other standing — a finding a job deleted without re-filing it
+/// would be a true statement gone until an unrelated vault heal.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Decided {
+    /// The spelling alone decides it: the act read paths and opened no bytes,
+    /// so what it concludes is what the grammar says about the names it read.
+    BySpelling,
+    /// The document's own bytes decide it: the act opened the file the place
+    /// names, so it concludes what those bytes say and nothing about the other
+    /// spellings rendering there.
+    ByBytes,
+}
+
+impl Decided {
+    /// The kinds an act of this side re-derives at the place it files at, which
+    /// is exactly what recording its finding discards there.
+    ///
+    /// Every quarantine files through this one mapping — the merge walk's
+    /// refused spellings and refused documents, the sweep of a poisoned root,
+    /// the reading of a vacated one, and the dirty-path loop — so a job that
+    /// read both sides of a place re-derives both and takes neither, and the
+    /// two scopes tell apart only where an act reaches one side alone.
+    const fn rederives(self) -> DiscardScope<'static> {
+        match self {
+            Decided::BySpelling => DiscardScope::Kinds(&SPELLING_KINDS),
+            Decided::ByBytes => DiscardScope::Kinds(&CONTENT_KINDS),
+        }
+    }
+
+    /// Whether two sides are the same one, which is the comparison a `const`
+    /// context has instead of `PartialEq`.
+    const fn same(self, other: Decided) -> bool {
+        matches!(
+            (self, other),
+            (Decided::BySpelling, Decided::BySpelling) | (Decided::ByBytes, Decided::ByBytes)
+        )
+    }
+}
+
+/// Every cause a quarantine carries, which is what the two scopes below are
+/// read off.
+///
+/// A cause absent from this list has its kind in neither scope, so a finding of
+/// it discards nothing it re-derives and stands beside its own previous copy at
+/// every heal. Two things hold the list to the enum: [`Undecodable::decided`]
+/// is exhaustive, so the next variant states its side or nothing compiles, and
+/// the classification below holds every kind the registry advertises to exactly
+/// one of this list and [`KINDS_NO_CAUSE_CARRIES`]. A cause minted under a kind
+/// an older cause already carries is reached by neither, and the ADR that
+/// closes the cause set at these four is what stands in front of one.
+const CAUSES: [Undecodable; 4] = [
+    Undecodable::PathBytes,
+    Undecodable::PathSpelling,
+    Undecodable::BodyBytes,
+    Undecodable::FrontmatterSize,
+];
+
+/// The finding kinds no quarantine cause carries.
+///
+/// Quarantine is the only producer recording findings today, so the list is
+/// empty. A kind minted for another producer — an ambiguity a resolution reads,
+/// a field a schema refuses — is named here, which is the one line that keeps
+/// the classification below a reading of the registry rather than a claim that
+/// every kind the registry holds is a quarantine cause.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
+
+// Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
+// named as no cause's, and no two causes carry one kind. The registry is a
+// general one, so a kind minted for another producer is a growth this crate
+// answers by classifying it rather than by widening a scope no act re-derives.
+const _: () = {
+    let mut index = 0;
+    while index < FindingKind::ALL.len() {
+        let kind = FindingKind::ALL[index];
+        assert!(
+            causes_carrying(kind) + times_named_uncarried(kind) == 1,
+            "a finding kind is carried by no cause and named as no producer's, \
+             or is claimed twice"
+        );
+        index += 1;
+    }
+};
+
+/// Whether two kinds are the same one, which is the comparison a `const`
+/// context has instead of `PartialEq`.
+const fn same_kind(left: FindingKind, right: FindingKind) -> bool {
+    let (left, right) = (left.as_str().as_bytes(), right.as_str().as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// How many causes in [`CAUSES`] record findings under this kind.
+const fn causes_carrying(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if same_kind(CAUSES[index].kind(), kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// How many times [`KINDS_NO_CAUSE_CARRIES`] names this kind.
+const fn times_named_uncarried(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < KINDS_NO_CAUSE_CARRIES.len() {
+        if same_kind(KINDS_NO_CAUSE_CARRIES[index], kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// How many causes [`Undecodable::decided`] puts on one side.
+const fn decided_count(decided: Decided) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if CAUSES[index].decided().same(decided) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// The kinds one side re-derives: every cause on that side, as the kind it is
+/// recorded under.
+const fn decided_kinds<const N: usize>(decided: Decided) -> [FindingKind; N] {
+    let mut kinds = [FindingKind::PathBytesNotUtf8; N];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if CAUSES[index].decided().same(decided) {
+            kinds[filled] = CAUSES[index].kind();
+            filled += 1;
+        }
+        index += 1;
+    }
+    assert!(
+        filled == N,
+        "the side holds a different count of causes than it filled"
+    );
+    kinds
+}
+
+/// The kinds a spelling alone decides, which is what an act that opens no bytes
+/// replaces at the place it files at.
+const SPELLING_KINDS: [FindingKind; decided_count(Decided::BySpelling)] =
+    decided_kinds(Decided::BySpelling);
+
+/// The kinds a document's own bytes decide, which is what an act that opened
+/// them replaces at the place those bytes are read at.
+const CONTENT_KINDS: [FindingKind; decided_count(Decided::ByBytes)] =
+    decided_kinds(Decided::ByBytes);
 
 /// One document held out of derived state, and why.
 #[derive(Clone, Debug)]
@@ -1511,8 +1706,7 @@ fn revisit_vacated(
     }
     // The reading files findings and pushes no change, so the accumulator it
     // carries — this job's own, emptied above — is one nothing adds to.
-    let mut pending =
-        Pending::new(store, policy.changeset_size, root, exclusions, vacated).reading_spellings();
+    let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, vacated);
     pending.revisit(&readings)?;
     pending.record_findings()
 }
@@ -1542,40 +1736,34 @@ struct Pending<'s> {
     /// reading after the last of them.
     vacated: &'s mut Vacated,
     changes: Vec<Change>,
-    quarantined: Vec<FindingFacts>,
-    /// The subjects this scope has already re-derived, so a second finding at
-    /// one **appends** rather than replacing the first: two spellings can render
-    /// to one place, and each of them is a document somebody has to fix.
+    quarantined: Vec<Queued>,
+    /// The places this scope has already re-derived, each paired with the side
+    /// it re-derived there, so a second finding of that side at one place
+    /// **appends** rather than replacing the first: two spellings can render to
+    /// one place, and each of them is a document somebody has to fix. A finding
+    /// of the other side discards its own kinds there, which are kinds no
+    /// finding of this side occupies.
     ///
-    /// It holds one path per quarantined document, which is the vault's defect
-    /// count rather than its size, and it is strictly smaller than what those
-    /// same defects put in the findings table.
-    replaced: BTreeSet<DocumentPath>,
-    /// What this scope's first record at a place replaces there, which is what
-    /// this scope reads.
-    ///
-    /// A scope that derives documents opens the bytes at the paths it walks, so
-    /// it concludes any cause a quarantine carries and replaces the place whole.
-    /// The two scopes that derive nothing — the reading of a vacated root, and
-    /// the sweep of a root the grammar poisons — open no bytes at all: they read
-    /// paths, so what they conclude is what a spelling alone decides and that is
-    /// all they replace. A quarantine about the document standing at a place
-    /// such a scope files at is a finding it did not read and does not re-file,
-    /// and taking it would delete a true statement about a real document until
-    /// an unrelated vault heal.
-    rederives: DiscardScope<'static>,
+    /// It holds at most one entry per quarantined place per side, which is the
+    /// vault's defect count rather than its size, and it is no larger than what
+    /// those same defects put in the findings table.
+    replaced: BTreeSet<(DocumentPath, Decided)>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
     /// covers.
     bound: usize,
 }
 
-/// The finding kinds a path alone decides, which is what a reading of a place's
-/// spellings re-derives: the two ways [`document_path`] refuses a spelling.
-const SPELLING_KINDS: [FindingKind; 2] = [
-    FindingKind::PathBytesNotUtf8,
-    FindingKind::PathNamesNoDocument,
-];
+/// A finding this scope has derived and not yet recorded, with the cause it
+/// states.
+///
+/// The cause rides along because it is what decides how much of the subject
+/// recording the finding replaces: [`Undecodable::decided`] says what an act
+/// had to read to conclude it, and an act re-derives what it read and no more.
+struct Queued {
+    finding: FindingFacts,
+    cause: Undecodable,
+}
 
 impl<'s> Pending<'s> {
     fn new(
@@ -1593,16 +1781,8 @@ impl<'s> Pending<'s> {
             changes: Vec::with_capacity(bound),
             quarantined: Vec::new(),
             replaced: BTreeSet::new(),
-            rederives: DiscardScope::EveryKind,
             bound,
         }
-    }
-
-    /// The same scope, recording as a reading of spellings rather than as a
-    /// derivation of documents.
-    fn reading_spellings(mut self) -> Self {
-        self.rederives = DiscardScope::Kinds(&SPELLING_KINDS);
-        self
     }
 
     fn push(&mut self, change: Change) {
@@ -1651,26 +1831,33 @@ impl<'s> Pending<'s> {
     /// Since a rendering is not injective, the detail carries the spelling this
     /// finding was read from, escaped, so two paths filed at one place stay
     /// tellable apart.
+    ///
+    /// The cause is carried to the record because it says what the act that
+    /// derived this finding read, and that is what the record replaces at the
+    /// subject.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
         let subject = DocumentPath::rendered(path);
-        self.quarantined.push(FindingFacts {
-            kind: quarantine.cause.kind(),
-            severity: QUARANTINE_SEVERITY,
-            message: format!(
-                "`{}` is quarantined: {}",
-                subject.as_str(),
-                quarantine.cause.statement()
-            ),
-            path: subject,
-            // Quarantine is not a reading of a resolution target, so the
-            // finding belongs to no ambiguity class and no class-scoped
-            // maintenance owns it.
-            class_keys: BTreeSet::new(),
-            target: None,
-            span: None,
-            candidates: Vec::new(),
-            candidates_total: 0,
-            detail: Some(format!("{path:?}: {}", quarantine.problem)),
+        self.quarantined.push(Queued {
+            finding: FindingFacts {
+                kind: quarantine.cause.kind(),
+                severity: QUARANTINE_SEVERITY,
+                message: format!(
+                    "`{}` is quarantined: {}",
+                    subject.as_str(),
+                    quarantine.cause.statement()
+                ),
+                path: subject,
+                // Quarantine is not a reading of a resolution target, so the
+                // finding belongs to no ambiguity class and no class-scoped
+                // maintenance owns it.
+                class_keys: BTreeSet::new(),
+                target: None,
+                span: None,
+                candidates: Vec::new(),
+                candidates_total: 0,
+                detail: Some(format!("{path:?}: {}", quarantine.problem)),
+            },
+            cause: quarantine.cause,
         });
     }
 
@@ -1711,7 +1898,7 @@ impl<'s> Pending<'s> {
     /// end, which is what keeps a queue filled by a reading of the vault inside
     /// the bound the changeset beside it holds to.
     fn record_findings(&mut self) -> Result<(), JobFailure> {
-        for finding in self.quarantined.drain(..) {
+        for Queued { finding, cause } in self.quarantined.drain(..) {
             let mut request = self.store.begin_request();
             if request
                 .stored_document(&finding.path)
@@ -1720,15 +1907,18 @@ impl<'s> Pending<'s> {
             {
                 continue;
             }
-            // The first finding this scope **records** at a subject replaces
-            // what this scope re-derives there, which is how a cause that
-            // changed stops being reported twice; the ones after it append,
-            // because two spellings can render to one place and each is a
-            // document somebody has to fix. A withheld finding records nothing
-            // and so takes no turn.
-            if self.replaced.insert(finding.path.clone()) {
+            // The first finding this scope **records** at a subject on one side
+            // of the split replaces what that side re-derives there, which is
+            // how a cause that changed stops being reported twice; the ones
+            // after it on the same side append, because two spellings can
+            // render to one place and each is a document somebody has to fix.
+            // The other side's kinds are disjoint from this one's, so a finding
+            // from it discards without reaching what was recorded here. A
+            // withheld finding records nothing and so takes no turn.
+            let decided = cause.decided();
+            if self.replaced.insert((finding.path.clone(), decided)) {
                 request
-                    .discard_findings_about(&finding.path, self.rederives)
+                    .discard_findings_about(&finding.path, decided.rederives())
                     .map_err(store_effect)?;
             }
             request.record_finding(&finding).map_err(store_effect)?;
@@ -3023,6 +3213,238 @@ mod tests {
             "the sweep filed a second copy of the spelling it re-derived"
         );
         ops.detach(&name, attachment);
+    }
+
+    /// **A dirty path the grammar refuses replaces the spellings at the place it
+    /// renders to and nothing else.** The event names a path, and a name the
+    /// store cannot hold has nothing to derive — so the loop files what the
+    /// spelling decides without opening a byte anywhere.
+    ///
+    /// The place it files at holds the content quarantine of the marker-named
+    /// document that place is: bytes this job never read. Nothing dies here, so
+    /// no reading is owed either, and taking that finding would leave it gone
+    /// until a full vault heal.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_dirty_path_leaves_the_content_quarantine_standing_at_the_place_it_files_at() {
+        let f = Fixture::new("dirty-spelling-collision");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The dirty path is the refused spelling itself, which is the whole of
+        // what this job reads.
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\\name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the dirty path took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the dirty path filed a second copy of the spelling it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **An act that opened a document's bytes replaces what those bytes decide
+    /// and nothing else.** The dirty path here names a real document whose own
+    /// name carries the marker, and re-reading it concludes the causes its bytes
+    /// carry — so its finding is re-derived rather than doubled.
+    ///
+    /// The refused spelling rendering onto that same place is another document
+    /// somebody has to fix, and this job read its name nowhere: its finding
+    /// stands, and no death here owes the reading that would file it again.
+    #[cfg(unix)]
+    #[test]
+    fn a_re_read_document_leaves_the_spelling_findings_standing_at_the_place_it_files_at() {
+        let f = Fixture::new("dirty-content-collision");
+        fs::write(f.vault().join("bad\u{fffd}name.md"), UNDECODABLE).unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = findings_at(&mut attachment.store, "bad\u{fffd}name.md");
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The same document, still undecodable, with the first bad byte
+        // somewhere else — a cause that moved, which the re-read re-derives.
+        fs::write(
+            f.vault().join("bad\u{fffd}name.md"),
+            b"a much longer prefix \xff\xfe here\n",
+        )
+        .unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}name.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the re-read took a finding it does not re-derive"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the re-read filed a second copy of the cause it re-derived"
+        );
+        let content = |findings: &[norn_store::StoredFinding]| {
+            findings
+                .iter()
+                .find(|finding| finding.kind == "document/body-bytes-not-utf8")
+                .and_then(|finding| finding.detail.clone())
+                .expect("a content finding with a detail")
+        };
+        assert_ne!(
+            content(&findings_at(&mut attachment.store, "bad\u{fffd}name.md")),
+            content(&before),
+            "the stale content finding outlived its cause"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A heal replaces the side it read at the places it walked, and a
+    /// finding read outside the tree it walked stands.** The merge walk is the
+    /// act that opens bytes, so what its quarantines conclude is what those
+    /// bytes say.
+    ///
+    /// A directory the grammar refuses renders onto a directory the vault also
+    /// holds, so a spelling finding filed by the sweep of the refused one sits
+    /// at a place inside the real one. A heal of the real subtree walks that
+    /// place and no path under the refused directory: it reads the bytes there
+    /// and the name of nothing else, so the spelling finding is a statement it
+    /// did not re-derive.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_heal_leaves_the_spelling_finding_read_outside_it_standing() {
+        let f = Fixture::new("subtree-heal-collision");
+        fs::create_dir(f.vault().join("bad\u{fffd}dir")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}dir/doc.md"), UNDECODABLE).unwrap();
+        if fs::create_dir(f.vault().join("bad\\dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create `bad\\dir`");
+            return;
+        }
+        if !write_or_report(&f.vault().join("bad\\dir/doc.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/doc.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The same document, still undecodable, with the first bad byte
+        // somewhere else — a cause that moved, which the subtree heal
+        // re-derives.
+        fs::write(
+            f.vault().join("bad\u{fffd}dir/doc.md"),
+            b"a much longer prefix \xff\xfe here\n",
+        )
+        .unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/doc.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the subtree heal took a finding read under a directory it never walked"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the subtree heal filed a second copy of the cause it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The two discard scopes partition the causes.** The scopes are read off
+    /// [`CAUSES`] through [`Undecodable::decided`], so a cause whose kind falls
+    /// out of both is a cause no act re-derives — which is a copy of that
+    /// finding per heal — and a kind in both is one side taking the other's
+    /// work.
+    ///
+    /// The kinds a quarantine records are a subset of the registry rather than
+    /// the whole of it: what holds the two apart is the classification beside
+    /// [`CAUSES`], which a kind minted for another producer is named in.
+    #[test]
+    fn the_two_scopes_partition_the_quarantine_causes() {
+        let mut carried: Vec<&str> = CAUSES.iter().map(|cause| cause.kind().as_str()).collect();
+        carried.sort_unstable();
+
+        let mut scoped: Vec<&str> = SPELLING_KINDS
+            .iter()
+            .chain(CONTENT_KINDS.iter())
+            .map(FindingKind::as_str)
+            .collect();
+        scoped.sort_unstable();
+        assert_eq!(scoped, carried, "a cause the two scopes do not partition");
+
+        let registry: Vec<&str> = FindingKind::ALL.iter().map(FindingKind::as_str).collect();
+        for kind in &carried {
+            assert!(
+                registry.contains(kind),
+                "`{kind}` is a cause's kind the registry does not advertise"
+            );
+        }
     }
 
     /// **Places vacated under one root are read together.** Removing a directory
