@@ -4660,6 +4660,55 @@ mod tests {
         }
     }
 
+    /// **A key written twice reaches the same degradation whichever spelling
+    /// wrote it.** The text layer refuses the block either way, so the row, the
+    /// body facts, the note count and the cause a finding is filed under agree
+    /// between a document whose duplicate the parser sees and one whose keys
+    /// only collapse into a single name.
+    #[test]
+    fn a_repeated_key_degrades_alike_whether_or_not_a_tag_spelled_it() {
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+        };
+        let plain = derive("---\nk: 1\nk: 2\n---\n# heading\n");
+        let tagged = derive("---\n!x k: 1\nk: 2\n---\n# heading\n");
+        for (spelling, derived) in [("plain", &plain), ("tagged", &tagged)] {
+            assert!(
+                derived.facts.frontmatter.is_none(),
+                "the {spelling} duplicate produced a projection"
+            );
+            assert_eq!(
+                derived.facts.frontmatter_diagnostic_count, 1,
+                "the {spelling} duplicate counted another number of block-scoped notes"
+            );
+            assert_eq!(
+                derived.facts.headings.len(),
+                1,
+                "the {spelling} duplicate lost the body facts the act could derive"
+            );
+            let unread = derived
+                .unread_frontmatter
+                .as_ref()
+                .expect("the block was read by nothing");
+            assert_eq!(unread.cause, UnreadBlock::Unreadable);
+            assert_eq!(
+                unread.cause.kind().as_str(),
+                "document/frontmatter-unreadable"
+            );
+        }
+        assert_eq!(
+            plain.unread_frontmatter.expect("refused").problem,
+            tagged.unread_frontmatter.expect("refused").problem,
+            "the two spellings account for the refusal differently"
+        );
+    }
+
     /// **The store's projection bound is not a fourth outcome a document can
     /// reach.** The store refuses a frontmatter projection nesting past
     /// `MAX_FRONTMATTER_DEPTH`, and that refusal would withdraw the whole
