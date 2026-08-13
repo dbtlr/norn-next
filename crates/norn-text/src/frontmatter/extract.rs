@@ -316,11 +316,12 @@ pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal>
 /// cannot remove: the directive is removed by name and a tagged node is keyed
 /// apart from a plain one, so the entry survives expansion and reaches the
 /// model as a field named `<<` — the phantom the expansion exists to prevent.
-/// Refusing the block is the only other reading, so it is the one taken. A tag
-/// the parser resolves away instead — `!!merge <<`, `!!str <<` — leaves a key
-/// no part of the value can tell from a plain directive, and it folds like
-/// one; the tag survives only in the block's text, where the per-field split
-/// reads past it to keep the line bounding the entry above it.
+/// Refusing the block is the only other reading, so it is the one taken. A
+/// property the parser resolves away instead — a standard tag, `!!merge <<`
+/// or `!!str "<<"`, or an anchor, `&a <<` — leaves a key no part of the value
+/// can tell from a plain directive, and it folds like one; the property
+/// survives only in the block's text, where the per-field split reads past it
+/// to keep the line bounding the entry above it.
 fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
     match value {
         serde_yaml::Value::Sequence(items) => items.iter_mut().try_for_each(expand_merges),

@@ -246,10 +246,10 @@ struct RawKeyLine {
     key_line_end: usize,
     name: String,
     /// Whether this line writes the merge directive rather than a field. The
-    /// name alone does not answer it: a tag is no part of a key's name, so a
-    /// plain `!!merge <<` scans under a name the directive's own spelling is
-    /// still attached to, while a quoted `"!!merge <<"` is a field of exactly
-    /// that name.
+    /// name alone does not answer it: node properties are no part of a key's
+    /// name, so a plain `!!merge <<` scans under a name the directive's own
+    /// spelling is still attached to, while a quoted `"!!merge <<"` is a field
+    /// of exactly that name.
     names_merge_key: bool,
     proposed_value_range: Option<Range<usize>>,
     proposed_style: ValueStyle,
@@ -550,24 +550,54 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
 
 /// Whether a scanned key line writes the merge directive rather than a field.
 ///
-/// A tag is no part of a key's name, so `!!merge <<` and `<<` are one
-/// directive, and the fold treats them as one: the parser resolves a standard
-/// tag away before a value exists, leaving the value with no record that a tag
-/// was written. The line's text is the only place that spelling survives, so
-/// the tag is stripped here, and a directive line bounds the entry above it
-/// however it was written. A quoted key is a name and not a spelling — `"<<"`
-/// is the directive, `"!!merge <<"` is a field of that exact name — so only a
-/// plain key is read past a tag.
+/// Node properties — a tag, an anchor, or both in either order — name no part
+/// of the key they are written on, so `!!merge <<`, `&a <<` and `<<` are one
+/// directive and the fold treats them as one: the parser resolves a standard
+/// tag away and expands an anchor before a value exists, leaving the value
+/// with no record that either was written. The line's text is the only place
+/// that spelling survives, so the properties are read past here, and a
+/// directive line bounds the entry above it however it was written.
+///
+/// Past the properties the key is read the way the parser reads it, quotes
+/// included: `!!str "<<"` names the directive as much as `!!str <<` does.
+/// Quotes with no property in front of them are a name and not a spelling —
+/// `"<<"` is the directive, `"!!merge <<"` is a field of exactly that name —
+/// which is why the scan hands the decoded name of a quoted key straight to
+/// the first comparison below.
 fn names_merge_key(name: &str, spelling: KeySpelling) -> bool {
     if name == MERGE_KEY {
         return true;
     }
-    spelling == KeySpelling::Plain
-        && name.strip_prefix('!').is_some_and(|tagged| {
-            tagged
-                .split_once([' ', '\t'])
-                .is_some_and(|(_, key)| key.trim_start() == MERGE_KEY)
-        })
+    if spelling != KeySpelling::Plain {
+        return false;
+    }
+    let key = past_node_properties(name);
+    key == MERGE_KEY || decode_quoted_key(key).as_deref() == Some(MERGE_KEY)
+}
+
+/// The key text a plain key line's node properties are written on. `!` and `&`
+/// begin no plain scalar, so a leading one opens a tag or an anchor, and each
+/// runs to the whitespace that separates it from what follows.
+fn past_node_properties(name: &str) -> &str {
+    let mut rest = name;
+    while rest.starts_with(['!', '&']) {
+        let Some((_, tail)) = rest.split_once([' ', '\t']) else {
+            return "";
+        };
+        rest = tail.trim_start();
+    }
+    rest
+}
+
+/// The name a quoted key carries, if `text` is one quoted scalar and nothing
+/// else.
+fn decode_quoted_key(text: &str) -> Option<String> {
+    let (name, end) = match text.as_bytes().first()? {
+        b'\'' => scan_single_quoted_key(text)?,
+        b'"' => scan_double_quoted_key(text)?,
+        _ => return None,
+    };
+    text[end..].trim().is_empty().then_some(name)
 }
 
 /// The first `:` acting as a block-mapping separator — a colon followed by

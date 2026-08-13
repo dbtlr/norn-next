@@ -999,19 +999,30 @@ fn a_tagged_merge_key_refuses_the_block() {
     }
 }
 
-/// A tag the parser resolves — `!!merge`, `!!str`, or the verbatim form of
-/// either — is gone before a value exists, so the directive it was written on
-/// is a plain one to the fold and folds like one. The spelling survives in the
-/// block's text alone, which is where the per-field split reads past it: the
-/// line bounds the entry above it and no field's range absorbs it, exactly as
-/// for a directive written bare.
+/// A node property the parser resolves — a standard tag, the verbatim form of
+/// one, or an anchor — is gone before a value exists, so the directive it was
+/// written on is a plain one to the fold and folds like one. The spelling
+/// survives in the block's text alone, which is where the per-field split
+/// reads past it: the line bounds the entry above it and no field's range
+/// absorbs it, exactly as for a directive written bare. Quotes past a property
+/// are read too, since the parser reads them.
 #[test]
-fn a_merge_key_under_a_resolved_tag_folds_like_a_bare_one() {
+fn a_merge_key_under_a_resolved_property_folds_like_a_bare_one() {
     // The anchor is on `anchor:`, so the directive does not depend on `base`
     // and has to outlive its removal.
     let bare = "---\nanchor: &b\n  keep: 1\nkeep: 0\nbase: 5\n<<: *b\n---\nbody\n";
-    for spelling in ["!!merge", "!!str", "!<tag:yaml.org,2002:merge>"] {
-        let source = bare.replace("\n<<: *b", &format!("\n{spelling} <<: *b"));
+    for key in [
+        "!!merge <<",
+        "!!str <<",
+        "!<tag:yaml.org,2002:merge> <<",
+        "!!merge \"<<\"",
+        "!!str \"<<\"",
+        "!!str '<<'",
+        "&m <<",
+        "&m !!str <<",
+        "!!str &m <<",
+    ] {
+        let source = bare.replace("\n<<: *b", &format!("\n{key}: *b"));
         let document = Document::parse(&source);
         assert_eq!(document.frontmatter_refusal(), None, "{source:?}");
         assert!(
