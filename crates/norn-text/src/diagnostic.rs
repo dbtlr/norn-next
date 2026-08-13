@@ -81,12 +81,6 @@ impl DiagnosticCode {
         }
     }
 
-    /// Whether the note this code files is about the frontmatter block.
-    ///
-    /// A consumer counting the frontmatter-scoped notes is telling a document
-    /// with no block apart from a document whose block did not read, so the
-    /// answer belongs to the code rather than to a caller matching on how the
-    /// code is spelled.
     /// Whether the note this code files says the block was read by nothing.
     ///
     /// A code answering `true` is a code that reports an unread block: no field
@@ -110,6 +104,12 @@ impl DiagnosticCode {
         }
     }
 
+    /// Whether the note this code files is about the frontmatter block.
+    ///
+    /// A consumer counting the frontmatter-scoped notes is telling a document
+    /// with no block apart from a document whose block did not read, so the
+    /// answer belongs to the code rather than to a caller matching on how the
+    /// code is spelled.
     pub const fn frontmatter_scoped(self) -> bool {
         match self {
             DiagnosticCode::FrontmatterUnclosed

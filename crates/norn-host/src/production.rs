@@ -1727,9 +1727,11 @@ struct UnreadFrontmatter {
 
 /// The roots one job's deaths owe a reading of.
 ///
-/// A finding is withheld while a document row stands at its subject, so the
-/// death that vacates a rendered place is what frees the findings about the
-/// spellings rendering there. **Death is final within a job** — no later
+/// A **place-scoped** finding is withheld while a document row stands at its
+/// subject, so the death that vacates a rendered place is what frees the
+/// findings about the spellings rendering there. Document-scoped findings are
+/// never withheld and so are never owed a reading: this whole mechanism is
+/// about the place-scoped ones. **Death is final within a job** — no later
 /// increment puts a row back at a place an earlier one killed — so the readings
 /// those deaths owe are owed once, after the job's last flush, rather than once
 /// per flush: removing a directory whose own name carries the marker vacates a
@@ -1742,8 +1744,8 @@ struct UnreadFrontmatter {
 /// its documents. A reading files a finding for every refused spelling beneath
 /// its root, whether or not this job freed the place it renders to. What that
 /// costs is bounded by what the reading re-derives: the recording withholds
-/// every finding a document row still stands at, and the discard it carries to a
-/// place takes the spelling kinds it is re-filing there and nothing else, so a
+/// every place-scoped finding a document row still stands at, and the discard it
+/// carries to a place takes the spelling kinds it is re-filing there and nothing else, so a
 /// quarantine about the document occupying that place stands through a reading
 /// that was never about it.
 #[derive(Default)]
@@ -1755,8 +1757,9 @@ impl Vacated {
     /// Take the roots a changeset's deaths free a reading of.
     ///
     /// Only a place carrying the rendering marker can have withheld a finding: a
-    /// finding is withheld when a document row stands at its subject, a subject
-    /// is a rendering, and a rendering of a spelling the grammar refuses carries
+    /// place-scoped finding is withheld when a document row stands at its
+    /// subject, a subject is a rendering, and a rendering of a spelling the
+    /// grammar refuses carries
     /// the marker. A subject the grammar admits as it is written belongs to the
     /// document at that path, whose own row dies in the same changeset as the
     /// finding that replaces it.
