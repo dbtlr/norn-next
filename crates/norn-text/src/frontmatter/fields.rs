@@ -118,11 +118,6 @@ pub(crate) fn field_spans(
     }
 
     let candidates = scan_key_lines(content, &frontmatter_range);
-    // Every scanned line asks the mapping about its key, so the mapping is
-    // indexed once here rather than scanned once per line: the block's byte
-    // bound admits thousands of keys, and a scan per key is quadratic in how
-    // many of them there are.
-    let parsed_keys = KeyIndex::of(map);
 
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     for candidate in &candidates {
@@ -134,6 +129,13 @@ pub(crate) fn field_spans(
     if !every_key_uniquely_located {
         return None;
     }
+
+    // Every scanned line asks the mapping about its key, so the mapping is
+    // indexed once here rather than scanned once per line: the block's byte
+    // bound admits thousands of keys, and a scan per key is quadratic in how
+    // many of them there are. It is built past the gate above, which needs no
+    // lookups and refuses the split outright.
+    let parsed_keys = KeyIndex::of(map);
 
     // An entry ends where the next one begins. A merge-key line begins no
     // entry — expansion folded it away, so no parsed key names it — but it

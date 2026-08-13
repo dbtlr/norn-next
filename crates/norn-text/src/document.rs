@@ -279,6 +279,12 @@ impl<'a> Document<'a> {
         let Some(Value::Map(map)) = &self.frontmatter else {
             return Vec::new();
         };
+        if self.fields.is_empty() {
+            // A block whose split was refused has fields nothing can attribute,
+            // and there is no key here to resolve. The mapping still holds every
+            // entry the block parsed, so indexing it would be work for no lookup.
+            return Vec::new();
+        }
         // One lookup per field, so the mapping is indexed once rather than
         // scanned per field: a block at the byte bound holds thousands of
         // fields, and a scan each is quadratic in how many there are.

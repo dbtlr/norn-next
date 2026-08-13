@@ -176,7 +176,8 @@ impl From<f64> for Value {
 ///
 /// A scan is right for a lookup and wrong for a *walk*: a caller that resolves
 /// every key of a mapping pays one scan per key, which is quadratic in key
-/// count. [`KeyIndex`] is what such a caller takes instead.
+/// count. A walk of a large mapping resolves its keys through a by-key view of
+/// it instead, built once inside this module.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mapping {
     entries: Vec<(String, Value)>,
@@ -261,34 +262,56 @@ impl Mapping {
 ///
 /// [`Mapping::get`] is a scan over the mapping's entries, so resolving `n` keys
 /// through it costs `n` scans — quadratic in the key count, and the block's byte
-/// bound caps how far that goes without flattening it. Building this view is one
-/// pass and one hash per entry, and every lookup through it is then constant, so
-/// a walk of the whole mapping stays linear in its key count. What it costs is
-/// one borrowed key reference and one borrowed value reference per entry, held
-/// for the walk.
+/// bound caps how far that goes without flattening it. Hashing the entries once
+/// makes every later lookup constant, so a walk of the whole mapping stays
+/// linear in its key count. What that costs is one borrowed key reference and
+/// one borrowed value reference per entry, held for the walk.
+///
+/// Below [`HASH_ABOVE`] entries the view scans the mapping instead. A block of a
+/// handful of fields is what an ordinary document carries, and there the table's
+/// allocation and its hash per entry cost more than the comparisons they save.
+///
+/// A key resolves to the **first** entry carrying it, which is what
+/// [`Mapping::get`] answers, so a walk through this view and a walk of
+/// [`Mapping::get`] calls read the same value for every key. That agreement is
+/// the point: this is a faster route to an answer, never a different one.
 ///
 /// It is a view and not a cache: it borrows the mapping, so a mapping cannot be
 /// mutated while one stands and no index can outlive or disagree with the
 /// entries it was built from.
-pub(crate) struct KeyIndex<'a> {
-    by_key: HashMap<&'a str, &'a Value>,
+pub(crate) enum KeyIndex<'a> {
+    Scan(&'a Mapping),
+    Hashed(HashMap<&'a str, &'a Value>),
 }
 
+/// The entry count above which a by-key view hashes rather than scans.
+///
+/// A frontmatter block of this many fields costs at most a few hundred string
+/// comparisons to walk by scan, which is less than the table it would otherwise
+/// allocate and fill; past it the scan's square is what dominates the walk.
+const HASH_ABOVE: usize = 32;
+
 impl<'a> KeyIndex<'a> {
-    /// Index `map` by key. Keys in a [`Mapping`] are unique, so every entry is
-    /// reachable through the result.
     pub(crate) fn of(map: &'a Mapping) -> Self {
-        KeyIndex {
-            by_key: map.iter().collect(),
+        if map.len() <= HASH_ABOVE {
+            return KeyIndex::Scan(map);
         }
+        let mut by_key: HashMap<&'a str, &'a Value> = HashMap::with_capacity(map.len());
+        for (key, value) in map.iter() {
+            by_key.entry(key).or_insert(value);
+        }
+        KeyIndex::Hashed(by_key)
     }
 
     pub(crate) fn get(&self, key: &str) -> Option<&'a Value> {
-        self.by_key.get(key).copied()
+        match self {
+            KeyIndex::Scan(map) => map.get(key),
+            KeyIndex::Hashed(by_key) => by_key.get(key).copied(),
+        }
     }
 
     pub(crate) fn contains_key(&self, key: &str) -> bool {
-        self.by_key.contains_key(key)
+        self.get(key).is_some()
     }
 }
 
@@ -461,4 +484,51 @@ fn number_from_yaml(
         return Value::Float(value as f64);
     }
     Value::Float(number.as_f64().unwrap_or(f64::NAN))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HASH_ABOVE, KeyIndex, Mapping, Value};
+
+    /// A mapping holding `filler` distinct keys and two entries under `dup`.
+    ///
+    /// The parse boundary is what keeps a repeated key out of an ordinary
+    /// mapping, so this reaches past it to build one directly: what the cases
+    /// below hold is that the two routes to a value agree whatever the entries
+    /// are, not that these entries occur.
+    fn with_a_repeated_key(filler: usize) -> Mapping {
+        let mut map = Mapping::new();
+        map.append_unique("dup".to_string(), Value::Int(1));
+        for index in 0..filler {
+            map.append_unique(format!("k{index}"), Value::Int(0));
+        }
+        map.append_unique("dup".to_string(), Value::Int(2));
+        map
+    }
+
+    /// A key written twice resolves to its first entry through a by-key view,
+    /// which is the entry [`Mapping::get`] answers with — through the scanning
+    /// arm and the hashing one alike.
+    #[test]
+    fn a_by_key_view_resolves_a_repeated_key_the_way_a_scan_does() {
+        for filler in [0, HASH_ABOVE * 2] {
+            let map = with_a_repeated_key(filler);
+            let view = KeyIndex::of(&map);
+            assert_eq!(view.get("dup"), map.get("dup"));
+            assert_eq!(view.get("dup"), Some(&Value::Int(1)));
+            assert!(view.contains_key("dup"));
+            assert_eq!(view.get("absent"), None);
+            assert!(!view.contains_key("absent"));
+        }
+    }
+
+    /// Which arm a view takes is the entry count, so the case above covers both
+    /// rather than one of them twice.
+    #[test]
+    fn a_small_mapping_scans_and_a_large_one_hashes() {
+        let small = with_a_repeated_key(0);
+        let large = with_a_repeated_key(HASH_ABOVE * 2);
+        assert!(matches!(KeyIndex::of(&small), KeyIndex::Scan(_)));
+        assert!(matches!(KeyIndex::of(&large), KeyIndex::Hashed(_)));
+    }
 }
