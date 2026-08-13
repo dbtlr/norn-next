@@ -51,6 +51,11 @@ fn finding_kinds() -> Vec<FindingKind> {
     FindingKind::ALL.to_vec()
 }
 
+/// Every scope a kind's findings may stand in.
+fn finding_scopes() -> Vec<FindingScope> {
+    vec![FindingScope::Place, FindingScope::Document]
+}
+
 /// Every severity a finding carries.
 fn severities() -> Vec<Severity> {
     Severity::ALL.to_vec()
@@ -146,6 +151,13 @@ fn every_reason_code_survives_the_round_trip() {
 fn every_finding_kind_survives_the_round_trip() {
     for kind in finding_kinds() {
         round_trip(&kind);
+    }
+}
+
+#[test]
+fn every_finding_scope_survives_the_round_trip() {
+    for scope in finding_scopes() {
+        round_trip(&scope);
     }
 }
 
@@ -342,6 +354,29 @@ fn the_two_scopes_partition_the_finding_kinds() {
         ]
     );
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
+}
+
+/// A scope is the bare string it serializes as, and a kind hands out the same
+/// scope the wire carries. A string outside the pair is refused rather than
+/// defaulted, so a scope a later version writes stops a reader of this one
+/// instead of arriving as `Place` and taking the withholding a place-scoped
+/// finding is subject to.
+#[test]
+fn a_finding_scope_is_the_bare_string_it_renders_as() {
+    let strings = ["place", "document"];
+    assert_eq!(finding_scopes().len(), strings.len());
+    for (scope, string) in finding_scopes().into_iter().zip(strings) {
+        let json = format!("\"{string}\"");
+        assert_eq!(wire(&scope), json);
+        assert_eq!(
+            serde_json::from_str::<FindingScope>(&json).expect("reading a scope back"),
+            scope
+        );
+    }
+    assert!(
+        serde_json::from_str::<FindingScope>(r#""vault""#).is_err(),
+        "a scope nobody wrote was read as one of the two"
+    );
 }
 
 /// Severity is the bare value a finding stores and renders, with one spelling
