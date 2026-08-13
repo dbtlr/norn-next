@@ -957,6 +957,31 @@ fn a_merge_key_that_names_no_mapping_refuses_the_block() {
     assert_eq!(document.frontmatter(), None);
 }
 
+/// A tag makes `<<` no less the directive — a tag names no part of a key — and
+/// no more attributable: the block's lines are read as written, so a tagged
+/// directive is a line no field owns and none bounds. Folding it in would leave
+/// its bytes for a neighbouring field's edit to carry away and carrying it is
+/// the phantom `<<` field expansion exists to prevent, so the block is refused.
+#[test]
+fn a_tagged_merge_key_refuses_the_block() {
+    for source in [
+        "---\nbase: &b\n  x: 1\n!x <<: *b\n---\nbody\n",
+        "---\nbase: &b\n  x: 1\nouter:\n  !x <<: *b\n---\nbody\n",
+    ] {
+        let document = Document::parse(source);
+        assert_eq!(
+            document.frontmatter_refusal(),
+            Some(&BlockRefusal::Unreadable {
+                problem: "a merge key carries no tag, but this one is written `!x <<`".to_string()
+            }),
+            "{source:?}"
+        );
+        assert_eq!(codes(&document), ["frontmatter-parse-failed"], "{source:?}");
+        assert_eq!(document.frontmatter(), None, "{source:?}");
+        assert_eq!(document.body(), "body\n", "{source:?}");
+    }
+}
+
 /// A merge line belongs to no field, so no field's range may absorb it. It
 /// bounds the entry above it instead, and the block it sits in refuses every
 /// field edit — reading is unaffected and the bytes round-trip.

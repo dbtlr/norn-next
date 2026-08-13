@@ -276,7 +276,9 @@ impl BlockRefusal {
 /// happens here, before a value exists, so the model holds the merged mapping
 /// and `<<` never becomes a field. A `<<` that names no mapping is not a merge
 /// and cannot be expanded, so the block is refused rather than read with a
-/// directive silently carried as a field.
+/// directive silently carried as a field. A `<<` under a tag is refused for the
+/// same reason: a tag is no part of a key's name, so the key is still the
+/// directive, and it is one no line of the block can be attributed to.
 pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal> {
     if yaml.len() > FRONTMATTER_MAX_BYTES {
         return Err(BlockRefusal::TooLarge { bytes: yaml.len() });
@@ -307,6 +309,14 @@ pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal>
 /// The walk expands a mapping's children before the mapping itself, so a
 /// merged source that carries a `<<` of its own is already expanded when it is
 /// folded in and no directive survives anywhere in the value.
+///
+/// **A tagged directive refuses the block.** `!x <<` is the merge key — a tag
+/// names no part of a key — and it is one this fold cannot honour: the
+/// per-field split reads the block's lines as written, so a directive spelled
+/// with a tag is a line no field owns and no field bounds, and folding it in
+/// would leave its bytes inside a neighbouring field's range for that field's
+/// next edit to carry away. Carrying it instead is the phantom `<<` field the
+/// expansion exists to prevent, so neither reading is taken.
 fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
     match value {
         serde_yaml::Value::Sequence(items) => items.iter_mut().try_for_each(expand_merges),
@@ -314,6 +324,11 @@ fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
         serde_yaml::Value::Mapping(mapping) => {
             for (_, child) in mapping.iter_mut() {
                 expand_merges(child)?;
+            }
+            if let Some(tag) = tagged_merge_key(mapping) {
+                return Err(format!(
+                    "a merge key carries no tag, but this one is written `{tag} {MERGE_KEY}`"
+                ));
             }
             let Some(directive) = mapping.shift_remove(MERGE_KEY) else {
                 return Ok(());
@@ -327,6 +342,16 @@ fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// The tag on a merge key this mapping writes under one, if it writes one.
+fn tagged_merge_key(mapping: &serde_yaml::Mapping) -> Option<String> {
+    mapping.keys().find_map(|key| match key {
+        serde_yaml::Value::Tagged(tagged) if key.as_str() == Some(MERGE_KEY) => {
+            Some(tagged.tag.to_string())
+        }
+        _ => None,
+    })
 }
 
 /// The mappings a `<<` names: one, or a sequence of them. Anything else is not
