@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0019-quarantine-is-for-nothing-derivable-causes.md
 date: 2026-08-12
 ---
 
