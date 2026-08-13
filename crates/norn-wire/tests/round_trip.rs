@@ -356,11 +356,10 @@ fn the_two_scopes_partition_the_finding_kinds() {
     assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
 }
 
-/// A scope is the bare string it serializes as, and a kind hands out the same
-/// scope the wire carries. A string outside the pair is refused rather than
-/// defaulted, so a scope a later version writes stops a reader of this one
-/// instead of arriving as `Place` and taking the withholding a place-scoped
-/// finding is subject to.
+/// A scope is the bare string it serializes as. A string outside the pair is
+/// refused rather than defaulted, so a scope a later version writes stops a
+/// reader of this one instead of arriving as `Place` and taking the
+/// withholding a place-scoped finding is subject to.
 #[test]
 fn a_finding_scope_is_the_bare_string_it_renders_as() {
     let strings = ["place", "document"];
