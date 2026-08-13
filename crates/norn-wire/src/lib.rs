@@ -11,7 +11,8 @@
 //! What is defined here today is where a vault entry stands — [`TrustState`]
 //! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
 //! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
-//! finding is filed under, [`FindingKind`], and its [`Severity`]. Maintainer
+//! finding is filed under, [`FindingKind`], with the [`FindingScope`] its kind
+//! answers and its [`Severity`]. Maintainer
 //! contention carries the diagnostic [`MaintainerIdentity`] reported by the
 //! lock without changing an entry's trust state.
 //!

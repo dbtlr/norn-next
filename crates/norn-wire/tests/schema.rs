@@ -11,8 +11,8 @@
 //! restating it.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, Severity, TrustState,
-    UntrustedReason, WarmingPhase, WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity, ReasonCode,
+    Severity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -97,6 +97,7 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<WarmingPhase>(),
         schema_of::<ReasonCode>(),
         schema_of::<FindingKind>(),
+        schema_of::<FindingScope>(),
         schema_of::<Severity>(),
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),

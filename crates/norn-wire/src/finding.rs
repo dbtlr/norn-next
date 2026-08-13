@@ -125,7 +125,8 @@ pub enum FindingKind {
 /// Plain rather than `#[non_exhaustive]`: a producer or a reader that has not
 /// decided what a new scope means should fail to compile rather than fall into
 /// a default arm.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FindingScope {
     /// The finding is about the place, and no document is derived there. It is
     /// withheld while a document row stands at its subject, because a place a
