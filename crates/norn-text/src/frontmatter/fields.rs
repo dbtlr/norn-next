@@ -556,7 +556,9 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
 /// tag away and expands an anchor before a value exists, leaving the value
 /// with no record that either was written. The line's text is the only place
 /// that spelling survives, so the properties are read past here, and a
-/// directive line bounds the entry above it however it was written.
+/// directive line written inline — plain, tagged, quoted, or anchored —
+/// bounds the entry above it. The explicit-key spelling `? <<` is not
+/// recognized here and its line is absorbed into the entry above it.
 ///
 /// Past the properties the key is read the way the parser reads it, quotes
 /// included: `!!str "<<"` names the directive as much as `!!str <<` does.
