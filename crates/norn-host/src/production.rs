@@ -1448,7 +1448,9 @@ impl Undecodable {
 enum UnreadBlock {
     /// The block opens and never closes.
     Unclosed,
-    /// The block is not well-formed, so nothing parsed it.
+    /// Nothing read the block: it is not well-formed, or it is well-formed and
+    /// says something no value can be made of — a key written twice, a merge
+    /// directive naming no mapping.
     Unreadable,
     /// The block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so the text
     /// layer refuses it unparsed rather than paying a read that grows with the
