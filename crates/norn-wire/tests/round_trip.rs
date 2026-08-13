@@ -14,8 +14,9 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, Severity, TrustState,
-    UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase, WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity, ReasonCode,
+    Severity, TrustState, UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase,
+    WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -291,6 +292,8 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/path-names-no-document",
         "document/body-bytes-not-utf8",
         "document/frontmatter-too-large",
+        "document/frontmatter-unclosed",
+        "document/frontmatter-unreadable",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -303,6 +306,42 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         FindingKind::try_from("document/unreadable"),
         Err(UnknownFindingKind)
     );
+}
+
+/// A kind says where its findings may stand, and the two scopes partition the
+/// registry. A place-scoped kind states that nothing is derived at its subject;
+/// a document-scoped kind states something about the document derived there, so
+/// it stands beside that document's row.
+#[test]
+fn the_two_scopes_partition_the_finding_kinds() {
+    let spellings = |scope: FindingScope| {
+        let mut kinds: Vec<&str> = finding_kinds()
+            .into_iter()
+            .filter(|kind| kind.scope() == scope)
+            .map(|kind| kind.as_str())
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    };
+    let place = spellings(FindingScope::Place);
+    let document = spellings(FindingScope::Document);
+    assert_eq!(
+        place,
+        [
+            "document/body-bytes-not-utf8",
+            "document/path-bytes-not-utf8",
+            "document/path-names-no-document",
+        ]
+    );
+    assert_eq!(
+        document,
+        [
+            "document/frontmatter-too-large",
+            "document/frontmatter-unclosed",
+            "document/frontmatter-unreadable",
+        ]
+    );
+    assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
 }
 
 /// Severity is the bare value a finding stores and renders, with one spelling

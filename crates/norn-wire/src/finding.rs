@@ -8,8 +8,16 @@
 //! nobody can enumerate here is a kind no surface can advertise.
 //!
 //! The set is `document/…` because each member is a fact about one document:
-//! a vault holding a document norn cannot decode stays serviceable, and the
-//! finding is where that document's absence from derived state is stated.
+//! a vault holding a document norn cannot fully read stays serviceable, and the
+//! finding is where what is missing from derived state is stated.
+//!
+//! **A kind also says where its findings may stand**, as [`FindingScope`]. A
+//! kind whose cause leaves nothing derivable is about the *place* and stands
+//! only where no document row does; a kind whose cause leaves the document
+//! derivable but incomplete is about the *document* and stands beside its row.
+//! A client reading the findings at a path branches on that: a place-scoped
+//! finding there says no document is derived at it, and a document-scoped one
+//! says the document beside it is derived with something missing.
 
 use std::fmt;
 
@@ -97,6 +105,36 @@ pub enum FindingKind {
     /// document's fields are unknown.
     #[serde(rename = "document/frontmatter-too-large")]
     FrontmatterTooLarge,
+    /// `document/frontmatter-unclosed` — the frontmatter block opens and never
+    /// closes, so no block's bytes are addressable and the document's fields
+    /// are unknown.
+    #[serde(rename = "document/frontmatter-unclosed")]
+    FrontmatterUnclosed,
+    /// `document/frontmatter-unreadable` — the frontmatter block is not
+    /// well-formed, so nothing parsed it and the document's fields are unknown.
+    #[serde(rename = "document/frontmatter-unreadable")]
+    FrontmatterUnreadable,
+}
+
+/// Where the findings of a kind may stand.
+///
+/// The two scopes differ in one thing: whether a document row at the subject
+/// withholds the finding. Everything else — how a finding is recorded, read,
+/// filtered and discarded — is the same for both.
+///
+/// Plain rather than `#[non_exhaustive]`: a producer or a reader that has not
+/// decided what a new scope means should fail to compile rather than fall into
+/// a default arm.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FindingScope {
+    /// The finding is about the place, and no document is derived there. It is
+    /// withheld while a document row stands at its subject, because a place a
+    /// readable document occupies is that document's.
+    Place,
+    /// The finding is about the document derived at its subject, and stands
+    /// beside that document's row. Withholding it would suppress every finding
+    /// it exists to report.
+    Document,
 }
 
 impl FindingKind {
@@ -105,11 +143,13 @@ impl FindingKind {
     /// Reading a kind back and enumerating the registry both walk this list,
     /// so a variant absent here is unreadable and unadvertisable — the schema
     /// suite holds this list equal to the enum itself.
-    pub const ALL: [FindingKind; 4] = [
+    pub const ALL: [FindingKind; 6] = [
         FindingKind::PathBytesNotUtf8,
         FindingKind::PathNamesNoDocument,
         FindingKind::BodyBytesNotUtf8,
         FindingKind::FrontmatterTooLarge,
+        FindingKind::FrontmatterUnclosed,
+        FindingKind::FrontmatterUnreadable,
     ];
 
     /// The kind as the string it is on the wire.
@@ -119,6 +159,29 @@ impl FindingKind {
             FindingKind::PathNamesNoDocument => "document/path-names-no-document",
             FindingKind::BodyBytesNotUtf8 => "document/body-bytes-not-utf8",
             FindingKind::FrontmatterTooLarge => "document/frontmatter-too-large",
+            FindingKind::FrontmatterUnclosed => "document/frontmatter-unclosed",
+            FindingKind::FrontmatterUnreadable => "document/frontmatter-unreadable",
+        }
+    }
+
+    /// Where this kind's findings may stand.
+    ///
+    /// The match carries no wildcard: a kind minted without an answer here does
+    /// not compile, because a producer recording it and a reader reading it both
+    /// need to know whether a document row at the subject is a contradiction or
+    /// the subject itself.
+    pub const fn scope(&self) -> FindingScope {
+        match self {
+            // Nothing is derivable: there is no identity to hold a row under, or
+            // no text to read facts out of.
+            FindingKind::PathBytesNotUtf8
+            | FindingKind::PathNamesNoDocument
+            | FindingKind::BodyBytesNotUtf8 => FindingScope::Place,
+            // The document is derived and its frontmatter block was read by
+            // nothing, so the finding stands beside the row it is about.
+            FindingKind::FrontmatterTooLarge
+            | FindingKind::FrontmatterUnclosed
+            | FindingKind::FrontmatterUnreadable => FindingScope::Document,
         }
     }
 }
