@@ -34,7 +34,10 @@
 //!   [`FrontmatterTagStripped`](crate::DiagnosticCode::FrontmatterTagStripped)
 //!   diagnostic. A key carries one the same way a value does: a tag is no part
 //!   of a key's name, so `!foo k` is the field `k` and the note says which of
-//!   the two the tag was on.
+//!   the two the tag was on. A tag on a key with no addressable name under it
+//!   — `!foo 1` — is the one place no strip is reported, because nothing is
+//!   kept for the note to be about: the entry goes whole, and the dropped-key
+//!   note above is its account.
 //! - **An integer past `i64` but inside `u64`** is carried as a float, with a
 //!   [`FrontmatterIntegerOutOfRange`](crate::DiagnosticCode::FrontmatterIntegerOutOfRange)
 //!   diagnostic. Past `u64`, or below `i64`, the block does not parse at all:

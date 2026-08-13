@@ -439,6 +439,22 @@ fn a_tagged_key_with_no_twin_reads() {
     assert_eq!(stripped.detail.as_deref(), Some("`!x` on a key at `k`"));
 }
 
+/// A tag on a key the model cannot address is the one tag no strip is reported
+/// for: the entry goes whole, so nothing is kept for a stripped tag to be
+/// about, and the dropped-key note is the entry's whole account.
+#[test]
+fn a_tag_on_a_non_string_key_goes_with_the_entry_it_names() {
+    let document = Document::parse("---\n!x 1: v\nother: 2\n---\nbody\n");
+    assert_eq!(document.frontmatter_refusal(), None);
+    assert_eq!(
+        codes(&document),
+        ["frontmatter-non-string-key", "frontmatter-not-editable"]
+    );
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map([("other", 2)].into_iter().collect()))
+    );
+}
 
 // ── The bound on the block ───────────────────────────────────────────────
 
