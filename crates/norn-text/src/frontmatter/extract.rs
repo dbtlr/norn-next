@@ -92,25 +92,30 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         return absent(Some(refusal));
     };
 
-    // The notes the conversion files are held until it produces a value: a
-    // conversion that refuses the block instead leaves nothing for them to be
-    // about, and a block refused at the collapse then reports exactly what a
-    // block the parser refuses reports — the refusal, and nothing else.
-    let mut strip = StripReport::default();
-    let mut carried = Vec::new();
+    // What the conversion reports about the block — its notes, and what it had
+    // to strip — is held until it produces a value, because a conversion that
+    // refuses the block instead leaves nothing for either to be about. A block
+    // refused where its keys collapse then reports exactly what a block the
+    // parser refuses reports: the refusal, and nothing else.
+    let mut converted_strip = StripReport::default();
+    let mut converted_notes = Vec::new();
     let converted = parse_block(&content[block.yaml.clone()]).and_then(|parsed| {
-        from_yaml(parsed, &mut String::new(), &mut carried, &mut strip)
-            .map_err(|problem| BlockRefusal::Unreadable { problem })
+        from_yaml(
+            parsed,
+            &mut String::new(),
+            &mut converted_notes,
+            &mut converted_strip,
+        )
+        .map_err(|problem| BlockRefusal::Unreadable { problem })
     });
-    let (value, refusal) = match converted {
+    let (value, refusal, strip) = match converted {
         Ok(value) => {
-            diagnostics.append(&mut carried);
-            (Some(value), None)
+            diagnostics.append(&mut converted_notes);
+            (Some(value), None, converted_strip)
         }
         Err(refusal) => {
             diagnostics.push(refusal.to_diagnostic());
-            strip = StripReport::default();
-            (None, Some(refusal))
+            (None, Some(refusal), StripReport::default())
         }
     };
     Extraction {
