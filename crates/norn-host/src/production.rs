@@ -3267,6 +3267,76 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A heal replaces the side it read at the places it walked, and a
+    /// finding read outside the tree it walked stands.** The merge walk is the
+    /// act that opens bytes, so what its quarantines conclude is what those
+    /// bytes say.
+    ///
+    /// A directory the grammar refuses renders onto a directory the vault also
+    /// holds, so a spelling finding filed by the sweep of the refused one sits
+    /// at a place inside the real one. A heal of the real subtree walks that
+    /// place and no path under the refused directory: it reads the bytes there
+    /// and the name of nothing else, so the spelling finding is a statement it
+    /// did not re-derive.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_heal_leaves_the_spelling_finding_read_outside_it_standing() {
+        let f = Fixture::new("subtree-heal-collision");
+        fs::create_dir(f.vault().join("bad\u{fffd}dir")).unwrap();
+        fs::write(f.vault().join("bad\u{fffd}dir/doc.md"), UNDECODABLE).unwrap();
+        if fs::create_dir(f.vault().join("bad\\dir")).is_err() {
+            eprintln!("skipped: this filesystem does not create `bad\\dir`");
+            return;
+        }
+        if !write_or_report(&f.vault().join("bad\\dir/doc.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/doc.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the heal did not file both causes, so this proves nothing"
+        );
+
+        // The same document, still undecodable, with the first bad byte
+        // somewhere else — a cause that moved, which the subtree heal
+        // re-derives.
+        fs::write(
+            f.vault().join("bad\u{fffd}dir/doc.md"),
+            b"a much longer prefix \xff\xfe here\n",
+        )
+        .unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "bad\u{fffd}dir"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}dir/doc.md"),
+            [
+                "document/body-bytes-not-utf8",
+                "document/path-names-no-document"
+            ],
+            "the subtree heal took a finding read under a directory it never walked"
+        );
+        assert_eq!(
+            finding_total(&mut attachment.store),
+            2,
+            "the subtree heal filed a second copy of the cause it re-derived"
+        );
+        ops.detach(&name, attachment);
+    }
+
     /// **Every cause is a finding kind, and the two discard scopes partition
     /// them.** The scopes are read off [`CAUSES`] through
     /// [`Undecodable::decided`], so a kind no cause claims is a kind no producer
