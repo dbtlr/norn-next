@@ -237,14 +237,28 @@ impl Mapping {
         self.entries.push((key, value));
     }
 
-    /// The first key this mapping holds more than one entry under, found in one
-    /// pass over the entries.
+    /// The first key this mapping holds more than one entry under.
+    ///
+    /// Past [`HASH_ABOVE`] entries the pass is over a table, which keeps the
+    /// answer linear in key count where the square of a scan is what a read of
+    /// a block full of keys would pay. At or under it the pass compares
+    /// instead: a handful of short strings is fewer comparisons than a table
+    /// costs to allocate and hash into, and this runs on every mapping of every
+    /// block that is read.
     pub(crate) fn repeated_key(&self) -> Option<&str> {
-        let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+        if self.entries.len() > HASH_ABOVE {
+            let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+            return self
+                .entries
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .find(|key| !seen.insert(key));
+        }
         self.entries
             .iter()
-            .map(|(key, _)| key.as_str())
-            .find(|key| !seen.insert(key))
+            .enumerate()
+            .find(|(index, (key, _))| self.entries[..*index].iter().any(|(seen, _)| seen == key))
+            .map(|(_, (key, _))| key.as_str())
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -291,15 +305,17 @@ pub(crate) enum KeyIndex<'a> {
     Hashed(HashMap<&'a str, &'a Value>),
 }
 
-/// The entry count above which a by-key view hashes rather than scans.
+/// The entry count above which a question about a mapping's keys is answered
+/// through a hash table rather than a scan — both for a by-key view of it and
+/// for [`Mapping::repeated_key`].
 ///
-/// Both arms answer every key identically, so what this value picks is cost and
-/// never correctness. It sits where the two routes cost about the same in an
-/// optimized build: under it the comparisons a walk by scan makes are cheaper
-/// than allocating a table and hashing every key into it, and over it the scan's
-/// square is what dominates the walk. An ordinary document's block — title,
-/// dates, status, tags — holds fewer fields than this, so the common read
-/// allocates no table at all.
+/// Both arms answer identically, so what this value picks is cost and never
+/// correctness. It sits where the two routes cost about the same in an
+/// optimized build: under it the comparisons a scan makes are cheaper than
+/// allocating a table and hashing every key into it, and over it the scan's
+/// square is what dominates. An ordinary document's block — title, dates,
+/// status, tags — holds fewer fields than this, so the common read allocates no
+/// table at all.
 const HASH_ABOVE: usize = 16;
 
 impl<'a> KeyIndex<'a> {
