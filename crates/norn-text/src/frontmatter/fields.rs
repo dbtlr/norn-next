@@ -316,7 +316,8 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
     let parsed = crate::frontmatter::extract::parse_block(text).ok()?;
     let mut discarded = Vec::new();
     let mut strip = StripReport::default();
-    let value = crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip);
+    let value =
+        crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip).ok()?;
     strip.is_clean().then_some(value)
 }
 

@@ -234,6 +234,98 @@ fn a_refusal_carries_the_decoder_s_account_of_the_block() {
     );
 }
 
+// ── A key written twice ──────────────────────────────────────────────────
+
+/// Everything a consumer of a read document can see about it.
+fn posture(source: &str) -> (Option<BlockRefusal>, Vec<String>, bool, String) {
+    let document = Document::parse(source);
+    (
+        document.frontmatter_refusal().cloned(),
+        codes(&document)
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect(),
+        document.frontmatter().is_some(),
+        document.body().to_string(),
+    )
+}
+
+/// **A tag is invisible for uniqueness.** A key written twice refuses the
+/// block, and the spelling of the two keys is not part of the answer: the
+/// parser refuses the pair it sees as one key, and the pair it holds apart —
+/// a tagged key and a plain one, which the strip into the value model collapses
+/// into one name — is refused where they collapse. The document a reader gets
+/// is the same document either way, down to the account of the refusal.
+#[test]
+fn a_key_written_twice_refuses_the_block_however_it_was_spelled() {
+    let plain = posture("---\nk: 1\nk: 2\n---\nbody\n");
+    assert_eq!(
+        plain.0,
+        Some(BlockRefusal::Unreadable {
+            problem: "duplicate entry with key \"k\"".to_string()
+        })
+    );
+    assert_eq!(plain.1, ["frontmatter-parse-failed"]);
+    assert!(!plain.2, "a refused block produced a value");
+    assert_eq!(plain.3, "body\n");
+
+    for spelling in [
+        "---\n!x k: 1\nk: 2\n---\nbody\n",
+        "---\nk: 1\n!x k: 2\n---\nbody\n",
+        "---\n!x k: 1\n!y k: 2\n---\nbody\n",
+    ] {
+        assert_eq!(
+            posture(spelling),
+            plain,
+            "{spelling:?} degrades differently from the plain duplicate"
+        );
+    }
+}
+
+/// The collapse is checked wherever a mapping is built, so a repeated key
+/// refuses the block at depth and whether the block wrote both entries or a
+/// merge contributed one of them.
+#[test]
+fn a_key_repeated_below_the_top_level_refuses_the_block_too() {
+    for (source, expected) in [
+        (
+            "---\nouter:\n  !x k: 1\n  k: 2\n---\nbody\n",
+            "outer: duplicate entry with key \"k\"",
+        ),
+        (
+            "---\nbase: &b\n  k: 1\nout:\n  <<: *b\n  !x k: 2\n---\nbody\n",
+            "out: duplicate entry with key \"k\"",
+        ),
+        (
+            "---\nlist:\n  - !x k: 1\n    k: 2\n---\nbody\n",
+            "list[0]: duplicate entry with key \"k\"",
+        ),
+    ] {
+        let document = Document::parse(source);
+        assert_eq!(
+            document.frontmatter_refusal(),
+            Some(&BlockRefusal::Unreadable {
+                problem: expected.to_string()
+            }),
+            "{source:?}"
+        );
+        assert_eq!(codes(&document), ["frontmatter-parse-failed"], "{source:?}");
+        assert_eq!(document.frontmatter(), None, "{source:?}");
+        assert_eq!(document.body(), "body\n", "{source:?}");
+    }
+}
+
+/// A tag beside a key nothing else writes is stripped and its block read, so
+/// what the refusal above turns on is the repetition and not the tag.
+#[test]
+fn a_tagged_key_with_no_twin_reads() {
+    let document = Document::parse("---\n!x k: 1\nother: 2\n---\nbody\n");
+    assert_eq!(document.frontmatter_refusal(), None);
+    let map = map_of("---\n!x k: 1\nother: 2\n---\nbody\n");
+    assert_eq!(map.get("k"), Some(&Value::Int(1)));
+    assert_eq!(map.get("other"), Some(&Value::Int(2)));
+}
+
 // ── The bound on the block ───────────────────────────────────────────────
 
 /// A block of `bytes` bytes that parses to a mapping, closed and well-formed.
@@ -659,9 +751,8 @@ fn the_non_finite_floats_survive_as_floats() {
     assert_eq!(map.get("c"), Some(&Value::Float(f64::NEG_INFINITY)));
 }
 
-/// Duplicate keys are not a value-model question. The block is not
-/// well-formed YAML, so it does not parse and there is no value to strip
-/// anything from.
+/// A key written twice is refused rather than stripped: the block is read by
+/// nothing, so there is no value for a last entry to win in.
 #[test]
 fn duplicate_keys_are_a_parse_failure_not_a_silent_last_wins() {
     let document = Document::parse("---\na: 1\na: 2\n---\n");

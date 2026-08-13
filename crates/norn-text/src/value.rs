@@ -52,8 +52,13 @@
 //!   is a parsed key no line can be attributed to, so the block has no
 //!   trustworthy per-field split and every field edit in it refuses. A merge
 //!   contributing only keys the block already writes leaves it editable.
-//! - **Duplicate keys** are not a value-model question at all: the block is
-//!   not well-formed, so it does not parse and no value exists.
+//! - **A repeated key** costs the block its read rather than reaching the
+//!   model. Two spellings of one key are one key: the parser refuses `k: 1`
+//!   beside `k: 2` itself, and a pair it holds apart — `!x k: 1` beside
+//!   `k: 2`, whose key tag this boundary strips — is refused here, where the
+//!   two collapse. Either way the block is
+//!   [`FrontmatterParseFailed`](crate::DiagnosticCode::FrontmatterParseFailed)
+//!   and no value exists, so no mapping in the model answers one key twice.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
@@ -221,24 +226,25 @@ impl Mapping {
         }
     }
 
-    /// Append an entry whose key is known to be new, skipping the scan
-    /// `insert` does to find an existing one. The parse boundary is the caller:
-    /// a block with two entries under one key is not well-formed and never
-    /// reaches the value model.
+    /// Append an entry at the end, skipping the scan `insert` does to find an
+    /// existing key.
     ///
-    /// The uniqueness this relies on is checked by [`Mapping::keys_are_unique`]
-    /// once the mapping is built, rather than per call: a scan per append is the
-    /// quadratic this method exists to avoid.
-    pub(crate) fn append_unique(&mut self, key: String, value: Value) {
+    /// Uniqueness is settled once per mapping by [`Mapping::repeated_key`]
+    /// rather than per call — a scan per append is the quadratic this method
+    /// exists to avoid — and a mapping whose keys repeat is refused there
+    /// rather than carried.
+    pub(crate) fn append(&mut self, key: String, value: Value) {
         self.entries.push((key, value));
     }
 
-    /// Whether every key in this mapping occurs exactly once — the invariant
-    /// [`Mapping::append_unique`] is handed rather than enforces, checked in one
-    /// pass over the built mapping.
-    pub(crate) fn keys_are_unique(&self) -> bool {
+    /// The first key this mapping holds more than one entry under, found in one
+    /// pass over the entries.
+    pub(crate) fn repeated_key(&self) -> Option<&str> {
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
-        self.entries.iter().all(|(key, _)| seen.insert(key))
+        self.entries
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .find(|key| !seen.insert(key))
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -396,26 +402,31 @@ impl StripReport {
 /// `path` is a scratch buffer naming where the walk currently is. It is
 /// extended and truncated in place rather than rebuilt per node, so a document
 /// with no strippable construct in it pays nothing to be able to name one.
+///
+/// The error is the account of a key the block writes twice, which is the one
+/// construct this boundary refuses rather than strips: the conversion collapses
+/// spellings the parser holds apart, so the value it would return could answer
+/// one key two ways.
 pub(crate) fn from_yaml(
     value: serde_yaml::Value,
     path: &mut String,
     diagnostics: &mut Vec<Diagnostic>,
     report: &mut StripReport,
-) -> Value {
+) -> Result<Value, String> {
     match value {
-        serde_yaml::Value::Null => Value::Null,
-        serde_yaml::Value::Bool(value) => Value::Bool(value),
-        serde_yaml::Value::Number(number) => number_from_yaml(number, path, diagnostics),
-        serde_yaml::Value::String(text) => Value::String(text),
+        serde_yaml::Value::Null => Ok(Value::Null),
+        serde_yaml::Value::Bool(value) => Ok(Value::Bool(value)),
+        serde_yaml::Value::Number(number) => Ok(number_from_yaml(number, path, diagnostics)),
+        serde_yaml::Value::String(text) => Ok(Value::String(text)),
         serde_yaml::Value::Sequence(items) => {
             let mut out = Vec::with_capacity(items.len());
             for (index, item) in items.into_iter().enumerate() {
                 let mark = path.len();
                 let _ = write!(path, "[{index}]");
-                out.push(from_yaml(item, path, diagnostics, report));
+                out.push(from_yaml(item, path, diagnostics, report)?);
                 path.truncate(mark);
             }
-            Value::Sequence(out)
+            Ok(Value::Sequence(out))
         }
         serde_yaml::Value::Mapping(mapping) => {
             let mut map = Mapping::new();
@@ -437,15 +448,23 @@ pub(crate) fn from_yaml(
                     path.push('.');
                 }
                 path.push_str(&key);
-                let value = from_yaml(value, path, diagnostics, report);
+                let value = from_yaml(value, path, diagnostics, report)?;
                 path.truncate(mark);
-                map.append_unique(key, value);
+                map.append(key, value);
             }
-            debug_assert!(
-                map.keys_are_unique(),
-                "a parsed mapping reaching the value model repeats a key"
-            );
-            Value::Map(map)
+            // A tag on a key is dropped by the strip above, so `!x k` and `k`
+            // arrive as distinct nodes and leave as one name. The parser refuses
+            // the pair it can see; the pair only this collapse produces is
+            // refused here, and both refusals cost the block its read.
+            //
+            // Recovery at entry level — keeping the first entry under a
+            // repeated key and reading the rest of the block — belongs to a
+            // replacement of the parser behind this seam, which is what decides
+            // what a duplicate is on the other route.
+            if let Some(key) = map.repeated_key() {
+                return Err(duplicate_entry(path, key));
+            }
+            Ok(Value::Map(map))
         }
         serde_yaml::Value::Tagged(tagged) => {
             diagnostics.push(
@@ -458,6 +477,18 @@ pub(crate) fn from_yaml(
             );
             from_yaml(tagged.value, path, diagnostics, report)
         }
+    }
+}
+
+/// The account a repeated key is refused with, in the shape the parser behind
+/// this seam states its own duplicate refusal in: the key, prefixed by the path
+/// to the mapping holding it wherever that is not the top level.
+fn duplicate_entry(path: &str, key: &str) -> String {
+    let entry = format!("duplicate entry with key {key:?}");
+    if path.is_empty() {
+        entry
+    } else {
+        format!("{path}: {entry}")
     }
 }
 
@@ -497,17 +528,17 @@ mod tests {
 
     /// A mapping holding `filler` distinct keys and two entries under `dup`.
     ///
-    /// The parse boundary is what keeps a repeated key out of an ordinary
-    /// mapping, so this reaches past it to build one directly: what the cases
-    /// below hold is that the two routes to a value agree whatever the entries
-    /// are, not that these entries occur.
+    /// A block whose keys repeat is refused before a mapping is carried, so
+    /// this builds one past that refusal directly: what the cases below hold is
+    /// that the two routes to a value agree whatever the entries are, not that
+    /// these entries occur.
     fn with_a_repeated_key(filler: usize) -> Mapping {
         let mut map = Mapping::new();
-        map.append_unique("dup".to_string(), Value::Int(1));
+        map.append("dup".to_string(), Value::Int(1));
         for index in 0..filler {
-            map.append_unique(format!("k{index}"), Value::Int(0));
+            map.append(format!("k{index}"), Value::Int(0));
         }
-        map.append_unique("dup".to_string(), Value::Int(2));
+        map.append("dup".to_string(), Value::Int(2));
         map
     }
 
@@ -531,7 +562,7 @@ mod tests {
     fn of_size(entries: usize) -> Mapping {
         let mut map = Mapping::new();
         for index in 0..entries {
-            map.append_unique(format!("k{index}"), Value::Int(0));
+            map.append(format!("k{index}"), Value::Int(0));
         }
         map
     }

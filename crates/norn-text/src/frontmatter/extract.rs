@@ -92,19 +92,24 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         return absent(Some(refusal));
     };
 
+    // The notes the conversion files are held until it produces a value: a
+    // conversion that refuses the block instead leaves nothing for them to be
+    // about, and a block refused at the collapse then reports exactly what a
+    // block the parser refuses reports — the refusal, and nothing else.
     let mut strip = StripReport::default();
-    let (value, refusal) = match parse_block(&content[block.yaml.clone()]) {
-        Ok(parsed) => (
-            Some(from_yaml(
-                parsed,
-                &mut String::new(),
-                diagnostics,
-                &mut strip,
-            )),
-            None,
-        ),
+    let mut carried = Vec::new();
+    let converted = parse_block(&content[block.yaml.clone()]).and_then(|parsed| {
+        from_yaml(parsed, &mut String::new(), &mut carried, &mut strip)
+            .map_err(|problem| BlockRefusal::Unreadable { problem })
+    });
+    let (value, refusal) = match converted {
+        Ok(value) => {
+            diagnostics.append(&mut carried);
+            (Some(value), None)
+        }
         Err(refusal) => {
             diagnostics.push(refusal.to_diagnostic());
+            strip = StripReport::default();
             (None, Some(refusal))
         }
     };
@@ -205,8 +210,9 @@ pub enum BlockRefusal {
     /// The block is longer than [`FRONTMATTER_MAX_BYTES`], carrying its own
     /// length so the note can state how far past the bound it is.
     TooLarge { bytes: usize },
-    /// The block is not well-formed YAML, or carries a merge directive that
-    /// names no mapping.
+    /// The block is not well-formed YAML, carries a merge directive that names
+    /// no mapping, or writes one key twice — including the pair only the strip
+    /// into the value model collapses into one name.
     Unreadable { problem: String },
 }
 
