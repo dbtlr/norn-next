@@ -36,7 +36,7 @@ A resolved outcome in which Norn performs no requested mutation because safety, 
 _Avoid_: Error, failure (when the distinction matters)
 
 **Finding**:
-A structured statement that vault state violates a rule or cannot be resolved unambiguously.
+A structured statement that vault state violates a rule or cannot be resolved unambiguously. A **place-scoped** finding states that no document is derived at the place it names, so a readable document standing there withholds it; a **document-scoped** finding states something about the document derived at that place and stands beside it.
 
 **Quarantined document**:
 A vault document Norn cannot decode, which therefore contributes no derived state and is named by a finding carrying its path and the cause, except while a readable document occupies the same rendered place. Quarantine is scoped to the one document; the rest of the vault is derived and served.

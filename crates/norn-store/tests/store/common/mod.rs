@@ -267,6 +267,23 @@ pub fn ambiguity_for_target(
     }
 }
 
+/// A finding about the document derived at its subject: no ambiguity class, and
+/// a kind that stands beside a document row rather than in place of one.
+pub fn unread_block(at: &str) -> FindingFacts {
+    FindingFacts {
+        kind: FindingKind::FrontmatterUnreadable,
+        severity: Severity::Error,
+        path: path(at),
+        class_keys: BTreeSet::new(),
+        target: None,
+        span: None,
+        candidates: Vec::new(),
+        candidates_total: 0,
+        message: format!("`{at}` derives without its frontmatter"),
+        detail: Some("the block is not well-formed".to_string()),
+    }
+}
+
 /// A finding with no ambiguity class — the shape a vault-schema violation takes.
 pub fn violation(at: &str) -> FindingFacts {
     FindingFacts {

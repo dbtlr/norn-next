@@ -14,8 +14,9 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, MaintainerIdentity, ReasonCode, Severity, TrustState,
-    UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase, WatcherLossCause,
+    ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity, ReasonCode,
+    Severity, TrustState, UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase,
+    WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -48,6 +49,11 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
 /// Every kind a finding is filed under.
 fn finding_kinds() -> Vec<FindingKind> {
     FindingKind::ALL.to_vec()
+}
+
+/// Every scope a kind's findings may stand in.
+fn finding_scopes() -> Vec<FindingScope> {
+    vec![FindingScope::Place, FindingScope::Document]
 }
 
 /// Every severity a finding carries.
@@ -145,6 +151,13 @@ fn every_reason_code_survives_the_round_trip() {
 fn every_finding_kind_survives_the_round_trip() {
     for kind in finding_kinds() {
         round_trip(&kind);
+    }
+}
+
+#[test]
+fn every_finding_scope_survives_the_round_trip() {
+    for scope in finding_scopes() {
+        round_trip(&scope);
     }
 }
 
@@ -291,6 +304,8 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
         "document/path-names-no-document",
         "document/body-bytes-not-utf8",
         "document/frontmatter-too-large",
+        "document/frontmatter-unclosed",
+        "document/frontmatter-unreadable",
     ];
     assert_eq!(finding_kinds().len(), strings.len());
     for (kind, string) in finding_kinds().into_iter().zip(strings) {
@@ -302,6 +317,64 @@ fn a_finding_kind_is_the_flat_namespaced_string_it_renders_as() {
     assert_eq!(
         FindingKind::try_from("document/unreadable"),
         Err(UnknownFindingKind)
+    );
+}
+
+/// A kind says where its findings may stand, and the two scopes partition the
+/// registry. A place-scoped kind states that nothing is derived at its subject;
+/// a document-scoped kind states something about the document derived there, so
+/// it stands beside that document's row.
+#[test]
+fn the_two_scopes_partition_the_finding_kinds() {
+    let spellings = |scope: FindingScope| {
+        let mut kinds: Vec<&str> = finding_kinds()
+            .into_iter()
+            .filter(|kind| kind.scope() == scope)
+            .map(|kind| kind.as_str())
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    };
+    let place = spellings(FindingScope::Place);
+    let document = spellings(FindingScope::Document);
+    assert_eq!(
+        place,
+        [
+            "document/body-bytes-not-utf8",
+            "document/path-bytes-not-utf8",
+            "document/path-names-no-document",
+        ]
+    );
+    assert_eq!(
+        document,
+        [
+            "document/frontmatter-too-large",
+            "document/frontmatter-unclosed",
+            "document/frontmatter-unreadable",
+        ]
+    );
+    assert_eq!(place.len() + document.len(), FindingKind::ALL.len());
+}
+
+/// A scope is the bare string it serializes as. A string outside the pair is
+/// refused rather than defaulted, so a scope a later version writes stops a
+/// reader of this one instead of arriving as `Place` and taking the
+/// withholding a place-scoped finding is subject to.
+#[test]
+fn a_finding_scope_is_the_bare_string_it_renders_as() {
+    let strings = ["place", "document"];
+    assert_eq!(finding_scopes().len(), strings.len());
+    for (scope, string) in finding_scopes().into_iter().zip(strings) {
+        let json = format!("\"{string}\"");
+        assert_eq!(wire(&scope), json);
+        assert_eq!(
+            serde_json::from_str::<FindingScope>(&json).expect("reading a scope back"),
+            scope
+        );
+    }
+    assert!(
+        serde_json::from_str::<FindingScope>(r#""vault""#).is_err(),
+        "a scope nobody wrote was read as one of the two"
     );
 }
 

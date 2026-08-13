@@ -46,6 +46,9 @@ pub const FRONTMATTER_MAX_BYTES: usize = 16 * 1024;
 pub(crate) struct Extraction<'a> {
     /// The parsed block, or `None` when there is none or it is malformed.
     pub(crate) value: Option<Value>,
+    /// Why the block was read by nothing, when it was. `None` covers both a
+    /// document that opens no block and one whose block parsed.
+    pub(crate) refusal: Option<BlockRefusal>,
     /// The byte range of the YAML between the delimiters. Present even when
     /// the block did not parse; absent when there is no closed block at all.
     pub(crate) range: Option<Range<usize>>,
@@ -69,8 +72,9 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         content
     };
 
-    let absent = || Extraction {
+    let absent = |refusal: Option<BlockRefusal>| Extraction {
         value: None,
+        refusal,
         range: None,
         body: content,
         body_start: 0,
@@ -79,32 +83,34 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
     };
 
     if strip_opening_fence(after_bom).is_none() {
-        return absent();
+        return absent(None);
     }
 
     let Some(block) = closed_block(content) else {
-        diagnostics.push(Diagnostic::warning(
-            DiagnosticCode::FrontmatterUnclosed,
-            "frontmatter opening delimiter has no closing delimiter",
-        ));
-        return absent();
+        let refusal = BlockRefusal::Unclosed;
+        diagnostics.push(refusal.to_diagnostic());
+        return absent(Some(refusal));
     };
 
     let mut strip = StripReport::default();
-    let value = match parse_block(&content[block.yaml.clone()]) {
-        Ok(parsed) => Some(from_yaml(
-            parsed,
-            &mut String::new(),
-            diagnostics,
-            &mut strip,
-        )),
+    let (value, refusal) = match parse_block(&content[block.yaml.clone()]) {
+        Ok(parsed) => (
+            Some(from_yaml(
+                parsed,
+                &mut String::new(),
+                diagnostics,
+                &mut strip,
+            )),
+            None,
+        ),
         Err(refusal) => {
-            diagnostics.push(refusal.into_diagnostic());
-            None
+            diagnostics.push(refusal.to_diagnostic());
+            (None, Some(refusal))
         }
     };
     Extraction {
         value,
+        refusal,
         range: Some(block.yaml),
         body: &content[block.body_start..],
         body_start: block.body_start,
@@ -173,13 +179,29 @@ fn is_fence(line: &str) -> bool {
 /// The key a merge directive is written under.
 pub(crate) const MERGE_KEY: &str = "<<";
 
-/// Why a frontmatter block yields no value.
+/// Why a document's frontmatter block was read by nothing.
 ///
-/// The two refusals are told apart because they are different defects in the
-/// document: one block is written in a YAML this crate cannot read, and the
-/// other is larger than the block it reads at all.
-#[derive(Debug)]
-pub(crate) enum BlockRefusal {
+/// This is the state a consumer branches on when it has to tell *this document
+/// has no frontmatter* from *this document's frontmatter is unknown*: a block
+/// that carries a refusal contributed no field, no tag and no link, and the
+/// fields the document was written with are whatever the unread bytes say. The
+/// three refusals are told apart because they are different defects in the
+/// document — a block that never closes, a block written in a YAML this crate
+/// cannot read, and a block longer than the block it reads at all — and each is
+/// fixed by a different edit.
+///
+/// A note is filed alongside, because reading is forgiving and reports what it
+/// worked around. The note is prose plus a [`DiagnosticCode`] this crate's own
+/// consumers match on; this state is what crosses a seam.
+///
+/// Plain rather than `#[non_exhaustive]`: a consumer that has not decided what
+/// a new way of leaving a block unread means to it should fail to compile
+/// rather than fall into a default arm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BlockRefusal {
+    /// An opening `---` with no closing delimiter, so no block's bytes are
+    /// addressable.
+    Unclosed,
     /// The block is longer than [`FRONTMATTER_MAX_BYTES`], carrying its own
     /// length so the note can state how far past the bound it is.
     TooLarge { bytes: usize },
@@ -189,21 +211,43 @@ pub(crate) enum BlockRefusal {
 }
 
 impl BlockRefusal {
-    /// The note this refusal is filed as.
-    pub(crate) fn into_diagnostic(self) -> Diagnostic {
+    /// The code the note beside this refusal is filed under.
+    ///
+    /// One mapping, in one direction: the state is what a refusal *is*, and the
+    /// code is how the note about it is spelled, so a consumer reading either
+    /// reads the same answer.
+    pub const fn code(&self) -> DiagnosticCode {
         match self {
-            BlockRefusal::TooLarge { bytes } => Diagnostic::warning(
-                DiagnosticCode::FrontmatterTooLarge,
-                "frontmatter is larger than the block that is read",
-            )
-            .with_detail(format!(
+            BlockRefusal::Unclosed => DiagnosticCode::FrontmatterUnclosed,
+            BlockRefusal::TooLarge { .. } => DiagnosticCode::FrontmatterTooLarge,
+            BlockRefusal::Unreadable { .. } => DiagnosticCode::FrontmatterParseFailed,
+        }
+    }
+
+    /// The decoder's own account of the refusal, which a consumer carries
+    /// beside the state when it reports one. `None` where the state is the
+    /// whole account.
+    pub fn problem(&self) -> Option<String> {
+        match self {
+            BlockRefusal::Unclosed => None,
+            BlockRefusal::TooLarge { bytes } => Some(format!(
                 "the block is {bytes} bytes and the bound is {FRONTMATTER_MAX_BYTES}"
             )),
-            BlockRefusal::Unreadable { problem } => Diagnostic::warning(
-                DiagnosticCode::FrontmatterParseFailed,
-                "frontmatter could not be parsed",
-            )
-            .with_detail(problem),
+            BlockRefusal::Unreadable { problem } => Some(problem.clone()),
+        }
+    }
+
+    /// The note this refusal is filed as.
+    pub(crate) fn to_diagnostic(&self) -> Diagnostic {
+        let message = match self {
+            BlockRefusal::Unclosed => "frontmatter opening delimiter has no closing delimiter",
+            BlockRefusal::TooLarge { .. } => "frontmatter is larger than the block that is read",
+            BlockRefusal::Unreadable { .. } => "frontmatter could not be parsed",
+        };
+        let note = Diagnostic::warning(self.code(), message);
+        match self.problem() {
+            Some(problem) => note.with_detail(problem),
+            None => note,
         }
     }
 }

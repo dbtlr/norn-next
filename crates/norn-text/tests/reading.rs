@@ -5,7 +5,9 @@
 //! diagnostic and a usable body, never an error return — so most of what this
 //! file states is which diagnostic, and what survives beside it.
 
-use norn_text::{DiagnosticCode, Document, LineEnding, Value, ValueStyle, render_document};
+use norn_text::{
+    BlockRefusal, DiagnosticCode, Document, LineEnding, Value, ValueStyle, render_document,
+};
 
 fn codes<'a>(document: &'a Document<'a>) -> Vec<&'a str> {
     document
@@ -132,6 +134,104 @@ fn malformed_yaml_is_diagnosed_and_still_reports_where_the_block_was() {
     // A parse failure is a state of its own, not an absence: the diagnostic
     // carries the parser's own account of what went wrong.
     assert!(document.diagnostics()[0].detail.is_some());
+}
+
+/// The state a consumer deriving from a document branches on.
+///
+/// `frontmatter()` is `None` for a document with no block and for a document
+/// whose block was read by nothing, and a consumer that cannot tell them apart
+/// records *no tags, no title, no aliases* about a document whose fields were
+/// never read. The refusal is what tells them apart, it names which defect the
+/// block carries, and it agrees with the note filed beside it.
+#[test]
+fn a_block_read_by_nothing_carries_its_refusal_as_state() {
+    let oversized = document_of(&block_of(norn_text::FRONTMATTER_MAX_BYTES + 1));
+    let cases: [(&str, Option<DiagnosticCode>); 6] = [
+        // No block at all: nothing refused anything.
+        ("# heading\n", None),
+        // A block that read.
+        ("---\ntitle: hello\n---\n# body\n", None),
+        // A block that read, with a note about what the read worked around.
+        ("---\ntitle: !!str hello\n---\n# body\n", None),
+        (
+            "---\ntitle: hello\n# heading (no close)\n",
+            Some(DiagnosticCode::FrontmatterUnclosed),
+        ),
+        (
+            "---\ntitle: : :\n---\n# body\n",
+            Some(DiagnosticCode::FrontmatterParseFailed),
+        ),
+        (
+            oversized.as_str(),
+            Some(DiagnosticCode::FrontmatterTooLarge),
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let document = Document::parse(source);
+        let refusal = document.frontmatter_refusal();
+        assert_eq!(
+            refusal.map(BlockRefusal::code),
+            expected,
+            "the refusal state disagrees for {:?}",
+            &source[..source.len().min(40)]
+        );
+        assert_eq!(
+            refusal.is_some(),
+            document
+                .diagnostics()
+                .iter()
+                .any(|note| note.code.refuses_the_block()),
+            "the state and the notes disagree for {:?}",
+            &source[..source.len().min(40)]
+        );
+        if refusal.is_some() {
+            assert_eq!(
+                document.frontmatter(),
+                None,
+                "a block read by nothing produced a value"
+            );
+        }
+    }
+}
+
+/// A refusal that has more to say than its variant carries it: the account the
+/// decoder gave, which is what a consumer reports beside the state.
+#[test]
+fn a_refusal_carries_the_decoder_s_account_of_the_block() {
+    let block = block_of(norn_text::FRONTMATTER_MAX_BYTES * 2);
+    let source = document_of(&block);
+    let document = Document::parse(&source);
+    let problem = document
+        .frontmatter_refusal()
+        .expect("the block is past the bound")
+        .problem()
+        .expect("the size refusal states the block's length and the bound");
+    assert!(problem.contains(&block.len().to_string()), "{problem}");
+    assert!(
+        problem.contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string()),
+        "{problem}"
+    );
+
+    let malformed = Document::parse("---\ntitle: : :\n---\n# body\n");
+    assert!(
+        malformed
+            .frontmatter_refusal()
+            .expect("the block is not well-formed")
+            .problem()
+            .is_some_and(|problem| !problem.is_empty()),
+        "the parse refusal states nothing"
+    );
+
+    let unclosed = Document::parse("---\ntitle: hello\n# heading (no close)\n");
+    assert_eq!(
+        unclosed
+            .frontmatter_refusal()
+            .expect("the block never closes")
+            .problem(),
+        None,
+        "an unclosed block has nothing to say past the state itself"
+    );
 }
 
 // ── The bound on the block ───────────────────────────────────────────────

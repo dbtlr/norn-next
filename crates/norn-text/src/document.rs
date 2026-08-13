@@ -5,7 +5,9 @@ use std::ops::Range;
 
 use crate::body::BodyScan;
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
-use crate::frontmatter::extract::{BOM, FRONTMATTER_MAX_BYTES, closed_block, extract};
+use crate::frontmatter::extract::{
+    BOM, BlockRefusal, FRONTMATTER_MAX_BYTES, closed_block, extract,
+};
 use crate::frontmatter::fields::{Field, ValueStyle, classify_value, field_spans, reparse};
 use crate::frontmatter::render::{
     RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
@@ -172,6 +174,9 @@ pub struct Document<'a> {
     byte_order_mark: bool,
     line_ending: LineEnding,
     frontmatter: Option<Value>,
+    /// Why the block was read by nothing, when it was: the state that separates
+    /// a document carrying no block from one whose fields are unknown.
+    frontmatter_refusal: Option<BlockRefusal>,
     frontmatter_range: Option<Range<usize>>,
     body: &'a str,
     body_start: usize,
@@ -209,6 +214,7 @@ impl<'a> Document<'a> {
             byte_order_mark: extraction.byte_order_mark,
             line_ending: LineEnding::of(source),
             frontmatter: extraction.value,
+            frontmatter_refusal: extraction.refusal,
             frontmatter_range: extraction.range,
             body: extraction.body,
             body_start: extraction.body_start,
@@ -245,6 +251,20 @@ impl<'a> Document<'a> {
     /// parse.
     pub fn frontmatter(&self) -> Option<&Value> {
         self.frontmatter.as_ref()
+    }
+
+    /// Why this document's frontmatter block was read by nothing, or `None`
+    /// where nothing refused it.
+    ///
+    /// [`Document::frontmatter`] is `None` for two documents that differ: one
+    /// carries no block, and one carries a block that contributed no field. A
+    /// consumer deriving state from a document has to tell them apart —
+    /// answering *this document has no tags, no title, no aliases* about a
+    /// document whose block went unread states as fact what was never read —
+    /// and this is the state it tells them apart by. It is `Some` exactly when
+    /// a block was opened and no value came out of it.
+    pub fn frontmatter_refusal(&self) -> Option<&BlockRefusal> {
+        self.frontmatter_refusal.as_ref()
     }
 
     /// The byte range of the YAML between the delimiters. Present even when

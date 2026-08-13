@@ -15,8 +15,8 @@ use norn_store::{
     FrontmatterValue, HeadingFact, IncrementProvenance, LinkFact, LinkFamily, Provenance,
     SchemaPin, Span, Store, StoreError, StoredDocument, StoredPathOrder, TagFact, TagSource,
 };
-use norn_text::{DiagnosticCode, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, MaintainerIdentity, Severity};
+use norn_text::{BlockRefusal, Document, SourceSpan, Value};
+use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity};
 
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 
@@ -261,12 +261,13 @@ impl ProductionEntryOps {
         let exclusions = exclusions(&attachment.registration, &attachment._shadows);
         // Pinning first is what makes this the re-derivation leg of a schema
         // change: every finding the walk below records carries the fingerprint
-        // the pin just installed. What the pin discarded stands again because a
-        // finding only ever sits where no document row does — `Pending::flush`
-        // refuses one at a path that has a row — and the walk reads every such
-        // path whatever its bytes say. The rest of the walk is hash-gated: a
-        // path whose document row stands is re-derived only when its content
-        // hash moved, and no finding sits at such a path.
+        // the pin just installed. What the pin discarded stands again where the
+        // finding is **place-scoped**: such a finding sits only where no
+        // document row does, and the walk reads every such path whatever its
+        // bytes say. The rest of the walk is hash-gated, so a **document-scoped**
+        // finding — one standing beside the row it is about — is re-derived by
+        // the walk only where that document's content hash moved, and otherwise
+        // returns when the document next changes.
         Self::pin_schema(&mut attachment.store, &attachment.registration)?;
         heal_documents(
             &mut attachment.store,
@@ -551,10 +552,10 @@ impl EntryOps for ProductionEntryOps {
         // A re-pin that moved the fingerprint discarded every finding keyed by
         // the old one, and the paths those findings sit at are not the paths
         // this batch names — so the scoped increment cannot record them again
-        // and the vault-wide heal is the leg that does: a finding sits only
-        // where no document row does, and the heal reads every such path. A
-        // schema event whose re-read pins the same bytes moved nothing and
-        // discarded nothing, so it stays on the increment it arrived as.
+        // and the vault-wide heal is the leg that does: a place-scoped finding
+        // sits only where no document row does, and the heal reads every such
+        // path. A schema event whose re-read pins the same bytes moved nothing
+        // and discarded nothing, so it stays on the increment it arrived as.
         let repinned =
             schema && Self::pin_schema(&mut attachment.store, &attachment.registration)?.repinned;
         if repinned || work.batch.rescans().contains(&RescanScope::Vault) {
@@ -774,16 +775,20 @@ where
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
                 let read = open_enumerated(&mut files)?;
                 match read {
-                    Some(read) if read.content_hash().to_string() != stored[index].content_hash => {
-                        pending.rederive(
-                            Path::new(&fp),
-                            &fp,
-                            read.bytes(),
-                            read.content_hash().to_string(),
-                            Some(&stored[index].path),
-                        );
+                    Some(read) => {
+                        let hash = read.content_hash().to_string();
+                        if hash != stored[index].content_hash
+                            || stands_without_its_finding(pending.store, &stored[index])?
+                        {
+                            pending.rederive(
+                                Path::new(&fp),
+                                &fp,
+                                read.bytes(),
+                                hash,
+                                Some(&stored[index].path),
+                            );
+                        }
                     }
-                    Some(_) => {}
                     // The file went away between this walk's enumeration and
                     // this open. A walk begun now holds no file here, so the
                     // convergent answer is the one that walk's merge would
@@ -824,6 +829,39 @@ where
         progress.report(healed, None);
     }
     pending.flush()
+}
+
+/// Whether this row is a degraded one whose finding is not standing beside it.
+///
+/// A heal is otherwise hash-authoritative: a path a row stands at is read again
+/// only when its bytes moved. That reaches a **place-scoped** finding whatever
+/// happened to it, because no row stands where one sits — but a
+/// **document-scoped** finding sits beside a row, so a heal that only compared
+/// hashes would never restore one that left the table. Two things take one:
+/// a vault-schema re-pin, which discards every finding keyed by the fingerprint
+/// it replaced, and a process killed between a flush's increment and the
+/// recording after it. Either leaves the row asserting an absent frontmatter
+/// with nothing stating that the fields were never read, which is the answer
+/// the degradation exists to prevent.
+///
+/// So the pair is what the heal converges, not the row alone. The row says
+/// which documents can owe a finding — an absent frontmatter projection beside
+/// a nonzero frontmatter-scoped diagnostic count is a block nothing read, and
+/// the same absence beside a zero count is a document with no block — so the
+/// findings read below costs one indexed lookup per **defective** document per
+/// heal, and a converged vault re-derives nothing.
+fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result<bool, JobFailure> {
+    if row.frontmatter.is_some() || row.frontmatter_diagnostic_count == 0 {
+        return Ok(false);
+    }
+    let standing = store
+        .begin_request()
+        .stored_findings(&row.path)
+        .map_err(store_effect)?;
+    Ok(!standing.iter().any(|finding| {
+        FindingKind::try_from(finding.kind.as_str())
+            .is_ok_and(|kind| kind.scope() == FindingScope::Document)
+    }))
 }
 
 /// Read the file the merge is standing on, or answer that it is no longer
@@ -971,7 +1009,13 @@ fn scoped_increment(
                     .begin_request()
                     .stored_document(&document_path)
                     .map_err(store_effect)?;
-                if standing.as_ref().is_none_or(|row| row.content_hash != hash) {
+                let stale = match standing.as_ref() {
+                    None => true,
+                    Some(row) => {
+                        row.content_hash != hash || stands_without_its_finding(pending.store, row)?
+                    }
+                };
+                if stale {
                     pending.rederive(
                         path,
                         document_path.as_str(),
@@ -1328,14 +1372,17 @@ fn store_order(sensitivity: norn_fs::CaseSensitivity) -> StoredPathOrder {
     }
 }
 
-/// The severity a quarantine finding carries. A document the vault holds and
-/// norn cannot decode is a defect in the vault, not an advisory about it.
-const QUARANTINE_SEVERITY: Severity = Severity::Error;
+/// The severity a finding this crate records carries. A document the vault
+/// holds and norn cannot read — wholly, or only as far as its frontmatter
+/// block — is a defect in the vault, not an advisory about it.
+const FINDING_SEVERITY: Severity = Severity::Error;
 
 /// Why a path the vault holds produces no document facts.
 ///
 /// One variant per finding kind, which is how a reader tells a name the store
-/// cannot hold from bytes the parser cannot read.
+/// cannot hold from bytes the parser cannot read. Every one of them leaves the
+/// deriving act with nothing to store: no identity to hold a row under, or no
+/// text to read facts out of.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Undecodable {
     /// The path bytes are not UTF-8.
@@ -1344,17 +1391,6 @@ enum Undecodable {
     PathSpelling,
     /// The document's bytes are not UTF-8.
     BodyBytes,
-    /// The frontmatter block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so
-    /// the text layer refuses it unparsed and the document's fields are
-    /// unknown.
-    ///
-    /// This is a cause class rather than a note beside a derived row because
-    /// the fields are what a vault is queried by: deriving the body of a
-    /// document whose whole block went unread would answer *this document has
-    /// no tags, no title, no aliases*, which is a wrong answer rather than a
-    /// missing one. Quarantine states the absence instead, and the document
-    /// returns of its own accord once the block is written inside the bound.
-    FrontmatterSize,
 }
 
 impl Undecodable {
@@ -1367,7 +1403,6 @@ impl Undecodable {
             Undecodable::PathBytes => FindingKind::PathBytesNotUtf8,
             Undecodable::PathSpelling => FindingKind::PathNamesNoDocument,
             Undecodable::BodyBytes => FindingKind::BodyBytesNotUtf8,
-            Undecodable::FrontmatterSize => FindingKind::FrontmatterTooLarge,
         }
     }
 
@@ -1377,7 +1412,6 @@ impl Undecodable {
             Undecodable::PathBytes => "its path bytes are not UTF-8",
             Undecodable::PathSpelling => "its path names no document",
             Undecodable::BodyBytes => "its bytes are not UTF-8",
-            Undecodable::FrontmatterSize => "its frontmatter block is past the bound that is read",
         }
     }
 
@@ -1392,9 +1426,115 @@ impl Undecodable {
             // [`document_path`] reads the name and opens nothing, so these two
             // are concluded wherever a path is in hand.
             Undecodable::PathBytes | Undecodable::PathSpelling => Decided::BySpelling,
-            // These are read out of the file the place names, so concluding
-            // them means having opened it.
-            Undecodable::BodyBytes | Undecodable::FrontmatterSize => Decided::ByBytes,
+            // This is read out of the file the place names, so concluding it
+            // means having opened it.
+            Undecodable::BodyBytes => Decided::ByBytes,
+        }
+    }
+}
+
+/// Why a document that derives carries no frontmatter value.
+///
+/// The block was read by nothing, so the document's fields are unknown: it is
+/// the vault's own defect and not a shape of a document. The row still holds
+/// every fact the act could derive — identity, body, headings, links, body
+/// tags — and this cause is what a finding beside that row states, because a
+/// row alone would answer *this document has no tags, no title, no aliases*
+/// about fields nothing ever read.
+///
+/// One variant per way [`norn_text::BlockRefusal`] leaves a block unread, each
+/// fixed by a different edit to the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnreadBlock {
+    /// The block opens and never closes.
+    Unclosed,
+    /// The block is not well-formed, so nothing parsed it.
+    Unreadable,
+    /// The block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so the text
+    /// layer refuses it unparsed rather than paying a read that grows with the
+    /// block's own length.
+    TooLarge,
+}
+
+impl UnreadBlock {
+    /// The cause behind the state the text layer reports.
+    ///
+    /// The match carries no wildcard, so a new way to leave a block unread
+    /// arrives here as a cause rather than as silence on a derived row.
+    const fn of(refusal: &BlockRefusal) -> Self {
+        match refusal {
+            BlockRefusal::Unclosed => UnreadBlock::Unclosed,
+            BlockRefusal::Unreadable { .. } => UnreadBlock::Unreadable,
+            BlockRefusal::TooLarge { .. } => UnreadBlock::TooLarge,
+        }
+    }
+
+    /// The finding kind, which is the cause class a reader dispatches on.
+    const fn kind(self) -> FindingKind {
+        match self {
+            UnreadBlock::Unclosed => FindingKind::FrontmatterUnclosed,
+            UnreadBlock::Unreadable => FindingKind::FrontmatterUnreadable,
+            UnreadBlock::TooLarge => FindingKind::FrontmatterTooLarge,
+        }
+    }
+
+    /// The cause as the finding's message states it.
+    const fn statement(self) -> &'static str {
+        match self {
+            UnreadBlock::Unclosed => "its frontmatter block never closes",
+            UnreadBlock::Unreadable => "its frontmatter block is not well-formed",
+            UnreadBlock::TooLarge => "its frontmatter block is past the bound that is read",
+        }
+    }
+}
+
+/// Why a finding this crate records stands where it stands.
+///
+/// The two families differ in what the deriving act left behind, which is what
+/// [`FindingKind::scope`] says about the kind each records under: an
+/// undecodable path leaves no row, so its finding is about the place; an unread
+/// block leaves the row it could derive, so its finding is about the document
+/// standing at that place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Cause {
+    /// Nothing about the path is derivable.
+    Undecodable(Undecodable),
+    /// The document derives and its frontmatter block was read by nothing.
+    UnreadBlock(UnreadBlock),
+}
+
+impl Cause {
+    /// The finding kind this cause is recorded under.
+    const fn kind(self) -> FindingKind {
+        match self {
+            Cause::Undecodable(cause) => cause.kind(),
+            Cause::UnreadBlock(cause) => cause.kind(),
+        }
+    }
+
+    /// What an act has to read to conclude this cause.
+    const fn decided(self) -> Decided {
+        match self {
+            Cause::Undecodable(cause) => cause.decided(),
+            // A block is read out of the document's own bytes, so concluding
+            // that nothing read it means having opened them.
+            Cause::UnreadBlock(_) => Decided::ByBytes,
+        }
+    }
+
+    /// The finding's message: the subject, what happened to it, and the cause.
+    fn message(self, subject: &DocumentPath) -> String {
+        match self {
+            Cause::Undecodable(cause) => format!(
+                "`{}` is quarantined: {}",
+                subject.as_str(),
+                cause.statement()
+            ),
+            Cause::UnreadBlock(cause) => format!(
+                "`{}` derives without its frontmatter: {}",
+                subject.as_str(),
+                cause.statement()
+            ),
         }
     }
 }
@@ -1446,37 +1586,41 @@ impl Decided {
     }
 }
 
-/// Every cause a quarantine carries, which is what the two scopes below are
-/// read off.
+/// Every cause a finding this crate records states, which is what the two
+/// sides below are read off.
 ///
-/// A cause absent from this list has its kind in neither scope, so a finding of
+/// A cause absent from this list has its kind in neither side, so a finding of
 /// it discards nothing it re-derives and stands beside its own previous copy at
-/// every heal. Two things hold the list to the enum: [`Undecodable::decided`]
-/// is exhaustive, so the next variant states its side or nothing compiles, and
-/// the classification below holds every kind the registry advertises to exactly
-/// one of this list and [`KINDS_NO_CAUSE_CARRIES`]. A cause minted under a kind
-/// an older cause already carries is reached by neither, and the ADR that
-/// closes the cause set at these four is what stands in front of one.
-const CAUSES: [Undecodable; 4] = [
-    Undecodable::PathBytes,
-    Undecodable::PathSpelling,
-    Undecodable::BodyBytes,
-    Undecodable::FrontmatterSize,
+/// every heal. Three things hold the list to the enums: [`Undecodable::decided`]
+/// is exhaustive, so the next variant states its side or nothing compiles; the
+/// classification below holds every kind the registry advertises to exactly one
+/// of this list and [`KINDS_NO_CAUSE_CARRIES`]; and the scope agreement beside
+/// it holds each cause to a kind that stands where that cause leaves a row or
+/// leaves none. A cause minted under a kind an older cause already carries is
+/// reached by neither side, and the ADR that closes both cause sets is what
+/// stands in front of one.
+const CAUSES: [Cause; 6] = [
+    Cause::Undecodable(Undecodable::PathBytes),
+    Cause::Undecodable(Undecodable::PathSpelling),
+    Cause::Undecodable(Undecodable::BodyBytes),
+    Cause::UnreadBlock(UnreadBlock::Unclosed),
+    Cause::UnreadBlock(UnreadBlock::Unreadable),
+    Cause::UnreadBlock(UnreadBlock::TooLarge),
 ];
 
-/// The finding kinds no quarantine cause carries.
+/// The finding kinds no cause above carries.
 ///
-/// Quarantine is the only producer recording findings today, so the list is
-/// empty. A kind minted for another producer — an ambiguity a resolution reads,
-/// a field a schema refuses — is named here, which is the one line that keeps
-/// the classification below a reading of the registry rather than a claim that
-/// every kind the registry holds is a quarantine cause.
+/// Quarantine and the unread block are the only producers recording findings
+/// today, so the list is empty. A kind minted for another producer — an
+/// ambiguity a resolution reads, a field a schema refuses — is named here, which
+/// is the one line that keeps the classification below a reading of the registry
+/// rather than a claim that every kind the registry holds is this crate's.
 const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
 
 // Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
 // named as no cause's, and no two causes carry one kind. The registry is a
 // general one, so a kind minted for another producer is a growth this crate
-// answers by classifying it rather than by widening a scope no act re-derives.
+// answers by classifying it rather than by widening a side no act re-derives.
 const _: () = {
     let mut index = 0;
     while index < FindingKind::ALL.len() {
@@ -1489,6 +1633,32 @@ const _: () = {
         index += 1;
     }
 };
+
+// Every cause records under a kind whose scope matches what the act deriving it
+// leaves at the subject. A cause that left no row filed under a document-scoped
+// kind would stand beside a row that is not there; one that left a row filed
+// under a place-scoped kind would be withheld by the very row it is about, so
+// nothing would ever report it.
+const _: () = {
+    let mut index = 0;
+    while index < CAUSES.len() {
+        assert!(
+            scope_agrees(CAUSES[index]),
+            "a cause records under a kind whose scope disagrees with what its \
+             deriving act leaves at the subject"
+        );
+        index += 1;
+    }
+};
+
+/// Whether a cause's kind stands where that cause leaves the subject.
+const fn scope_agrees(cause: Cause) -> bool {
+    matches!(
+        (cause, cause.kind().scope()),
+        (Cause::Undecodable(_), FindingScope::Place)
+            | (Cause::UnreadBlock(_), FindingScope::Document)
+    )
+}
 
 /// Whether two kinds are the same one, which is the comparison a `const`
 /// context has instead of `PartialEq`.
@@ -1533,7 +1703,7 @@ const fn times_named_uncarried(kind: FindingKind) -> usize {
     count
 }
 
-/// How many causes [`Undecodable::decided`] puts on one side.
+/// How many causes [`Cause::decided`] puts on one side.
 const fn decided_count(decided: Decided) -> usize {
     let mut count = 0;
     let mut index = 0;
@@ -1585,11 +1755,26 @@ struct Quarantine {
     problem: String,
 }
 
+/// One document derived without its frontmatter, and why.
+///
+/// The document keeps its row: this is what stands beside it, so that the
+/// fields nothing read are absent from derived state *and* stated rather than
+/// silently absent.
+#[derive(Clone, Debug)]
+struct UnreadFrontmatter {
+    cause: UnreadBlock,
+    /// The reader's own account of the refusal, where the cause is not the
+    /// whole of it. A block that never closes has nothing to add.
+    problem: Option<String>,
+}
+
 /// The roots one job's deaths owe a reading of.
 ///
-/// A finding is withheld while a document row stands at its subject, so the
-/// death that vacates a rendered place is what frees the findings about the
-/// spellings rendering there. **Death is final within a job** — no later
+/// A **place-scoped** finding is withheld while a document row stands at its
+/// subject, so the death that vacates a rendered place is what frees the
+/// findings about the spellings rendering there. Document-scoped findings are
+/// never withheld and so are never owed a reading: this whole mechanism is
+/// about the place-scoped ones. **Death is final within a job** — no later
 /// increment puts a row back at a place an earlier one killed — so the readings
 /// those deaths owe are owed once, after the job's last flush, rather than once
 /// per flush: removing a directory whose own name carries the marker vacates a
@@ -1602,8 +1787,8 @@ struct Quarantine {
 /// its documents. A reading files a finding for every refused spelling beneath
 /// its root, whether or not this job freed the place it renders to. What that
 /// costs is bounded by what the reading re-derives: the recording withholds
-/// every finding a document row still stands at, and the discard it carries to a
-/// place takes the spelling kinds it is re-filing there and nothing else, so a
+/// every place-scoped finding a document row still stands at, and the discard it
+/// carries to a place takes the spelling kinds it is re-filing there and nothing else, so a
 /// quarantine about the document occupying that place stands through a reading
 /// that was never about it.
 #[derive(Default)]
@@ -1615,8 +1800,9 @@ impl Vacated {
     /// Take the roots a changeset's deaths free a reading of.
     ///
     /// Only a place carrying the rendering marker can have withheld a finding: a
-    /// finding is withheld when a document row stands at its subject, a subject
-    /// is a rendering, and a rendering of a spelling the grammar refuses carries
+    /// place-scoped finding is withheld when a document row stands at its
+    /// subject, a subject is a rendering, and a rendering of a spelling the
+    /// grammar refuses carries
     /// the marker. A subject the grammar admits as it is written belongs to the
     /// document at that path, whose own row dies in the same changeset as the
     /// finding that replaces it.
@@ -1712,17 +1898,19 @@ fn revisit_vacated(
 }
 
 /// What one heal scope has derived and not yet committed: the changeset being
-/// filled, and the findings its quarantined documents record.
+/// filled, and the findings its defective documents record.
 ///
 /// One flush call applies the increment first and records the findings after
 /// it, each in its own transaction: a flush torn between the two leaves the
-/// quarantine recorded — a tombstone where the path had a row, nothing where it
-/// did not — with no finding until the next heal re-derives the path and
-/// records it. The order matters because a changeset entry discards the
-/// findings recorded about the path it names, so a finding written ahead of the
-/// increment is a finding the increment takes — and a quarantined document that
-/// reads again is a plain upsert whose own discard clears the finding with no
-/// second mechanism.
+/// increment landed — a tombstone where a quarantined path had a row, the row
+/// where a document derived without its frontmatter — with no finding until the
+/// next heal re-derives the path and records it. The order matters because a
+/// changeset entry discards the findings recorded about the path it names, so a
+/// finding written ahead of the increment is a finding the increment takes. It
+/// is also what makes the co-resident case work: an act that writes a row and
+/// files a finding about that same row concludes the row first and states what
+/// it concluded second. A document that reads again is a plain upsert whose own
+/// discard clears the finding with no second mechanism.
 struct Pending<'s> {
     store: &'s mut Store,
     /// The vault root every path in this scope is relative to, which is what a
@@ -1736,17 +1924,21 @@ struct Pending<'s> {
     /// reading after the last of them.
     vacated: &'s mut Vacated,
     changes: Vec<Change>,
-    quarantined: Vec<Queued>,
-    /// The places this scope has already re-derived, each paired with the side
-    /// it re-derived there, so a second finding of that side at one place
-    /// **appends** rather than replacing the first: two spellings can render to
-    /// one place, and each of them is a document somebody has to fix. A finding
-    /// of the other side discards its own kinds there, which are kinds no
-    /// finding of this side occupies.
+    queued: Vec<Queued>,
+    /// The places this scope has already re-derived a **place-scoped** finding
+    /// at, each paired with the side it re-derived there, so a second finding of
+    /// that side at one place **appends** rather than replacing the first: two
+    /// spellings can render to one place, and each of them is a document
+    /// somebody has to fix. A finding of the other side discards its own kinds
+    /// there, which are kinds no finding of this side occupies.
     ///
-    /// It holds at most one entry per quarantined place per side, which is the
-    /// vault's defect count rather than its size, and it is no larger than what
-    /// those same defects put in the findings table.
+    /// Document-scoped findings are absent from it: the increment that wrote
+    /// their subject's row already ended everything standing there, so they
+    /// replace nothing and are entered nowhere.
+    ///
+    /// It holds at most one entry per refused spelling per side, which is the
+    /// vault's undecodable-document count rather than its size, and it is no
+    /// larger than what those same documents put in the findings table.
     replaced: BTreeSet<(DocumentPath, Decided)>,
     /// The bound on the changeset and on the findings waiting beside it, which
     /// is what holds a scope's residency independent of how much of the vault it
@@ -1758,11 +1950,13 @@ struct Pending<'s> {
 /// states.
 ///
 /// The cause rides along because it is what decides how much of the subject
-/// recording the finding replaces: [`Undecodable::decided`] says what an act
-/// had to read to conclude it, and an act re-derives what it read and no more.
+/// recording the finding replaces: [`Cause::decided`] says what an act had to
+/// read to conclude it, and an act re-derives what it read and no more. It also
+/// says whether a document row at the subject withholds the finding, through
+/// the scope of the kind it records under.
 struct Queued {
     finding: FindingFacts,
-    cause: Undecodable,
+    cause: Cause,
 }
 
 impl<'s> Pending<'s> {
@@ -1779,7 +1973,7 @@ impl<'s> Pending<'s> {
             exclusions,
             vacated,
             changes: Vec::with_capacity(bound),
-            quarantined: Vec::new(),
+            queued: Vec::new(),
             replaced: BTreeSet::new(),
             bound,
         }
@@ -1802,6 +1996,12 @@ impl<'s> Pending<'s> {
     /// read it by key. The store holds only what it can represent, so a document
     /// that stops decoding leaves nothing behind but the finding — and the row's
     /// death is a **quarantine**, because the file is still there.
+    ///
+    /// A document that decodes and whose frontmatter block was read by nothing
+    /// **keeps its row**: the facts the act could derive are derived, and the
+    /// finding filed beside them is what says the fields are unknown rather than
+    /// absent. Both are queued here, and the flush that lands them lands the row
+    /// first.
     fn rederive(
         &mut self,
         path: &Path,
@@ -1811,7 +2011,18 @@ impl<'s> Pending<'s> {
         stored: Option<&DocumentPath>,
     ) {
         match map_document(spelling, bytes, hash) {
-            Ok(facts) => self.push(Change::Upsert(facts)),
+            Ok(derived) => {
+                let subject = derived.facts.path.clone();
+                self.push(Change::Upsert(derived.facts));
+                if let Some(unread) = derived.unread_frontmatter {
+                    self.file(
+                        path,
+                        subject,
+                        Cause::UnreadBlock(unread.cause),
+                        unread.problem,
+                    );
+                }
+            }
             Err(quarantine) => {
                 if let Some(row) = stored {
                     self.push(Change::Death {
@@ -1828,26 +2039,37 @@ impl<'s> Pending<'s> {
     ///
     /// The subject is the place the path occupies — its own spelling where the
     /// grammar admits one, and a rendering of it where the grammar does not.
+    fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
+        let subject = DocumentPath::rendered(path);
+        self.file(
+            path,
+            subject,
+            Cause::Undecodable(quarantine.cause),
+            Some(quarantine.problem),
+        );
+    }
+
+    /// Queue one finding about `subject`, read from `path`.
+    ///
     /// Since a rendering is not injective, the detail carries the spelling this
     /// finding was read from, escaped, so two paths filed at one place stay
     /// tellable apart.
     ///
     /// The cause is carried to the record because it says what the act that
-    /// derived this finding read, and that is what the record replaces at the
-    /// subject.
-    fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
-        let subject = DocumentPath::rendered(path);
-        self.quarantined.push(Queued {
+    /// derived this finding read — which is what the record replaces at the
+    /// subject — and whether a document row at the subject withholds it.
+    fn file(&mut self, path: &Path, subject: DocumentPath, cause: Cause, problem: Option<String>) {
+        let detail = match problem {
+            Some(problem) => format!("{path:?}: {problem}"),
+            None => format!("{path:?}"),
+        };
+        self.queued.push(Queued {
             finding: FindingFacts {
-                kind: quarantine.cause.kind(),
-                severity: QUARANTINE_SEVERITY,
-                message: format!(
-                    "`{}` is quarantined: {}",
-                    subject.as_str(),
-                    quarantine.cause.statement()
-                ),
+                kind: cause.kind(),
+                severity: FINDING_SEVERITY,
+                message: cause.message(&subject),
                 path: subject,
-                // Quarantine is not a reading of a resolution target, so the
+                // Neither cause is a reading of a resolution target, so the
                 // finding belongs to no ambiguity class and no class-scoped
                 // maintenance owns it.
                 class_keys: BTreeSet::new(),
@@ -1855,29 +2077,31 @@ impl<'s> Pending<'s> {
                 span: None,
                 candidates: Vec::new(),
                 candidates_total: 0,
-                detail: Some(format!("{path:?}: {}", quarantine.problem)),
+                detail: Some(detail),
             },
-            cause: quarantine.cause,
+            cause,
         });
     }
 
     /// Whether the changeset or the findings beside it have reached the bound
     /// one flush may hold.
     fn is_full(&self) -> bool {
-        self.changes.len() >= self.bound || self.quarantined.len() >= self.bound
+        self.changes.len() >= self.bound || self.queued.len() >= self.bound
     }
 
-    /// Apply the changeset, then record what its quarantines say.
+    /// Apply the changeset, then record what its findings say.
     ///
     /// Findings go after the increment because the increment's own subject
-    /// discard would otherwise take them, and because a document that derived is
-    /// then readable: a place a real document occupies is that document's, and a
-    /// finding there would call a document that just derived unreadable.
+    /// discard would otherwise take them, and because the rows the increment
+    /// wrote are what the recording reads: a place-scoped finding is withheld
+    /// where a document row stands, and a document-scoped one is refiled at the
+    /// row the same act just wrote.
     ///
-    /// The places the increment **vacated** are the other half of that
-    /// exclusion: while a document stood at a rendered spelling, every finding
-    /// filed there was withheld, and the paths those findings are about are not
-    /// paths the increment names. The roots to read for them go to the job,
+    /// The places the increment **vacated** are the other half of the
+    /// withholding: while a document stood at a rendered spelling, every
+    /// place-scoped finding filed there was withheld, and the paths those
+    /// findings are about are not paths the increment names. The roots to read
+    /// for them go to the job,
     /// which reads each of them once after its last flush — a row this increment
     /// kills is a row no later one revives, so a reading here would be a reading
     /// per flush of an answer that does not change.
@@ -1898,12 +2122,23 @@ impl<'s> Pending<'s> {
     /// end, which is what keeps a queue filled by a reading of the vault inside
     /// the bound the changeset beside it holds to.
     fn record_findings(&mut self) -> Result<(), JobFailure> {
-        for Queued { finding, cause } in self.quarantined.drain(..) {
+        for Queued { finding, cause } in self.queued.drain(..) {
             let mut request = self.store.begin_request();
-            if request
-                .stored_document(&finding.path)
-                .map_err(store_effect)?
-                .is_some()
+            // A **place-scoped** finding says no document is derived at its
+            // subject, so a document row standing there contradicts it and
+            // withholds it: the place belongs to the document occupying it, and
+            // a finding filed over that document would call one that just
+            // derived unreadable.
+            //
+            // A **document-scoped** finding is about the document derived at
+            // its subject, so the row standing there is what it describes.
+            // Withholding it would suppress every finding of the kind, since a
+            // row is what the act that derives one always writes.
+            if cause.kind().scope() == FindingScope::Place
+                && request
+                    .stored_document(&finding.path)
+                    .map_err(store_effect)?
+                    .is_some()
             {
                 continue;
             }
@@ -1915,11 +2150,21 @@ impl<'s> Pending<'s> {
             // The other side's kinds are disjoint from this one's, so a finding
             // from it discards without reaching what was recorded here. A
             // withheld finding records nothing and so takes no turn.
-            let decided = cause.decided();
-            if self.replaced.insert((finding.path.clone(), decided)) {
-                request
-                    .discard_findings_about(&finding.path, decided.rederives())
-                    .map_err(store_effect)?;
+            //
+            // A **document-scoped** finding takes no turn either, and needs
+            // none: it is queued by the act that pushed the row at its subject,
+            // and the increment ahead of this loop ended every finding standing
+            // at each path it wrote a row to. There is nothing at the subject
+            // for a discard to reach, and nothing this scope can record there
+            // twice — one row is derived per path per flush, and it concludes
+            // the block's readability once.
+            if cause.kind().scope() == FindingScope::Place {
+                let decided = cause.decided();
+                if self.replaced.insert((finding.path.clone(), decided)) {
+                    request
+                        .discard_findings_about(&finding.path, decided.rederives())
+                        .map_err(store_effect)?;
+                }
             }
             request.record_finding(&finding).map_err(store_effect)?;
         }
@@ -2015,7 +2260,14 @@ fn document_path(path: &Path) -> Result<DocumentPath, Quarantine> {
     })
 }
 
-fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts, Quarantine> {
+/// One document as derived state holds it: the facts, and the defect standing
+/// beside them where the document derives with something unread.
+struct Derived {
+    facts: DocumentFacts,
+    unread_frontmatter: Option<UnreadFrontmatter>,
+}
+
+fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Derived, Quarantine> {
     // Identity before content: a path that names no document has nothing to
     // say about its own bytes.
     let document_path = document_path(Path::new(path))?;
@@ -2026,18 +2278,16 @@ fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts,
     let document = Document::parse(source);
     // The text layer reads a block only up to its own bound and says so rather
     // than parsing past it, so this costs the bound at worst however the block
-    // is shaped. A block it refused for size leaves the fields unknown, which
-    // is a cause class and not a note beside a row.
-    if let Some(note) = document
-        .diagnostics()
-        .iter()
-        .find(|note| note.code == DiagnosticCode::FrontmatterTooLarge)
-    {
-        return Err(Quarantine {
-            cause: Undecodable::FrontmatterSize,
-            problem: note.detail.clone().unwrap_or_else(|| note.message.clone()),
+    // is shaped. A block nothing read — unclosed, not well-formed, or past the
+    // bound — leaves the fields unknown, which the document reports as state:
+    // the facts below are derived without them, and the finding beside them is
+    // where the absence is stated.
+    let unread_frontmatter = document
+        .frontmatter_refusal()
+        .map(|refusal| UnreadFrontmatter {
+            cause: UnreadBlock::of(refusal),
+            problem: refusal.problem(),
         });
-    }
     let scan = document.scan_body();
     let mut facts = DocumentFacts::new(document_path, hash, document.body(), bytes.len() as u64);
     facts.body_offset = document.body_start() as u64;
@@ -2087,7 +2337,10 @@ fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<DocumentFacts,
             span: t.span.map(span),
         }))
         .collect();
-    Ok(facts)
+    Ok(Derived {
+        facts,
+        unread_frontmatter,
+    })
 }
 
 fn map_link(link: norn_text::Link) -> LinkFact {
@@ -3416,17 +3669,16 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **The two discard scopes partition the causes.** The scopes are read off
-    /// [`CAUSES`] through [`Undecodable::decided`], so a cause whose kind falls
-    /// out of both is a cause no act re-derives — which is a copy of that
-    /// finding per heal — and a kind in both is one side taking the other's
-    /// work.
+    /// **The two discard sides partition the causes.** The sides are read off
+    /// [`CAUSES`] through [`Cause::decided`], so a cause whose kind falls out of
+    /// both is a cause no act re-derives — which is a copy of that finding per
+    /// heal — and a kind in both is one side taking the other's work.
     ///
-    /// The kinds a quarantine records are a subset of the registry rather than
+    /// The kinds this crate records are a subset of the registry rather than
     /// the whole of it: what holds the two apart is the classification beside
     /// [`CAUSES`], which a kind minted for another producer is named in.
     #[test]
-    fn the_two_scopes_partition_the_quarantine_causes() {
+    fn the_two_discard_sides_partition_the_causes() {
         let mut carried: Vec<&str> = CAUSES.iter().map(|cause| cause.kind().as_str()).collect();
         carried.sort_unstable();
 
@@ -3443,6 +3695,23 @@ mod tests {
             assert!(
                 registry.contains(kind),
                 "`{kind}` is a cause's kind the registry does not advertise"
+            );
+        }
+
+        // Which side a cause discards on and where its findings may stand are
+        // different questions, and every cause that leaves a row answers the
+        // second one the same way: an act that opened a document's bytes and
+        // derived a row from them files beside that row.
+        for cause in CAUSES {
+            let expected = match cause {
+                Cause::Undecodable(_) => FindingScope::Place,
+                Cause::UnreadBlock(_) => FindingScope::Document,
+            };
+            assert_eq!(
+                cause.kind().scope(),
+                expected,
+                "`{}` stands somewhere its deriving act does not leave it",
+                cause.kind()
             );
         }
     }
@@ -3973,8 +4242,8 @@ mod tests {
     /// derivations are compared as.
     ///
     /// Four readings, because a derivation puts its answer in four places: the
-    /// document rows and every fact row under them, the findings that sit where
-    /// no document row does, how much each pillar holds — tombstones and
+    /// document rows and every fact row under them, the findings standing at
+    /// the vault's places, how much each pillar holds — tombstones and
     /// finding candidates included — and the vault schema the whole derivation
     /// was keyed by. A rebuild that lost a finding, kept a tombstone or stopped
     /// re-pinning the schema disagrees here.
@@ -4052,9 +4321,9 @@ mod tests {
             .into_iter()
             .map(DerivedDocument::from)
             .collect();
-        // A finding sits only where no document row does, so the paths it is
-        // read at come from the vault rather than from the store's own list of
-        // documents.
+        // A finding sits at a place the vault holds, whether or not a document
+        // row stands there, so the paths it is read at come from the vault
+        // rather than from the store's own list of documents.
         let findings = vault_relative_paths(vault)
             .iter()
             .flat_map(|path| findings_at(store, path))
@@ -4260,8 +4529,8 @@ mod tests {
     }
 
     #[test]
-    fn heal_quarantines_an_oversized_frontmatter_block_and_indexes_every_other_document() {
-        let f = Fixture::new("quarantine-frontmatter-size");
+    fn heal_derives_an_oversized_block_s_document_and_files_a_finding_beside_it() {
+        let f = Fixture::new("unread-block-frontmatter-size");
         fs::write(f.vault().join("alpha.md"), "alpha").unwrap();
         fs::write(f.vault().join("huge.md"), unclosed_flow_nest(100 * 1024)).unwrap();
         let (ops, name) = f.ops(2);
@@ -4272,7 +4541,23 @@ mod tests {
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         let elapsed = started.elapsed();
 
-        assert_eq!(stored_paths(&mut attachment.store), ["alpha.md"]);
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["alpha.md", "huge.md"],
+            "a document whose block went unread lost its row"
+        );
+        let stored = attachment
+            .store
+            .begin_request()
+            .stored_facts(&DocumentPath::new("huge.md").unwrap())
+            .unwrap()
+            .expect("the document derives");
+        assert!(
+            stored.document.frontmatter.is_none(),
+            "a block nothing read produced a projection"
+        );
+        assert_eq!(stored.headings.len(), 1, "the body facts were not derived");
+
         let findings = findings_at(&mut attachment.store, "huge.md");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "document/frontmatter-too-large");
@@ -4298,48 +4583,187 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// The same block at the bound is read like any other block, so the
-    /// refusal above is the bound and not the shape.
+    /// The same block at the bound reaches the parser, so the refusal above is
+    /// the bound and not the shape. What the parser then says about it is the
+    /// other way a block goes unread, and the posture is the same one.
     #[test]
-    fn a_frontmatter_block_at_the_bound_still_derives() {
+    fn a_frontmatter_block_at_the_bound_is_read_and_refused_for_its_shape() {
         let source = unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES);
-        let facts = map_document(
+        let derived = map_document(
             "note.md",
             &source,
             norn_fs::ContentHash::of(&source).to_string(),
         )
-        .expect("a block under the bound derives");
-        // The block is not well-formed YAML, which is the ordinary forgiving
-        // read: no projection, one block-scoped note, and a body.
-        assert!(facts.frontmatter.is_none());
-        assert_eq!(facts.frontmatter_diagnostic_count, 1);
-    }
-
-    #[test]
-    fn an_oversized_frontmatter_block_is_a_quarantine_cause_rather_than_a_note() {
-        let source = unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES + 1);
-        let quarantine = map_document(
-            "note.md",
-            &source,
-            norn_fs::ContentHash::of(&source).to_string(),
-        )
-        .expect_err("a block past the bound is not read");
-        assert_eq!(quarantine.cause, Undecodable::FrontmatterSize);
-        assert!(
-            quarantine
-                .problem
-                .contains(&norn_text::FRONTMATTER_MAX_BYTES.to_string()),
-            "the refusal does not state the bound: {}",
-            quarantine.problem
+        .expect("a document derives");
+        assert!(derived.facts.frontmatter.is_none());
+        assert_eq!(derived.facts.frontmatter_diagnostic_count, 1);
+        assert_eq!(
+            derived
+                .unread_frontmatter
+                .expect("the block is not well-formed")
+                .cause,
+            UnreadBlock::Unreadable
         );
     }
 
-    /// The document comes back of its own accord: a block rewritten inside the
-    /// bound is an ordinary derivation, and the increment's own discard takes
-    /// the finding with it.
+    /// **Every wholly unread block degrades alike.** Whichever way the block
+    /// went unread, the document keeps the identity and body facts the act could
+    /// derive, carries no frontmatter projection, and names its cause — so no
+    /// derived row answers *this document has no tags, no title, no aliases*
+    /// about fields nothing read.
     #[test]
-    fn a_document_whose_block_is_rewritten_inside_the_bound_derives_and_clears_its_finding() {
-        let f = Fixture::new("quarantine-frontmatter-size-recovery");
+    fn every_wholly_unread_block_derives_its_body_facts_and_names_its_cause() {
+        for (source, cause, kind) in [
+            (
+                "---\ntitle: note\n# heading\n".to_string(),
+                UnreadBlock::Unclosed,
+                "document/frontmatter-unclosed",
+            ),
+            (
+                "---\ntitle: : :\n---\n# heading\n".to_string(),
+                UnreadBlock::Unreadable,
+                "document/frontmatter-unreadable",
+            ),
+            (
+                String::from_utf8(unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES + 1))
+                    .unwrap()
+                    .replace("# body", "# heading"),
+                UnreadBlock::TooLarge,
+                "document/frontmatter-too-large",
+            ),
+        ] {
+            let bytes = source.as_bytes();
+            let derived = map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives");
+            assert!(
+                derived.facts.frontmatter.is_none(),
+                "{kind} produced a projection"
+            );
+            assert_eq!(
+                derived.facts.frontmatter_diagnostic_count, 1,
+                "{kind} counted another number of block-scoped notes"
+            );
+            assert_eq!(
+                derived.facts.headings.len(),
+                1,
+                "{kind} lost the body facts the act could derive"
+            );
+            let unread = derived
+                .unread_frontmatter
+                .expect("the block was read by nothing");
+            assert_eq!(unread.cause, cause);
+            assert_eq!(unread.cause.kind().as_str(), kind);
+        }
+    }
+
+    /// **The store's projection bound is not a fourth outcome a document can
+    /// reach.** The store refuses a frontmatter projection nesting past
+    /// `MAX_FRONTMATTER_DEPTH`, and that refusal would withdraw the whole
+    /// increment rather than one document — so the bound has to stand above what
+    /// any readable block can carry. The text layer refuses the deeper block
+    /// first, and a block it refuses is the degradation above: a row, and a
+    /// finding naming the cause. The ceiling is searched rather than assumed, so
+    /// either bound moving toward the other fails here.
+    #[test]
+    fn no_readable_block_nests_deeper_than_the_store_projects() {
+        let block_nesting = |depth: usize| {
+            let mut source = String::from("---\nk: ");
+            source.push_str(&"[".repeat(depth));
+            source.push_str(&"]".repeat(depth));
+            source.push_str("\n---\n# body\n");
+            source
+        };
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+        };
+
+        let refused = (1..=norn_store::MAX_FRONTMATTER_DEPTH)
+            .find(|depth| derive(&block_nesting(*depth)).unread_frontmatter.is_some())
+            .expect("the text layer reads every block the store's bound admits");
+        let deepest = derive(&block_nesting(refused - 1));
+        let projection = deepest
+            .facts
+            .frontmatter
+            .as_ref()
+            .expect("the deepest block the text layer reads produced no projection");
+        norn_store::canonical_json(projection)
+            .expect("the deepest block the text layer reads is past the store's bound");
+        assert_eq!(
+            derive(&block_nesting(refused))
+                .unread_frontmatter
+                .expect("the block past the ceiling was read")
+                .cause,
+            UnreadBlock::Unreadable,
+            "a block the text layer will not nest through took another outcome"
+        );
+    }
+
+    /// **Where the body starts differs by cause.** A closed block bounds its own
+    /// bytes, so an unreadable one is skipped whole and nothing inside it is
+    /// read. A block that never closes bounds nothing, so the document is body
+    /// from its first byte and the links and tags written in the lines that
+    /// opened like a block are the document's own body facts. The finding says
+    /// the block was read by nothing; it does not say the text is unread.
+    #[test]
+    fn an_unclosed_block_bounds_nothing_so_its_text_reads_as_body() {
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+            .facts
+        };
+
+        let unclosed = derive("---\ntags: [alpha]\nlink: [[Some Target]]\nnote: #hashtag\n");
+        assert_eq!(unclosed.body_offset, 0, "an unclosed block bounded a body");
+        assert_eq!(
+            unclosed
+                .tags
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            ["hashtag"]
+        );
+        assert!(
+            unclosed.tags.iter().all(|t| t.source == TagSource::Body),
+            "a tag was attributed to a block nothing read"
+        );
+        assert_eq!(
+            unclosed
+                .links
+                .iter()
+                .map(|l| l.target.as_str())
+                .collect::<Vec<_>>(),
+            ["Some Target"]
+        );
+
+        // The same text inside a block that closes: the block is skipped whole,
+        // so none of it is read either as frontmatter or as body.
+        let closed = derive("---\ntags: [alpha]\nlink: [[Some Target]]\nnote: : :\n---\n# body\n");
+        assert!(closed.body_offset > 0, "a closed block bounded no body");
+        assert!(closed.tags.is_empty(), "a skipped block yielded a tag");
+        assert!(closed.links.is_empty(), "a skipped block yielded a link");
+    }
+
+    /// The finding closes on the ordinary derivation that finds the block
+    /// readable again: the increment's own subject discard takes it, and the
+    /// act that wrote the row files nothing in its place.
+    #[test]
+    fn a_document_whose_block_is_rewritten_inside_the_bound_clears_its_finding() {
+        let f = Fixture::new("unread-block-frontmatter-size-recovery");
         fs::write(
             f.vault().join("note.md"),
             unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES * 4),
@@ -4349,7 +4773,7 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
-        assert!(stored_paths(&mut attachment.store).is_empty());
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
 
         fs::write(f.vault().join("note.md"), "---\ntitle: note\n---\n# body\n").unwrap();
         scoped_increment(
@@ -4369,12 +4793,13 @@ mod tests {
     }
 
     /// The direction a user causes: a document that derived and served queries
-    /// has an oversized block written into it. The standing row dies with the
-    /// increment — recorded as a quarantine, so nothing reads it as the
-    /// document leaving the vault — and the finding stands where the row was.
+    /// has an oversized block written into it. **The finding flips, not the
+    /// row** — the document is re-derived without its frontmatter, so no query
+    /// loses the document over a block it cannot read, and nothing records a
+    /// death the file never had.
     #[test]
-    fn a_document_rewritten_past_the_bound_loses_its_row_to_a_quarantine() {
-        let f = Fixture::new("quarantine-frontmatter-size-onset");
+    fn a_document_rewritten_past_the_bound_keeps_its_row_and_gains_a_finding() {
+        let f = Fixture::new("unread-block-frontmatter-size-onset");
         fs::write(f.vault().join("note.md"), "---\ntitle: note\n---\n# body\n").unwrap();
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
         let (ops, name) = f.ops(2);
@@ -4401,21 +4826,279 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stored_paths(&mut attachment.store), ["steady.md"]);
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"],
+            "the row flipped across the size bound"
+        );
         let findings = findings_at(&mut attachment.store, "note.md");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "document/frontmatter-too-large");
         assert_eq!(finding_total(&mut attachment.store), 1);
-        assert_eq!(
+        assert!(
             attachment
                 .store
                 .begin_request()
                 .stored_tombstone(&DocumentPath::new("note.md").unwrap())
                 .unwrap()
-                .expect("a tombstone")
-                .provenance,
-            Provenance::Quarantine
+                .is_none(),
+            "a document that still derives was recorded as a death"
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// The common failure: a typo in a hand-written block. It appears and
+    /// clears without the row moving, so no query loses a document over it and
+    /// the churn a heal sees is the finding alone.
+    #[test]
+    fn a_malformed_block_appearing_and_clearing_never_flips_the_row() {
+        let f = Fixture::new("unread-block-typo");
+        let write = |bytes: &str| fs::write(f.vault().join("note.md"), bytes).unwrap();
+        write("---\ntitle: note\n---\n# body\n");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let increment = |attachment: &mut ProductionAttachment| {
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty_path(f.vault().as_path(), "note.md"),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+        };
+
+        write("---\ntitle: : :\n---\n# body\n");
+        increment(&mut attachment);
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "note.md"),
+            ["document/frontmatter-unreadable"]
+        );
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .is_none(),
+            "a typo killed the row"
+        );
+
+        write("---\ntitle: note\n---\n# body\n");
+        increment(&mut attachment);
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A degraded row never stands alone.** A vault-schema re-pin discards
+    /// every finding keyed by the fingerprint it replaced, and the walk after it
+    /// is otherwise hash-authoritative — so without the pair check the row would
+    /// keep answering with an absent frontmatter and nothing would state that
+    /// the fields were never read. The heal re-derives the document instead, and
+    /// the finding stands again under the new key.
+    #[test]
+    fn a_schema_re_pin_re_files_the_finding_beside_a_degraded_row() {
+        let f = Fixture::new("unread-block-schema-repin");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].kind, "document/frontmatter-unreadable");
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# edited by hand\n",
+        )
+        .unwrap();
+        ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::schema_change(),
+            },
+            &progress,
+        )
+        .unwrap();
+
+        let after = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(
+            after.len(),
+            1,
+            "the re-pin left the degraded row with no finding beside it"
+        );
+        assert_eq!(after[0].kind, "document/frontmatter-unreadable");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert_ne!(
+            after[0].vault_schema_fingerprint, before[0].vault_schema_fingerprint,
+            "the edit did not move the pin, so this proves nothing"
+        );
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A flush torn between its increment and its recording converges.** The
+    /// row landed and the finding beside it did not, which is the state a
+    /// process killed in that window leaves. The row itself says its block was
+    /// read by nothing, so the next heal reads the document again and states the
+    /// cause again — no edit to the file is needed to reach it.
+    #[test]
+    fn a_heal_re_files_the_finding_a_torn_flush_never_recorded() {
+        let f = Fixture::new("unread-block-torn-flush");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "note.md").len(), 1);
+
+        // What the tear leaves: the increment's own subject discard ran and the
+        // recording after it did not.
+        attachment
+            .store
+            .begin_request()
+            .discard_findings_about(
+                &DocumentPath::new("note.md").unwrap(),
+                norn_store::DiscardScope::EveryKind,
+            )
+            .unwrap();
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let recovered = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the heal left a degraded row with no finding beside it"
+        );
+        assert_eq!(recovered[0].kind, "document/frontmatter-unreadable");
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["note.md", "steady.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A converged vault re-derives nothing.** The pair check reads the
+    /// findings standing at a degraded row and stops there when one is beside
+    /// it, so a heal over an unchanged vault leaves every generation where it
+    /// was — a degraded document is not re-written once per heal.
+    #[test]
+    fn a_heal_over_a_standing_pair_writes_nothing() {
+        let f = Fixture::new("unread-block-warm-zero");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let path = DocumentPath::new("note.md").unwrap();
+        let row = attachment
+            .store
+            .begin_request()
+            .stored_document(&path)
+            .unwrap()
+            .unwrap();
+        let finding = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(finding.len(), 1);
+        ops.detach(&name, attachment);
+
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let again = attachment
+            .store
+            .begin_request()
+            .stored_document(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            again.generation, row.generation,
+            "the second heal re-derived a document nothing changed"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "note.md")[0].generation,
+            finding[0].generation,
+            "the second heal re-filed a finding already standing"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A row written at a path takes the findings standing there, and the act
+    /// that wrote it refiles what it still finds.** The deriving act read the
+    /// frontmatter, so it concludes the block's readability: a document
+    /// re-derived with its block still unread carries one finding rather than a
+    /// second copy, and the standing finding moves with the derivation that
+    /// re-stated it.
+    #[test]
+    fn a_re_derivation_that_finds_the_block_still_unread_refiles_one_finding() {
+        let f = Fixture::new("unread-block-refiled");
+        let write = |bytes: &str| fs::write(f.vault().join("note.md"), bytes).unwrap();
+        write("---\ntitle: : :\n---\n# body\n");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let before = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(before.len(), 1);
+
+        // The body moves and the block stays unreadable, so the document is
+        // re-derived and the cause it states is the one already standing.
+        write("---\ntitle: : :\n---\n# body\n\nmore\n");
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        let after = findings_at(&mut attachment.store, "note.md");
+        assert_eq!(after.len(), 1, "the re-derivation filed a second copy");
+        assert_eq!(finding_total(&mut attachment.store), 1);
+        assert!(
+            after[0].generation > before[0].generation,
+            "the finding standing here was never re-derived"
+        );
+        assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **Two scopes at one place.** A rendering that lands on a real document is
+    /// a collision, and the spelling finding filed there is withheld while that
+    /// document stands. The document's own finding is not: it is about the
+    /// document occupying the place rather than about the place, so it stands
+    /// beside the row that withholds the other.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_scoped_finding_stands_at_a_place_a_withheld_one_may_not() {
+        let f = Fixture::new("unread-block-marker-collision");
+        fs::write(
+            f.vault().join("bad\u{fffd}name.md"),
+            "---\ntitle: : :\n---\n# body\n",
+        )
+        .unwrap();
+        if !write_or_report(&f.vault().join("bad\\name.md"), b"body") {
+            return;
+        }
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["bad\u{fffd}name.md"],
+            "the real document is served"
+        );
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, "bad\u{fffd}name.md"),
+            ["document/frontmatter-unreadable"],
+            "the withheld spelling finding stood, or the document's own did not"
+        );
+        assert_eq!(finding_total(&mut attachment.store), 1);
         ops.detach(&name, attachment);
     }
 
@@ -6619,12 +7302,14 @@ mod tests {
     #[test]
     fn mapper_is_the_complete_text_to_store_boundary() {
         let source = b"---\ntags: [front]\nkind: note\n---\n# Heading\n[[target#Part|Title]] #body\nblock ^id\n";
-        let facts = map_document(
+        let derived = map_document(
             "note.md",
             source,
             norn_fs::ContentHash::of(source).to_string(),
         )
         .unwrap();
+        let facts = derived.facts;
+        assert!(derived.unread_frontmatter.is_none());
         assert!(facts.frontmatter.is_some());
         assert_eq!(facts.headings.len(), 1);
         assert_eq!(facts.links.len(), 1);
@@ -6654,7 +7339,8 @@ mod tests {
                 &source,
                 norn_fs::ContentHash::of(&source).to_string(),
             )
-            .unwrap();
+            .unwrap()
+            .facts;
             let read = String::from_utf8(source).unwrap();
             assert_eq!(
                 facts.frontmatter.is_some(),

@@ -11,7 +11,8 @@
 //! What is defined here today is where a vault entry stands — [`TrustState`]
 //! and the [`UntrustedReason`] it carries — the one shape a refusal takes:
 //! [`ErrorEnvelope`], with its [`ReasonCode`] and [`ErrorDetail`]; and what a
-//! finding is filed under, [`FindingKind`], and its [`Severity`]. Maintainer
+//! finding is filed under, [`FindingKind`], with the [`FindingScope`] its kind
+//! answers and its [`Severity`]. Maintainer
 //! contention carries the diagnostic [`MaintainerIdentity`] reported by the
 //! lock without changing an entry's trust state.
 //!
@@ -125,8 +126,9 @@
 //! layer files a parse diagnostic under a kebab-case identifier of its own:
 //! it names what a reader worked around inside one document, it carries no
 //! namespace, and it does not cross this seam. What crosses is what a consumer
-//! derives from such notes — a count on a document's row, or a finding — and a
-//! finding is filed under [`FindingKind`] like every other.
+//! derives from such notes — a count on a document's row, the typed state that
+//! says a document's frontmatter block was read by nothing, or a finding — and
+//! a finding is filed under [`FindingKind`] like every other.
 //!
 //! **A `detail` string is prose and never a match target.** Where a payload
 //! carries one — an environmental refusal, a lost watcher — it exists for a
@@ -149,5 +151,5 @@ mod finding;
 mod trust;
 
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
-pub use finding::{FindingKind, Severity, UnknownFindingKind, UnknownSeverity};
+pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
 pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};
