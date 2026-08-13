@@ -56,6 +56,7 @@ pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
         "norn-host",
         &["counter-lane case:", "memory-lane case:", "soak-lane case:"],
     ),
+    ("norn-text", &["soak-lane case:"]),
 ];
 
 /// Every `.rs` file under `manifest_dir`'s `tests/` directory.
