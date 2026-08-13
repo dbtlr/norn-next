@@ -29,10 +29,13 @@
 //!   information, and it is information the *file* carries; a projection that
 //!   kept it would make the column's bytes depend on something the column
 //!   cannot be queried by.
-//! - **A repeated key keeps its last value.** The value model does not produce
-//!   one — a block with duplicate keys does not parse — so this is the
-//!   canonicalization being total rather than a case anything relies on. It
-//!   matches the model's own "insert replaces" reading of a repeated key.
+//! - **A repeated key keeps its last value.** No document reaches this with
+//!   one: a block writing one key twice, however the two were spelled, is
+//!   refused where it is read, so a projected document's map answers each of
+//!   its keys once. This is the canonicalization being total over the values a
+//!   caller can compose rather than a case anything a document produces relies
+//!   on, and the value it keeps is the one a second write through a map that
+//!   replaces in place would leave.
 //! - **Numbers are written as plain decimal digits, never in exponent
 //!   notation**, in the shortest such spelling that reads back to the same
 //!   value, with integral floats keeping a `.0` so that a float never projects

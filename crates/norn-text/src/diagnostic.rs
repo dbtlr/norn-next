@@ -58,7 +58,8 @@ pub enum DiagnosticCode {
     FrontmatterTooLarge,
     /// An entry keyed by something other than a string. The entry is dropped.
     FrontmatterNonStringKey,
-    /// An explicit YAML tag. The tag is dropped and its value kept.
+    /// An explicit YAML tag, on a value or on a key. The tag is dropped and
+    /// what it tagged is kept.
     FrontmatterTagStripped,
     /// An integer outside `i64`. It is carried as a float.
     FrontmatterIntegerOutOfRange,

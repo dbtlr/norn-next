@@ -145,14 +145,12 @@ pub(crate) fn field_spans(
     // purpose.
     let boundaries: Vec<&RawKeyLine> = candidates
         .iter()
-        .filter(|candidate| {
-            parsed_keys.contains_key(&candidate.name) || candidate.name == MERGE_KEY
-        })
+        .filter(|candidate| candidate.names_merge_key || parsed_keys.contains_key(&candidate.name))
         .collect();
 
     let mut fields = Vec::with_capacity(boundaries.len());
     for (index, candidate) in boundaries.iter().enumerate() {
-        if candidate.name == MERGE_KEY {
+        if candidate.names_merge_key {
             continue;
         }
         let entry_end = boundaries
@@ -247,6 +245,12 @@ struct RawKeyLine {
     /// lines, if any, begin.
     key_line_end: usize,
     name: String,
+    /// Whether this line writes the merge directive rather than a field. The
+    /// name alone does not answer it: node properties are no part of a key's
+    /// name, so a plain `!!merge <<` scans under a name the directive's own
+    /// spelling is still attached to, while a quoted `"!!merge <<"` is a field
+    /// of exactly that name.
+    names_merge_key: bool,
     proposed_value_range: Option<Range<usize>>,
     proposed_style: ValueStyle,
     /// A block scalar whose header asks for keep-chomping, which makes the
@@ -316,7 +320,8 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
     let parsed = crate::frontmatter::extract::parse_block(text).ok()?;
     let mut discarded = Vec::new();
     let mut strip = StripReport::default();
-    let value = crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip);
+    let value =
+        crate::value::from_yaml(parsed, &mut String::new(), &mut discarded, &mut strip).ok()?;
     strip.is_clean().then_some(value)
 }
 
@@ -347,7 +352,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         let line_start = line_starts[index];
         let trimmed_line = line.trim_end_matches(['\r', '\n']);
 
-        let Some((name, after_colon)) = parse_top_level_key(trimmed_line) else {
+        let Some((name, after_colon, spelling)) = parse_top_level_key(trimmed_line) else {
             index += 1;
             continue;
         };
@@ -359,6 +364,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         fields.push(RawKeyLine {
             key_line_start: line_start,
             key_line_end: line_starts[index + 1],
+            names_merge_key: names_merge_key(&name, spelling),
             name,
             proposed_value_range,
             proposed_style,
@@ -502,25 +508,34 @@ fn scan_flow_line(bytes: &[u8], closer: u8, in_single: &mut bool, in_double: &mu
     false
 }
 
+/// How a key line spelled its key. A quoted key is decoded to exactly the name
+/// it carries; a plain one still carries whatever tag was written in front of
+/// it, because a tag is no part of a key's name and nothing has removed it yet.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeySpelling {
+    Plain,
+    Quoted,
+}
+
 /// Recognize a top-level `key:` mapping entry at column 0 of `line`, whose
 /// trailing newline is already stripped. Returns the *decoded* key name — the
-/// spelling the parser keys the mapping by — and the byte offset in `line`
-/// just past the `:` separator.
+/// spelling the parser keys the mapping by — the byte offset in `line` just
+/// past the `:` separator, and how the key was written.
 ///
 /// Recognized structurally, with no identifier allowlist: plain keys, single-
 /// and double-quoted keys, numeric-leading keys, and the merge key (`<<`).
-fn parse_top_level_key(line: &str) -> Option<(String, usize)> {
+fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
     if line.starts_with('#') {
         return None;
     }
     match line.as_bytes().first()? {
         b'\'' => {
             let (name, end) = scan_single_quoted_key(line)?;
-            Some((name, colon_after(line, end)?))
+            Some((name, colon_after(line, end)?, KeySpelling::Quoted))
         }
         b'"' => {
             let (name, end) = scan_double_quoted_key(line)?;
-            Some((name, colon_after(line, end)?))
+            Some((name, colon_after(line, end)?, KeySpelling::Quoted))
         }
         _ => {
             let separator = find_plain_key_separator(line)?;
@@ -528,9 +543,63 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize)> {
             if name.is_empty() {
                 return None;
             }
-            Some((name.to_string(), separator + 1))
+            Some((name.to_string(), separator + 1, KeySpelling::Plain))
         }
     }
+}
+
+/// Whether a scanned key line writes the merge directive rather than a field.
+///
+/// Node properties — a tag, an anchor, or both in either order — name no part
+/// of the key they are written on, so `!!merge <<`, `&a <<` and `<<` are one
+/// directive and the fold treats them as one: the parser resolves a standard
+/// tag away and expands an anchor before a value exists, leaving the value
+/// with no record that either was written. The line's text is the only place
+/// that spelling survives, so the properties are read past here, and a
+/// directive line written inline — plain, tagged, quoted, or anchored —
+/// bounds the entry above it. The explicit-key spelling `? <<` is not
+/// recognized here and its line is absorbed into the entry above it.
+///
+/// Past the properties the key is read the way the parser reads it, quotes
+/// included: `!!str "<<"` names the directive as much as `!!str <<` does.
+/// Quotes with no property in front of them are a name and not a spelling —
+/// `"<<"` is the directive, `"!!merge <<"` is a field of exactly that name —
+/// which is why the scan hands the decoded name of a quoted key straight to
+/// the first comparison below.
+fn names_merge_key(name: &str, spelling: KeySpelling) -> bool {
+    if name == MERGE_KEY {
+        return true;
+    }
+    if spelling != KeySpelling::Plain {
+        return false;
+    }
+    let key = past_node_properties(name);
+    key == MERGE_KEY || decode_quoted_key(key).as_deref() == Some(MERGE_KEY)
+}
+
+/// The key text a plain key line's node properties are written on. `!` and `&`
+/// begin no plain scalar, so a leading one opens a tag or an anchor, and each
+/// runs to the whitespace that separates it from what follows.
+fn past_node_properties(name: &str) -> &str {
+    let mut rest = name;
+    while rest.starts_with(['!', '&']) {
+        let Some((_, tail)) = rest.split_once([' ', '\t']) else {
+            return "";
+        };
+        rest = tail.trim_start();
+    }
+    rest
+}
+
+/// The name a quoted key carries, if `text` is one quoted scalar and nothing
+/// else.
+fn decode_quoted_key(text: &str) -> Option<String> {
+    let (name, end) = match text.as_bytes().first()? {
+        b'\'' => scan_single_quoted_key(text)?,
+        b'"' => scan_double_quoted_key(text)?,
+        _ => return None,
+    };
+    text[end..].trim().is_empty().then_some(name)
 }
 
 /// The first `:` acting as a block-mapping separator — a colon followed by

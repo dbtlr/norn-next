@@ -85,8 +85,10 @@ fn a_nested_map_is_canonicalized_too() {
     assert_eq!(projected(&one), "{\"meta\":{\"a\":2,\"z\":1}}");
 }
 
-/// The canonicalization is total: a repeated key keeps its last value, which is
-/// how the value model itself reads a second write to one.
+/// The canonicalization is total: a composed value whose entries repeat a key
+/// is written by the run's last entry, which is the value a second write
+/// through a map that replaces in place would leave. No document produces one —
+/// a block writing a key twice is refused where it is read.
 #[test]
 fn a_repeated_key_keeps_its_last_value() {
     let repeated = map(&[

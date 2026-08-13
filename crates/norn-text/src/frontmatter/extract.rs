@@ -92,20 +92,30 @@ pub(crate) fn extract<'a>(content: &'a str, diagnostics: &mut Vec<Diagnostic>) -
         return absent(Some(refusal));
     };
 
-    let mut strip = StripReport::default();
-    let (value, refusal) = match parse_block(&content[block.yaml.clone()]) {
-        Ok(parsed) => (
-            Some(from_yaml(
-                parsed,
-                &mut String::new(),
-                diagnostics,
-                &mut strip,
-            )),
-            None,
-        ),
+    // What the conversion reports about the block — its notes, and what it had
+    // to strip — is held until it produces a value, because a conversion that
+    // refuses the block instead leaves nothing for either to be about. A block
+    // refused where its keys collapse then reports exactly what a block the
+    // parser refuses reports: the refusal, and nothing else.
+    let mut converted_strip = StripReport::default();
+    let mut converted_notes = Vec::new();
+    let converted = parse_block(&content[block.yaml.clone()]).and_then(|parsed| {
+        from_yaml(
+            parsed,
+            &mut String::new(),
+            &mut converted_notes,
+            &mut converted_strip,
+        )
+        .map_err(|problem| BlockRefusal::Unreadable { problem })
+    });
+    let (value, refusal, strip) = match converted {
+        Ok(value) => {
+            diagnostics.append(&mut converted_notes);
+            (Some(value), None, converted_strip)
+        }
         Err(refusal) => {
             diagnostics.push(refusal.to_diagnostic());
-            (None, Some(refusal))
+            (None, Some(refusal), StripReport::default())
         }
     };
     Extraction {
@@ -205,8 +215,9 @@ pub enum BlockRefusal {
     /// The block is longer than [`FRONTMATTER_MAX_BYTES`], carrying its own
     /// length so the note can state how far past the bound it is.
     TooLarge { bytes: usize },
-    /// The block is not well-formed YAML, or carries a merge directive that
-    /// names no mapping.
+    /// The block is not well-formed YAML, carries a merge directive that names
+    /// no mapping, or writes one key twice — including the pair only the strip
+    /// into the value model collapses into one name.
     Unreadable { problem: String },
 }
 
@@ -265,7 +276,10 @@ impl BlockRefusal {
 /// happens here, before a value exists, so the model holds the merged mapping
 /// and `<<` never becomes a field. A `<<` that names no mapping is not a merge
 /// and cannot be expanded, so the block is refused rather than read with a
-/// directive silently carried as a field.
+/// directive silently carried as a field. A `<<` under a tag the parser keeps
+/// — `!x <<` — is refused for the same reason: the fold removes the directive
+/// by name and the parser keys a tagged node apart from a plain one, so that
+/// entry survives the fold and would reach the model as a field named `<<`.
 pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal> {
     if yaml.len() > FRONTMATTER_MAX_BYTES {
         return Err(BlockRefusal::TooLarge { bytes: yaml.len() });
@@ -296,6 +310,18 @@ pub(crate) fn parse_block(yaml: &str) -> Result<serde_yaml::Value, BlockRefusal>
 /// The walk expands a mapping's children before the mapping itself, so a
 /// merged source that carries a `<<` of its own is already expanded when it is
 /// folded in and no directive survives anywhere in the value.
+///
+/// **A directive under a tag the parser keeps refuses the block.** `!x <<` is
+/// the merge key — a tag names no part of a key — but it is one this fold
+/// cannot remove: the directive is removed by name and a tagged node is keyed
+/// apart from a plain one, so the entry survives expansion and reaches the
+/// model as a field named `<<` — the phantom the expansion exists to prevent.
+/// Refusing the block is the only other reading, so it is the one taken. A
+/// property the parser resolves away instead — a standard tag, `!!merge <<`
+/// or `!!str "<<"`, or an anchor, `&a <<` — leaves a key no part of the value
+/// can tell from a plain directive, and it folds like one; the property
+/// survives only in the block's text, where the per-field split reads past it
+/// to keep the line bounding the entry above it.
 fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
     match value {
         serde_yaml::Value::Sequence(items) => items.iter_mut().try_for_each(expand_merges),
@@ -303,6 +329,11 @@ fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
         serde_yaml::Value::Mapping(mapping) => {
             for (_, child) in mapping.iter_mut() {
                 expand_merges(child)?;
+            }
+            if let Some(tag) = tagged_merge_key(mapping) {
+                return Err(format!(
+                    "a merge key carries no tag, but this one is written `{tag} {MERGE_KEY}`"
+                ));
             }
             let Some(directive) = mapping.shift_remove(MERGE_KEY) else {
                 return Ok(());
@@ -316,6 +347,16 @@ fn expand_merges(value: &mut serde_yaml::Value) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// The tag on a merge key this mapping writes under one, if it writes one.
+fn tagged_merge_key(mapping: &serde_yaml::Mapping) -> Option<String> {
+    mapping.keys().find_map(|key| match key {
+        serde_yaml::Value::Tagged(tagged) if key.as_str() == Some(MERGE_KEY) => {
+            Some(tagged.tag.to_string())
+        }
+        _ => None,
+    })
 }
 
 /// The mappings a `<<` names: one, or a sequence of them. Anything else is not

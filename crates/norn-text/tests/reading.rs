@@ -234,6 +234,237 @@ fn a_refusal_carries_the_decoder_s_account_of_the_block() {
     );
 }
 
+// ── A key written twice ──────────────────────────────────────────────────
+
+/// Everything a consumer of a read document can see about it, with a refusal
+/// reduced to its class. What the account of a refusal says is compared
+/// separately, by [`refusal_account`], because the two refusals of a repeated
+/// key know different amounts about where it is.
+fn posture(source: &str) -> (Option<&'static str>, Vec<String>, bool, String) {
+    let document = Document::parse(source);
+    (
+        document.frontmatter_refusal().map(|refusal| match refusal {
+            BlockRefusal::Unclosed => "unclosed",
+            BlockRefusal::TooLarge { .. } => "too large",
+            BlockRefusal::Unreadable { .. } => "unreadable",
+        }),
+        codes(&document)
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect(),
+        document.frontmatter().is_some(),
+        document.body().to_string(),
+    )
+}
+
+/// The account an unreadable block carries.
+fn refusal_account(source: &str) -> String {
+    match Document::parse(source).frontmatter_refusal() {
+        Some(BlockRefusal::Unreadable { problem }) => problem.clone(),
+        other => panic!("{source:?} is not an unreadable block: {other:?}"),
+    }
+}
+
+/// **A tag is invisible for uniqueness.** A key written twice refuses the
+/// block, and the spelling of the two keys is not part of the answer: the
+/// parser refuses the pair it sees as one key, and the pair it holds apart —
+/// a tagged key and a plain one, which the strip into the value model collapses
+/// into one name — is refused where they collapse. The refusal class, the
+/// notes, the absent value and the body are the same document either way, and
+/// so is the account wherever the parser's own refusal has no position to add
+/// to it.
+#[test]
+fn a_key_written_twice_refuses_the_block_however_it_was_spelled() {
+    let plain = posture("---\nk: 1\nk: 2\n---\nbody\n");
+    assert_eq!(plain.0, Some("unreadable"));
+    assert_eq!(plain.1, ["frontmatter-parse-failed"]);
+    assert!(!plain.2, "a refused block produced a value");
+    assert_eq!(plain.3, "body\n");
+    assert_eq!(
+        refusal_account("---\nk: 1\nk: 2\n---\nbody\n"),
+        "duplicate entry with key \"k\""
+    );
+
+    for spelling in [
+        "---\n!x k: 1\nk: 2\n---\nbody\n",
+        "---\nk: 1\n!x k: 2\n---\nbody\n",
+        "---\n!x k: 1\n!y k: 2\n---\nbody\n",
+    ] {
+        assert_eq!(
+            posture(spelling),
+            plain,
+            "{spelling:?} degrades differently from the plain duplicate"
+        );
+        assert_eq!(
+            refusal_account(spelling),
+            "duplicate entry with key \"k\"",
+            "{spelling:?} accounts for the refusal differently"
+        );
+    }
+}
+
+/// **The account places the repeated key only where the refusal held a
+/// position.** The parser knows the line and column its own duplicate sits at
+/// and says so; a pair that only collapses into one key collapses after every
+/// span the parse had, so the account it carries stops at the key and the path
+/// to the mapping holding it. What a reader sees of the document is the same
+/// either way — the account is more precise where more was known, never
+/// different about what is wrong.
+#[test]
+fn the_account_places_the_repeated_key_only_where_the_parser_refused() {
+    for (plain, tagged) in [
+        (
+            "---\n# a note\nk: 1\nk: 2\n---\nbody\n",
+            "---\n# a note\n!x k: 1\nk: 2\n---\nbody\n",
+        ),
+        (
+            "---\nouter:\n  k: 1\n  k: 2\n---\nbody\n",
+            "---\nouter:\n  !x k: 1\n  k: 2\n---\nbody\n",
+        ),
+        (
+            "---\nlist:\n  - k: 1\n    k: 2\n---\nbody\n",
+            "---\nlist:\n  - !x k: 1\n    k: 2\n---\nbody\n",
+        ),
+    ] {
+        assert_eq!(
+            posture(plain),
+            posture(tagged),
+            "{tagged:?} degrades differently from {plain:?}"
+        );
+        let (placed, unplaced) = (refusal_account(plain), refusal_account(tagged));
+        assert!(
+            placed.starts_with(&unplaced),
+            "{placed:?} is not {unplaced:?} plus a position"
+        );
+        assert!(placed.contains(" at line "), "{placed:?} places nothing");
+        assert!(
+            !unplaced.contains(" at line "),
+            "{unplaced:?} places a key the collapse has no span for"
+        );
+    }
+}
+
+/// The collapse is checked wherever a mapping is built, so a repeated key
+/// refuses the block at depth and whether the block wrote both entries or a
+/// merge contributed one of them. The account names the mapping the repeat is
+/// in, by the path to it.
+#[test]
+fn a_key_repeated_below_the_top_level_refuses_the_block_too() {
+    for (source, expected) in [
+        (
+            "---\nouter:\n  !x k: 1\n  k: 2\n---\nbody\n",
+            "outer: duplicate entry with key \"k\"",
+        ),
+        (
+            "---\nbase: &b\n  k: 1\nout:\n  <<: *b\n  !x k: 2\n---\nbody\n",
+            "out: duplicate entry with key \"k\"",
+        ),
+        (
+            "---\nlist:\n  - !x k: 1\n    k: 2\n---\nbody\n",
+            "list[0]: duplicate entry with key \"k\"",
+        ),
+    ] {
+        let document = Document::parse(source);
+        assert_eq!(
+            document.frontmatter_refusal(),
+            Some(&BlockRefusal::Unreadable {
+                problem: expected.to_string()
+            }),
+            "{source:?}"
+        );
+        assert_eq!(codes(&document), ["frontmatter-parse-failed"], "{source:?}");
+        assert_eq!(document.frontmatter(), None, "{source:?}");
+        assert_eq!(document.body(), "body\n", "{source:?}");
+    }
+}
+
+/// **A block refused at the collapse reports the refusal and nothing else.**
+/// What the conversion stripped on its way to the collapse was stripped from a
+/// value the block never gets, so a note about it would describe a document no
+/// reader holds. A block the parser refuses reports one note; so does this one.
+#[test]
+fn a_block_refused_at_the_collapse_reports_only_the_refusal() {
+    for source in [
+        // A tagged value, whose strip is reported wherever a value survives it.
+        "---\na: !x 1\nk: 1\n!y k: 2\n---\nbody\n",
+        // A non-string key, whose entry is dropped with a note of its own.
+        "---\n1: dropped\nk: 1\n!y k: 2\n---\nbody\n",
+    ] {
+        assert_eq!(
+            codes(&Document::parse(source)),
+            ["frontmatter-parse-failed"],
+            "{source:?}"
+        );
+    }
+}
+
+/// **A block of many keys is held to the same rule as a block of two.** The
+/// uniqueness check answers a mapping past a size through a table rather than a
+/// scan, which is a cost decision and not a different question: a repeat among
+/// dozens of keys refuses the block exactly as a repeat among two does.
+#[test]
+fn a_repeated_key_among_many_refuses_the_block_too() {
+    let mut source = String::from("---\n");
+    for index in 0..24 {
+        source.push_str(&format!("k{index}: {index}\n"));
+    }
+    source.push_str("!x k7: 99\n---\nbody\n");
+
+    assert_eq!(posture(&source), posture("---\nk: 1\n!x k: 2\n---\nbody\n"));
+    assert_eq!(
+        refusal_account(&source),
+        "duplicate entry with key \"k7\"",
+        "the account of a repeat among many keys names another one"
+    );
+}
+
+/// A tag beside a key nothing else writes is stripped and its block read, so
+/// what the refusal above turns on is the repetition and not the tag. The strip
+/// is reported: a tag is dropped loudly wherever it sits, and a key whose name
+/// silently lost bytes is a field the document does not appear to hold.
+#[test]
+fn a_tagged_key_with_no_twin_reads() {
+    let source = "---\n!x k: 1\nother: 2\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(document.frontmatter_refusal(), None);
+    let map = map_of(source);
+    assert_eq!(map.get("k"), Some(&Value::Int(1)));
+    assert_eq!(map.get("other"), Some(&Value::Int(2)));
+
+    let stripped = document
+        .diagnostics()
+        .iter()
+        .find(|note| note.code == DiagnosticCode::FrontmatterTagStripped)
+        .expect("a tag dropped from a key is reported");
+    assert_eq!(stripped.detail.as_deref(), Some("`!x` on a key at `k`"));
+}
+
+/// A tag written anywhere in an entry the model cannot address — on its key,
+/// on its value, or on both — is reported by no strip note: the entry goes
+/// whole, so nothing is kept for a note to be about, and the dropped-key note
+/// is the entry's whole account.
+#[test]
+fn a_tag_anywhere_in_a_dropped_entry_goes_with_it() {
+    for source in [
+        "---\n!x 1: v\nother: 2\n---\nbody\n",
+        "---\n1: !y v\nother: 2\n---\nbody\n",
+        "---\n!x 1: !y v\nother: 2\n---\nbody\n",
+    ] {
+        let document = Document::parse(source);
+        assert_eq!(document.frontmatter_refusal(), None, "{source:?}");
+        assert_eq!(
+            codes(&document),
+            ["frontmatter-non-string-key", "frontmatter-not-editable"],
+            "{source:?}"
+        );
+        assert_eq!(
+            document.frontmatter(),
+            Some(&Value::Map([("other", 2)].into_iter().collect())),
+            "{source:?}"
+        );
+    }
+}
+
 // ── The bound on the block ───────────────────────────────────────────────
 
 /// A block of `bytes` bytes that parses to a mapping, closed and well-formed.
@@ -659,9 +890,8 @@ fn the_non_finite_floats_survive_as_floats() {
     assert_eq!(map.get("c"), Some(&Value::Float(f64::NEG_INFINITY)));
 }
 
-/// Duplicate keys are not a value-model question. The block is not
-/// well-formed YAML, so it does not parse and there is no value to strip
-/// anything from.
+/// A key written twice is refused rather than stripped: the block is read by
+/// nothing, so there is no value for a last entry to win in.
 #[test]
 fn duplicate_keys_are_a_parse_failure_not_a_silent_last_wins() {
     let document = Document::parse("---\na: 1\na: 2\n---\n");
@@ -751,6 +981,91 @@ fn a_merge_key_that_names_no_mapping_refuses_the_block() {
     let document = Document::parse("---\n<<: 1\ntitle: t\n---\n");
     assert_eq!(codes(&document), ["frontmatter-parse-failed"]);
     assert_eq!(document.frontmatter(), None);
+}
+
+/// A tag makes `<<` no less the directive — a tag names no part of a key — but
+/// a tag the parser keeps makes it one the fold cannot remove: the directive is
+/// removed by name and a tagged key is not that name, so the entry survives
+/// expansion and reaches the model as the phantom `<<` field the expansion
+/// exists to prevent. The block is refused instead.
+#[test]
+fn a_tagged_merge_key_refuses_the_block() {
+    for source in [
+        "---\nbase: &b\n  x: 1\n!x <<: *b\n---\nbody\n",
+        "---\nbase: &b\n  x: 1\nouter:\n  !x <<: *b\n---\nbody\n",
+    ] {
+        let document = Document::parse(source);
+        assert_eq!(
+            document.frontmatter_refusal(),
+            Some(&BlockRefusal::Unreadable {
+                problem: "a merge key carries no tag, but this one is written `!x <<`".to_string()
+            }),
+            "{source:?}"
+        );
+        assert_eq!(codes(&document), ["frontmatter-parse-failed"], "{source:?}");
+        assert_eq!(document.frontmatter(), None, "{source:?}");
+        assert_eq!(document.body(), "body\n", "{source:?}");
+    }
+}
+
+/// A node property the parser resolves — a standard tag, the verbatim form of
+/// one, or an anchor — is gone before a value exists, so the directive it was
+/// written on is a plain one to the fold and folds like one. The spelling
+/// survives in the block's text alone, which is where the per-field split
+/// reads past it: the line bounds the entry above it and no field's range
+/// absorbs it, exactly as for a directive written bare. Quotes past a property
+/// are read too, since the parser reads them.
+#[test]
+fn a_merge_key_under_a_resolved_property_folds_like_a_bare_one() {
+    // The anchor is on `anchor:`, so the directive does not depend on `base`
+    // and has to outlive its removal.
+    let bare = "---\nanchor: &b\n  keep: 1\nkeep: 0\nbase: 5\n<<: *b\n---\nbody\n";
+    for key in [
+        "!!merge <<",
+        "!!str <<",
+        "!<tag:yaml.org,2002:merge> <<",
+        "!!merge \"<<\"",
+        "!!str \"<<\"",
+        "!!str '<<'",
+        "&m <<",
+        "&m !!str <<",
+        "!!str &m <<",
+    ] {
+        let source = bare.replace("\n<<: *b", &format!("\n{key}: *b"));
+        let document = Document::parse(&source);
+        assert_eq!(document.frontmatter_refusal(), None, "{source:?}");
+        assert!(
+            !document.fields().iter().any(|field| field.name == "<<"),
+            "{source:?}"
+        );
+        assert_eq!(
+            document.remove_field("base"),
+            Ok(source.replace("base: 5\n", "")),
+            "{source:?}"
+        );
+    }
+}
+
+/// A quoted key is a name, not a spelling: the parser keys the mapping by the
+/// bytes inside the quotes and no tag is written there. `"<<"` is the
+/// directive, and a quoted key that merely reads like a tagged one is an
+/// ordinary field of that exact name.
+#[test]
+fn a_quoted_key_that_reads_like_a_tagged_directive_is_a_field() {
+    let source = "---\n\"!!merge <<\": v\nbase: 5\n---\nbody\n";
+    let document = Document::parse(source);
+    assert_eq!(
+        document
+            .fields()
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["!!merge <<", "base"]
+    );
+    assert_eq!(
+        document.remove_field("base"),
+        Ok("---\n\"!!merge <<\": v\n---\nbody\n".to_string())
+    );
 }
 
 /// A merge line belongs to no field, so no field's range may absorb it. It

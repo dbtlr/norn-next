@@ -1448,7 +1448,9 @@ impl Undecodable {
 enum UnreadBlock {
     /// The block opens and never closes.
     Unclosed,
-    /// The block is not well-formed, so nothing parsed it.
+    /// Nothing read the block: it is not well-formed, or it is well-formed and
+    /// says something no value can be made of — a key written twice, a merge
+    /// directive naming no mapping.
     Unreadable,
     /// The block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so the text
     /// layer refuses it unparsed rather than paying a read that grows with the
@@ -4657,6 +4659,63 @@ mod tests {
                 .expect("the block was read by nothing");
             assert_eq!(unread.cause, cause);
             assert_eq!(unread.cause.kind().as_str(), kind);
+        }
+    }
+
+    /// **A key written twice reaches the same degradation whichever spelling
+    /// wrote it.** The text layer refuses the block either way, so the row, the
+    /// body facts, the note count and the cause a finding is filed under agree
+    /// between a document whose duplicate the parser sees and one whose keys
+    /// only collapse into a single name. Both accounts name the repeated key;
+    /// how precisely each places it is the text layer's contract, not this
+    /// layer's.
+    #[test]
+    fn a_repeated_key_degrades_alike_whether_or_not_a_tag_spelled_it() {
+        let derive = |source: &str| {
+            let bytes = source.as_bytes();
+            map_document(
+                "note.md",
+                bytes,
+                norn_fs::ContentHash::of(bytes).to_string(),
+            )
+            .expect("a document whose block went unread still derives")
+        };
+        let plain = derive("---\nk: 1\nk: 2\n---\n# heading\n");
+        let tagged = derive("---\n!x k: 1\nk: 2\n---\n# heading\n");
+        for (spelling, derived) in [("plain", &plain), ("tagged", &tagged)] {
+            assert!(
+                derived.facts.frontmatter.is_none(),
+                "the {spelling} duplicate produced a projection"
+            );
+            assert_eq!(
+                derived.facts.frontmatter_diagnostic_count, 1,
+                "the {spelling} duplicate counted another number of block-scoped notes"
+            );
+            assert_eq!(
+                derived.facts.headings.len(),
+                1,
+                "the {spelling} duplicate lost the body facts the act could derive"
+            );
+            let unread = derived
+                .unread_frontmatter
+                .as_ref()
+                .expect("the block was read by nothing");
+            assert_eq!(unread.cause, UnreadBlock::Unreadable);
+            assert_eq!(
+                unread.cause.kind().as_str(),
+                "document/frontmatter-unreadable"
+            );
+        }
+        for (spelling, derived) in [("plain", plain), ("tagged", tagged)] {
+            let problem = derived
+                .unread_frontmatter
+                .expect("refused")
+                .problem
+                .expect("a refusal the reader accounted for");
+            assert!(
+                problem.contains("duplicate entry with key \"k\""),
+                "the {spelling} duplicate's finding does not name the repeated key: {problem:?}"
+            );
         }
     }
 

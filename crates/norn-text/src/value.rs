@@ -29,9 +29,15 @@
 //!   [`FrontmatterNonStringKey`](crate::DiagnosticCode::FrontmatterNonStringKey)
 //!   diagnostic. Coercing it to the string `"1"` would invent a field the
 //!   document does not contain.
-//! - **An explicit tag** — `!foo bar` — is dropped and its value kept, with a
+//! - **An explicit tag** — `!foo bar` — is dropped and what it tagged is kept,
+//!   with a
 //!   [`FrontmatterTagStripped`](crate::DiagnosticCode::FrontmatterTagStripped)
-//!   diagnostic.
+//!   diagnostic. A key carries one the same way a value does: a tag is no part
+//!   of a key's name, so `!foo k` is the field `k` and the note says which of
+//!   the two the tag was on. A tag written anywhere in an entry the model
+//!   cannot address — `!foo 1: !bar v` — is reported by no note of its own,
+//!   because nothing is kept for one to be about: the entry goes whole, and
+//!   the dropped-key note above is its account.
 //! - **An integer past `i64` but inside `u64`** is carried as a float, with a
 //!   [`FrontmatterIntegerOutOfRange`](crate::DiagnosticCode::FrontmatterIntegerOutOfRange)
 //!   diagnostic. Past `u64`, or below `i64`, the block does not parse at all:
@@ -51,9 +57,19 @@
 //!   field. What costs a block its edits is a key the merge *introduces*: it
 //!   is a parsed key no line can be attributed to, so the block has no
 //!   trustworthy per-field split and every field edit in it refuses. A merge
-//!   contributing only keys the block already writes leaves it editable.
-//! - **Duplicate keys** are not a value-model question at all: the block is
-//!   not well-formed, so it does not parse and no value exists.
+//!   contributing only keys the block already writes leaves it editable. A
+//!   directive under a tag the parser keeps — `!x <<` — is the directive
+//!   still, but not one the fold can remove, so it refuses the block rather
+//!   than reaching the model as the field the name would otherwise make. A tag
+//!   the parser resolves away — `!!merge <<` — leaves the fold a plain
+//!   directive and never reaches here at all.
+//! - **A repeated key** costs the block its read rather than reaching the
+//!   model. Two spellings of one key are one key: the parser refuses `k: 1`
+//!   beside `k: 2` itself, and a pair it holds apart — `!x k: 1` beside
+//!   `k: 2`, whose key tag this boundary strips — is refused here, where the
+//!   two collapse. Either way the block is
+//!   [`FrontmatterParseFailed`](crate::DiagnosticCode::FrontmatterParseFailed)
+//!   and no value exists, so no mapping in the model answers one key twice.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
@@ -221,24 +237,41 @@ impl Mapping {
         }
     }
 
-    /// Append an entry whose key is known to be new, skipping the scan
-    /// `insert` does to find an existing one. The parse boundary is the caller:
-    /// a block with two entries under one key is not well-formed and never
-    /// reaches the value model.
+    /// Append an entry at the end, skipping the scan `insert` does to find an
+    /// existing key.
     ///
-    /// The uniqueness this relies on is checked by [`Mapping::keys_are_unique`]
-    /// once the mapping is built, rather than per call: a scan per append is the
-    /// quadratic this method exists to avoid.
-    pub(crate) fn append_unique(&mut self, key: String, value: Value) {
+    /// Uniqueness is settled once per mapping by [`Mapping::repeated_key`]
+    /// rather than per call — a scan per append is the quadratic this method
+    /// exists to avoid — and a mapping whose keys repeat is refused there
+    /// rather than carried.
+    pub(crate) fn append(&mut self, key: String, value: Value) {
         self.entries.push((key, value));
     }
 
-    /// Whether every key in this mapping occurs exactly once — the invariant
-    /// [`Mapping::append_unique`] is handed rather than enforces, checked in one
-    /// pass over the built mapping.
-    pub(crate) fn keys_are_unique(&self) -> bool {
-        let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
-        self.entries.iter().all(|(key, _)| seen.insert(key))
+    /// The first key this mapping holds more than one entry under.
+    ///
+    /// Past [`HASH_ABOVE`] entries the pass is over a table, which keeps the
+    /// answer linear in key count where the square of a scan is what a read of
+    /// a block full of keys would pay. At or under it the pass compares
+    /// instead: a handful of short strings is fewer comparisons than a table
+    /// costs to allocate and hash into, and this runs on every mapping of every
+    /// block that is read. What the check costs is therefore paid by the block
+    /// carrying many keys — one table, one pass — and not by the ordinary read,
+    /// which a scan over a few fields answers.
+    pub(crate) fn repeated_key(&self) -> Option<&str> {
+        if self.entries.len() > HASH_ABOVE {
+            let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+            return self
+                .entries
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .find(|key| !seen.insert(key));
+        }
+        self.entries
+            .iter()
+            .enumerate()
+            .find(|(index, (key, _))| self.entries[..*index].iter().any(|(seen, _)| seen == key))
+            .map(|(_, (key, _))| key.as_str())
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -285,15 +318,17 @@ pub(crate) enum KeyIndex<'a> {
     Hashed(HashMap<&'a str, &'a Value>),
 }
 
-/// The entry count above which a by-key view hashes rather than scans.
+/// The entry count above which a question about a mapping's keys is answered
+/// through a hash table rather than a scan — both for a by-key view of it and
+/// for [`Mapping::repeated_key`].
 ///
-/// Both arms answer every key identically, so what this value picks is cost and
-/// never correctness. It sits where the two routes cost about the same in an
-/// optimized build: under it the comparisons a walk by scan makes are cheaper
-/// than allocating a table and hashing every key into it, and over it the scan's
-/// square is what dominates the walk. An ordinary document's block — title,
-/// dates, status, tags — holds fewer fields than this, so the common read
-/// allocates no table at all.
+/// Both arms answer identically, so what this value picks is cost and never
+/// correctness. It sits where the two routes cost about the same in an
+/// optimized build: under it the comparisons a scan makes are cheaper than
+/// allocating a table and hashing every key into it, and over it the scan's
+/// square is what dominates. An ordinary document's block — title, dates,
+/// status, tags — holds fewer fields than this, so the common read allocates no
+/// table at all.
 const HASH_ABOVE: usize = 16;
 
 impl<'a> KeyIndex<'a> {
@@ -396,31 +431,36 @@ impl StripReport {
 /// `path` is a scratch buffer naming where the walk currently is. It is
 /// extended and truncated in place rather than rebuilt per node, so a document
 /// with no strippable construct in it pays nothing to be able to name one.
+///
+/// The error is the account of a key the block writes twice, which is the one
+/// construct this boundary refuses rather than strips: the conversion collapses
+/// spellings the parser holds apart, so the value it would return could answer
+/// one key two ways.
 pub(crate) fn from_yaml(
     value: serde_yaml::Value,
     path: &mut String,
     diagnostics: &mut Vec<Diagnostic>,
     report: &mut StripReport,
-) -> Value {
+) -> Result<Value, String> {
     match value {
-        serde_yaml::Value::Null => Value::Null,
-        serde_yaml::Value::Bool(value) => Value::Bool(value),
-        serde_yaml::Value::Number(number) => number_from_yaml(number, path, diagnostics),
-        serde_yaml::Value::String(text) => Value::String(text),
+        serde_yaml::Value::Null => Ok(Value::Null),
+        serde_yaml::Value::Bool(value) => Ok(Value::Bool(value)),
+        serde_yaml::Value::Number(number) => Ok(number_from_yaml(number, path, diagnostics)),
+        serde_yaml::Value::String(text) => Ok(Value::String(text)),
         serde_yaml::Value::Sequence(items) => {
             let mut out = Vec::with_capacity(items.len());
             for (index, item) in items.into_iter().enumerate() {
                 let mark = path.len();
                 let _ = write!(path, "[{index}]");
-                out.push(from_yaml(item, path, diagnostics, report));
+                out.push(from_yaml(item, path, diagnostics, report)?);
                 path.truncate(mark);
             }
-            Value::Sequence(out)
+            Ok(Value::Sequence(out))
         }
         serde_yaml::Value::Mapping(mapping) => {
             let mut map = Mapping::new();
             for (key, value) in mapping {
-                let Some(key) = key.as_str().map(str::to_string) else {
+                let Some(name) = key.as_str().map(str::to_string) else {
                     report.dropped_keys += 1;
                     diagnostics.push(
                         Diagnostic::warning(
@@ -436,28 +476,62 @@ pub(crate) fn from_yaml(
                 if !path.is_empty() {
                     path.push('.');
                 }
-                path.push_str(&key);
-                let value = from_yaml(value, path, diagnostics, report);
+                path.push_str(&name);
+                // A tag on a key names no part of the key, so the entry keeps
+                // its name and the tag is reported the way a tag on a value is.
+                if let serde_yaml::Value::Tagged(tagged) = &key {
+                    diagnostics.push(tag_stripped(&tagged.tag, "a key", path));
+                }
+                let value = from_yaml(value, path, diagnostics, report)?;
                 path.truncate(mark);
-                map.append_unique(key, value);
+                map.append(name, value);
             }
-            debug_assert!(
-                map.keys_are_unique(),
-                "a parsed mapping reaching the value model repeats a key"
-            );
-            Value::Map(map)
+            // A tag on a key is dropped by the strip above, so `!x k` and `k`
+            // arrive as distinct nodes and leave as one name. The parser refuses
+            // the pair it can see; the pair only this collapse produces is
+            // refused here, and both refusals cost the block its read.
+            //
+            // Recovery at entry level — keeping the first entry under a
+            // repeated key and reading the rest of the block — belongs to a
+            // replacement of the parser behind this seam, which is what decides
+            // what a duplicate is on the other route.
+            if let Some(key) = map.repeated_key() {
+                return Err(duplicate_entry(path, key));
+            }
+            Ok(Value::Map(map))
         }
         serde_yaml::Value::Tagged(tagged) => {
-            diagnostics.push(
-                Diagnostic::warning(
-                    DiagnosticCode::FrontmatterTagStripped,
-                    "an explicit YAML tag was dropped and its value kept; the value model \
-                     carries no tags",
-                )
-                .with_detail(format!("`{}` {}", tagged.tag, location(path))),
-            );
+            diagnostics.push(tag_stripped(&tagged.tag, "a value", path));
             from_yaml(tagged.value, path, diagnostics, report)
         }
+    }
+}
+
+/// The note an explicit tag is dropped with. `subject` names what carried it,
+/// because a key and its value are one place in the block and two tags.
+fn tag_stripped(tag: impl fmt::Display, subject: &str, path: &str) -> Diagnostic {
+    Diagnostic::warning(
+        DiagnosticCode::FrontmatterTagStripped,
+        "an explicit YAML tag was dropped and what it tagged was kept; the value model \
+         carries no tags",
+    )
+    .with_detail(format!("`{tag}` on {subject} {}", location(path)))
+}
+
+/// The account a repeated key is refused with, in the shape the parser behind
+/// this seam states its own duplicate refusal in: the key, prefixed by the path
+/// to the mapping holding it wherever that is not the top level.
+///
+/// The parser's own account also places the entry — `at line 2 column 3` — and
+/// this one does not. A collapse is reached after the parse, which is where the
+/// spans were, so what the two spellings of a repeated key share is the key and
+/// the path and not a byte of position.
+fn duplicate_entry(path: &str, key: &str) -> String {
+    let entry = format!("duplicate entry with key {key:?}");
+    if path.is_empty() {
+        entry
+    } else {
+        format!("{path}: {entry}")
     }
 }
 
@@ -497,17 +571,17 @@ mod tests {
 
     /// A mapping holding `filler` distinct keys and two entries under `dup`.
     ///
-    /// The parse boundary is what keeps a repeated key out of an ordinary
-    /// mapping, so this reaches past it to build one directly: what the cases
-    /// below hold is that the two routes to a value agree whatever the entries
-    /// are, not that these entries occur.
+    /// A block whose keys repeat is refused before a mapping is carried, so
+    /// this builds one past that refusal directly: what the cases below hold is
+    /// that the two routes to a value agree whatever the entries are, not that
+    /// these entries occur.
     fn with_a_repeated_key(filler: usize) -> Mapping {
         let mut map = Mapping::new();
-        map.append_unique("dup".to_string(), Value::Int(1));
+        map.append("dup".to_string(), Value::Int(1));
         for index in 0..filler {
-            map.append_unique(format!("k{index}"), Value::Int(0));
+            map.append(format!("k{index}"), Value::Int(0));
         }
-        map.append_unique("dup".to_string(), Value::Int(2));
+        map.append("dup".to_string(), Value::Int(2));
         map
     }
 
@@ -527,11 +601,28 @@ mod tests {
         }
     }
 
+    /// **Both arms of the uniqueness check answer the same question.** The arm
+    /// a mapping takes is a cost decision, so a repeated key is found through
+    /// the scan a small mapping takes and through the table a large one takes
+    /// alike, and a mapping whose keys are distinct answers nothing on either
+    /// route. Nothing but this holds the hashing arm: a block of more keys than
+    /// [`HASH_ABOVE`] is refused by it alone.
+    #[test]
+    fn the_uniqueness_check_finds_a_repeated_key_through_either_arm() {
+        for filler in [0, HASH_ABOVE * 2] {
+            let map = with_a_repeated_key(filler);
+            assert_eq!(map.repeated_key(), Some("dup"), "{} entries", map.len());
+        }
+        for entries in [0, 1, HASH_ABOVE, HASH_ABOVE + 1, HASH_ABOVE * 2] {
+            assert_eq!(of_size(entries).repeated_key(), None, "{entries} entries");
+        }
+    }
+
     /// A mapping holding `entries` distinct keys.
     fn of_size(entries: usize) -> Mapping {
         let mut map = Mapping::new();
         for index in 0..entries {
-            map.append_unique(format!("k{index}"), Value::Int(0));
+            map.append(format!("k{index}"), Value::Int(0));
         }
         map
     }

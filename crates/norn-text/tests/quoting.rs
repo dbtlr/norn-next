@@ -138,6 +138,11 @@ fn hostile_block_values_read_back_as_themselves() {
         "[bracket",
         "{brace",
         ",comma",
+        // Flow mappings whose keys repeat, in both spellings of a repeat: a
+        // candidate style is judged by re-parsing it, and a block no reader
+        // will read is a style the emission climbs past rather than trusting.
+        "{k: 1, k: 2}",
+        "{k: 1, !x k: 2}",
         // Quotes of both kinds, and both at once.
         "it's",
         "say \"hi\"",
@@ -205,6 +210,8 @@ fn hostile_flow_items_read_back_as_themselves() {
         "value # not a comment",
         "héllo",
         "control\u{07}",
+        "{k: 1, k: 2}",
+        "{k: 1, !x k: 2}",
     ] {
         assert_eq!(
             round_trip_flow(text),
