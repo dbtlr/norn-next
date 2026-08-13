@@ -211,16 +211,21 @@ it**: the deaths that vacate rendered places send the heal back, after its last 
 to read the roots those places sit under, and every refused spelling those readings meet is
 quarantined then. Waiting for a demand or for unrelated work to reach the quarantined path
 is what that revisit exists to prevent. **A producer replaces the findings it re-derives and
-no others.** A scope that reads paths and not bytes — the revisit, and the sweep of a root
-the grammar poisons — concludes what a spelling alone decides, so a quarantine about the
-document standing at a place it files at is left where it is; a scope that derives documents
-reads a place whole and replaces it whole. **The revisit is opportunistic, and it is owed
-once per heal rather than once per removal**: its increments are already committed, so a
-directory it cannot open ends that root's reading rather than refusing the heal, and a place
-left unread that way keeps its finding withheld until a later heal reads it again — the same
-honesty the paging window above states, for the same reason. Recovery needs no second
-mechanism: a document that reads again is an ordinary derivation, and the increment's own
-findings discard takes the finding with it.
+no others, and the unit that carries it is the finding rather than the job.** What a
+quarantine replaces at the place it is filed at is decided by what the act that derived it
+read. An act that read a path and opened no bytes — the revisit, the sweep of a root the
+grammar poisons, a dirty path the grammar refuses — concludes what a spelling alone decides,
+so a quarantine about the document standing at that place is left where it is. An act that
+opened a document's bytes concludes what those bytes say, so the findings about the refused
+spellings rendering onto the same place are left where they are. Each side is the causes it
+can conclude, read off the cause the finding states, so neither side can take the other's
+work without re-deriving it. **The revisit is opportunistic, and it is owed once per heal
+rather than once per removal**: its increments are already committed, so a directory it
+cannot open ends that root's reading rather than refusing the heal, and a place left unread
+that way keeps its finding withheld until a later heal reads it again — the same honesty the
+paging window above states, for the same reason. Recovery needs no second mechanism: a
+document that reads again is an ordinary derivation, and the increment's own findings
+discard takes the finding with it.
 
 Refusal stays for failures of the environment rather than of one document — a schema that
 will not read, a store that will not open, a walk that cannot list a directory, a path whose
@@ -258,9 +263,9 @@ a statement it emitted, because a plan cannot be taken by a crate that may not o
 connection — and four named statements carry an index bar through it: suffix candidates,
 findings in a class, and the class- and subject-scoped findings discards, the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives.
-None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no query shape carries
-its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate per PR, and no query
-shape carries a timing or a memory bar.
+None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
+query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
+per PR, and no query shape carries a timing or a memory bar.
 
 ### 4. One obvious path
 
