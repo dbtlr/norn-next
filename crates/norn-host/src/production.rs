@@ -4373,6 +4373,58 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A walk that refuses takes nothing.** Prune authority is enumeration
+    /// rather than absence, and a directory this account cannot list is a scope
+    /// nothing enumerated: the refusal ends the job ahead of its own prune, so
+    /// the findings that walk was reading against stand until a walk that reads
+    /// the whole scope converges them.
+    #[cfg(unix)]
+    #[test]
+    fn a_walk_that_refuses_leaves_the_findings_in_its_scope_standing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = Fixture::new("refused-walk-finding");
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "bad.md").len(), 1);
+
+        // The document leaves, so a walk that read the whole vault would take
+        // the finding standing at its place — and this walk cannot.
+        fs::remove_file(f.vault().join("bad.md")).unwrap();
+        let denied = f.vault().join("zz-denied");
+        fs::create_dir(&denied).unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&denied).is_ok() {
+            eprintln!("skipped: this account reads a mode-000 directory");
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+            ops.detach(&name, attachment);
+            return;
+        }
+        let healed = ops.reconcile(
+            &name,
+            &mut attachment,
+            ReconcileWork {
+                batch: norn_fs::Batch::rescan(RescanScope::Vault),
+            },
+            &progress,
+        );
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o755)).unwrap();
+        healed.expect_err("a directory the walk cannot list refuses the heal");
+
+        assert_eq!(
+            findings_at(&mut attachment.store, "bad.md").len(),
+            1,
+            "a walk that refused took a finding it never enumerated the scope of"
+        );
+
+        // The walk that reads the whole vault is the one that converges it.
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert_eq!(finding_total(&mut attachment.store), 0);
+        ops.detach(&name, attachment);
+    }
+
     /// **The two discard sides partition the causes.** The sides are read off
     /// [`CAUSES`] through [`Cause::decided`], so a cause whose kind falls out of
     /// both is a cause no act re-derives — which is a copy of that finding per
