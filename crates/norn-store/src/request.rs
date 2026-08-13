@@ -1128,12 +1128,15 @@ pub enum DiscardScope<'a> {
     /// whatever it says.
     ///
     /// This is the subject statement with no kind predicate on it, which is
-    /// what [`Request::apply_increment`] prepares and runs once per changed path:
-    /// findings and rows are mutually exclusive at a path, so a change that
-    /// writes a row there ends every finding standing at it. A caller reaching
-    /// [`Request::discard_findings_about`] names kinds instead, and this arm is
-    /// how the whole form's plan is read back through
-    /// [`ExplainedStatement::SubjectDiscard`].
+    /// what [`Request::apply_increment`] prepares and runs once per changed
+    /// path: a change that writes a row there ends every finding standing at it,
+    /// and the caller re-records whichever of them its act still concludes. What
+    /// licenses the whole form is one of two things per finding — a finding that
+    /// may not stand where a row does is one nothing could read for as long as
+    /// that row stands, and a finding that may is one the act that wrote the row
+    /// re-derived. A caller reaching [`Request::discard_findings_about`] names
+    /// kinds instead, and this arm is how the whole form's plan is read back
+    /// through [`ExplainedStatement::SubjectDiscard`].
     EveryKind,
     /// The findings of these kinds and no others.
     Kinds(&'a [FindingKind]),

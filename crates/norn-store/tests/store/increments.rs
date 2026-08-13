@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, violation,
-    write_document, write_documents,
+    Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, unread_block,
+    violation, write_document, write_documents,
 };
 use norn_store::{
     Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Store,
@@ -797,6 +797,57 @@ fn a_changeset_discards_the_findings_recorded_about_every_path_it_names() {
     store
         .verify_integrity()
         .expect("a store whose findings left through a changeset");
+}
+
+/// **A finding stands beside the document row at its subject, and the next row
+/// written there takes it.** A finding about the document derived at a path is
+/// recorded at that path and read back from it while the row stands, which is
+/// what a reader enumerating a path's findings sees; the subject discard then
+/// takes it whole with the next change to that path, so the act that re-derives
+/// the document is what decides whether it stands again.
+#[test]
+fn a_finding_stands_beside_the_document_row_at_its_subject() {
+    let scratch = Scratch::new("co-resident-subject");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    write_documents(&mut request, &[document("note.md", "hash-1", "a body\n")]);
+    request
+        .record_finding(&unread_block("note.md"))
+        .expect("recording a finding");
+
+    assert!(
+        request
+            .stored_document(&path("note.md"))
+            .expect("reading a document row")
+            .is_some(),
+        "the document row is what the finding stands beside"
+    );
+    let standing = request
+        .stored_findings(&path("note.md"))
+        .expect("reading findings");
+    assert_eq!(standing.len(), 1);
+    assert_eq!(standing[0].kind, "document/frontmatter-unreadable");
+
+    let outcome = request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("note.md", "hash-2", "another body\n")],
+        )
+        .expect("applying a changeset");
+    assert_eq!(outcome.invalidated.findings_discarded, 1);
+    assert!(
+        request
+            .stored_findings(&path("note.md"))
+            .expect("reading findings")
+            .is_empty(),
+        "a row written at the subject left the finding standing"
+    );
+
+    request.finish();
+    store
+        .verify_integrity()
+        .expect("a store whose finding stood beside a row");
 }
 
 /// **A finding both axes reach leaves once.** The subject discard runs first and
