@@ -38,7 +38,8 @@
 //! crate joining the lanes gains the guard rather than a copy of it.
 //! [`LANE_PREFIXES_BY_PACKAGE`] is what keeps the tables from drifting apart:
 //! each crate's guard asserts its table against the row named for it, and this
-//! module asserts the rows against [`LANE_IGNORE_PREFIXES`].
+//! module asserts the rows against
+//! [`LANE_IGNORE_PREFIXES`](crate::regression::LANE_IGNORE_PREFIXES).
 
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,7 @@ pub const LANE_PREFIXES_BY_PACKAGE: &[(&str, &[&str])] = &[
         "norn-host",
         &["counter-lane case:", "memory-lane case:", "soak-lane case:"],
     ),
+    ("norn-text", &["soak-lane case:"]),
 ];
 
 /// Every `.rs` file under `manifest_dir`'s `tests/` directory.

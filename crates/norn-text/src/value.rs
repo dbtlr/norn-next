@@ -55,6 +55,7 @@
 //! - **Duplicate keys** are not a value-model question at all: the block is
 //!   not well-formed, so it does not parse and no value exists.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
 
 use crate::diagnostic::{Diagnostic, DiagnosticCode};
@@ -172,6 +173,11 @@ impl From<f64> for Value {
 /// short strings costs more in hashing and allocation than the scan does in
 /// comparisons — while giving up the ordering that makes an edit preserve key
 /// order.
+///
+/// A scan is right for a lookup and wrong for a *walk*: a caller that resolves
+/// every key of a mapping pays one scan per key, which is quadratic in key
+/// count. A walk of a large mapping resolves its keys through a by-key view of
+/// it instead, built once inside this module.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mapping {
     entries: Vec<(String, Value)>,
@@ -219,9 +225,20 @@ impl Mapping {
     /// `insert` does to find an existing one. The parse boundary is the caller:
     /// a block with two entries under one key is not well-formed and never
     /// reaches the value model.
+    ///
+    /// The uniqueness this relies on is checked by [`Mapping::keys_are_unique`]
+    /// once the mapping is built, rather than per call: a scan per append is the
+    /// quadratic this method exists to avoid.
     pub(crate) fn append_unique(&mut self, key: String, value: Value) {
-        debug_assert!(!self.contains_key(&key), "append_unique on a repeated key");
         self.entries.push((key, value));
+    }
+
+    /// Whether every key in this mapping occurs exactly once — the invariant
+    /// [`Mapping::append_unique`] is handed rather than enforces, checked in one
+    /// pass over the built mapping.
+    pub(crate) fn keys_are_unique(&self) -> bool {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(self.entries.len());
+        self.entries.iter().all(|(key, _)| seen.insert(key))
     }
 
     pub fn remove(&mut self, key: &str) -> Option<Value> {
@@ -237,6 +254,69 @@ impl Mapping {
 
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(key, _)| key.as_str())
+    }
+}
+
+/// A by-key view of a [`Mapping`], borrowed from it, for a caller that resolves
+/// every key rather than a few.
+///
+/// [`Mapping::get`] is a scan over the mapping's entries, so resolving `n` keys
+/// through it costs `n` scans — quadratic in the key count, and the block's byte
+/// bound caps how far that goes without flattening it. Hashing the entries once
+/// makes every later lookup constant, so a walk of the whole mapping stays
+/// linear in its key count. What that costs is one borrowed key reference and
+/// one borrowed value reference per entry, held for the walk.
+///
+/// At [`HASH_ABOVE`] entries or fewer the view scans the mapping instead. A
+/// block of a handful of fields is what an ordinary document carries, and there
+/// the table's allocation and its hash per entry cost more than the comparisons
+/// they save.
+///
+/// A key resolves to the **first** entry carrying it, which is what
+/// [`Mapping::get`] answers, so a walk through this view and a walk of
+/// [`Mapping::get`] calls read the same value for every key. That agreement is
+/// the point: this is a faster route to an answer, never a different one.
+///
+/// It is a view and not a cache: it borrows the mapping, so a mapping cannot be
+/// mutated while one stands and no index can outlive or disagree with the
+/// entries it was built from.
+pub(crate) enum KeyIndex<'a> {
+    Scan(&'a Mapping),
+    Hashed(HashMap<&'a str, &'a Value>),
+}
+
+/// The entry count above which a by-key view hashes rather than scans.
+///
+/// Both arms answer every key identically, so what this value picks is cost and
+/// never correctness. It sits where the two routes cost about the same in an
+/// optimized build: under it the comparisons a walk by scan makes are cheaper
+/// than allocating a table and hashing every key into it, and over it the scan's
+/// square is what dominates the walk. An ordinary document's block — title,
+/// dates, status, tags — holds fewer fields than this, so the common read
+/// allocates no table at all.
+const HASH_ABOVE: usize = 16;
+
+impl<'a> KeyIndex<'a> {
+    pub(crate) fn of(map: &'a Mapping) -> Self {
+        if map.len() <= HASH_ABOVE {
+            return KeyIndex::Scan(map);
+        }
+        let mut by_key: HashMap<&'a str, &'a Value> = HashMap::with_capacity(map.len());
+        for (key, value) in map.iter() {
+            by_key.entry(key).or_insert(value);
+        }
+        KeyIndex::Hashed(by_key)
+    }
+
+    pub(crate) fn get(&self, key: &str) -> Option<&'a Value> {
+        match self {
+            KeyIndex::Scan(map) => map.get(key),
+            KeyIndex::Hashed(by_key) => by_key.get(key).copied(),
+        }
+    }
+
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
     }
 }
 
@@ -361,6 +441,10 @@ pub(crate) fn from_yaml(
                 path.truncate(mark);
                 map.append_unique(key, value);
             }
+            debug_assert!(
+                map.keys_are_unique(),
+                "a parsed mapping reaching the value model repeats a key"
+            );
             Value::Map(map)
         }
         serde_yaml::Value::Tagged(tagged) => {
@@ -405,4 +489,73 @@ fn number_from_yaml(
         return Value::Float(value as f64);
     }
     Value::Float(number.as_f64().unwrap_or(f64::NAN))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HASH_ABOVE, KeyIndex, Mapping, Value};
+
+    /// A mapping holding `filler` distinct keys and two entries under `dup`.
+    ///
+    /// The parse boundary is what keeps a repeated key out of an ordinary
+    /// mapping, so this reaches past it to build one directly: what the cases
+    /// below hold is that the two routes to a value agree whatever the entries
+    /// are, not that these entries occur.
+    fn with_a_repeated_key(filler: usize) -> Mapping {
+        let mut map = Mapping::new();
+        map.append_unique("dup".to_string(), Value::Int(1));
+        for index in 0..filler {
+            map.append_unique(format!("k{index}"), Value::Int(0));
+        }
+        map.append_unique("dup".to_string(), Value::Int(2));
+        map
+    }
+
+    /// A key written twice resolves to its first entry through a by-key view,
+    /// which is the entry [`Mapping::get`] answers with — through the scanning
+    /// arm and the hashing one alike.
+    #[test]
+    fn a_by_key_view_resolves_a_repeated_key_the_way_a_scan_does() {
+        for filler in [0, HASH_ABOVE * 2] {
+            let map = with_a_repeated_key(filler);
+            let view = KeyIndex::of(&map);
+            assert_eq!(view.get("dup"), map.get("dup"));
+            assert_eq!(view.get("dup"), Some(&Value::Int(1)));
+            assert!(view.contains_key("dup"));
+            assert_eq!(view.get("absent"), None);
+            assert!(!view.contains_key("absent"));
+        }
+    }
+
+    /// A mapping holding `entries` distinct keys.
+    fn of_size(entries: usize) -> Mapping {
+        let mut map = Mapping::new();
+        for index in 0..entries {
+            map.append_unique(format!("k{index}"), Value::Int(0));
+        }
+        map
+    }
+
+    /// Which arm a view takes turns at [`HASH_ABOVE`] exactly: a mapping of that
+    /// many entries scans, and one entry more hashes. The boundary is what this
+    /// holds, so the constant cannot move without a diff a reviewer reads.
+    #[test]
+    fn the_arm_a_view_takes_turns_at_hash_above() {
+        let scanned = of_size(HASH_ABOVE);
+        let hashed = of_size(HASH_ABOVE + 1);
+        assert_eq!(scanned.len(), HASH_ABOVE);
+        assert_eq!(hashed.len(), HASH_ABOVE + 1);
+        assert!(matches!(KeyIndex::of(&scanned), KeyIndex::Scan(_)));
+        assert!(matches!(KeyIndex::of(&hashed), KeyIndex::Hashed(_)));
+    }
+
+    /// The fillers the repeated-key case walks sit on either side of that
+    /// boundary, so it covers both arms rather than one of them twice.
+    #[test]
+    fn a_small_mapping_scans_and_a_large_one_hashes() {
+        let small = with_a_repeated_key(0);
+        let large = with_a_repeated_key(HASH_ABOVE * 2);
+        assert!(matches!(KeyIndex::of(&small), KeyIndex::Scan(_)));
+        assert!(matches!(KeyIndex::of(&large), KeyIndex::Hashed(_)));
+    }
 }

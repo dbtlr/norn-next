@@ -103,6 +103,14 @@ jobs:
       # with nothing else this suite started.
       - name: Memory and wall clock at the soak profile
         run: .github/scripts/lane-suite.sh norn-fixtures memory_soak --nocapture --test-threads=1
+      # Single-threaded for the same reason as the step above: both readings each
+      # ratio is taken from are of a read competing with nothing else this suite
+      # started. It sits with the other bar-carrying steps, ahead of the load
+      # below, so its readings are of a runner that has run nothing long — the
+      # cost of which is that a reading past its bar ends the job before the load
+      # step, and the run counts toward no lockdown.
+      - name: Frontmatter parse cost against key count
+        run: .github/scripts/lane-suite.sh norn-text frontmatter_cost --nocapture --test-threads=1
       # The hour is this step's alone: the duration is declared here rather than
       # in the suite, so a local run of the same case is a short one and the
       # nightly one is the load lockdown counts.

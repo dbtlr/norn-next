@@ -54,7 +54,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::frontmatter::extract::MERGE_KEY;
-use crate::value::{StripReport, Value};
+use crate::value::{KeyIndex, StripReport, Value};
 
 /// How a field's value is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +130,13 @@ pub(crate) fn field_spans(
         return None;
     }
 
+    // Every scanned line asks the mapping about its key, so the mapping is
+    // indexed once here rather than scanned once per line: the block's byte
+    // bound admits thousands of keys, and a scan per key is quadratic in how
+    // many of them there are. It is built past the gate above, which needs no
+    // lookups and refuses the split outright.
+    let parsed_keys = KeyIndex::of(map);
+
     // An entry ends where the next one begins. A merge-key line begins no
     // entry — expansion folded it away, so no parsed key names it — but it
     // still bounds the entry above it: absorbing it would hand a directive's
@@ -138,7 +145,9 @@ pub(crate) fn field_spans(
     // purpose.
     let boundaries: Vec<&RawKeyLine> = candidates
         .iter()
-        .filter(|candidate| map.contains_key(&candidate.name) || candidate.name == MERGE_KEY)
+        .filter(|candidate| {
+            parsed_keys.contains_key(&candidate.name) || candidate.name == MERGE_KEY
+        })
         .collect();
 
     let mut fields = Vec::with_capacity(boundaries.len());
@@ -151,7 +160,7 @@ pub(crate) fn field_spans(
             .map(|next| next.key_line_start)
             .unwrap_or(frontmatter_range.end);
 
-        let parsed = map
+        let parsed = parsed_keys
             .get(&candidate.name)
             .expect("a boundary that is not the merge key is a parsed key");
         let trailing = &content[candidate.key_line_end..entry_end];
