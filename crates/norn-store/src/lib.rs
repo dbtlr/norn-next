@@ -83,6 +83,7 @@ pub use path::{
 };
 pub use request::{
     DiscardScope, EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request,
+    SubjectScope,
 };
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;

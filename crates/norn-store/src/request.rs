@@ -54,6 +54,7 @@
 use std::collections::BTreeSet;
 
 use norn_wire::FindingKind;
+use rusqlite::types::Value;
 use rusqlite::{
     Connection, OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter,
 };
@@ -825,6 +826,54 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page of subjects in `scope` that hold a finding of one
+    /// of these `kinds` and that **no document row stands at**.
+    ///
+    /// This is the read half of the subject axis's walked-scope prune: a walk
+    /// converges the rows its scope addresses against the files it enumerated,
+    /// and these are the places in that scope where a finding stands and no row
+    /// does — the places the walk has to account for or take. A subject a row
+    /// stands at is never returned, because such a row is the walk's own account
+    /// of that place: it withholds a place-scoped finding and is the thing a
+    /// document-scoped one describes.
+    ///
+    /// The kinds are the caller's, for the same reason a discard's are: what a
+    /// producer prunes is what it derives, and a finding another producer
+    /// recorded is outside every walk's account of the place. An empty list
+    /// names nothing, which is what pruning nothing reads.
+    ///
+    /// `after` is exclusive and the order is bytewise whatever the vault's case
+    /// sensitivity is, because this page is read against a caller's own set
+    /// rather than merged against a walk — so the cursor needs a total order and
+    /// not the walk's. `order` decides only which paths a bounded scope holds,
+    /// which is the same question the row pages ask it.
+    pub fn finding_subjects_without_rows_after(
+        &self,
+        scope: SubjectScope<'_>,
+        kinds: &[FindingKind],
+        after: Option<&DocumentPath>,
+        limit: usize,
+        order: StoredPathOrder,
+    ) -> Result<Vec<DocumentPath>, StoreError> {
+        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+            return Err(StoreError::Bound {
+                what: "a finding-subject page",
+                limit: MAX_STORED_DOCUMENT_PAGE,
+                given: limit,
+            });
+        }
+        Self::read_all(
+            &self.store.connection,
+            &finding_subjects_sql(scope, kinds.len(), order),
+            params_from_iter(finding_subject_parameters(scope, kinds, after, limit)),
+            |row| {
+                let path: String = row.get(0)?;
+                Ok(DocumentPath::new(&path))
+            },
+            "reading the finding-subject page",
+        )
+    }
+
     /// The findings recorded at one path, oldest generation first.
     pub fn stored_findings(&self, path: &DocumentPath) -> Result<Vec<StoredFinding>, StoreError> {
         let sql = format!(
@@ -956,6 +1005,9 @@ impl<'a> Request<'a> {
             }
             ExplainedStatement::ClassDiscard(probe) => class_discard_sql(probe.range_count()),
             ExplainedStatement::SubjectDiscard(_, scope) => subject_discard_sql(scope),
+            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, order) => {
+                finding_subjects_sql(scope, kinds.len(), order)
+            }
         };
         let read = |row: &Row<'_>| {
             Ok(Ok(PlanStep {
@@ -979,6 +1031,18 @@ impl<'a> Request<'a> {
                 &self.store.connection,
                 &explained,
                 params_from_iter(subject_discard_parameters(path, scope)),
+                read,
+                "explaining an emitted statement",
+            )?,
+            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => Self::read_all(
+                &self.store.connection,
+                &explained,
+                params_from_iter(finding_subject_parameters(
+                    scope,
+                    kinds,
+                    None,
+                    MAX_STORED_DOCUMENT_PAGE,
+                )),
                 read,
                 "explaining an emitted statement",
             )?,
@@ -1114,6 +1178,40 @@ pub enum ExplainedStatement<'a> {
     /// once per changed path, and [`Request::discard_findings_about`] runs it
     /// over the kinds a caller is re-deriving.
     SubjectDiscard(&'a DocumentPath, DiscardScope<'a>),
+    /// [`Request::finding_subjects_without_rows_after`], which a walk pages its
+    /// scope's unaccounted places through.
+    FindingSubjectsWithoutRows(SubjectScope<'a>, &'a [FindingKind], StoredPathOrder),
+}
+
+/// The stored subjects one act addresses.
+///
+/// These are the three ranges the ordered document pages take, named once for
+/// the callers that range over findings by the same scope a walk ranges over
+/// rows by: a walk of the whole vault, a walk rooted at a path a document can be
+/// stored under, and a walk rooted at a directory that names no document and
+/// still holds documents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubjectScope<'a> {
+    /// Every subject the store holds.
+    Vault,
+    /// A root and its segment-aligned descendants, the root's own subject
+    /// included.
+    Subtree(&'a DocumentPath),
+    /// A directory's segment-aligned descendants. The directory is not a path a
+    /// document is stored under, so no exact subject is in it.
+    Under(&'a DirectoryPrefix),
+}
+
+impl<'a> SubjectScope<'a> {
+    /// The exact subject this scope holds and the bounds its descendants sit in,
+    /// or `None` where the scope is bounded by nothing.
+    fn bounds(self) -> Option<(Option<&'a str>, (String, String))> {
+        match self {
+            SubjectScope::Vault => None,
+            SubjectScope::Subtree(root) => Some((Some(root.as_str()), root.descendant_bounds())),
+            SubjectScope::Under(prefix) => Some((None, prefix.descendant_bounds())),
+        }
+    }
 }
 
 /// How much of a subject a discard takes.
@@ -1221,6 +1319,81 @@ fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
         .collect::<Vec<String>>()
         .join(", ");
     format!("{SUBJECT_DISCARD_SQL} AND kind IN ({placeholders})")
+}
+
+/// The statement [`Request::finding_subjects_without_rows_after`] emits for a
+/// scope, a count of kinds, and the order that scope's bounds are read in.
+///
+/// The cursor and the order are bytewise in every form: this page is read
+/// against a caller's own set rather than merged against a walk, so the order
+/// `findings_path` already holds is the order the page states — no sorter, and
+/// the distinct subjects come off the index adjacent. The kind list filters the
+/// rows the index order reached, exactly as the subject discard's does, and the
+/// anti-join is one seek of `documents_path` per row.
+///
+/// A bounded scope holds the paths its rows are paged under, which is what `order`
+/// decides: a case-insensitive vault folds a subtree's bounds the way that
+/// subtree's rows are folded, so the two sides of one walk address one set of
+/// places.
+fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPathOrder) -> String {
+    // One range holds a root and its descendants both, because a root sorts
+    // ahead of the separator its descendants open with — so the seek is the
+    // whole span and the disjunction inside it drops the names that sort
+    // between the two, which are a root's textual neighbours rather than
+    // anything under it. Spelling the root's own subject as a second range
+    // instead costs the ordering: two ranges are a union, and a union of two
+    // seeks has to be sorted before it can be paged.
+    let bounded = match (scope, order) {
+        (SubjectScope::Vault, _) => "",
+        (SubjectScope::Subtree(_), StoredPathOrder::Sensitive) => {
+            " AND path >= ?2 AND path < ?4
+               AND (path = ?2 OR path >= ?3)"
+        }
+        (SubjectScope::Subtree(_), StoredPathOrder::AsciiCaseInsensitive) => {
+            " AND path >= ?2 COLLATE NOCASE AND path < ?4 COLLATE NOCASE
+               AND (path = ?2 COLLATE NOCASE OR path >= ?3 COLLATE NOCASE)"
+        }
+        (SubjectScope::Under(_), StoredPathOrder::Sensitive) => " AND path >= ?3 AND path < ?4",
+        (SubjectScope::Under(_), StoredPathOrder::AsciiCaseInsensitive) => {
+            " AND path >= ?3 COLLATE NOCASE AND path < ?4 COLLATE NOCASE"
+        }
+    };
+    let first_kind = if scope.bounds().is_some() { 5 } else { 2 };
+    let placeholders = (0..kinds)
+        .map(|index| format!("?{}", first_kind + index))
+        .collect::<Vec<String>>()
+        .join(", ");
+    let limit = first_kind + kinds;
+    format!(
+        "SELECT DISTINCT path FROM findings
+             WHERE (?1 IS NULL OR path > ?1){bounded}
+               AND kind IN ({placeholders})
+               AND NOT EXISTS (SELECT 1 FROM documents WHERE documents.path = findings.path)
+             ORDER BY path
+             LIMIT ?{limit}"
+    )
+}
+
+/// The cursor, the scope's bounds, the kinds and the page bound, in the order
+/// [`finding_subjects_sql`] numbers them.
+fn finding_subject_parameters(
+    scope: SubjectScope<'_>,
+    kinds: &[FindingKind],
+    after: Option<&DocumentPath>,
+    limit: usize,
+) -> Vec<Value> {
+    let text = |value: &str| Value::Text(value.to_string());
+    let mut bound = vec![after.map_or(Value::Null, |after| text(after.as_str()))];
+    if let Some((exact, (lower, upper))) = scope.bounds() {
+        bound.push(exact.map_or(Value::Null, text));
+        bound.push(Value::Text(lower));
+        bound.push(Value::Text(upper));
+    }
+    bound.extend(kinds.iter().map(|kind| text(kind.as_str())));
+    bound.push(Value::Integer(
+        i64::try_from(limit).expect("the page bound fits i64"),
+    ));
+    bound
 }
 
 /// The subject and the kinds in the order [`subject_discard_sql`] numbers them.
