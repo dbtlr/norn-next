@@ -290,6 +290,14 @@ pub enum AttachMode {
     /// Disposable derivation over a throwaway store, discarded with the work
     /// that asked for it. The demand seam refuses it: the lifecycle behind this
     /// mode is not built, and the entry it would run against does not exist.
+    ///
+    /// The layer that consumes this mode is disposable derivation for
+    /// unregistered roots — registration is what gates durability, and a root
+    /// nobody registered is served, when that layer lands, by deriving over a
+    /// throwaway store and throwing it away again. The host holds the other
+    /// half of that seam already: `norn-store` opens a throwaway store today,
+    /// while nothing here establishes an entry over one, which is why the call
+    /// graph reaches this variant only through the refusal.
     Throwaway,
 }
 
@@ -410,8 +418,13 @@ struct EntryState<A: SnapshotSource> {
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
     ///
-    /// It is set beside every publication of [`UntrustedReason::StoreDamaged`]
-    /// and cleared by the rebuild that resolves it, and it dominates
+    /// It is set beside a damage verdict the entry holds a store to answer —
+    /// the database the rebuild rung discards is the one the entry acquired —
+    /// and cleared by the rebuild that resolves it. A damage verdict an attach
+    /// publishes sets nothing here, because that attach acquired no store:
+    /// there is nothing to discard until a demand opens the file again, so the
+    /// verdict stands on its own and the flag would name work no entry holds
+    /// the ground for. It dominates
     /// `recovery_required` wherever both stand: a store that will not answer
     /// answers no better after coverage is installed over it again, so a
     /// recovery run against damaged state is the loop this flag exists to keep
@@ -1466,9 +1479,10 @@ pub struct Host<O: EntryOps> {
 /// One read's hold on a vault entry.
 ///
 /// The handle and the trust label come out of one hold of the entry gate lock,
-/// which is what makes the label a read answers under and the snapshot it
-/// answers from describe the same instant — trust state, not the handle, is
-/// what buys the right to answer.
+/// so the label a read answers under and the snapshot it answers from describe
+/// one instant. Which labels answer and which refuse is
+/// [`TrustState::refusal`]'s answer, given beside the states themselves in
+/// `norn-wire`, and it is read there rather than restated here.
 ///
 /// The hold pins the entry the way a leg running outside the lock does, so a
 /// teardown that reads the pin schedules nothing while a read is in flight, and
