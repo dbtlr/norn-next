@@ -84,6 +84,17 @@ type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
 const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span_column,
             span_offset, candidates_total, message, detail, vault_schema_fingerprint, generation";
 
+/// The leaf a page's explained cursor is spelled with, under whatever floor the
+/// scope being explained has.
+const EXPLAINED_PAGE_CURSOR_LEAF: &str = "explained-page-cursor.md";
+
+/// The columns every reader of a document row selects, in the order
+/// [`stored_document`] reads them. A reader that wants the row's id or its body
+/// selects those ahead of these and tells [`stored_document`] where the row
+/// begins.
+const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_offset, frontmatter,
+            frontmatter_diagnostic_count, generation, derived_at";
+
 /// How many finding ids one further-query batches its `IN` list by.
 ///
 /// A class or a path can hold more findings than SQLite's 32766-parameter
@@ -571,9 +582,7 @@ impl<'a> Request<'a> {
     ) -> Result<Option<StoredDocument>, StoreError> {
         Self::read_one(
             &self.store.connection,
-            "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents WHERE path = ?1",
+            &format!("SELECT {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
             params![path.as_str()],
             |row| stored_document(row, 0),
             "reading a document row",
@@ -600,32 +609,11 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        let limit = i64::try_from(limit).expect("the page bound fits i64");
-        let after = after.map(DocumentPath::as_str);
-        let sql = match order {
-            StoredPathOrder::Sensitive => {
-                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents
-             WHERE (?1 IS NULL OR path > ?1)
-             ORDER BY path
-             LIMIT ?2"
-            }
-            StoredPathOrder::AsciiCaseInsensitive => {
-                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents
-             WHERE (?1 IS NULL OR
-                    path > ?1 COLLATE NOCASE OR
-                    (path = ?1 COLLATE NOCASE AND path > ?1))
-             ORDER BY path COLLATE NOCASE, path
-             LIMIT ?2"
-            }
-        };
+        let scope = SubjectScope::Vault;
         Self::read_all(
             &self.store.connection,
-            sql,
-            params![after, limit],
+            &document_page_sql(scope, order),
+            params_from_iter(document_page_parameters(scope, after, limit)),
             |row| stored_document(row, 0),
             "reading the stored-document page",
         )
@@ -645,8 +633,7 @@ impl<'a> Request<'a> {
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
         self.stored_documents_in_range_after_ordered(
-            Some(root.as_str()),
-            root.descendant_bounds(),
+            SubjectScope::Subtree(root),
             after,
             limit,
             order,
@@ -668,24 +655,24 @@ impl<'a> Request<'a> {
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
         self.stored_documents_in_range_after_ordered(
-            None,
-            prefix.descendant_bounds(),
+            SubjectScope::Under(prefix),
             after,
             limit,
             order,
         )
     }
 
-    /// One bounded page of the rows an exact path and a descendant range hold.
+    /// One bounded page of the rows a scope's exact path and descendant range
+    /// hold.
     ///
     /// Both bounds and cursor are expressed as whole paths, so this never relies
     /// on wildcard matching or admits a textual neighbor such as `ab` while
-    /// reconciling `a`. `exact` is the root's own row where the root is a path a
-    /// document can be stored under, and `None` where it is a directory only.
+    /// reconciling `a`. The scope carries the root's own row where the root is a
+    /// path a document can be stored under, and no exact row where it is a
+    /// directory only.
     fn stored_documents_in_range_after_ordered(
         &self,
-        exact: Option<&str>,
-        bounds: (String, String),
+        scope: SubjectScope<'_>,
         after: Option<&DocumentPath>,
         limit: usize,
         order: StoredPathOrder,
@@ -697,36 +684,10 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        let limit = i64::try_from(limit).expect("the page bound fits i64");
-        let (descendant_lower, descendant_upper) = bounds;
-        let after = after.map(DocumentPath::as_str);
-        let sql = match order {
-            StoredPathOrder::Sensitive => {
-                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents
-             WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
-               AND (?4 IS NULL OR path > ?4)
-             ORDER BY path
-             LIMIT ?5"
-            }
-            StoredPathOrder::AsciiCaseInsensitive => {
-                "SELECT path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents
-             WHERE (path = ?1 COLLATE NOCASE OR
-                    (path >= ?2 COLLATE NOCASE AND path < ?3 COLLATE NOCASE))
-               AND (?4 IS NULL OR
-                    path > ?4 COLLATE NOCASE OR
-                    (path = ?4 COLLATE NOCASE AND path > ?4))
-             ORDER BY path COLLATE NOCASE, path
-             LIMIT ?5"
-            }
-        };
         Self::read_all(
             &self.store.connection,
-            sql,
-            params![exact, descendant_lower, descendant_upper, after, limit],
+            &document_page_sql(scope, order),
+            params_from_iter(document_page_parameters(scope, after, limit)),
             |row| stored_document(row, 0),
             "reading the stored-document subtree page",
         )
@@ -754,9 +715,7 @@ impl<'a> Request<'a> {
             .map_err(|error| error::sql("opening the stored-facts snapshot", error))?;
         let found = Self::read_one(
             &transaction,
-            "SELECT id, body, path, content_hash, byte_length, body_offset, frontmatter,
-                    frontmatter_diagnostic_count, generation, derived_at
-             FROM documents WHERE path = ?1",
+            &format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
             params![path.as_str()],
             |row| {
                 let id: i64 = row.get(0)?;
@@ -1008,6 +967,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, order) => {
                 finding_subjects_sql(scope, kinds.len(), order)
             }
+            ExplainedStatement::StoredDocumentPage(scope, order) => document_page_sql(scope, order),
         };
         let read = |row: &Row<'_>| {
             Ok(Ok(PlanStep {
@@ -1034,18 +994,35 @@ impl<'a> Request<'a> {
                 read,
                 "explaining an emitted statement",
             )?,
-            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => Self::read_all(
-                &self.store.connection,
-                &explained,
-                params_from_iter(finding_subject_parameters(
-                    scope,
-                    kinds,
-                    None,
-                    MAX_STORED_DOCUMENT_PAGE,
-                )),
-                read,
-                "explaining an emitted statement",
-            )?,
+            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
+                let cursor = explained_page_cursor(scope);
+                Self::read_all(
+                    &self.store.connection,
+                    &explained,
+                    params_from_iter(finding_subject_parameters(
+                        scope,
+                        kinds,
+                        Some(&cursor),
+                        MAX_STORED_DOCUMENT_PAGE,
+                    )),
+                    read,
+                    "explaining an emitted statement",
+                )?
+            }
+            ExplainedStatement::StoredDocumentPage(scope, _) => {
+                let cursor = explained_page_cursor(scope);
+                Self::read_all(
+                    &self.store.connection,
+                    &explained,
+                    params_from_iter(document_page_parameters(
+                        scope,
+                        Some(&cursor),
+                        MAX_STORED_DOCUMENT_PAGE,
+                    )),
+                    read,
+                    "explaining an emitted statement",
+                )?
+            }
         };
         Ok(EmittedPlan { sql, steps })
     }
@@ -1181,6 +1158,15 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::finding_subjects_without_rows_after`], which a walk pages its
     /// scope's unaccounted places through.
     FindingSubjectsWithoutRows(SubjectScope<'a>, &'a [FindingKind], StoredPathOrder),
+    /// The ordered document page a heal merges its walk against: the whole
+    /// vault through [`Request::stored_documents_after_ordered`], a root and
+    /// its descendants through
+    /// [`Request::stored_documents_in_subtree_after_ordered`], and a
+    /// directory's descendants through
+    /// [`Request::stored_documents_under_after_ordered`]. The order is the one
+    /// the walk proved for the vault root, because the two sides of a merge
+    /// advance together.
+    StoredDocumentPage(SubjectScope<'a>, StoredPathOrder),
 }
 
 /// The stored subjects one act addresses.
@@ -1321,6 +1307,206 @@ fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
     format!("{SUBJECT_DISCARD_SQL} AND kind IN ({placeholders})")
 }
 
+/// The predicate one keyset page of a scope opens, for the collation the index
+/// it seeks holds and the collation the scope's bounds are read under.
+///
+/// Both paged readers emit this: the heal's document page and the walked-scope
+/// prune's finding-subject page ask one question of one column, and the only
+/// thing that differs between them is which of the two collations each half of
+/// the question is asked in. The document page seeks an index declared under the
+/// vault's own order, so both halves are that order. The prune's index orders
+/// bytewise while its scope may be read folded, so the two come apart there —
+/// and that is the whole of the difference, which is why it is a parameter here
+/// rather than a second builder.
+///
+/// # A page has exactly one lower bound, and the cursor is it
+///
+/// Every predicate here is shaped by one rule: **the row the page starts at has
+/// to be reachable by a seek.** A cursor written as `?1 IS NULL OR path > ?1`
+/// reads as a filter rather than a bound, so SQLite starts at the beginning of
+/// the scope and steps to the cursor before returning anything — which costs a
+/// page the rows already paged, and costs a full walk the vault once per page.
+///
+/// So the lower bound is `COALESCE(cursor, exact, descendant_lower)`: one term,
+/// index-usable, and the empty string where the coalesce has no scope floor to
+/// fall back to. It is a sound floor because [`DocumentPath`] refuses the empty
+/// spelling and the column refuses to store it, so every stored path sorts above
+/// it under either collation.
+///
+/// **The coalesce is the whole point, and two `>=` terms is the trap it avoids.**
+/// Writing the scope's floor and the cursor as separate bounds gives SQLite two
+/// candidates for one seek; it takes the scope's and demotes the cursor to a
+/// filter, which is the quadratic shape again with an index in front of it. The
+/// cursor is always inside the scope, so coalescing to it is always the tighter
+/// of the two. `MAX()` would express the same intent and get it wrong: it
+/// compares under `BINARY`, and against a folded scope the wrong argument wins.
+///
+/// **A scope's floor may join the coalesce only where the index orders the way
+/// the scope is read.** One term carries one collation, so a bytewise floor
+/// standing for a folded scope would drop rows the scope holds: a scope rooted
+/// at `b` holds `B/x.md`, which sorts below `b` bytewise. Where the two come
+/// apart, the cursor is the whole bound and the scope's bounds are filters over
+/// the rows it reaches — one pass across the read rather than one per page of
+/// it, which is the strongest shape a single-collation index admits.
+///
+/// A bounded scope is **one** range and not two. A root sorts ahead of the
+/// separator its descendants open with, so one range spans the root and
+/// everything under it, and the disjunction inside the range drops what sorts
+/// between them — a root's textual neighbours, `ab` while `a` is being healed.
+/// Two ranges are a union, and a union of two seeks has to be sorted before it
+/// can be paged. A directory scope binds no exact subject, and the disjunction
+/// stands anyway: `path = NULL` is never true, so the term reads as the
+/// descendant range alone. Spelling that scope its own predicate would state the
+/// membership rule twice, and an `OR` is not a bound in either scope — which is
+/// what leaves the coalesced floor as the one term a seek can take.
+///
+/// The cursor's exclusivity is stated by the floor itself wherever the floor
+/// carries no inclusive scope bound and the index orders totally on its own:
+/// `path > COALESCE(...)` is that page. Everywhere else the floor is inclusive
+/// and a second term states the exclusivity — folded, as the pair
+/// `path > ?1 COLLATE NOCASE OR path > ?1`, which under a floor that already
+/// excludes everything below the cursor's folded key admits a row equal under
+/// the fold only where it sorts after the cursor bytewise. That bytewise
+/// tie-break is what keeps the page total over two rows that fold together.
+fn scope_page_predicate(
+    scope: SubjectScope<'_>,
+    index_order: StoredPathOrder,
+    scope_order: StoredPathOrder,
+) -> String {
+    let bounded = scope.bounds().is_some();
+    let seek = collation(index_order);
+    let fold = collation(scope_order);
+    let floor_holds_the_scope = bounded && index_order == scope_order;
+    let arguments = if floor_holds_the_scope {
+        "?1, ?2, ?3"
+    } else {
+        "?1, ''"
+    };
+    let strict = !floor_holds_the_scope && index_order == StoredPathOrder::Sensitive;
+    let mut opening = if strict {
+        format!("path > COALESCE({arguments})")
+    } else {
+        format!("path >= COALESCE({arguments}){seek}")
+    };
+    let mut terms: Vec<String> = Vec::new();
+    if bounded {
+        opening.push_str(&format!(" AND path < ?4{fold}"));
+        terms.push(format!("(path = ?2{fold} OR path >= ?3{fold})"));
+    }
+    if !strict {
+        terms.push(match index_order {
+            StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)".to_string(),
+            StoredPathOrder::AsciiCaseInsensitive => {
+                "(?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)".to_string()
+            }
+        });
+    }
+    std::iter::once(opening)
+        .chain(terms)
+        .collect::<Vec<String>>()
+        .join("\n               AND ")
+}
+
+/// How a comparison is spelled under one order: the store's default collation
+/// needs no spelling, and the vault's ASCII fold is SQLite's `NOCASE`.
+fn collation(order: StoredPathOrder) -> &'static str {
+    match order {
+        StoredPathOrder::Sensitive => "",
+        StoredPathOrder::AsciiCaseInsensitive => " COLLATE NOCASE",
+    }
+}
+
+/// The first parameter a scoped page numbers after its cursor and bounds.
+///
+/// One rule for both paged statements, because both bind the same prefix:
+/// the cursor alone where a scope is bounded by nothing, and the cursor with the
+/// exact subject and the descendant range where it is bounded by paths.
+fn first_parameter_after_scope(scope: SubjectScope<'_>) -> usize {
+    if scope.bounds().is_some() { 5 } else { 2 }
+}
+
+/// The cursor [`Request::emitted_plan`] explains a paged statement with.
+///
+/// Both paged statements are explained with a cursor **bound and inside the
+/// scope**, and for one reason each.
+///
+/// Bound rather than `NULL`, because the statement text does not branch on the
+/// cursor and so the plan is the same in both states — but an edit that ever
+/// gave the cursor its own text would otherwise be explained on the first page
+/// alone, and the bar would quietly narrow to the cheaper of the two pages.
+///
+/// Inside the scope rather than any path at all, because a cursor below a
+/// bounded scope's floor is not a page any caller reads: it is the coalesced
+/// floor's other argument that would win there, so explaining one would state
+/// the bar over a parameterization paging never produces. A descendant of the
+/// scope's own lower bound is a page two of that scope.
+fn explained_page_cursor(scope: SubjectScope<'_>) -> DocumentPath {
+    let spelling = match scope.bounds() {
+        None => format!("explained/{EXPLAINED_PAGE_CURSOR_LEAF}"),
+        Some((_, (lower, _))) => format!("{lower}{EXPLAINED_PAGE_CURSOR_LEAF}"),
+    };
+    DocumentPath::new(&spelling).expect("a scope's explained cursor is a document path")
+}
+
+/// The cursor and the scope's bounds, in the order [`scope_page_predicate`]
+/// numbers them. Each paged reader appends what it alone binds.
+fn scope_page_parameters(scope: SubjectScope<'_>, after: Option<&DocumentPath>) -> Vec<Value> {
+    let text = |value: &str| Value::Text(value.to_string());
+    let mut bound = vec![after.map_or(Value::Null, |after| text(after.as_str()))];
+    if let Some((exact, (lower, upper))) = scope.bounds() {
+        bound.push(exact.map_or(Value::Null, text));
+        bound.push(Value::Text(lower));
+        bound.push(Value::Text(upper));
+    }
+    bound
+}
+
+/// The statement the ordered document pages emit for a scope and the order the
+/// vault proved for its root.
+///
+/// One builder behind all three readers, because a page is one operation with
+/// three scopes rather than three operations. The page seeks an index declared
+/// under the vault's own order — `documents_path` where the vault compares
+/// bytes, `documents_path_nocase` where it folds ASCII case — so the scope's
+/// bounds and the seek are read in one collation, and
+/// [`scope_page_predicate`] states what that shape has to be.
+fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String {
+    let predicate = scope_page_predicate(scope, order, order);
+    let ordering = document_page_ordering(order);
+    let limit = first_parameter_after_scope(scope);
+    format!(
+        "SELECT {STORED_DOCUMENT_COLUMNS}
+             FROM documents
+             WHERE {predicate}
+             ORDER BY {ordering}
+             LIMIT ?{limit}"
+    )
+}
+
+/// The order a document page states, which is the order the vault proved for
+/// its root: bytewise, or ASCII-folded with the bytewise tie-break that keeps
+/// it total where two rows fold together.
+fn document_page_ordering(order: StoredPathOrder) -> &'static str {
+    match order {
+        StoredPathOrder::Sensitive => "path",
+        StoredPathOrder::AsciiCaseInsensitive => "path COLLATE NOCASE, path",
+    }
+}
+
+/// The scope's parameters and the page bound, in the order
+/// [`document_page_sql`] numbers them.
+fn document_page_parameters(
+    scope: SubjectScope<'_>,
+    after: Option<&DocumentPath>,
+    limit: usize,
+) -> Vec<Value> {
+    let mut bound = scope_page_parameters(scope, after);
+    bound.push(Value::Integer(
+        i64::try_from(limit).expect("the page bound fits i64"),
+    ));
+    bound
+}
+
 /// The statement [`Request::finding_subjects_without_rows_after`] emits for a
 /// scope, a count of kinds, and the order that scope's bounds are read in.
 ///
@@ -1335,30 +1521,20 @@ fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
 /// decides: a case-insensitive vault folds a subtree's bounds the way that
 /// subtree's rows are folded, so the two sides of one walk address one set of
 /// places.
+///
+/// **The cursor is the page's lower bound rather than a test applied to rows the
+/// page already read**, which is [`scope_page_predicate`]'s rule and the one
+/// this page's stated bar rests on. The index it seeks is `findings_path`, which
+/// orders bytewise whatever the vault's case behaviour is — so the seek's
+/// collation is always [`StoredPathOrder::Sensitive`] here, while the scope's
+/// bounds are read under `order`. Bytewise, the two agree and the cursor
+/// coalesces with the scope's floor. Folded, they come apart: the cursor is the
+/// whole bound and the fold filters the rows it reaches, which is one pass over
+/// the findings index across the whole prune. A narrower bound there would be a
+/// second index this table has no reader asking for.
 fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPathOrder) -> String {
-    // One range holds a root and its descendants both, because a root sorts
-    // ahead of the separator its descendants open with — so the seek is the
-    // whole span and the disjunction inside it drops the names that sort
-    // between the two, which are a root's textual neighbours rather than
-    // anything under it. Spelling the root's own subject as a second range
-    // instead costs the ordering: two ranges are a union, and a union of two
-    // seeks has to be sorted before it can be paged.
-    let bounded = match (scope, order) {
-        (SubjectScope::Vault, _) => "",
-        (SubjectScope::Subtree(_), StoredPathOrder::Sensitive) => {
-            " AND path >= ?2 AND path < ?4
-               AND (path = ?2 OR path >= ?3)"
-        }
-        (SubjectScope::Subtree(_), StoredPathOrder::AsciiCaseInsensitive) => {
-            " AND path >= ?2 COLLATE NOCASE AND path < ?4 COLLATE NOCASE
-               AND (path = ?2 COLLATE NOCASE OR path >= ?3 COLLATE NOCASE)"
-        }
-        (SubjectScope::Under(_), StoredPathOrder::Sensitive) => " AND path >= ?3 AND path < ?4",
-        (SubjectScope::Under(_), StoredPathOrder::AsciiCaseInsensitive) => {
-            " AND path >= ?3 COLLATE NOCASE AND path < ?4 COLLATE NOCASE"
-        }
-    };
-    let first_kind = if scope.bounds().is_some() { 5 } else { 2 };
+    let scoped = scope_page_predicate(scope, StoredPathOrder::Sensitive, order);
+    let first_kind = first_parameter_after_scope(scope);
     let placeholders = (0..kinds)
         .map(|index| format!("?{}", first_kind + index))
         .collect::<Vec<String>>()
@@ -1366,7 +1542,7 @@ fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPath
     let limit = first_kind + kinds;
     format!(
         "SELECT DISTINCT path FROM findings
-             WHERE (?1 IS NULL OR path > ?1){bounded}
+             WHERE {scoped}
                AND kind IN ({placeholders})
                AND NOT EXISTS (SELECT 1 FROM documents WHERE documents.path = findings.path)
              ORDER BY path
@@ -1374,7 +1550,7 @@ fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPath
     )
 }
 
-/// The cursor, the scope's bounds, the kinds and the page bound, in the order
+/// The scope's parameters, the kinds and the page bound, in the order
 /// [`finding_subjects_sql`] numbers them.
 fn finding_subject_parameters(
     scope: SubjectScope<'_>,
@@ -1382,14 +1558,12 @@ fn finding_subject_parameters(
     after: Option<&DocumentPath>,
     limit: usize,
 ) -> Vec<Value> {
-    let text = |value: &str| Value::Text(value.to_string());
-    let mut bound = vec![after.map_or(Value::Null, |after| text(after.as_str()))];
-    if let Some((exact, (lower, upper))) = scope.bounds() {
-        bound.push(exact.map_or(Value::Null, text));
-        bound.push(Value::Text(lower));
-        bound.push(Value::Text(upper));
-    }
-    bound.extend(kinds.iter().map(|kind| text(kind.as_str())));
+    let mut bound = scope_page_parameters(scope, after);
+    bound.extend(
+        kinds
+            .iter()
+            .map(|kind| Value::Text(kind.as_str().to_string())),
+    );
     bound.push(Value::Integer(
         i64::try_from(limit).expect("the page bound fits i64"),
     ));

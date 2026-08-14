@@ -411,11 +411,13 @@ fn a_derived_path_form_has_one_home() {
             "`{absent}` is declared, and no statement in this build reads it"
         );
     }
-    // The three that stay, because a statement in this build reads each: the
-    // resolution ladder's range, the class direction of findings maintenance, and
-    // the schema-key discard's two ranges.
+    // The four that stay, because a statement in this build reads each: the
+    // resolution ladder's range, the order a heal's page seeks on a vault that
+    // folds ASCII case, the class direction of findings maintenance, and the
+    // schema-key discard's two ranges.
     for present in [
         "documents_suffix_key",
+        "documents_path_nocase",
         "finding_classes_class_key",
         "findings_vault_schema_fingerprint",
     ] {
