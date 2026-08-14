@@ -603,7 +603,12 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
     correctness input, because the inference crate structurally cannot reach findings or
     plans.
 13. **The orchestrator is protocol-blind.** `norn-host` depends on no protocol or serving
-    crate; requests reach it only as `norn-wire` types. Dependencies point downward
+    crate; requests reach it only as `norn-wire` types, and every refusal a client can
+    observe leaves as `norn-wire`'s one envelope. The host spells no reason code of its own
+    for a surface to map, and it answers one instant one way: the state a caller polls and
+    the completion a lease reports render the same value through the same wildcard-free
+    mapping, so a refusal minted without a stance in the vocabulary is a build failure
+    rather than a code invented at a call site. Dependencies point downward
     (`bin → serve → {mcp, host}`), never the reverse. A protocol type in orchestrator code
     is a defect, and the missing edges make it a compile error.
 
