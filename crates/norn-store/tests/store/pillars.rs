@@ -1249,6 +1249,20 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
     let mut request = store.begin_request();
     seed_a_drainable_store(&mut request, DRAINED_ROWS);
 
+    // Taking a plan runs a statement, and what it steps is not work a reader
+    // spent: an explain is a report about a statement rather than a run of it.
+    // A bar taken beside a plan assertion would otherwise read the explain's own
+    // cost as the reader's.
+    let before_the_explain = request.read_steps();
+    for statement in ENUMERATIONS {
+        request.emitted_plan(*statement).expect("a query plan");
+    }
+    assert_eq!(
+        request.read_steps(),
+        before_the_explain,
+        "taking a query plan moved the reader work count"
+    );
+
     let rows = DRAINED_ROWS as u64;
     for order in [
         norn_store::StoredPathOrder::Sensitive,
