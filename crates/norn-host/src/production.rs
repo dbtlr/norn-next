@@ -65,7 +65,7 @@ impl ProductionPolicy {
         store_page_size: usize,
         changeset_size: usize,
     ) -> Result<Self, ProductionPolicyError> {
-        if store_page_size == 0 || store_page_size > norn_store::MAX_STORED_DOCUMENT_PAGE {
+        if store_page_size == 0 || store_page_size > norn_store::MAX_PAGE {
             return Err(ProductionPolicyError::StorePageSize(store_page_size));
         }
         if changeset_size == 0 || changeset_size > MAX_CHANGESET_SIZE {
@@ -90,7 +90,7 @@ impl fmt::Display for ProductionPolicyError {
             Self::StorePageSize(given) => write!(
                 f,
                 "store page size must be between 1 and {}, got {given}",
-                norn_store::MAX_STORED_DOCUMENT_PAGE
+                norn_store::MAX_PAGE
             ),
             Self::ChangesetSize(given) => write!(
                 f,
@@ -3167,9 +3167,9 @@ mod tests {
             ProductionPolicy::new(0, 1),
             Err(ProductionPolicyError::StorePageSize(0))
         ));
-        assert!(ProductionPolicy::new(norn_store::MAX_STORED_DOCUMENT_PAGE, 1).is_ok());
+        assert!(ProductionPolicy::new(norn_store::MAX_PAGE, 1).is_ok());
         assert!(matches!(
-            ProductionPolicy::new(norn_store::MAX_STORED_DOCUMENT_PAGE + 1, 1),
+            ProductionPolicy::new(norn_store::MAX_PAGE + 1, 1),
             Err(ProductionPolicyError::StorePageSize(1025))
         ));
     }

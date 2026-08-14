@@ -51,7 +51,7 @@ use norn_store::{
 
 /// How many rows one page of a drain asks for.
 ///
-/// Well under either page bound the store accepts, so a projection of a large
+/// Well under the page bound the store accepts, so a projection of a large
 /// vault is read in many bounded pages rather than one wide one: a reader that
 /// asked for the largest page it could would be a working set that grows with
 /// the vault.

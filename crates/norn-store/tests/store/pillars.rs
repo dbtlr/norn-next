@@ -1007,7 +1007,7 @@ fn an_enumeration_refuses_a_page_bound_it_does_not_hold() {
     let scratch = Scratch::new("enumeration-bound");
     let mut store = scratch.open();
     let request = store.begin_request();
-    for limit in [0, norn_store::MAX_ENUMERATED_PAGE + 1] {
+    for limit in [0, norn_store::MAX_PAGE + 1] {
         assert!(request.stored_findings_after(None, limit).is_err());
         assert!(request.stored_tombstones_after(None, limit).is_err());
         assert!(request.indexed_terms_after(None, limit).is_err());

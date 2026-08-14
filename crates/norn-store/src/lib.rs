@@ -82,8 +82,8 @@ pub use path::{
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_ENUMERATED_PAGE,
-    MAX_STORED_DOCUMENT_PAGE, PlanStep, Request, SubjectScope,
+    DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_PAGE, PlanStep, Request,
+    SubjectScope,
 };
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;

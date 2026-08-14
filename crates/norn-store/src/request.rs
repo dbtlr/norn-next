@@ -72,14 +72,14 @@ use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
-/// Maximum row count accepted by ordered stored-document page readers.
-pub const MAX_STORED_DOCUMENT_PAGE: usize = 1024;
-
-/// Maximum row count accepted by the readers that enumerate a whole pillar.
+/// Maximum row count any paged reader accepts.
 ///
-/// The same bound as a document page, for the same reason: a page a caller
-/// drains is a working set, and one bound is one number to reason about.
-pub const MAX_ENUMERATED_PAGE: usize = 1024;
+/// One number covers every page this crate hands out — the ordered document
+/// pages a heal merges its walk against, and the enumerations a caller drains a
+/// whole pillar through — because a page is a working set whatever it holds
+/// rows of. A caller sizes one buffer against one bound, and a bound per reader
+/// would be a set of numbers that agree until one of them is moved.
+pub const MAX_PAGE: usize = 1024;
 
 /// The lowest row key a finding can be stored under, which is the floor an
 /// unset cursor coalesces to.
@@ -624,10 +624,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -699,10 +699,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document subtree page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -836,10 +836,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<DocumentPath>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a finding-subject page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -882,10 +882,10 @@ impl<'a> Request<'a> {
         after: Option<FindingCursor>,
         limit: usize,
     ) -> Result<Vec<(FindingCursor, StoredFinding)>, StoreError> {
-        if limit == 0 || limit > MAX_ENUMERATED_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-finding page",
-                limit: MAX_ENUMERATED_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -916,10 +916,10 @@ impl<'a> Request<'a> {
         after: Option<&DocumentPath>,
         limit: usize,
     ) -> Result<Vec<StoredTombstone>, StoreError> {
-        if limit == 0 || limit > MAX_ENUMERATED_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a tombstone page",
-                limit: MAX_ENUMERATED_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -949,10 +949,10 @@ impl<'a> Request<'a> {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<IndexedTerm>, StoreError> {
-        if limit == 0 || limit > MAX_ENUMERATED_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "an indexed-term page",
-                limit: MAX_ENUMERATED_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -1136,7 +1136,7 @@ impl<'a> Request<'a> {
                         scope,
                         kinds,
                         Some(&cursor),
-                        MAX_STORED_DOCUMENT_PAGE,
+                        MAX_PAGE,
                     )),
                     read,
                     "explaining an emitted statement",
@@ -1147,11 +1147,7 @@ impl<'a> Request<'a> {
                 Self::read_all(
                     &self.store.connection,
                     &explained,
-                    params_from_iter(document_page_parameters(
-                        scope,
-                        Some(&cursor),
-                        MAX_STORED_DOCUMENT_PAGE,
-                    )),
+                    params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
                     read,
                     "explaining an emitted statement",
                 )?
@@ -1166,7 +1162,7 @@ impl<'a> Request<'a> {
                 &explained,
                 params_from_iter(finding_page_parameters(
                     Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
-                    MAX_ENUMERATED_PAGE,
+                    MAX_PAGE,
                 )),
                 read,
                 "explaining an emitted statement",
@@ -1176,7 +1172,7 @@ impl<'a> Request<'a> {
                 &explained,
                 params_from_iter(text_page_parameters(
                     Some(EXPLAINED_PAGE_CURSOR_LEAF),
-                    MAX_ENUMERATED_PAGE,
+                    MAX_PAGE,
                 )),
                 read,
                 "explaining an emitted statement",
@@ -1184,10 +1180,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::IndexedTermPage => Self::read_all(
                 &self.store.connection,
                 &explained,
-                params_from_iter(text_page_parameters(
-                    Some(EXPLAINED_TERM_CURSOR),
-                    MAX_ENUMERATED_PAGE,
-                )),
+                params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
                 read,
                 "explaining an emitted statement",
             )?,
