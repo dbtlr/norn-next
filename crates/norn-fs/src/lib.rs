@@ -41,6 +41,9 @@
 //!   content observation over it, and the walk's own reads take the same seam.
 //! - [`path`] — the root-scoped, filesystem-case-aware normalization point used
 //!   by walks today and watcher invalidation roots next.
+//! - [`reads`] — what this thread has asked the filesystem for: opens, stats and
+//!   directory entries, counted where they happen. Evidence a caller folds into
+//!   its own account, and nothing that decides anything.
 //! - [`ContentHash`], [`hashed_from`] and [`PostState`] — the hash that
 //!   concludes, the one act that produces one from a file, and the identity a
 //!   landed write reports.
@@ -88,6 +91,7 @@
 pub mod exclusion;
 pub mod lock;
 pub mod path;
+pub mod reads;
 pub mod shadow;
 pub mod walk;
 pub mod watch;

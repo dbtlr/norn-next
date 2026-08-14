@@ -6,11 +6,13 @@
 //! host decides *when* attach, reconciliation and detach happen, while the
 //! filesystem and store crates remain the only owners of those effects.
 
+mod evidence;
 mod lifecycle;
 mod production;
 mod refusal;
 mod registry;
 
+pub use evidence::{EvidenceReading, JobEvidence};
 pub use lifecycle::{
     Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
     LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,

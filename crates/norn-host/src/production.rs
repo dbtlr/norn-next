@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use norn_config::registry::{Entry as Registration, PollBackend};
@@ -19,6 +20,7 @@ use norn_store::{
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity, VaultName};
 
+use crate::evidence::{EvidenceReading, JobEvidence, count_changeset};
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -110,6 +112,12 @@ impl std::error::Error for ProductionPolicyError {}
 pub struct ProductionEntryOps {
     dirs: ConfigDirs,
     policy: ProductionPolicy,
+    /// What this host's jobs have spent and done, kept rather than discarded.
+    ///
+    /// The account is the ops' own and outlives every job it records, so a
+    /// caller reads it before and after the work it is asking about. Nothing
+    /// here decides anything: see [`crate::evidence`].
+    evidence: Arc<JobEvidence>,
 }
 
 pub struct ProductionAttachment {
@@ -163,7 +171,19 @@ impl SnapshotSource for ProductionAttachment {
 
 impl ProductionEntryOps {
     pub fn new(dirs: ConfigDirs, policy: ProductionPolicy) -> Self {
-        Self { dirs, policy }
+        Self {
+            dirs,
+            policy,
+            evidence: Arc::new(JobEvidence::default()),
+        }
+    }
+
+    /// What this host's jobs have spent and done, as it stands.
+    ///
+    /// Every field is cumulative, so what one job cost is the difference between
+    /// a reading taken before it and one taken after.
+    pub fn evidence(&self) -> EvidenceReading {
+        self.evidence.read()
     }
 
     fn derived(&self, name: &VaultName) -> PathBuf {
@@ -481,6 +501,7 @@ impl EntryOps for ProductionEntryOps {
         // that counts no document and can take a while on a loaded machine.
         // The phase is entered before it so a caller reading the entry sees
         // what it is waiting on rather than a heal that appears not to start.
+        let _job = self.evidence.attributing();
         progress.installing_coverage();
         let root = registration.root.as_path();
         let derived = self.derived(&registration.name);
@@ -543,6 +564,7 @@ impl EntryOps for ProductionEntryOps {
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -579,6 +601,8 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
+        self.evidence.count_recovery();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -598,6 +622,7 @@ impl EntryOps for ProductionEntryOps {
         _: &VaultName,
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
+        let _job = self.evidence.attributing();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -619,6 +644,8 @@ impl EntryOps for ProductionEntryOps {
         // therefore give the resources back through [`release`] rather than by
         // dropping the attachment, which would release the maintainer lock
         // ahead of the watch it is declared before.
+        let _job = self.evidence.attributing();
+        self.evidence.count_rebuild();
         match attachment.maintainership.still_current() {
             Ok(true) => self.rung_three(attachment, progress),
             Ok(false) => {
@@ -642,6 +669,7 @@ impl EntryOps for ProductionEntryOps {
     }
 
     fn maintain(&self, _: &VaultName, attachment: &mut Self::Attachment) -> Result<(), JobFailure> {
+        let _job = self.evidence.attributing();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -2640,10 +2668,16 @@ impl<'s> Pending<'s> {
     fn flush(&mut self) -> Result<(), JobFailure> {
         if !self.changes.is_empty() {
             self.account.vacated.absorb(&self.changes);
-            self.store
+            // The outcome is the store's account of what this changeset did, and
+            // it is recorded rather than dropped: the job that applied it is the
+            // only place the tallies are ever visible, since a changeset that
+            // landed leaves the same rows behind however many entries it held.
+            let outcome = self
+                .store
                 .begin_request()
                 .apply_increment(IncrementProvenance::Derived, self.changes.drain(..))
                 .map_err(store_effect)?;
+            count_changeset(&outcome);
         }
         self.record_findings()
     }

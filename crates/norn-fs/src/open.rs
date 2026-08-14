@@ -195,13 +195,17 @@ pub(crate) fn open_regular_at(
             descended = Some(fd);
             continue;
         }
+        crate::reads::count_stat();
         let stat = fstat(&fd).map_err(|errno| OpenError::Machine {
             errno,
             component: name.to_owned(),
         })?;
         let kind = FileType::from_raw_mode(stat.st_mode as _);
         return Ok(match kind {
-            FileType::RegularFile => Reached::Regular(fd),
+            FileType::RegularFile => {
+                crate::reads::count_document_open();
+                Reached::Regular(fd)
+            }
             _ => Reached::Nothing(Unreached::not_regular(name)),
         });
     }
@@ -272,14 +276,15 @@ fn classify(parent: BorrowedFd<'_>, name: &OsStr, errno: Errno) -> Result<Reache
         Errno::NOENT | Errno::NAMETOOLONG => Ok(Reached::Nothing(Unreached::missing(name, errno))),
         Errno::LOOP => Ok(Reached::Nothing(Unreached::symbolic_link(name))),
         Errno::NXIO | Errno::OPNOTSUPP => Ok(Reached::Nothing(Unreached::not_regular(name))),
-        Errno::NOTDIR => Ok(Reached::Nothing(
+        Errno::NOTDIR => Ok(Reached::Nothing({
+            crate::reads::count_stat();
             match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) if FileType::from_raw_mode(stat.st_mode as _) == FileType::Symlink => {
                     Unreached::symbolic_link(name)
                 }
                 _ => Unreached::not_a_directory(name),
-            },
-        )),
+            }
+        })),
         errno => Err(OpenError::Machine {
             errno,
             component: name.to_owned(),

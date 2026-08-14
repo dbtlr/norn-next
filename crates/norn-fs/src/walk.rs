@@ -116,6 +116,7 @@ fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkE
                 reason: SkipReason::Shadow,
             }));
         }
+        crate::reads::count_stat();
         let metadata = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|source| environment_errno("stating", &access, source))?;
         if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) == EntryKind::Symlink
@@ -318,6 +319,7 @@ impl FileFact {
             Reached::Nothing(_) => return Ok(None),
         };
         let mut file = fs::File::from(fd);
+        crate::reads::count_stat();
         let metadata = file
             .metadata()
             .map_err(|source| environment("stating", &access, source))?;
@@ -604,6 +606,7 @@ fn directory_page(
         if name == b"." || name == b".." {
             continue;
         }
+        crate::reads::count_dirents(1);
         let name = OsString::from_vec(name.to_vec());
         let relative_path = relative.join(&name);
         let path = normalizer
@@ -613,6 +616,7 @@ fn directory_page(
                 source,
             })?;
         let kind = if entry.file_type() == FileType::Unknown {
+            crate::reads::count_stat();
             let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(|source| environment_errno("stating", &relative_path, source))?;
             classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
@@ -650,6 +654,7 @@ fn directory_page(
             sort_key,
         } = candidate;
         let relative_path = relative.join(&name);
+        crate::reads::count_stat();
         let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|source| environment_errno("stating", &relative_path, source))?;
         let observed_kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
@@ -780,6 +785,7 @@ fn inspect_link_target(
                 Err(error) => return Err(error),
             }
         } else {
+            crate::reads::count_stat();
             return match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(stat) => match FileType::from_raw_mode(stat.st_mode as _) {
                     FileType::Directory => Ok(LinkKind::InVaultDirectory),

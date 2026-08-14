@@ -120,7 +120,12 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// A caller reads this to hold a path to the stats it spends: the counter
     /// moves once per [`ServingSet::recheck`], and one recheck stats every
     /// served root.
-    #[cfg(test)]
+    ///
+    /// The set is this crate's own, so a bar outside it reads this through
+    /// [`Host::classifications`] — which is the narrowest surface that reaches
+    /// it, and is why the reading here is not gated to this crate's own cases.
+    ///
+    /// [`Host::classifications`]: crate::Host::classifications
     pub(crate) fn classifications(&self) -> usize {
         self.classifications.load(Ordering::SeqCst)
     }
