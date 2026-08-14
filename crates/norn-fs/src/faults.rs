@@ -79,13 +79,15 @@ pub(crate) enum Stage {
     Cleanup,
 }
 
-// The stage vocabulary is what a harness arms and what a record names, so a
-// build that arms nothing constructs none of it. The names still belong to the
-// seam rather than to the suite: they are what the widened half is stated over,
-// and a build that carried a different set would be a different seam.
-#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
+// The stage vocabulary — the roster and the names — is what a harness arms and
+// what a record names, so it compiles where something reads it and nowhere
+// else. It still belongs to the seam rather than to the suite: the names are
+// what the widened half is stated over, and a build that carried a different
+// set would be a different seam. The variants themselves carry no such gate:
+// the protocol names one at every stage it checks, in every build.
 impl Stage {
     /// Every stage, in the order the replacement protocol runs them.
+    #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) const ALL: [Stage; 6] = [
         Stage::Create,
         Stage::Write,
@@ -97,6 +99,7 @@ impl Stage {
 
     /// The name a harness arms this stage under, which is also the name a
     /// record of it carries.
+    #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Stage::Create => "create",
@@ -124,7 +127,11 @@ impl Stage {
 /// [`io::ErrorKind`](std::io::ErrorKind) of its own, and which a caller reads
 /// off the refusal as an error number — and another say nothing at all, because
 /// the process it was armed in does not reach a return.
-// Only an armed build constructs an answer, for the same reason.
+// The allow stays at the enum rather than moving onto its items: nothing in a
+// build that arms nothing constructs an answer at all, and a variant nobody
+// names is what the lint reads as dead. The variants are the seam's vocabulary
+// even so — an unarmed build has to hold the same three, or the arm a harness
+// spells means something different from the arm this seam answers.
 #[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Answer {
@@ -140,9 +147,9 @@ pub(crate) enum Answer {
     Ends,
 }
 
-#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
 impl Answer {
     /// The name a harness arms this answer under.
+    #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Answer::Fails(_) => "fails",
