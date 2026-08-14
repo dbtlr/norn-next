@@ -83,13 +83,19 @@ use norn_wire::{FindingKind, TrustState};
 /// a walk refuses to follow. What each case adds on top is its own workload, so
 /// the vault around the churn is the same in every one of them.
 ///
-/// **The scale is chosen so that a changed-set bound can mean something.** The
-/// widest changing phase here names 12 places against these 120 documents, and
-/// each cost bar asserts that its own ceiling is under half of them — a claim
-/// that maintenance costs the changed set rather than the vault is not a claim
-/// at all over a vault a bound could mostly re-read and still fit. It is also
-/// small enough that the two attachments each case makes cost a fraction of a
-/// second, which is what keeps this suite in the per-PR lane.
+/// **The scale is chosen so that a changed-set bound can mean something.** A
+/// claim that maintenance costs the changed set rather than the vault is not a
+/// claim at all over a vault a bound could mostly re-read and still fit, so
+/// every cost bar asserts beside its own reading that its ceiling is under half
+/// of these 120 documents. Against that guard of 60, the ceilings the bars here
+/// really stand on are 8 opens over ordinary editing's and atomic replacement's
+/// 4 places, 4 over the ambiguity class's 2, 4 upserts over the same 4 places,
+/// 24 opens over the external tools' 12, and 36 over the burst's 18 steps — the
+/// widest of them well under it.
+///
+/// The profile is also small enough that the two attachments each case makes
+/// cost a fraction of a second, which is what keeps this suite in the per-PR
+/// lane.
 const PROFILE: &str = "small";
 
 /// The runaway bound on settling, derived from the changed set.
@@ -449,6 +455,10 @@ fn edits_during_an_active_heal_converge_on_a_build_from_zero() {
 /// for and the member that joins is added to a class that already resolves —
 /// which is the only ordering in which membership is derived state being
 /// *changed* rather than derived once.
+///
+/// The changing phase is one write and one removal over two places, which is
+/// the ordinary-editing shape, so it takes [`OPENS`] rather than declaring an
+/// exemption the way the validity and during-heal cases do.
 #[test]
 fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     let mut ink = churn::Ink::new(67);
@@ -498,6 +508,7 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     );
     let mut churned = churn_the_vault("churn-class", &churn::Phased::new(opening, changing));
     churned.assert_rows_were_taken_away();
+    churned.assert_maintenance_is_bracketed(&OPENS);
     churned.judge("an ambiguity class gaining and losing members", 0);
 
     let expected = vec![
@@ -713,27 +724,38 @@ impl WorkBound {
     }
 }
 
-/// **The bound on documents a maintenance pass opens**, over the two workloads
+/// **The bound on documents a maintenance pass opens**, over the workloads
 /// whose changing phase names a handful of places.
 ///
-/// Profile: `small`, 120 generated documents. Each of those changing phases
-/// names **4 places**, and the measured readings are **2 opens** for ordinary
-/// editing — two rewrites, and the two prunes cost none — and **3 opens** for
-/// atomic replacement, which is the replaced document and both names its
-/// travelling document arrives at.
+/// Profile: `small`, 120 generated documents. Ordinary editing and atomic
+/// replacement each name **4 places**; the ambiguity class's change names **2**.
+/// The measured readings, taken with the phase's acts landing together and again
+/// with 150ms between them so that each act is delivered on its own:
 ///
-/// **The coefficient is one, so what this bound says is that a host opens each
-/// changed place at most once.** That is the whole of the changed-set claim and
-/// there is no headroom past it: a second read of one place is the regression
-/// this refuses. **What the slack between 3 and 4 absorbs** is the places that
-/// are departures — a name that emptied is in the changed set and costs no
-/// open — so a workload of nothing but prunes reads far under this and a
-/// workload of nothing but edits reads at it.
+/// | workload | changed set | acts together | acts spaced |
+/// |---|---|---|---|
+/// | ordinary editing | 4 places | 2 opens | 2 opens |
+/// | atomic replacement | 4 places | 3 opens | **4 opens** |
+/// | ambiguity class | 2 places | 2 opens | — |
+///
+/// **The coefficient is two because the second open is a mechanism, not
+/// headroom.** A host reads and hashes a dirty path *before* comparing the hash
+/// against the row it holds, so a path delivered again once it is already
+/// current costs one open and writes nothing — which is what the spaced atomic
+/// reading is: a rename delivered as the name that emptied and the name that
+/// filled, and a replacement delivered beside its own staging write. A
+/// coefficient of one leaves that reading exactly at the ceiling with nothing
+/// between the bound and the mechanism.
+///
+/// **What this refuses** is the changed set read a third time, and — through the
+/// vault-fraction guard asserted beside every reading — any ceiling wide enough
+/// to hide a re-read of the vault. Departures cost no open at all, so a workload
+/// of nothing but prunes reads far under this however it is delivered.
 const OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
     floor: 0,
-    per_change: 1,
+    per_change: 2,
     counted_in: ChangedSetIn::Places,
     named_input: "places where document content changed",
 };
@@ -741,16 +763,20 @@ const OPENS: WorkBound = WorkBound {
 /// **The bound on document rows a maintenance pass writes.**
 ///
 /// Same profile and same named input, over ordinary editing's changing phase: 4
-/// places, measured **2 upserts**.
+/// places, measured **2 upserts** with the acts landing together and **2** again
+/// with 150ms between them.
 ///
-/// The reading sits at half the ceiling because a place is opened before it is
-/// judged and written only if it derives — a prune upserts nothing, and half of
-/// this phase's places are prunes — and because a host that coalesces a workload
-/// writes each surviving document once however many times it was edited.
+/// **The coefficient stays at one where [`OPENS`]'s is two**, and the asymmetry
+/// is the read-before-compare mechanism seen from the other side: a re-delivered
+/// path is read and hashed again, and the hash it comes back with is the one the
+/// row already holds, so the second delivery costs the open and writes nothing.
+/// A row is upserted once per state its bytes reach, and a phase leaves each
+/// place in one state.
 ///
-/// **What the coefficient of one admits** is every changed place deriving a row,
-/// which is the workload of pure edits; **what the slack absorbs** is the prunes
-/// this particular workload spends half its changed set on.
+/// **What the coefficient admits** is every changed place deriving a row, which
+/// is the workload of pure edits; **what the slack absorbs** is the prunes this
+/// particular workload spends half its changed set on, since a place that
+/// emptied is in the changed set and upserts nothing.
 const UPSERTS: WorkBound = WorkBound {
     counted: Counted::DocumentsUpserted,
     what: "document rows upserted",
@@ -765,24 +791,27 @@ const UPSERTS: WorkBound = WorkBound {
 ///
 /// Profile: `small`. The changing phase names **12 places** — the editor's
 /// second save, the four documents the catch-up lands, the one it edits, the one
-/// it removes, and both ends of every document the directory rename moves — and
-/// the measured reading is **6 opens**.
+/// it removes, and both ends of every document the directory rename moves. The
+/// measured readings are **6 opens** with the acts landing together and **11**
+/// with 150ms between them.
 ///
 /// It is stated apart from [`OPENS`] because the shape of its changed set is
-/// different, and the reading shows how: a move names two places and is read
-/// once, so a workload that moves a directory sits at half a ceiling a workload
-/// of edits would sit at.
+/// different: half of these places are the two ends of one move, and a move is
+/// read at the arriving end only. So a workload that renames a directory sits
+/// under a ceiling stated per place, and stating it separately is what keeps
+/// that room from being read as headroom the editing workloads also have.
 ///
-/// **What the slack absorbs** is a document read at both ends of its own move.
-/// The rename reaches a host as a place that emptied and a place that filled,
-/// and a host that met the two in different increments opens the arriving name
-/// having already opened the departing one — 11 opens over these 12 places,
-/// which this admits and a tighter coefficient would not.
+/// **The coefficient is two for the same reason [`OPENS`]'s is**: a host reads
+/// and hashes before comparing, so a place delivered again once it is current
+/// costs an open and writes nothing. The spaced reading of 11 over 12 places
+/// leaves one open of room under a coefficient of one, which is a bound sitting
+/// on the mechanism rather than over it. What this refuses is the changed set
+/// read a third time.
 const TOOL_OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
     floor: 0,
-    per_change: 1,
+    per_change: 2,
     counted_in: ChangedSetIn::Places,
     named_input: "places where document content changed",
 };
@@ -793,20 +822,24 @@ const TOOL_OPENS: WorkBound = WorkBound {
 /// Profile: `small`. Twelve edits to one standing row and six documents landing
 /// at once are eighteen changes over seven places, and the bound is stated over
 /// the eighteen: a host that coalesced them into one increment reads far under
-/// this, and one that ran an increment per edit reads at it. Coalescing is an
-/// optimization, so the bound admits both. The measured reading is **13 opens**
-/// over 18 steps.
+/// this, and one that reacted to every edit reads over it. Coalescing is an
+/// optimization, so the bound admits both. The measured readings are **13
+/// opens** with the acts landing together and **19** with 150ms between them.
 ///
-/// **What the slack absorbs is exactly that spread**: no coalescing at all is
-/// the twelve edits arriving as twelve increments, each opening the hammered
-/// path again, plus the six wide documents — eighteen opens, which is this
-/// ceiling to the unit. The measured 13 is what one host's coalescing happened
-/// to spend, and the bound deliberately does not hold it to that.
+/// **The coefficient is two, and the spread between those two deliveries is
+/// why.** Landing together, the twelve edits coalesce into a handful of reads.
+/// Landing spaced apart, each edit is delivered on its own and the hammered path
+/// is read once per delivery — plus one read that finds the row already current,
+/// because a host reads and hashes before it compares. Nineteen opens over
+/// eighteen steps is a reading *over* the changed set and not under it, which a
+/// coefficient of one refuses: one re-read of a changed place is the mechanism
+/// rather than a regression. **What this refuses** is the same set read a third
+/// time.
 const BURST_OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
     floor: 0,
-    per_change: 1,
+    per_change: 2,
     counted_in: ChangedSetIn::Steps,
     named_input: "steps the workload applied",
 };
