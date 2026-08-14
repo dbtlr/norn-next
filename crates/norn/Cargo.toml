@@ -9,5 +9,9 @@ publish.workspace = true
 
 [dependencies]
 
+# The certification suite renders a qualification record and reads it back, so
+# the rendering a campaign stores records in is exercised where the record's own
+# validator is.
 [dev-dependencies]
 norn-testkit = { path = "../norn-testkit" }
+serde_json = { workspace = true }

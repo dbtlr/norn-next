@@ -15,6 +15,13 @@
 //! judgment made in review. That mapping is the authoritative one, and it is
 //! code so that it is checked rather than read.
 //!
+//! [`certification`] is enforcement of a third kind, over the suites rather
+//! than over the code: it holds the inventory of cases Layer 2 requires and
+//! reconciles it against what cargo compiled, digests everything that decides
+//! what a certification run is, and types the record one run leaves behind. What
+//! makes a soak run *qualifying* is stated there, in code, because a run counted
+//! against a list nobody checked is a count of nothing.
+//!
 //! [`lanes`] is the third: it walks a crate's `tests/` directory and holds
 //! every `#[ignore]` in it to the lane that adopts it. The walk lives here and
 //! the tables live with the crates they describe, so a crate joining the lanes
@@ -96,6 +103,7 @@
 pub mod architecture;
 pub mod attestation;
 pub mod base64;
+pub mod certification;
 pub mod churn;
 pub mod corpus;
 pub mod counters;

@@ -402,22 +402,57 @@ impl TestIndex {
     /// which is why the target is selected on the command line rather than
     /// parsed out of the output.
     pub fn from_cargo(workspace_root: &Path, targets: impl IntoIterator<Item = TargetRef>) -> Self {
+        Self::from_cargo_with_features(workspace_root, targets, &[])
+    }
+
+    /// The same, with `features` turned on for the whole invocation.
+    ///
+    /// **What compiled is a question about a feature set**, not about a target
+    /// alone: a suite whose cases sit behind an off-by-default feature compiles
+    /// to zero tests without it, and an index built without the feature would
+    /// report every one of them missing. So a caller whose cases declare a
+    /// feature asks under that feature, and a caller whose cases declare none
+    /// asks under none. Each index is one feature set's answer; a caller
+    /// spanning two builds two.
+    pub fn from_cargo_with_features(
+        workspace_root: &Path,
+        targets: impl IntoIterator<Item = TargetRef>,
+        features: &[&str],
+    ) -> Self {
         let wanted: BTreeSet<(String, Target)> =
             targets.into_iter().map(|target| target.key()).collect();
         let mut listings = BTreeMap::new();
         for (package, target) in wanted {
-            let listing = list(workspace_root, &package, &target, false).and_then(|all| {
-                let ignored = list(workspace_root, &package, &target, true)?;
-                Ok(Listing { all, ignored })
-            });
+            let listing =
+                list(workspace_root, &package, &target, features, false).and_then(|all| {
+                    let ignored = list(workspace_root, &package, &target, features, true)?;
+                    Ok(Listing { all, ignored })
+                });
             listings.insert((package, target), listing);
         }
         TestIndex { listings }
     }
 
+    /// Everything cargo compiled into `target`, or what went wrong asking.
+    ///
+    /// Public because the reverse direction of a reconciliation is a claim
+    /// about the whole target: every test a certification suite compiled is
+    /// named by the inventory, which is a question about the listing rather
+    /// than about one reference in it.
+    pub fn compiled(&self, target: &TargetRef) -> Result<&Listing, String> {
+        match self.listings.get(&target.key()) {
+            Some(Ok(listing)) => Ok(listing),
+            Some(Err(problem)) => Err(problem.clone()),
+            None => Err(format!(
+                "no test list was collected for `{} {}`",
+                target.package, target.target
+            )),
+        }
+    }
+
     /// Whether `function` is a live test in `target`'s listing, and whether it
     /// is ignored — or what is wrong with the reference.
-    fn resolve(&self, target: &TargetRef, function: &str) -> Result<bool, String> {
+    pub fn resolve(&self, target: &TargetRef, function: &str) -> Result<bool, String> {
         let listing = match self.listings.get(&target.key()) {
             Some(Ok(listing)) => listing,
             Some(Err(problem)) => return Err(problem.clone()),
@@ -461,6 +496,7 @@ fn list(
     workspace_root: &Path,
     package: &str,
     target: &Target,
+    features: &[&str],
     ignored_only: bool,
 ) -> Result<BTreeSet<String>, String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsStr::new("cargo").to_os_string());
@@ -470,10 +506,11 @@ fn list(
         .arg("test")
         .arg("--locked")
         .arg("-p")
-        .arg(package)
-        .args(target.selector())
-        .arg("--")
-        .arg("--list");
+        .arg(package);
+    if !features.is_empty() {
+        command.arg("--features").arg(features.join(","));
+    }
+    command.args(target.selector()).arg("--").arg("--list");
     if ignored_only {
         command.arg("--ignored");
     }
