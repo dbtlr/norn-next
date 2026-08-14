@@ -939,8 +939,9 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
             ] {
                 let sql = request.emitted_plan(statement).expect("a query plan").sql;
                 assert!(
-                    sql.contains("COALESCE(?1,"),
-                    "the cursor is not the first argument of the page's floor, so the seek \
+                    sql.contains("WHERE path > COALESCE(?1,")
+                        || sql.contains("WHERE path >= COALESCE(?1,"),
+                    "the WHERE does not open on the coalesced cursor, so the seek \
                      starts where the scope does and steps over every row already paged: {sql}"
                 );
                 assert!(
