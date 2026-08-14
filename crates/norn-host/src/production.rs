@@ -186,6 +186,15 @@ impl ProductionEntryOps {
         self.evidence.read()
     }
 
+    /// A handle on the account, for a caller that is about to give the ops away.
+    ///
+    /// [`crate::Host::new`] takes the ops by value and hands them back to
+    /// nobody, so a caller that means to read the account afterwards takes this
+    /// first. It is the same account the ops go on writing to.
+    pub fn account(&self) -> Arc<JobEvidence> {
+        Arc::clone(&self.evidence)
+    }
+
     fn derived(&self, name: &VaultName) -> PathBuf {
         self.dirs.derived_dir(name)
     }
