@@ -34,6 +34,17 @@
 //! when the value model had to drop an entry: the scanner still sees the line
 //! the parser no longer names.
 //!
+//! An entry written in YAML's explicit-key form — `? key` on one line, `: value`
+//! on the next — is that ambiguity by construction, and the block refuses on
+//! the spelling rather than on its consequences. The key is written on a line
+//! carrying no `key:` separator, so the scan attributes no line to it: an
+//! explicit *field* leaves a parsed key nothing names, and an explicit merge
+//! directive — `? <<` — leaves two lines no field owns and none bounds, which
+//! a neighbour's remove would otherwise take with it. A top-level `?` indicator
+//! is what the refusal is keyed on, so the whole class answers alike whatever
+//! key it writes. Indentation places the form inside a value some top-level
+//! entry already owns whole, which is an ordinary absorbed tail.
+//!
 //! # Blank lines and comments end a field
 //!
 //! A `line_range` stops before the run of blank lines and column-0 comments
@@ -117,7 +128,7 @@ pub(crate) fn field_spans(
         return None;
     }
 
-    let candidates = scan_key_lines(content, &frontmatter_range);
+    let candidates = scan_key_lines(content, &frontmatter_range)?;
 
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     for candidate in &candidates {
@@ -326,11 +337,17 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 }
 
 /// Identify every top-level `key:` line and the scanner's candidate value span
-/// for it. A multi-line value whose continuation can sit at column 0 — an
-/// unclosed flow collection or quoted scalar — is stepped over so its
-/// continuation lines are not misread as new keys; block scalars, folds and
-/// block collections continue on indented lines the scan already skips.
-fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKeyLine> {
+/// for it, or `None` where the block writes a top-level explicit key and no
+/// line attribution holds.
+///
+/// A multi-line value whose continuation can sit at column 0 — an unclosed
+/// flow collection or quoted scalar — is stepped over so its continuation
+/// lines are not misread as new keys; block scalars, folds and block
+/// collections continue on indented lines the scan already skips. Those same
+/// steps are what make the explicit-key answer precise: a `?` indicator is
+/// read only on a line the scan reaches as structure, so one written inside a
+/// quoted scalar or a block scalar is the value's own text.
+fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec<RawKeyLine>> {
     let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
@@ -351,6 +368,10 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         }
         let line_start = line_starts[index];
         let trimmed_line = line.trim_end_matches(['\r', '\n']);
+
+        if opens_explicit_key(trimmed_line) {
+            return None;
+        }
 
         let Some((name, after_colon, spelling)) = parse_top_level_key(trimmed_line) else {
             index += 1;
@@ -377,7 +398,18 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         }
     }
 
-    fields
+    Some(fields)
+}
+
+/// Whether `line` opens an explicit key: the `?` indicator, alone on the line
+/// or separated from the key written after it.
+///
+/// The separator is what makes it an indicator. `?` begins a plain scalar
+/// wherever a space does not follow it, so `?title: v` is a field of that name,
+/// and a quoted `"? title"` is one too — neither reaches here as an indicator.
+fn opens_explicit_key(line: &str) -> bool {
+    let mut bytes = line.bytes();
+    bytes.next() == Some(b'?') && matches!(bytes.next(), None | Some(b' ') | Some(b'\t'))
 }
 
 /// Whether a block scalar's header asks for the blank lines below it to be
@@ -557,8 +589,9 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
 /// with no record that either was written. The line's text is the only place
 /// that spelling survives, so the properties are read past here, and a
 /// directive line written inline — plain, tagged, quoted, or anchored —
-/// bounds the entry above it. The explicit-key spelling `? <<` is not
-/// recognized here and its line is absorbed into the entry above it.
+/// bounds the entry above it. The explicit-key spelling `? <<` is judged
+/// nowhere here: a top-level explicit key refuses the block's split whole, so
+/// there is no entry for its lines to bound and none to absorb them.
 ///
 /// Past the properties the key is read the way the parser reads it, quotes
 /// included: `!!str "<<"` names the directive as much as `!!str <<` does.
