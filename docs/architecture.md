@@ -312,26 +312,37 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and six named statements carry an index bar through it: suffix candidates,
+connection — and nine named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
-the page a walk reads its scope's unaccounted finding subjects through, and the ordered
-document page a heal merges its walk against.
+the page a walk reads its scope's unaccounted finding subjects through, the ordered
+document page a heal merges its walk against, and the three enumerations a caller drains a
+whole pillar through: the findings table, the tombstones, and the vocabulary the full-text
+index holds.
 
-The two paged statements are barred in the same terms, because a page is judged by what it
-reads before it returns its first row: the cursor is a bound on an index rather than a test
-applied to rows already read. The document page seeks the index that holds the order it
-states — the unique path index where the vault compares bytes, and an index declared under
-the same ASCII fold where the vault folds case — in all three scopes and both orders, and
-never sorts. The finding-subject page carries the weaker bar its shape admits: one ordered
+The document page and the finding-subject page are barred in the same terms, because a page
+is judged by what it reads before it returns its first row: the cursor is a bound on an
+index rather than a test applied to rows already read. The document page seeks the index
+that holds the order it states — the unique path index where the vault compares bytes, and
+an index declared under the same ASCII fold where the vault folds case — in all three
+scopes and both orders, and never sorts. The finding-subject page carries the weaker bar its shape admits: one ordered
 pass over the findings index per prune, never a read of the table, never a sorter, and an
 indexed seek per row for the document the place may hold. A scope the vault spells as it
 stores it narrows that pass to a seek of the scope's own range; a vault that folds ASCII
 case bounds the scope under the folding while that index orders bytewise, so the fold reads
 as a filter over the one pass the cursor seeks into.
 
+The three enumerations carry the bar their shapes admit. Each reaches its first row without
+a full scan and without a sorter, over a column whose order is total, so a drain of a whole
+pillar is a walk of an index rather than a re-read of the table per page. The two over
+ordinary tables also name what they seek: the findings page searches `findings` by the row
+key its cursor is, and the tombstone page seeks the unique path index that orders that
+pillar. The vocabulary page reads a virtual table, where a module reports the index it
+chose by number and never by name, so what is barred there is that a bound reached the
+module at all — an unconstrained module reports the pair `0:` and is a read of everything.
+
 A plan does not say which of two candidate bounds a seek took — a scope's floor and a
-cursor report the same plan text — so the two paged statements carry one further bar, taken
+cursor report the same plan text — so every paged statement carries one further bar, taken
 over the emitted SQL rather than its plan: the cursor is the coalesced floor's first
 argument. It pins a spelling rather than a cost, and it is the strongest bar available
 until a per-statement work count is, which is a store-side reporting surface no task has
@@ -449,7 +460,7 @@ contract.
 | `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, the read builders (wire params → emitted SQL, not built) with the snapshot read handles they run on, and — behind an off-by-default feature, so a shipped build carries none of it — the arrangements the induced-failure suite reaches a rung or a refusal through from outside. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch, so an unverified blob never appears under a name anything loads. A fetch failure or a digest mismatch refuses with a structured reason: semantic search stays un-enabled, and nothing else degrades. Acquisition is eager, at the explicit enable act, never lazy inside a query. A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-config` | **Machine-local state, one owner** — the machine-local layout (config directory, data directory, the machine-local schemas directory, the weights directory, and the per-vault derived-state directory, keyed by vault name), the registry file read/write, the bearer token read/write, and the loopback endpoint convention. The token file holds a **set of tokens keyed by label**, not one token: rotation is adding a second label and removing the first, and every stored secret is a credential the serving side verifies against. The endpoint is a convention rather than a discovery — a per-channel default port, with an explicit port override the one way past it. Every machine-local path is channel-qualified, and no API takes a channel. The vault-name grammar it keys all of that by is `norn-wire`'s, re-exported here rather than spelled a second time. Never touches a vault. | The one state surface both sides of the client/host seam must read — the serving side to authenticate, the client to find the host at all. Hand-sharing that convention in two crates is a drift class on a security-relevant file. |
-| `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault schema (resolved through the registry entry's schema-source — default: a path inside the vault — read via `norn-fs` as one atomic read-and-fingerprint act, and pinned at attach), and the worker pool (the one applier, mutation planners, the repair planner, embedding workers). The pinned schema is projected into the store's meta (bytes, fingerprint, generation) as derived state; the file remains its sole authority. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes, and the one direct effect reserved to it is the one-shot legacy-cache janitor, which is not built. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
+| `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault schema (resolved through the registry entry's schema-source — default: a path inside the vault — read via `norn-fs` as one atomic read-and-fingerprint act, and pinned at attach), and the worker pool (the one applier, mutation planners, the repair planner, embedding workers). The pinned schema is projected into the store's meta (bytes, fingerprint, generation) as derived state; the file remains its sole authority. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes, and the one direct effect reserved to it is the one-shot legacy-cache janitor, which is not built. Every job keeps an account of what it spent and did — filesystem reads, changesets, ladder rungs — written on every build and read only behind the same off-by-default feature the induced-failure arrangements sit behind, so a shipped build carries the accounting and none of its readers. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
 | `norn-mcp` | **MCP semantics, no transport** — derives tool schemas from `norn-wire`, translates MCP requests to wire params and wire reports to MCP responses. Pure functions, unit-testable like `norn-text`. | The derived-renderings owner for the MCP surface; protocol shape quarantined from both orchestration and plumbing. |
 | `norn-serve` | **The HTTP surface** — the serving socket, routing, auth middleware (bearer verification via `norn-config`), and whatever accretes above the protocol later (TLS when a real remote consumer exists, rate limits, request logging). Routes to `norn-mcp`, dispatches wire types to `norn-host`. | The serving effect seam; it keeps HTTP-layer growth out of the orchestrator. |
 | `norn-console` | **The CLI presentation kit** — clap *extensions*, never clap re-implementations; render conventions (palette and colors, records display, table/list projection, error-output envelope); input conventions (stdin handling, confirm prompts). **norn-agnostic**: generic over record types via traits, with no dependency on any other workspace crate. | Single source of truth for how output looks and input behaves, plus a standalone future — it is designed for extraction as an independent reusable crate. |
