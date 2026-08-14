@@ -50,10 +50,11 @@ pub struct ReadTally {
     /// The stats those same two acts take, and only those: the `fstat`
     /// `open_regular_at` reads a reached file's kind from, the `statat`
     /// it tells a symbolic link from a non-directory with, [`crate::path_kind`]'s
-    /// stat of the root an invalidation names, and the walk's own four — the
+    /// stat of the root an invalidation names, and the walk's own five — the
     /// frontier entry it is about to classify, a directory entry whose kind the
-    /// stream did not report, the re-stat that pages an entry, and the target of
-    /// a symbolic link it is classifying.
+    /// stream did not report, the re-stat that pages an entry, the target of
+    /// a symbolic link it is classifying, and the `fstat` of a file the walk
+    /// opened for its content, which reads that file's size and mtime.
     ///
     /// Deliberately outside: the registry's classification of served roots,
     /// the normalization probes under path handling, and every stat the shadow,
@@ -97,6 +98,15 @@ impl ReadWindow {
     /// counts the first is standing on and report them as its own, so it is
     /// refused: two windows over one thread are two answers to "what did this
     /// thread read", and only one of them could be right.
+    ///
+    /// `norn_host::JobEvidence::attributing` is the one caller in the tree that
+    /// opens a window, so the whole of the bookkeeping lives in one place; a
+    /// second opener elsewhere turns a bookkeeping conflict into a panic on the
+    /// worker thread that hits it.
+    ///
+    /// The six `norn_host::EntryOps` entry points that open a window do not
+    /// nest, and the assertion below is what makes that a runtime invariant of
+    /// production code rather than a claim about the call graph.
     pub fn open() -> ReadWindow {
         let standing = STANDING.replace(true);
         assert!(
