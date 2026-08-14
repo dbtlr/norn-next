@@ -30,13 +30,6 @@
 //! next demand schedules is what retires either one. The two are different
 //! reads inside the host and one fact to a client: the derived state cannot be
 //! trusted, because the environment refused.
-//!
-//! **The aliases of a duplicate root cross in one order.** An
-//! [`AliasConflict`](crate::AliasConflict) holds ascending [`VaultName`]s and
-//! [`ErrorDetail::duplicate_root`] sorts the strings it is handed, so the
-//! order a client reads is the order the host holds. The two sorts are
-//! separate acts over separate types, and the test below is the carrier that
-//! fails if they ever answer differently.
 
 use norn_wire::{ErrorDetail, ErrorEnvelope, TrustState, UntrustedReason, VaultName};
 
@@ -65,7 +58,7 @@ impl Demand {
             Demand::DuplicateRoot(conflict) => Err(ErrorEnvelope::new(
                 "more than one registered name resolves to this vault's root, so none of them \
                  is served",
-                ErrorDetail::duplicate_root(conflict.aliases().iter().map(VaultName::as_str)),
+                ErrorDetail::duplicate_root(conflict.aliases().iter().cloned()),
             )),
             Demand::IdentityRefused(refusal) => Err(ErrorEnvelope::new(
                 "the registry cannot read this vault's root",
@@ -73,7 +66,7 @@ impl Demand {
             )),
             Demand::UnknownVault => Err(ErrorEnvelope::new(
                 format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.as_str()),
+                ErrorDetail::unknown_vault(name.clone()),
             )),
             Demand::UnsupportedMode(mode) => Err(ErrorEnvelope::new(
                 "this host attaches registered vaults durably and holds no lifecycle for the \
@@ -244,7 +237,7 @@ mod tests {
             ),
             (
                 Demand::DuplicateRoot(AliasConflict::new([name("alpha"), name("beta")])),
-                Some(ErrorDetail::duplicate_root(["alpha", "beta"])),
+                Some(ErrorDetail::duplicate_root([name("alpha"), name("beta")])),
             ),
             (
                 Demand::IdentityRefused("the root cannot be read".to_string()),
@@ -254,7 +247,7 @@ mod tests {
             ),
             (
                 Demand::UnknownVault,
-                Some(ErrorDetail::unknown_vault(asked().as_str())),
+                Some(ErrorDetail::unknown_vault(asked())),
             ),
             (
                 Demand::UnsupportedMode(AttachMode::Throwaway),
@@ -354,34 +347,8 @@ mod tests {
             .expect_err("an unknown vault refuses");
         assert_eq!(
             envelope.detail(),
-            &ErrorDetail::unknown_vault("ledger"),
+            &ErrorDetail::unknown_vault(name("ledger")),
             "the refusal echoes another name"
-        );
-    }
-
-    /// The order the host holds the aliases in is the order the envelope
-    /// carries them in. The names below spread across the punctuation a vault
-    /// name may hold, so an ordering the conflict and the detail disagree on
-    /// shows here rather than in whichever surface reads them next.
-    #[test]
-    fn the_envelope_carries_the_aliases_in_the_order_the_conflict_holds_them() {
-        let names = ["ab", "a0", "a.b", "a-b", "a+b", "a"].map(name);
-        let conflict = AliasConflict::new(names);
-        let held = conflict
-            .aliases()
-            .iter()
-            .map(|alias| alias.as_str().to_owned())
-            .collect::<Vec<_>>();
-
-        let envelope = Demand::DuplicateRoot(conflict)
-            .answer(&name("a"))
-            .expect_err("a duplicate root refuses");
-        let ErrorDetail::DuplicateRoot { aliases, .. } = envelope.detail() else {
-            panic!("a duplicate root carries another detail: {envelope:?}");
-        };
-        assert_eq!(
-            aliases, &held,
-            "the conflict and the detail sort differently"
         );
     }
 }

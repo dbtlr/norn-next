@@ -122,7 +122,7 @@ fn warm_requests_under_a_live_attachment_finish_at_zero() {
     // wearing this one's name.
     assert_eq!(
         host.state(vault.name()),
-        Some(TrustState::Ready),
+        Ok(TrustState::Ready),
         "the reads above were meant to run against a live attachment, and the entry is not ready"
     );
     first.assert_all_zero("the first warm request under a live attachment");

@@ -25,6 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::demand::AttachMode;
+use crate::name::VaultName;
 use crate::trust::UntrustedReason;
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
@@ -111,8 +112,11 @@ pub enum ErrorDetail {
     #[serde(rename = "host/duplicate-root")]
     #[non_exhaustive]
     DuplicateRoot {
-        /// The colliding names, in ascending order.
-        aliases: Vec<String>,
+        /// The colliding names, in ascending order, each echoed back as the
+        /// typed name: the registry holds them as names parsed through the
+        /// grammar, and the refusal hands the same parsed values back rather
+        /// than strings a reader would have to parse again.
+        aliases: Vec<VaultName>,
     },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
     /// cannot be trusted.
@@ -134,8 +138,11 @@ pub enum ErrorDetail {
     #[serde(rename = "host/unknown-vault")]
     #[non_exhaustive]
     UnknownVault {
-        /// The vault name the request asked for, echoed back as typed data.
-        name: String,
+        /// The vault name the request asked for, echoed back as the typed
+        /// name: the request named it through the grammar, and the refusal
+        /// hands the same parsed value back rather than a string a reader
+        /// would have to parse again.
+        name: VaultName,
     },
     /// The detail of `host/unsupported-attach-mode`: the mode the demand
     /// named.
@@ -154,8 +161,8 @@ impl ErrorDetail {
     ///
     /// The aliases are sorted here, so the ascending order the field promises
     /// holds for every producer rather than for the ones that sorted first.
-    pub fn duplicate_root<A: Into<String>>(aliases: impl IntoIterator<Item = A>) -> Self {
-        let mut aliases: Vec<String> = aliases.into_iter().map(Into::into).collect();
+    pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
+        let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
         aliases.sort();
         ErrorDetail::DuplicateRoot { aliases }
     }
@@ -171,8 +178,8 @@ impl ErrorDetail {
     }
 
     /// The detail of `host/unknown-vault`, for the requested `name`.
-    pub fn unknown_vault(name: impl Into<String>) -> Self {
-        ErrorDetail::UnknownVault { name: name.into() }
+    pub const fn unknown_vault(name: VaultName) -> Self {
+        ErrorDetail::UnknownVault { name }
     }
 
     /// The detail of `host/unsupported-attach-mode`, for the `mode` the demand
@@ -312,14 +319,18 @@ mod tests {
     /// not compile.
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
-            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(["notes", "vault"]),
+            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(
+                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
+            ),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
             ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
             ),
-            ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault("notes"),
+            ReasonCode::HostUnknownVault => {
+                ErrorDetail::unknown_vault(VaultName::new("notes").expect("a legal vault name"))
+            }
             ReasonCode::HostUnsupportedAttachMode => {
                 ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
             }

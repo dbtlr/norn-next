@@ -112,10 +112,10 @@ fn error_details() -> Vec<ErrorDetail> {
         .map(ErrorDetail::entry_untrusted)
         .collect();
     details.extend([
-        ErrorDetail::duplicate_root(["notes", "vault"]),
+        ErrorDetail::duplicate_root([name("notes"), name("vault")]),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
-        ErrorDetail::unknown_vault("notes"),
+        ErrorDetail::unknown_vault(name("notes")),
     ]);
     details.extend(
         attach_modes()
@@ -145,6 +145,12 @@ where
 
 fn wire(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("serializing a wire type")
+}
+
+/// One name a vector names a vault by, parsed through the grammar the type
+/// keeps.
+fn name(text: &str) -> VaultName {
+    VaultName::new(text).expect("a legal vault name")
 }
 
 // ── The vectors are the vocabulary ───────────────────────────────────────
@@ -651,7 +657,7 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
         wire(&ErrorEnvelope::new(
             "two names resolve to one root",
-            ErrorDetail::duplicate_root(["notes", "vault"]),
+            ErrorDetail::duplicate_root([name("notes"), name("vault")]),
         )),
         concat!(
             r#"{"code":"host/duplicate-root","message":"two names resolve to one root","#,
@@ -661,7 +667,7 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
         wire(&ErrorEnvelope::new(
             "no vault is registered as `notes`",
-            ErrorDetail::unknown_vault("notes"),
+            ErrorDetail::unknown_vault(name("notes")),
         )),
         concat!(
             r#"{"code":"host/unknown-vault","message":"no vault is registered as `notes`","#,
@@ -670,12 +676,73 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     );
 }
 
+/// A name outside the grammar refuses the whole envelope rather than landing
+/// in it as a string.
+///
+/// Both registry refusals echo names, and both echo them as the typed name, so
+/// a name that crossed is a name that parsed on the reading side too: an
+/// envelope naming a vault no request could have named is refused entire —
+/// code, message and detail together — rather than read into a value a later
+/// reader would have to check. The names below are the shapes a string field
+/// would have carried through: a traversal with a trailing newline, an empty
+/// name, and a name outside the case the grammar admits.
+#[test]
+fn an_unknown_vault_refuses_a_name_outside_the_grammar() {
+    for legal in ["notes", "a-b.c+d"] {
+        assert!(
+            serde_json::from_str::<ErrorEnvelope>(&unknown_vault_envelope(legal)).is_ok(),
+            "`{legal}` was refused as the name an envelope echoes"
+        );
+        assert!(
+            serde_json::from_str::<ErrorEnvelope>(&duplicate_root_envelope(legal)).is_ok(),
+            "`{legal}` was refused as one of an envelope's colliding names"
+        );
+    }
+    for hostile in ["../../etc/passwd\n", "", "Notes"] {
+        let unknown = unknown_vault_envelope(hostile);
+        assert!(
+            serde_json::from_str::<ErrorEnvelope>(&unknown).is_err(),
+            "reading {unknown} produced an envelope"
+        );
+        let colliding = duplicate_root_envelope(hostile);
+        assert!(
+            serde_json::from_str::<ErrorEnvelope>(&colliding).is_err(),
+            "reading {colliding} produced an envelope"
+        );
+    }
+}
+
+/// A `host/unknown-vault` envelope as a writer sends it, echoing `named`.
+fn unknown_vault_envelope(named: &str) -> String {
+    serde_json::json!({
+        "code": "host/unknown-vault",
+        "message": "no vault is registered under that name",
+        "detail": {"code": "host/unknown-vault", "name": named},
+    })
+    .to_string()
+}
+
+/// A `host/duplicate-root` envelope as a writer sends it, carrying `named`
+/// beside a name the grammar accepts.
+fn duplicate_root_envelope(named: &str) -> String {
+    serde_json::json!({
+        "code": "host/duplicate-root",
+        "message": "more than one registered name resolves to one root",
+        "detail": {"code": "host/duplicate-root", "aliases": ["archive", named]},
+    })
+    .to_string()
+}
+
 /// The colliding names ascend because the detail sorts them, so the order the
 /// field promises holds whatever order a producer collected them in.
 #[test]
 fn duplicate_root_aliases_ascend_whatever_order_they_arrive_in() {
     assert_eq!(
-        wire(&ErrorDetail::duplicate_root(["vault", "archive", "notes"])),
+        wire(&ErrorDetail::duplicate_root([
+            name("vault"),
+            name("archive"),
+            name("notes"),
+        ])),
         r#"{"code":"host/duplicate-root","aliases":["archive","notes","vault"]}"#
     );
 }

@@ -36,7 +36,7 @@ use norn_host::{
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 /// The seed every generated tree is drawn at. One value, so two readings
 /// differ by the profile alone.
@@ -284,16 +284,30 @@ pub fn attach_and_wait(
         .expect("request attachment");
     let deadline = Instant::now() + READY_LIMIT;
     loop {
-        let observed = host.state(name).expect("registered vault state");
-        if observed == TrustState::Ready {
+        let observed = host.state(name);
+        if observed == Ok(TrustState::Ready) {
             return lease;
         }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
         assert!(
             Instant::now() < deadline,
             "attach did not converge inside {READY_LIMIT:?}; observed {observed:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Whether what the host answered is the refusal a name it holds no entry under
+/// is refused with.
+///
+/// A wait polls an entry on its way somewhere. A name no entry stands behind is
+/// a mistake in the case rather than a state converging, and it converges on
+/// nothing, so it ends the wait where it is found instead of at the deadline.
+fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
+    matches!(observed, Err(envelope) if envelope.code() == &ReasonCode::HostUnknownVault)
 }
 
 /// How many documents a store holds, read a bounded page at a time.
