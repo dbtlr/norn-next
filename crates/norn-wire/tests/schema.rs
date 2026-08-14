@@ -439,6 +439,30 @@ fn an_unknown_vault_advertises_the_requested_name() {
     );
 }
 
+/// A duplicate root advertises its colliding names as an array of the name's
+/// own definition, so a surface validating an envelope holds every alias to the
+/// grammar a request names a vault through.
+#[test]
+fn a_duplicate_root_advertises_its_colliding_names() {
+    let schema = schema_of::<ErrorDetail>();
+    let branch = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/duplicate-root"))
+        .expect("the duplicate-root branch");
+    assert_eq!(
+        property_names(branch),
+        ["code", "aliases"].into_iter().collect()
+    );
+    assert_eq!(
+        branch["properties"]["aliases"]["type"].as_str(),
+        Some("array")
+    );
+    assert_eq!(
+        branch["properties"]["aliases"]["items"]["$ref"].as_str(),
+        Some("#/$defs/VaultName")
+    );
+}
+
 /// The envelope refers to both, so the schema a surface publishes carries the
 /// code list and the detail vocabulary with it.
 #[test]

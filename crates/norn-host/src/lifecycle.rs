@@ -5388,7 +5388,7 @@ mod tests {
                 .as_ref()
                 .expect_err("a parked entry refuses")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
             "the status surface spelled the park in a vocabulary of its own"
         );
         assert_eq!(
@@ -5475,7 +5475,7 @@ mod tests {
             host.state(&a)
                 .expect_err("a parked entry refuses through its release")
                 .detail(),
-            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
             "the release window answered the warming label under the park"
         );
 
@@ -5741,7 +5741,7 @@ mod tests {
         let parked = lease.answer().expect_err("a parked entry refuses");
         assert_eq!(
             parked.detail(),
-            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            &ErrorDetail::duplicate_root([a.clone(), b.clone()]),
             "the lease answered its park with another refusal"
         );
 

@@ -112,8 +112,11 @@ pub enum ErrorDetail {
     #[serde(rename = "host/duplicate-root")]
     #[non_exhaustive]
     DuplicateRoot {
-        /// The colliding names, in ascending order.
-        aliases: Vec<String>,
+        /// The colliding names, in ascending order, each echoed back as the
+        /// typed name: the registry holds them as names parsed through the
+        /// grammar, and the refusal hands the same parsed values back rather
+        /// than strings a reader would have to parse again.
+        aliases: Vec<VaultName>,
     },
     /// The detail of `host/entry-untrusted`: why the entry's derived state
     /// cannot be trusted.
@@ -158,8 +161,8 @@ impl ErrorDetail {
     ///
     /// The aliases are sorted here, so the ascending order the field promises
     /// holds for every producer rather than for the ones that sorted first.
-    pub fn duplicate_root<A: Into<String>>(aliases: impl IntoIterator<Item = A>) -> Self {
-        let mut aliases: Vec<String> = aliases.into_iter().map(Into::into).collect();
+    pub fn duplicate_root(aliases: impl IntoIterator<Item = VaultName>) -> Self {
+        let mut aliases: Vec<VaultName> = aliases.into_iter().collect();
         aliases.sort();
         ErrorDetail::DuplicateRoot { aliases }
     }
@@ -316,7 +319,9 @@ mod tests {
     /// not compile.
     fn a_detail(code: &ReasonCode) -> ErrorDetail {
         match code {
-            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(["notes", "vault"]),
+            ReasonCode::HostDuplicateRoot => ErrorDetail::duplicate_root(
+                ["notes", "vault"].map(|text| VaultName::new(text).expect("a legal vault name")),
+            ),
             ReasonCode::HostEntryUntrusted => {
                 ErrorDetail::entry_untrusted(UntrustedReason::WatcherOverflow)
             }
