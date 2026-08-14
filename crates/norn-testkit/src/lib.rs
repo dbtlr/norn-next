@@ -24,6 +24,13 @@
 //! documents a fixture profile generates, without the suite holding a
 //! temporary tree to get them.
 //!
+//! [`equivalence`] is the judgment two derived stores are held to: it projects
+//! every derived fact a store holds, compares two projections and names the
+//! first field they disagree about, and states what each store answers for on
+//! its own. It lives here because two crates ask that question of stores they
+//! built by different routes, and one comparator is what keeps them from
+//! drifting into two meanings of "the same derived state".
+//!
 //! [`invalidation`] is assistance of the same kind, for a judgment two suites
 //! in different crates make about the same reports: whether a watcher's
 //! invalidation root reaches a path. Answering it here is what keeps the two
@@ -65,6 +72,7 @@ pub mod architecture;
 pub mod base64;
 pub mod corpus;
 pub mod counters;
+pub mod equivalence;
 pub mod explain;
 pub mod generated;
 pub mod invalidation;

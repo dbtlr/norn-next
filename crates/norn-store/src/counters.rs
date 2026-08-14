@@ -13,6 +13,15 @@
 //! ran in between. That matters as soon as a second request exists: a global
 //! counter attributes concurrent work to whoever read it last.
 //!
+//! **The prohibition is over this vocabulary.** It says that derivation is
+//! counted per request and nowhere else; it does not say that nothing in the
+//! workspace may accumulate. `norn-host` keeps a cumulative account of what its
+//! own jobs spent and did — reads, changesets, rungs — which is a different
+//! subject read a different way: those are acts of a host rather than
+//! derivation by a request, they are attributed by the window a job holds open
+//! rather than by the request it opened, and no counter here is spelled from
+//! them or they from it.
+//!
 //! The reading is what a harness compares. Every counter is always present,
 //! whatever its value, because a counter that appears in one reading and not
 //! another is a difference rather than a zero: reading a missing counter as zero

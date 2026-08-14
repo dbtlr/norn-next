@@ -63,8 +63,8 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, FindingFacts, HeadingFact, Invalidation, LinkFact,
-    LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, FindingFacts, HeadingFact, IndexedTerm, Invalidation,
+    LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
     StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
     VectorFacts,
 };
@@ -72,8 +72,23 @@ use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::{self, Store};
 
-/// Maximum row count accepted by ordered stored-document page readers.
-pub const MAX_STORED_DOCUMENT_PAGE: usize = 1024;
+/// Maximum row count any paged reader accepts.
+///
+/// One number covers every page this crate hands out — the ordered document
+/// pages a heal merges its walk against, and the enumerations a caller drains a
+/// whole pillar through — because a page is a working set whatever it holds
+/// rows of. A caller sizes one buffer against one bound, and a bound per reader
+/// would be a set of numbers that agree until one of them is moved.
+pub const MAX_PAGE: usize = 1024;
+
+/// The lowest row key a finding can be stored under, which is the floor an
+/// unset cursor coalesces to.
+///
+/// `findings.id` is an `INTEGER PRIMARY KEY`, so it is the row id and SQLite
+/// assigns those from one upwards. Zero is therefore below every stored key and
+/// above nothing, which is what makes it a sound floor for a page that seeks
+/// from the cursor.
+const BELOW_EVERY_FINDING_KEY: i64 = 0;
 
 /// A row reading that can fail twice: the driver may not produce the row, and
 /// the row may hold a value this schema does not describe.
@@ -88,12 +103,19 @@ const FINDING_COLUMNS: &str = "id, kind, severity, path, target, span_line, span
 /// scope being explained has.
 const EXPLAINED_PAGE_CURSOR_LEAF: &str = "explained-page-cursor.md";
 
+/// The row key a findings page is explained from. Any key inside the table's
+/// own range does; what matters is that the cursor is bound rather than null.
+const EXPLAINED_FINDING_CURSOR: i64 = 1;
+
+/// The term an indexed-term page is explained from.
+const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
+
 /// The columns every reader of a document row selects, in the order
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
 /// selects those ahead of these and tells [`stored_document`] where the row
 /// begins.
-const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_offset, frontmatter,
-            frontmatter_diagnostic_count, generation, derived_at";
+const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_offset,
+            frontmatter, frontmatter_diagnostic_count, generation, derived_at";
 
 /// How many finding ids one further-query batches its `IN` list by.
 ///
@@ -602,10 +624,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -677,10 +699,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<StoredDocument>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a stored-document subtree page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -814,10 +836,10 @@ impl<'a> Request<'a> {
         limit: usize,
         order: StoredPathOrder,
     ) -> Result<Vec<DocumentPath>, StoreError> {
-        if limit == 0 || limit > MAX_STORED_DOCUMENT_PAGE {
+        if limit == 0 || limit > MAX_PAGE {
             return Err(StoreError::Bound {
                 what: "a finding-subject page",
-                limit: MAX_STORED_DOCUMENT_PAGE,
+                limit: MAX_PAGE,
                 given: limit,
             });
         }
@@ -839,6 +861,150 @@ impl<'a> Request<'a> {
             "SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id"
         );
         self.findings(&sql, params![path.as_str()])
+    }
+
+    /// The next bounded page of **every** finding the store holds, paths with a
+    /// document row and paths without alike.
+    ///
+    /// The keyed readers answer about a path, a class or a scope, and a caller
+    /// that has to account for the whole table can compose none of them: a
+    /// finding at a path nobody thought to ask about is exactly the finding a
+    /// keyed read cannot report. This is the reader that enumerates instead, so
+    /// an empty answer means an empty table.
+    ///
+    /// `after` is exclusive and the page is ordered by the row's own key, which
+    /// is total by construction and needs no vault order to be one — this page
+    /// is drained against nothing, so the order it comes off in is the seek's
+    /// rather than a walk's. [`FindingCursor`] is that key and carries no fact
+    /// about the finding: it is where the next page starts and nothing else.
+    pub fn stored_findings_after(
+        &self,
+        after: Option<FindingCursor>,
+        limit: usize,
+    ) -> Result<Vec<(FindingCursor, StoredFinding)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a stored-finding page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        let found = self.findings_with_keys(
+            &finding_page_sql(),
+            params_from_iter(finding_page_parameters(after, limit)),
+        )?;
+        Ok(found
+            .into_iter()
+            .map(|(id, finding)| (FindingCursor(id), finding))
+            .collect())
+    }
+
+    /// The next bounded page of tombstones, in path order.
+    ///
+    /// [`Request::stored_tombstone`] answers about one path, which is the
+    /// question a late watcher fact asks. This answers what the pillar holds,
+    /// which is the question a verification of the recorded deaths asks — and no
+    /// composition of per-path reads can ask it, because the paths that have
+    /// died are not a set anything else enumerates.
+    ///
+    /// `after` is exclusive. The order is bytewise, which is total over a column
+    /// one row per path is stored under; a caller that wants the vault's own
+    /// order sorts what it drained rather than asking the page for it, since
+    /// nothing merges a walk against this page.
+    pub fn stored_tombstones_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<StoredTombstone>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a tombstone page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        Self::read_all(
+            &self.store.connection,
+            TOMBSTONE_PAGE_SQL,
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            stored_tombstone,
+            "reading the tombstone page",
+        )
+    }
+
+    /// The next bounded page of stored suffix keys, each beside the path whose
+    /// row holds it, in path order.
+    ///
+    /// `documents.suffix_key` is a derived column: the path type writes it and
+    /// the resolution ladder ranges over it, and every read that would notice a
+    /// key drifting from its path goes through the drifted range. So the check
+    /// is a recompute at rest over every row, and this is the page that reaches
+    /// every row to make it — no keyed read asks the question, and carrying the
+    /// column on the document row instead would put a string on every reader of
+    /// a document page for the sake of one verifier.
+    ///
+    /// The pair is what makes a row checkable: the stored key on one side, the
+    /// path that has to produce it on the other. `after` is exclusive, and the
+    /// order is `path`'s own bytewise order, which is total over a column one
+    /// row per path is stored under.
+    pub fn suffix_keys_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a suffix-key page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        Self::read_all(
+            &self.store.connection,
+            SUFFIX_KEY_PAGE_SQL,
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            stored_suffix_key,
+            "reading the suffix-key page",
+        )
+    }
+
+    /// The next bounded page of the terms the full-text index holds, in term
+    /// order.
+    ///
+    /// This reads the index rather than the column it indexes, and it does so
+    /// without a match expression: [`Request::full_text_matches`] answers about
+    /// terms a caller already named, so a term the index holds that no caller
+    /// thinks to ask for is invisible to it. What comes back is the index's own
+    /// vocabulary — the term, how many documents hold it, how many times it
+    /// occurs — which is what makes a disagreement between the index and
+    /// `documents.body` readable rather than only detectable.
+    ///
+    /// `after` is exclusive.
+    pub fn indexed_terms_after(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<IndexedTerm>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "an indexed-term page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        Self::read_all(
+            &self.store.connection,
+            INDEXED_TERM_PAGE_SQL,
+            params_from_iter(text_page_parameters(after, limit)),
+            |row| {
+                Ok(Ok(IndexedTerm {
+                    term: row.get(0)?,
+                    documents: row.get(1)?,
+                    occurrences: row.get(2)?,
+                }))
+            },
+            "reading the indexed-term page",
+        )
     }
 
     /// The pinned vault-schema projection, if a schema has been pinned.
@@ -968,6 +1134,10 @@ impl<'a> Request<'a> {
                 finding_subjects_sql(scope, kinds.len(), order)
             }
             ExplainedStatement::StoredDocumentPage(scope, order) => document_page_sql(scope, order),
+            ExplainedStatement::StoredFindingPage => finding_page_sql(),
+            ExplainedStatement::StoredTombstonePage => TOMBSTONE_PAGE_SQL.to_string(),
+            ExplainedStatement::StoredSuffixKeyPage => SUFFIX_KEY_PAGE_SQL.to_string(),
+            ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
         };
         let read = |row: &Row<'_>| {
             Ok(Ok(PlanStep {
@@ -1003,7 +1173,7 @@ impl<'a> Request<'a> {
                         scope,
                         kinds,
                         Some(&cursor),
-                        MAX_STORED_DOCUMENT_PAGE,
+                        MAX_PAGE,
                     )),
                     read,
                     "explaining an emitted statement",
@@ -1014,15 +1184,45 @@ impl<'a> Request<'a> {
                 Self::read_all(
                     &self.store.connection,
                     &explained,
-                    params_from_iter(document_page_parameters(
-                        scope,
-                        Some(&cursor),
-                        MAX_STORED_DOCUMENT_PAGE,
+                    params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
+                    read,
+                    "explaining an emitted statement",
+                )?
+            }
+            // Each of the four enumerations is explained with its cursor
+            // bound, for the reason [`explained_page_cursor`] states: the
+            // statement text does not branch on the cursor, so the plan is the
+            // same either way today, and an edit that ever gave the cursor its
+            // own text would otherwise be explained on the first page alone.
+            ExplainedStatement::StoredFindingPage => Self::read_all(
+                &self.store.connection,
+                &explained,
+                params_from_iter(finding_page_parameters(
+                    Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
+                    MAX_PAGE,
+                )),
+                read,
+                "explaining an emitted statement",
+            )?,
+            ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
+                Self::read_all(
+                    &self.store.connection,
+                    &explained,
+                    params_from_iter(text_page_parameters(
+                        Some(EXPLAINED_PAGE_CURSOR_LEAF),
+                        MAX_PAGE,
                     )),
                     read,
                     "explaining an emitted statement",
                 )?
             }
+            ExplainedStatement::IndexedTermPage => Self::read_all(
+                &self.store.connection,
+                &explained,
+                params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
+                read,
+                "explaining an emitted statement",
+            )?,
         };
         Ok(EmittedPlan { sql, steps })
     }
@@ -1042,6 +1242,20 @@ impl<'a> Request<'a> {
         sql: &str,
         parameters: impl Params,
     ) -> Result<Vec<StoredFinding>, StoreError> {
+        Ok(self
+            .findings_with_keys(sql, parameters)?
+            .into_iter()
+            .map(|(_, finding)| finding)
+            .collect())
+    }
+
+    /// The same reading with each finding's row key beside it, which is what a
+    /// page over the whole table advances its cursor by.
+    fn findings_with_keys(
+        &self,
+        sql: &str,
+        parameters: impl Params,
+    ) -> Result<Vec<(i64, StoredFinding)>, StoreError> {
         let found = Self::read_all(
             &self.store.connection,
             sql,
@@ -1097,7 +1311,7 @@ impl<'a> Request<'a> {
                 }
             }
         }
-        Ok(findings)
+        Ok(ids.into_iter().zip(findings).collect())
     }
 
     fn read_one<T>(
@@ -1167,6 +1381,18 @@ pub enum ExplainedStatement<'a> {
     /// the walk proved for the vault root, because the two sides of a merge
     /// advance together.
     StoredDocumentPage(SubjectScope<'a>, StoredPathOrder),
+    /// [`Request::stored_findings_after`], the page a caller drains the whole
+    /// findings table through.
+    StoredFindingPage,
+    /// [`Request::stored_tombstones_after`], the page a caller drains the whole
+    /// tombstones pillar through.
+    StoredTombstonePage,
+    /// [`Request::suffix_keys_after`], the page a caller drains every stored
+    /// suffix key through to recompute it against its own path.
+    StoredSuffixKeyPage,
+    /// [`Request::indexed_terms_after`], the page a caller drains the full-text
+    /// index's own vocabulary through.
+    IndexedTermPage,
 }
 
 /// The stored subjects one act addresses.
@@ -1225,6 +1451,15 @@ pub enum DiscardScope<'a> {
     /// The findings of these kinds and no others.
     Kinds(&'a [FindingKind]),
 }
+
+/// Where the next page of [`Request::stored_findings_after`] starts.
+///
+/// It is a position in a drain and never a fact about the finding it came back
+/// beside: two stores holding the same findings hand out different cursors for
+/// them, so a caller that compares stores compares the findings and carries the
+/// cursor no further than the next page.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FindingCursor(i64);
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1581,6 +1816,82 @@ fn subject_discard_parameters<'a>(path: &'a DocumentPath, scope: DiscardScope<'a
         .collect()
 }
 
+/// The statement [`Request::stored_findings_after`] emits.
+///
+/// The lower bound is the cursor coalesced to a floor below every stored key,
+/// which is [`scope_page_predicate`]'s rule spelled for a page whose column is
+/// an integer rather than a path: one term, index-usable, and the whole of the
+/// `WHERE`. `findings.id` is the row id, so the seek is of the table's own
+/// primary key and the order the page states is the order it comes off in —
+/// nothing sorts.
+fn finding_page_sql() -> String {
+    format!(
+        "SELECT {FINDING_COLUMNS} FROM findings
+             WHERE id > COALESCE(?1, {BELOW_EVERY_FINDING_KEY})
+             ORDER BY id
+             LIMIT ?2"
+    )
+}
+
+/// The cursor and the page bound, in the order [`finding_page_sql`] numbers
+/// them.
+fn finding_page_parameters(after: Option<FindingCursor>, limit: usize) -> Vec<Value> {
+    vec![
+        after.map_or(Value::Null, |cursor| Value::Integer(cursor.0)),
+        Value::Integer(i64::try_from(limit).expect("the page bound fits i64")),
+    ]
+}
+
+/// The statement [`Request::stored_tombstones_after`] emits.
+///
+/// One row per path, so `path` orders the table totally and `tombstones_path` is
+/// the index that holds that order. The cursor is the coalesced floor for the
+/// reason every page here has one: a cursor spelled as a filter reads the rows
+/// already paged before it returns anything.
+const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, generation,
+                    recorded_at
+             FROM tombstones
+             WHERE path > COALESCE(?1, '')
+             ORDER BY path
+             LIMIT ?2";
+
+/// The statement [`Request::suffix_keys_after`] emits.
+///
+/// `documents_path` is unique, so `path` orders the table totally and the index
+/// that holds that order is the one the seek runs through. The cursor is the
+/// coalesced floor for the reason every page here has one: a cursor spelled as
+/// a filter reads the rows already paged before it returns anything. The key
+/// column is read off the row the seek reached rather than off an index of its
+/// own, because `documents_suffix_key` orders by the key and this page orders
+/// by the path.
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key
+             FROM documents
+             WHERE path > COALESCE(?1, '')
+             ORDER BY path
+             LIMIT ?2";
+
+/// The statement [`Request::indexed_terms_after`] emits.
+///
+/// The vocabulary reports its rows in term order, so the page states the order
+/// the table already produces. The cursor is the coalesced floor on the same
+/// terms as every other page here.
+const INDEXED_TERM_PAGE_SQL: &str = "SELECT term, doc, cnt FROM documents_fts_vocab
+             WHERE term > COALESCE(?1, '')
+             ORDER BY term
+             LIMIT ?2";
+
+/// The cursor and the page bound, for the two pages whose cursor is text.
+///
+/// The empty string is a sound floor for both: [`DocumentPath`] refuses the
+/// empty spelling and the column refuses to store it, and a full-text
+/// tokenizer produces no empty term.
+fn text_page_parameters(after: Option<&str>, limit: usize) -> Vec<Value> {
+    vec![
+        after.map_or(Value::Null, |after| Value::Text(after.to_string())),
+        Value::Integer(i64::try_from(limit).expect("the page bound fits i64")),
+    ]
+}
+
 /// The predicate one probe's ranges open over `column`: a half-open range per
 /// range, `OR`ed, each bound its own parameter.
 ///
@@ -1627,6 +1938,13 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
         generation,
         derived_at,
     }))
+}
+
+/// One row's path and the suffix key stored beside it.
+fn stored_suffix_key(row: &Row<'_>) -> Reading<(DocumentPath, String)> {
+    let path: String = row.get(0)?;
+    let suffix_key: String = row.get(1)?;
+    Ok(DocumentPath::new(&path).map(|path| (path, suffix_key)))
 }
 
 fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {

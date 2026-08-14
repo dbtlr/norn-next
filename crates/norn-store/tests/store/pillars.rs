@@ -590,7 +590,7 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
 ///
 /// The `match` is exhaustive over [`ExplainedStatement`], so a statement named
 /// through that seam without a bar behind it does not compile: the author has to
-/// say which test covers it, and the only two answers are the two tests below.
+/// say which test covers it, and the only answers are the tests below.
 fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
     match statement {
         ExplainedStatement::SuffixCandidates(_)
@@ -603,8 +603,24 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::StoredDocumentPage(..) => {
             "a_heal_page_seeks_the_index_that_holds_its_order"
         }
+        ExplainedStatement::StoredFindingPage
+        | ExplainedStatement::StoredTombstonePage
+        | ExplainedStatement::StoredSuffixKeyPage
+        | ExplainedStatement::IndexedTermPage => {
+            "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it"
+        }
     }
 }
+
+/// The four statements a caller drains end to end to account for everything one
+/// pillar holds, named once so the bar and the cursor-spelling bar judge the
+/// same set.
+const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
+    ExplainedStatement::StoredFindingPage,
+    ExplainedStatement::StoredTombstonePage,
+    ExplainedStatement::StoredSuffixKeyPage,
+    ExplainedStatement::IndexedTermPage,
+];
 
 /// **Every statement findings maintenance runs reaches its rows through an
 /// index.** The bar is asserted against the statement the store actually
@@ -800,7 +816,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     // Every statement the plan seam names carries a bar, and `barred_by` is
     // where that is stated: its `match` is exhaustive, so a variant added to
     // `ExplainedStatement` does not compile until its author names the test that
-    // covers it. Both tests are named here, so a variant cannot be routed to a
+    // covers it. Every test is named here, so a variant cannot be routed to a
     // bar that does not exist.
     let probe = class_probe("glossary").expect("a class stem");
     let subject = path("one/glossary.md");
@@ -820,17 +836,217 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         ),
     ]
     .into_iter()
+    .chain(ENUMERATIONS.iter().copied())
     .map(barred_by)
     .collect();
     assert_eq!(
         bars,
         [
             "a_heal_page_seeks_the_index_that_holds_its_order",
+            "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<&str>>()
     );
+}
+
+/// **A pillar's enumeration is a seek, not a pass over what was already
+/// drained.** Each of these four pages is drained end to end by a caller
+/// accounting for a whole pillar, so a page that reaches its first row by
+/// stepping over the rows ahead of it makes that drain cost the pillar once per
+/// page of it.
+///
+/// The bar reads what each page reaches its first row through:
+///
+/// - The findings page seeks `findings.id`, which is the row id, so the order
+///   the page states is the order the primary key already holds and nothing
+///   sorts.
+/// - The tombstone page seeks `tombstones_path`, which is unique, so `path`
+///   orders the table totally and the page states that order.
+/// - The suffix-key page seeks `documents_path`, unique for the same reason, and
+///   reads the key column off the row that seek reached.
+/// - The vocabulary page hands its bound to the full-text index's own module,
+///   which is what a virtual table's index selection is. A module given no
+///   constraint reports the pair `0:` and is a read of everything; this one
+///   reports a chosen index, and the assertions below are what say so.
+#[test]
+fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it() {
+    let scratch = Scratch::new("enumeration-plans");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("one/glossary.md", "hash-1", "alpha beta\n"),
+            document("two/glossary.md", "hash-2", "beta gamma\n"),
+        ],
+    );
+    request
+        .record_finding(&ambiguity(
+            "one/glossary.md",
+            "glossary",
+            "glossary/",
+            &[],
+            2,
+        ))
+        .expect("recording a finding");
+    record_death(&mut request, &path("three/gone.md"), Provenance::HealPrune);
+
+    for statement in ENUMERATIONS {
+        let page = plan(
+            request
+                .emitted_plan(*statement)
+                .expect("a query plan for an enumeration page"),
+        );
+        page.assert_no_full_scan();
+        page.assert_no_temp_btree();
+    }
+
+    // The three pages over ordinary tables name the index the seek runs through,
+    // which a plan over a virtual table cannot: a module reports which index it
+    // chose by number and never by name.
+    plan(
+        request
+            .emitted_plan(ExplainedStatement::StoredFindingPage)
+            .expect("a query plan"),
+    )
+    .assert_searches("findings");
+    let tombstones = plan(
+        request
+            .emitted_plan(ExplainedStatement::StoredTombstonePage)
+            .expect("a query plan"),
+    );
+    tombstones.assert_searches("tombstones");
+    tombstones.assert_uses_index("tombstones_path");
+    let suffix_keys = plan(
+        request
+            .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
+            .expect("a query plan"),
+    );
+    suffix_keys.assert_searches("documents");
+    suffix_keys.assert_uses_index("documents_path");
+}
+
+/// **Every enumeration is complete and drains one page at a time.** A pillar
+/// read through a page of one is what says the cursor advances by exactly one
+/// row: a cursor that does not advance repeats a row forever, and one that
+/// advances too far drops the row after it.
+#[test]
+fn an_enumeration_drained_a_page_at_a_time_reaches_every_row() {
+    let scratch = Scratch::new("enumeration-drain");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("one/glossary.md", "hash-1", "alpha beta\n"),
+            document("two/glossary.md", "hash-2", "beta gamma\n"),
+        ],
+    );
+    for at in ["one/glossary.md", "two/glossary.md", "nowhere/absent.md"] {
+        request
+            .record_finding(&ambiguity(at, "glossary", "glossary/", &[], 3))
+            .expect("recording a finding");
+    }
+    for at in ["three/gone.md", "four/gone.md"] {
+        record_death(&mut request, &path(at), Provenance::HealPrune);
+    }
+
+    let mut findings = Vec::new();
+    let mut cursor = None;
+    while let Some((next, finding)) = request
+        .stored_findings_after(cursor, 1)
+        .expect("a page of findings")
+        .into_iter()
+        .next()
+    {
+        findings.push(finding.path.as_str().to_string());
+        cursor = Some(next);
+        assert!(findings.len() < 32, "the findings cursor did not advance");
+    }
+    assert_eq!(
+        findings,
+        vec!["one/glossary.md", "two/glossary.md", "nowhere/absent.md"],
+        "the enumeration reaches a finding at a path no document row stands at, which is the \
+         finding no keyed reader can be asked for"
+    );
+
+    let mut deaths: Vec<String> = Vec::new();
+    let mut after: Option<norn_store::DocumentPath> = None;
+    while let Some(tombstone) = request
+        .stored_tombstones_after(after.as_ref(), 1)
+        .expect("a page of tombstones")
+        .into_iter()
+        .next()
+    {
+        deaths.push(tombstone.path.as_str().to_string());
+        after = Some(tombstone.path);
+        assert!(deaths.len() < 32, "the tombstone cursor did not advance");
+    }
+    assert_eq!(deaths, vec!["four/gone.md", "three/gone.md"]);
+
+    let mut terms: Vec<String> = Vec::new();
+    let mut term_cursor: Option<String> = None;
+    while let Some(term) = request
+        .indexed_terms_after(term_cursor.as_deref(), 1)
+        .expect("a page of indexed terms")
+        .into_iter()
+        .next()
+    {
+        term_cursor = Some(term.term.clone());
+        terms.push(term.term);
+        assert!(terms.len() < 32, "the indexed-term cursor did not advance");
+    }
+    let mut keyed: Vec<(String, String)> = Vec::new();
+    let mut keyed_after: Option<norn_store::DocumentPath> = None;
+    while let Some((path, suffix_key)) = request
+        .suffix_keys_after(keyed_after.as_ref(), 1)
+        .expect("a page of stored suffix keys")
+        .into_iter()
+        .next()
+    {
+        keyed.push((path.as_str().to_string(), suffix_key));
+        keyed_after = Some(path);
+        assert!(keyed.len() < 32, "the suffix-key cursor did not advance");
+    }
+    assert_eq!(
+        keyed,
+        vec![
+            ("one/glossary.md".to_string(), "glossary/one/".to_string()),
+            ("two/glossary.md".to_string(), "glossary/two/".to_string()),
+        ],
+        "the enumeration reaches every row's stored key beside the path that has to produce it, \
+         which is the pair no keyed read hands back"
+    );
+
+    assert_eq!(terms, vec!["alpha", "beta", "gamma"]);
+    let beta = request
+        .indexed_terms_after(Some("alpha"), 1)
+        .expect("a page of indexed terms")
+        .into_iter()
+        .next()
+        .expect("the index holds a term after `alpha`");
+    assert_eq!(
+        (beta.documents, beta.occurrences),
+        (2, 2),
+        "the vocabulary reports what the index holds about a term, and `beta` is in both bodies"
+    );
+}
+
+/// A page bound outside what an enumeration accepts is refused rather than
+/// clamped, which is the same answer a document page gives.
+#[test]
+fn an_enumeration_refuses_a_page_bound_it_does_not_hold() {
+    let scratch = Scratch::new("enumeration-bound");
+    let mut store = scratch.open();
+    let request = store.begin_request();
+    for limit in [0, norn_store::MAX_PAGE + 1] {
+        assert!(request.stored_findings_after(None, limit).is_err());
+        assert!(request.stored_tombstones_after(None, limit).is_err());
+        assert!(request.suffix_keys_after(None, limit).is_err());
+        assert!(request.indexed_terms_after(None, limit).is_err());
+    }
 }
 
 /// **A heal's page is a seek, in every scope and both orders.** The merge that
@@ -953,7 +1169,26 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
             }
         }
     }
-    assert_eq!(judged, 12, "a scope or an order went unjudged");
+    // The four enumerations bind the same shape over their own column: the
+    // cursor is `COALESCE`'s first argument, and the floor it falls back to is
+    // below every key the column holds.
+    for statement in ENUMERATIONS {
+        let sql = request.emitted_plan(*statement).expect("a query plan").sql;
+        assert!(
+            sql.contains("WHERE id > COALESCE(?1,")
+                || sql.contains("WHERE path > COALESCE(?1,")
+                || sql.contains("WHERE term > COALESCE(?1,"),
+            "the WHERE does not open on the coalesced cursor, so the seek starts where the \
+             pillar does and steps over every row already drained: {sql}"
+        );
+        assert!(
+            !sql.contains("WHERE (?1 IS NULL"),
+            "the page opens on the cursor as a filter, which is the shape a seek cannot \
+             use: {sql}"
+        );
+        judged += 1;
+    }
+    assert_eq!(judged, 16, "a scope, an order or a pillar went unjudged");
 }
 
 /// **Findings maintenance is scoped by affected ambiguity class.** A changed path

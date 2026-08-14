@@ -120,7 +120,14 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// A caller reads this to hold a path to the stats it spends: the counter
     /// moves once per [`ServingSet::recheck`], and one recheck stats every
     /// served root.
-    #[cfg(test)]
+    ///
+    /// The set is this crate's own, so a bar outside it reads this through
+    /// `Host::classifications`, which is the narrowest surface that reaches it.
+    /// Both stand on the same terms: the count is written by every recheck and
+    /// read by the cases and suites that assert what an act stated, so the
+    /// reader is compiled for this crate's own cases and for the
+    /// harness-reachable feature and for nothing else.
+    #[cfg(any(feature = "induced-failure", test))]
     pub(crate) fn classifications(&self) -> usize {
         self.classifications.load(Ordering::SeqCst)
     }

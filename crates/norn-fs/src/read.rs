@@ -21,6 +21,7 @@ pub enum PathKind {
 
 #[allow(clippy::disallowed_methods)]
 pub fn path_kind(path: &Path) -> Result<PathKind, Refusal> {
+    crate::reads::count_stat();
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(PathKind::Missing),

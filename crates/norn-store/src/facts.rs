@@ -432,6 +432,19 @@ pub struct StoredFinding {
     pub generation: i64,
 }
 
+/// One term the full-text index holds, as the index itself reports it.
+///
+/// The counts are the index's own: how many documents hold the term, and how
+/// many times it occurs across them. Neither is a row identifier, so two
+/// databases that indexed the same bodies report the same terms whatever order
+/// their documents were written in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexedTerm {
+    pub term: String,
+    pub documents: u64,
+    pub occurrences: u64,
+}
+
 /// One document's embedding under one model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VectorFacts {

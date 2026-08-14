@@ -15,6 +15,7 @@
 mod common;
 
 mod counters;
+mod equivalence;
 mod facts;
 mod increments;
 mod lifecycle;

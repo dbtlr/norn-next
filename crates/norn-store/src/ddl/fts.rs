@@ -48,6 +48,20 @@
 //! it is a DDL edit that the fingerprint catches and a rebuild resolves. `2` is
 //! the diacritic handling that treats a composed and a decomposed spelling of
 //! the same word as the same word.
+//!
+//! # The vocabulary is how the index's own contents are read
+//!
+//! `documents_fts_vocab` is an `fts5vocab` table over `documents_fts` in `row`
+//! mode: one row per distinct term, with the number of documents holding it and
+//! the number of times it occurs. It reads the inverted index itself.
+//!
+//! That is what separates it from every other way of asking about the index. A
+//! `MATCH` answers a question posed in terms the caller already knows, and
+//! `SELECT body FROM documents_fts` reads `documents.body` through the content
+//! rowid — so neither of them can state what the index holds where the index and
+//! the column disagree. The vocabulary states it directly, and it names no
+//! rowid, so two databases carrying the same terms report the same rows whatever
+//! order their documents were written in.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
@@ -71,4 +85,5 @@ WHEN old.body IS NOT new.body BEGIN
     INSERT INTO documents_fts(documents_fts, rowid, body) VALUES ('delete', old.id, old.body);
     INSERT INTO documents_fts(rowid, body) VALUES (new.id, new.body);
 END",
+    "CREATE VIRTUAL TABLE documents_fts_vocab USING fts5vocab(documents_fts, 'row')",
 ];

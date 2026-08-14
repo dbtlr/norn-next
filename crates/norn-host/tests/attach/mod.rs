@@ -23,6 +23,8 @@
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "induced-failure")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -33,6 +35,8 @@ use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
     RegistryRead,
 };
+#[cfg(feature = "induced-failure")]
+use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
@@ -46,7 +50,7 @@ pub const SEED: u64 = 7;
 const VAULT_NAME: &str = "notes";
 
 /// The in-vault schema attachment pins.
-const SCHEMA: &[u8] = b"version: 1\n";
+pub const SCHEMA: &[u8] = b"version: 1\n";
 
 /// How long a suite waits for an attachment to converge.
 ///
@@ -133,6 +137,14 @@ pub fn accepted_harness_root(root: &OsStr, token_variable: &str) -> PathBuf {
 pub struct Vault {
     root: PathBuf,
     vault: PathBuf,
+    /// Where this view keeps the machine-local directories a host serves the
+    /// tree from — the derived store, the maintainer lock, the shadow home.
+    ///
+    /// It is separate from the tree because **a vault is not its derived
+    /// state**: two views over one tree that keep their derived state in two
+    /// places are two independent derivations of the same documents, which is
+    /// what a comparison of two stores is a comparison of.
+    machine: PathBuf,
     name: VaultName,
 }
 
@@ -158,7 +170,31 @@ impl Vault {
         Vault {
             root: root.to_path_buf(),
             vault: root.join("vault"),
+            machine: root.to_path_buf(),
             name: VaultName::new(VAULT_NAME).expect("vault name"),
+        }
+    }
+
+    /// The same vault tree, served from a second set of machine-local
+    /// directories under `machine`.
+    ///
+    /// What the two views share is the documents; what neither can see of the
+    /// other is a derived row, a maintainer lock or a shadow. So a host attached
+    /// through this one derives the tree from zero however much another view
+    /// already derived.
+    ///
+    /// **They are served one at a time.** Each attach takes the maintainer lock
+    /// for its own derived directory, and the locks are two, so nothing stops
+    /// the two from being attached at once — and the vault is one tree with one
+    /// platform watcher subscription apiece, which is the machine-wide service
+    /// the suites hold a lease over. A caller attaches one, lets it go, and
+    /// attaches the other.
+    pub fn beside(&self, machine: &Path) -> Vault {
+        Vault {
+            root: self.root.clone(),
+            vault: self.vault.clone(),
+            machine: machine.to_path_buf(),
+            name: self.name.clone(),
         }
     }
 
@@ -171,7 +207,7 @@ impl Vault {
     }
 
     fn dirs(&self) -> ConfigDirs {
-        ConfigDirs::new(self.root.join("config"), self.root.join("data"))
+        ConfigDirs::new(self.machine.join("config"), self.machine.join("data"))
             .expect("config directories")
     }
 
@@ -208,9 +244,15 @@ impl Vault {
         // the attach the host runs and there is no later moment that is still
         // ahead of it.
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
+        let ops = ProductionEntryOps::new(self.dirs(), policy);
+        // The host takes the ops by value, so the account is taken here or not
+        // at all. Reading an account is behind `induced-failure`, so a build
+        // without it composes the same host and carries no account.
+        #[cfg(feature = "induced-failure")]
+        let account = ops.account();
         let host = Host::new(
             registry,
-            ProductionEntryOps::new(self.dirs(), policy),
+            ops,
             LifecyclePolicy {
                 idle_after: IDLE_AFTER,
                 worker_slots: 1,
@@ -220,6 +262,8 @@ impl Vault {
         .expect("production host");
         ServingHost {
             host,
+            #[cfg(feature = "induced-failure")]
+            account,
             _watcher_lease: lease,
         }
     }
@@ -249,9 +293,23 @@ fn lease_budget() -> Budget {
 /// A caller holds what this hands back and takes none of its own.
 pub struct ServingHost {
     host: Host<ProductionEntryOps>,
+    /// What this host's jobs have spent and done. The ops that write it are
+    /// inside the host, so the account is taken where the host is built. Every
+    /// build writes it and this one reads it, which is what `induced-failure`
+    /// gates.
+    #[cfg(feature = "induced-failure")]
+    account: Arc<JobEvidence>,
     // Dropped after `host` by declaration order, which is the order that
     // matters: the watcher goes with the host, and the lease covers it.
     _watcher_lease: Lease,
+}
+
+#[cfg(feature = "induced-failure")]
+impl ServingHost {
+    /// What this host's jobs have spent and done, as it stands.
+    pub fn evidence(&self) -> EvidenceReading {
+        self.account.read()
+    }
 }
 
 impl Deref for ServingHost {

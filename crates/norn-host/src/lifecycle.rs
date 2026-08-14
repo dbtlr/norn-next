@@ -1773,6 +1773,47 @@ impl<O: EntryOps> Host<O> {
             .answer(name)
     }
 
+    /// How many classifications this host has run against its serving set.
+    ///
+    /// One classification stats every root the host serves, so this is the whole
+    /// filesystem cost the registry itself carries: a path that moves the
+    /// counter spent those stats, and a path that leaves it standing spent none.
+    /// It is cumulative, so what one act cost is the difference between a
+    /// reading before it and one after.
+    ///
+    /// **Behind `induced-failure`, with the rest of the harness-reachable
+    /// surface.** Nothing a client asks for is answered from this number: it
+    /// says what a host did rather than what a vault holds, and the suites that
+    /// read it are the ones that assert an act really stated the roots it
+    /// claims to have stated.
+    #[cfg(feature = "induced-failure")]
+    pub fn classifications(&self) -> usize {
+        self.shared.entries.classifications()
+    }
+
+    /// How many live demand leases are waiting on the recovery `name`'s entry
+    /// owes, and nothing where the host serves no such name.
+    ///
+    /// A recovery is asked for rather than scheduled outright, and this is what
+    /// says how many callers are asking. Zero beside an entry that owes one is a
+    /// requirement nobody is waiting on; zero beside an entry that owes none is
+    /// an entry with nothing to ask of it, and the two are told apart by
+    /// [`Host::state`].
+    ///
+    /// **Behind `induced-failure`.** A client that wants to know what an entry
+    /// owes reads [`Host::state`]; the count of who is waiting is an internal
+    /// bookkeeping fact, opened here for the suites that assert on it.
+    #[cfg(feature = "induced-failure")]
+    pub fn recovery_demands(&self, name: &VaultName) -> Option<usize> {
+        self.shared.entries.get(name).map(|entry| {
+            entry
+                .gate
+                .lock()
+                .expect("entry gate poisoned")
+                .recovery_demands
+        })
+    }
+
     /// Record client demand and, where necessary, start one asynchronous job
     /// against the entry. The call never waits on that job: what it answers
     /// with is the state the work it started runs under.

@@ -6,11 +6,18 @@
 //! host decides *when* attach, reconciliation and detach happen, while the
 //! filesystem and store crates remain the only owners of those effects.
 
+mod evidence;
 mod lifecycle;
 mod production;
 mod refusal;
 mod registry;
 
+/// **The harness-reachable readers of a host's own account.** Every job writes
+/// the account whatever features are on; reading it is what this feature opens,
+/// beside [`ProductionEntryOps::account`], [`Host::classifications`] and
+/// [`Host::recovery_demands`].
+#[cfg(feature = "induced-failure")]
+pub use evidence::{EvidenceReading, JobEvidence};
 pub use lifecycle::{
     Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
     LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
