@@ -4,12 +4,17 @@
 //!
 //! Every case here has the same three-part shape.
 //!
-//! - **A workload runs against a live tree.** The scripts are
+//! - **A workload runs against a live tree, in phases.** The scripts are
 //!   `norn_testkit::churn`'s: seeded, ordered, and each step saying in words what
 //!   it does, so a failure prints the workload rather than a stack of writes. The
 //!   host is a production attachment with a real platform watcher, so what
 //!   reaches it is what reaches a host on somebody's machine — no injected
-//!   failure, no seam a test reached through.
+//!   failure, no seam a test reached through. **At least one settle stands
+//!   between the phase that puts content in the tree and the phase that changes
+//!   it**, because a modification is only a modification against a row the host
+//!   already holds: a workload landing whole between two polls asks a host for
+//!   nothing but "these files appeared", and no prune, tombstone or
+//!   re-derivation is on the path it takes.
 //! - **The tree is settled, deterministically.** The wait is on a census: every
 //!   markdown place in the tree either has the document row its bytes imply, or
 //!   is one of the places the workload declared derives none. Nothing here sleeps
@@ -45,9 +50,10 @@
 //!
 //! # Two hosts never serve at once
 //!
-//! The real-watcher lease is machine-wide and not reentrant, so the churn host
-//! is dropped before the comparison derivation attaches. Every case here is
-//! therefore two attachments in sequence over one tree.
+//! The real-watcher lease is machine-wide and not reentrant, so each host here
+//! is dropped before the next one attaches. Every case is therefore a sequence
+//! of attachments over one tree — one for each phase it settles, and a last one
+//! for the derivation from zero it is judged against.
 //!
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness.
 #![cfg(unix)]
@@ -63,7 +69,7 @@ use norn_fs::{CaseSensitivity, ContentHash, PathNormalizer};
 use norn_host::AttachMode;
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
-use norn_store::{DocumentPath, Store, StoredPathOrder, class_probe};
+use norn_store::{DocumentPath, Store, class_probe};
 use norn_testkit::churn::{self, Act, Applied, Folding, Script, Step};
 use norn_testkit::equivalence::{Population, StoreProjection, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
@@ -77,13 +83,13 @@ use norn_wire::{FindingKind, TrustState};
 /// a walk refuses to follow. What each case adds on top is its own workload, so
 /// the vault around the churn is the same in every one of them.
 ///
-/// **The scale is chosen so that a changed-set bound can mean something.** Every
-/// workload here names well under ten places, and each cost bar asserts that its
-/// own ceiling is below the document count of this profile — a claim that
-/// maintenance costs the changed set rather than the vault is not a claim at all
-/// over a vault a bound could re-read and still fit. It is also small enough
-/// that the two attachments each case makes cost a fraction of a second, which
-/// is what keeps this suite in the per-PR lane.
+/// **The scale is chosen so that a changed-set bound can mean something.** The
+/// widest changing phase here names 12 places against these 120 documents, and
+/// each cost bar asserts that its own ceiling is under half of them — a claim
+/// that maintenance costs the changed set rather than the vault is not a claim
+/// at all over a vault a bound could mostly re-read and still fit. It is also
+/// small enough that the two attachments each case makes cost a fraction of a
+/// second, which is what keeps this suite in the per-PR lane.
 const PROFILE: &str = "small";
 
 /// The runaway bound on settling, derived from the changed set.
@@ -132,14 +138,41 @@ fn oversized_frontmatter() -> Vec<u8> {
 
 /// **Family 1.** Ordinary creation, modification and deletion across nested
 /// directories, with the cost of it bracketed.
+///
+/// The bracketed phase rewrites two rows the host holds and takes two away, so
+/// the account it moves is a re-derivation, a prune and the tombstones that go
+/// with them rather than four arrivals.
 #[test]
 fn ordinary_editing_converges_on_a_build_from_zero() {
-    let script = churn::ordinary_editing(41);
-    let mut churned = churn_the_vault("churn-ordinary", &script, When::Settled);
+    let workload = churn::ordinary_editing(41);
+    let mut churned = churn_the_vault("churn-ordinary", &workload);
 
-    churned.judge("ordinary editing across nested directories", 0);
+    churned.judge(workload.changing().name(), 0);
+    churned.assert_rows_were_taken_away();
     churned.assert_maintenance_is_bracketed(&OPENS);
     churned.assert_maintenance_is_bracketed(&UPSERTS);
+}
+
+/// **The same edits, made while nothing was attached.**
+///
+/// A watcher reports what happens while it is installed, and the phase here
+/// happens while it is not: the opening phase is settled and its host let go,
+/// the edits and removals land against a tree nobody is watching, and a host
+/// attaches afterwards. **The attach heal is then the only thing that can
+/// converge them**, so this is the case that reaches the merge's own answer for
+/// a row whose file the walk no longer yields — the arm every other case here
+/// gets for free from a watcher report.
+///
+/// No cost bar. The account this phase moves is a heal's, which walks the vault
+/// by contract, and a changed-set bound over a whole-vault act would be a bound
+/// against that contract.
+#[test]
+fn edits_made_while_nothing_was_attached_converge_on_a_build_from_zero() {
+    let workload = churn::ordinary_editing(79);
+    let opened = attach_and_churn(sandbox("churn-detached"), workload.opening(), When::Settled);
+    let mut churned = opened.then(workload.changing(), When::Before);
+
+    churned.judge(workload.changing().name(), 0);
 }
 
 /// **Family 2.** Content landing whole at a name, and names moving between
@@ -149,13 +182,16 @@ fn ordinary_editing_converges_on_a_build_from_zero() {
 /// filled — and a document that moves twice ends up somewhere no walk has ever
 /// enumerated it before. The case flip is the case below, because what a flip
 /// means is the volume's own answer.
+///
+/// Both acts land on rows the host holds: content arrives whole over a document
+/// that already derived, and the name that moves is a name a row stands at.
 #[test]
 fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
-    let sandbox = sandbox("churn-atomic");
-    let script = churn::atomic_replacement(43);
-    let mut churned = churn_the_vault_in(sandbox, &script, When::Settled);
+    let workload = churn::atomic_replacement(43);
+    let mut churned = churn_the_vault_in(sandbox("churn-atomic"), &workload);
 
-    churned.judge("atomic replacement and movement", 0);
+    churned.judge(workload.changing().name(), 0);
+    churned.assert_rows_were_taken_away();
     churned.assert_maintenance_is_bracketed(&OPENS);
 }
 
@@ -183,8 +219,8 @@ fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
 fn a_case_flip_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-flip");
     let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
-    let script = churn::case_flip(73, folding);
-    let mut churned = churn_the_vault_in(sandbox, &script, When::Settled);
+    let workload = churn::case_flip(73, folding);
+    let mut churned = churn_the_vault_in(sandbox, &workload);
     assert_eq!(
         folding, churned.folding,
         "two probes of one volume disagree"
@@ -194,7 +230,7 @@ fn a_case_flip_converges_on_a_build_from_zero() {
     if folding == Folding::Folded {
         churned = churned.then(&Script::new("nothing at all", Vec::new()), When::Settled);
     }
-    churned.judge(&format!("a case flip on {folding}"), 0);
+    churned.judge(workload.changing().name(), 0);
 }
 
 /// **Family 3.** A burst against one path and a burst across many.
@@ -208,10 +244,13 @@ fn a_case_flip_converges_on_a_build_from_zero() {
 /// edits to one path are twelve changes a host may be asked to reconcile — a
 /// bound stated over the one place they name would be a bound on coalescing,
 /// which is an optimization and not a contract.
+///
+/// The hammered path is written once and settled over before the burst starts,
+/// so every one of the twelve edits rewrites a row the host holds.
 #[test]
 fn a_burst_converges_on_the_last_bytes_written() {
-    let script = churn::burst(47);
-    let mut churned = churn_the_vault("churn-burst", &script, When::Settled);
+    let workload = churn::burst(47);
+    let mut churned = churn_the_vault("churn-burst", &workload);
 
     // The absolute claim beside the relative one: the hammered path holds the
     // last edit's bytes and none of the eleven writes before them.
@@ -221,7 +260,7 @@ fn a_burst_converges_on_the_last_bytes_written() {
         .get("churn/burst/hammered.md")
         .expect("the hammered path stands in the tree")
         .clone();
-    churned.judge("a burst against one path and a burst across many", 0);
+    churned.judge(workload.changing().name(), 0);
     churned.assert_derived_hash("churn/burst/hammered.md", &last);
     churned.assert_maintenance_is_bracketed(&BURST_OPENS);
 }
@@ -242,6 +281,11 @@ fn a_burst_converges_on_the_last_bytes_written() {
 /// under the fingerprint it replaced and heals the vault again, so what this
 /// case says about the findings above is that they came back.
 ///
+/// **Every crossing is made against what the host already holds.** The four
+/// states are established and settled over first, so the quarantine takes a row
+/// away, the recovery gives one back, and the two read-bound crossings move the
+/// frontmatter projection of rows that stand throughout.
+///
 /// **No work bound.** A schema re-pin is a vault-scope act by contract: the
 /// findings it discards stand at places no row does, and only a walk of the
 /// whole vault re-files them. A changed-set bound over this workload would be a
@@ -249,7 +293,7 @@ fn a_burst_converges_on_the_last_bytes_written() {
 #[test]
 fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     let oversized = oversized_frontmatter();
-    let script = churn::validity_transitions(
+    let workload = churn::validity_transitions(
         53,
         churn::SchemaGround {
             at: ".norn/schema.yaml",
@@ -257,12 +301,14 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
         },
         &oversized,
     );
-    let mut churned = churn_the_vault("churn-validity", &script, When::Settled);
+    let mut churned = churn_the_vault("churn-validity", &workload);
 
-    // Two documents stand past the frontmatter read bound at the end — the one
-    // the workload pushed past it — and each carries a finding beside the row
-    // it kept.
-    churned.judge("transitions between readable, quarantined and degraded", 1);
+    // One document stands past the frontmatter read bound at the end — the one
+    // the workload pushed past it — and it carries a finding beside the row it
+    // kept. The document that started past the bound was brought back inside
+    // it.
+    churned.judge(workload.changing().name(), 1);
+    churned.assert_rows_were_taken_away();
 
     let mut store = churned.vault.store();
     let projection = StoreProjection::read(&mut store).expect("projecting the churned store");
@@ -337,32 +383,52 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
 ///
 /// The catch-up is what lands between a host's polls: creations, an edit and a
 /// deletion arriving with nothing between them for a host to react to, followed
-/// by a tool renaming the directory they all sit in.
+/// by a tool renaming the directory they all sit in. The tree those tools find
+/// is one the host has already settled over, so the edit re-derives a standing
+/// row, the deletion prunes one, and the rename moves five at once.
 #[test]
 fn an_external_tools_catch_up_converges_on_a_build_from_zero() {
-    let script = churn::external_tools(59);
-    let mut churned = churn_the_vault("churn-tools", &script, When::Settled);
+    let workload = churn::external_tools(59);
+    let mut churned = churn_the_vault("churn-tools", &workload);
 
-    churned.judge("what external tools do to a vault", 0);
-    churned.assert_maintenance_is_bracketed(&OPENS);
+    churned.judge(workload.changing().name(), 0);
+    churned.assert_rows_were_taken_away();
+    churned.assert_maintenance_is_bracketed(&TOOL_OPENS);
 }
 
-/// **Family 5, second shape.** The same edits, landing while the attach heal is
+/// **Family 5, second shape.** The same edits, landing while an attach heal is
 /// still running.
 ///
-/// The demand is placed and the workload runs against the tree at once, so the
-/// walk that establishes the attachment is reading a vault somebody else is
-/// still writing to. Whether any one edit really lands inside the window between
-/// that walk's enumeration and its opens is not something a black-box case can
-/// force — the case that stages that window exactly is in `norn-host`'s own unit
-/// suite, where the walk and the merge are two calls. What this one says is the
-/// convergent claim: however the edits interleaved with the heal, the store ends
-/// up holding what a build from zero over the final tree holds.
+/// The opening phase is settled under one attachment which is then let go, so
+/// the heal this case's edits land during is a **re-attach heal over a store
+/// that already holds rows** — the walk enumerates documents the store stands
+/// for, and the workload changes them underneath it.
+///
+/// **The overlap is witnessed rather than assumed.** The state of the entry is
+/// sampled between the demand and the first act, and a reading of `Ready` there
+/// would mean the heal finished before the workload started — which is the
+/// catch-up case above wearing this one's name. What is *not* witnessable from
+/// outside is finer than that: whether any one edit landed inside the window
+/// between the walk's enumeration and its opens is not something a black-box
+/// case can force, and the case that stages that window exactly is in
+/// `norn-host`'s own unit suite, where the walk and the merge are two calls.
+///
+/// So what this case proves that the catch-up case does not is that the edits
+/// were concurrent with a heal in flight rather than delivered to a settled
+/// host; the convergent claim is the same either way — however the edits
+/// interleaved with the heal, the store ends up holding what a build from zero
+/// over the final tree holds.
 #[test]
 fn edits_during_an_active_heal_converge_on_a_build_from_zero() {
-    let script = churn::external_tools(61);
-    let mut churned = churn_the_vault("churn-during-heal", &script, When::DuringTheHeal);
+    let workload = churn::external_tools(61);
+    let opened = attach_and_churn(
+        sandbox("churn-during-heal"),
+        workload.opening(),
+        When::Settled,
+    );
+    let mut churned = opened.then(workload.changing(), When::DuringTheHeal);
 
+    churned.assert_the_workload_overlapped_a_heal();
     churned.judge("external tool edits landing during an active heal", 0);
 }
 
@@ -377,11 +443,17 @@ fn edits_during_an_active_heal_converge_on_a_build_from_zero() {
 /// derived from the rows rather than stored beside them — two stores holding the
 /// same rows hold the same class by construction, and what could still be wrong
 /// is the rows.
+///
+/// **The departure acts on a held row.** The class is established and settled
+/// over before it changes, so the member that leaves is one the store has a row
+/// for and the member that joins is added to a class that already resolves —
+/// which is the only ordering in which membership is derived state being
+/// *changed* rather than derived once.
 #[test]
 fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
     let mut ink = churn::Ink::new(67);
-    let script = Script::new(
-        "an ambiguity class gaining and losing members",
+    let opening = Script::new(
+        "an ambiguity class: the members that will change",
         vec![
             Step::new(
                 "write the first document of a shared stem",
@@ -404,22 +476,28 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
                     bytes: b"# citing\n\nSee [[shared]].\n".to_vec(),
                 },
             ),
+        ],
+    );
+    let changing = Script::new(
+        "an ambiguity class gaining and losing members",
+        vec![
             Step::new(
-                "write a third document into the same class",
+                "write a third document into the class the store already resolves",
                 Act::Write {
                     at: "churn/class/three/shared.md".to_string(),
                     bytes: ink.document("shared, three"),
                 },
             ),
             Step::new(
-                "take the second one out of the class again",
+                "take the second one, which the host holds a row for, out of the class again",
                 Act::Remove {
                     at: "churn/class/two/shared.md".to_string(),
                 },
             ),
         ],
     );
-    let mut churned = churn_the_vault("churn-class", &script, When::Settled);
+    let mut churned = churn_the_vault("churn-class", &churn::Phased::new(opening, changing));
+    churned.assert_rows_were_taken_away();
     churned.judge("an ambiguity class gaining and losing members", 0);
 
     let expected = vec![
@@ -505,7 +583,7 @@ fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
     .without_rows_at("bad\\name.md");
 
     let mut churned =
-        churn_the_vault_in(sandbox, &script, When::Before).then(&clearing, When::Settled);
+        attach_and_churn(sandbox, &script, When::Before).then(&clearing, When::Settled);
     churned.judge("a rendering collision that clears", 0);
 
     let mut store = churned.vault.store();
@@ -519,26 +597,40 @@ fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
 
 /// **The instrument moves with one seeded unit of work.**
 ///
-/// The negative control the bounds above stand on. One document is edited after
-/// the vault has settled, and the account a host's jobs write has to show it:
-/// a counter that read the same before and after would make every bracket above
-/// a statement about a number nothing drives, and the upper half of each bracket
-/// would pass a host that did no maintenance at all.
+/// **This is the control the brackets above stand on**, and it is a control
+/// over a host rather than over arithmetic: one document is written, the vault
+/// is settled, and then that one document — a row the store now holds — is
+/// edited once. The account a host's jobs write has to show it. A counter that
+/// read the same before and after would make every bracket above a statement
+/// about a number nothing drives, and the upper half of each bracket would pass
+/// a host that did no maintenance at all.
 #[test]
 fn one_seeded_edit_moves_the_maintenance_account() {
     let mut ink = churn::Ink::new(71);
-    let script = Script::new(
-        "one document, edited once",
-        vec![Step::new(
-            "write one document",
-            Act::Write {
-                at: "churn/seeded/one.md".to_string(),
-                bytes: ink.document("one"),
-            },
-        )],
+    let workload = churn::Phased::new(
+        Script::new(
+            "one document, written",
+            vec![Step::new(
+                "write one document",
+                Act::Write {
+                    at: "churn/seeded/one.md".to_string(),
+                    bytes: ink.document("one"),
+                },
+            )],
+        ),
+        Script::new(
+            "one document, edited once",
+            vec![Step::new(
+                "edit the one document the host holds a row for",
+                Act::Write {
+                    at: "churn/seeded/one.md".to_string(),
+                    bytes: ink.document("one, edited"),
+                },
+            )],
+        ),
     );
-    let mut churned = churn_the_vault("churn-seeded", &script, When::Settled);
-    churned.judge("one document, edited once", 0);
+    let mut churned = churn_the_vault("churn-seeded", &workload);
+    churned.judge(workload.changing().name(), 0);
     churned.assert_the_account_moved();
 }
 
@@ -574,8 +666,26 @@ struct WorkBound {
     floor: u64,
     /// What each unit of the changed set adds to the ceiling.
     per_change: u64,
-    /// Which named input the changed set is counted in.
+    /// Which of the workload's own accounts the changed set is read out of.
+    #[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
+    counted_in: ChangedSetIn,
+    /// The same, as it reads in a failure. Prose, so the sentence a bound fails
+    /// with names the input the way the case above it does.
     named_input: &'static str,
+}
+
+/// Which of a workload's own accounts a bound's changed set is read out of.
+///
+/// A field rather than a reading of [`WorkBound::named_input`], because the
+/// prose is there to be read by a person: a bound that dispatched off the
+/// wording of its own failure message would change what it counted when
+/// somebody rephrased it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChangedSetIn {
+    /// Places where document content changed.
+    Places,
+    /// Steps the workload applied.
+    Steps,
 }
 
 /// Which counter of a host's account a bound is stated over.
@@ -603,63 +713,120 @@ impl WorkBound {
     }
 }
 
-/// **The bound on documents a maintenance pass opens**, over a workload whose
-/// changed set is counted in places.
+/// **The bound on documents a maintenance pass opens**, over the two workloads
+/// whose changing phase names a handful of places.
 ///
-/// Profile: `small`, 120 generated documents, churned by workloads naming five
-/// to nine places. The measured readings are 6 opens over 5 places and 18 over
-/// 9, so the coefficient sits at roughly twice what a converged host spends:
-/// it admits a place being opened more than once, which is what a host that
-/// split one workload across several increments does.
+/// Profile: `small`, 120 generated documents. Each of those changing phases
+/// names **4 places**, and the measured readings are **2 opens** for ordinary
+/// editing — two rewrites, and the two prunes cost none — and **3 opens** for
+/// atomic replacement, which is the replaced document and both names its
+/// travelling document arrives at.
+///
+/// **The coefficient is one, so what this bound says is that a host opens each
+/// changed place at most once.** That is the whole of the changed-set claim and
+/// there is no headroom past it: a second read of one place is the regression
+/// this refuses. **What the slack between 3 and 4 absorbs** is the places that
+/// are departures — a name that emptied is in the changed set and costs no
+/// open — so a workload of nothing but prunes reads far under this and a
+/// workload of nothing but edits reads at it.
 const OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
     floor: 0,
-    per_change: 4,
-    named_input: "places the workload named",
+    per_change: 1,
+    counted_in: ChangedSetIn::Places,
+    named_input: "places where document content changed",
 };
 
 /// **The bound on document rows a maintenance pass writes.**
 ///
-/// Same profile and same named input. The coefficient is smaller than the one
-/// above because a place is opened before it is judged and written only if it
-/// derives — a removal upserts nothing — and because a host that coalesces a
-/// workload writes each surviving document once however many times it was
-/// edited. The measured reading is 2 upserts over 5 places.
+/// Same profile and same named input, over ordinary editing's changing phase: 4
+/// places, measured **2 upserts**.
+///
+/// The reading sits at half the ceiling because a place is opened before it is
+/// judged and written only if it derives — a prune upserts nothing, and half of
+/// this phase's places are prunes — and because a host that coalesces a workload
+/// writes each surviving document once however many times it was edited.
+///
+/// **What the coefficient of one admits** is every changed place deriving a row,
+/// which is the workload of pure edits; **what the slack absorbs** is the prunes
+/// this particular workload spends half its changed set on.
 const UPSERTS: WorkBound = WorkBound {
     counted: Counted::DocumentsUpserted,
     what: "document rows upserted",
     floor: 0,
-    per_change: 3,
-    named_input: "places the workload named",
+    per_change: 1,
+    counted_in: ChangedSetIn::Places,
+    named_input: "places where document content changed",
+};
+
+/// **The bound on documents an external tool's batch opens**, over a workload
+/// whose changing phase moves a whole directory.
+///
+/// Profile: `small`. The changing phase names **12 places** — the editor's
+/// second save, the four documents the catch-up lands, the one it edits, the one
+/// it removes, and both ends of every document the directory rename moves — and
+/// the measured reading is **6 opens**.
+///
+/// It is stated apart from [`OPENS`] because the shape of its changed set is
+/// different, and the reading shows how: a move names two places and is read
+/// once, so a workload that moves a directory sits at half a ceiling a workload
+/// of edits would sit at.
+///
+/// **What the slack absorbs** is a document read at both ends of its own move.
+/// The rename reaches a host as a place that emptied and a place that filled,
+/// and a host that met the two in different increments opens the arriving name
+/// having already opened the departing one — 11 opens over these 12 places,
+/// which this admits and a tighter coefficient would not.
+const TOOL_OPENS: WorkBound = WorkBound {
+    counted: Counted::DocumentOpens,
+    what: "documents opened",
+    floor: 0,
+    per_change: 1,
+    counted_in: ChangedSetIn::Places,
+    named_input: "places where document content changed",
 };
 
 /// **The bound on documents a burst opens**, whose changed set is counted in
 /// steps rather than places.
 ///
-/// Profile: `small`. Twelve edits to one path and six documents landing at once
-/// are eighteen changes over seven places, and the bound is stated over the
-/// eighteen: a host that coalesced them into one increment reads far under this,
-/// and one that ran an increment per edit reads near it. Coalescing is an
-/// optimization, so the bound admits both. The measured reading is 27 opens over
-/// 18 steps.
+/// Profile: `small`. Twelve edits to one standing row and six documents landing
+/// at once are eighteen changes over seven places, and the bound is stated over
+/// the eighteen: a host that coalesced them into one increment reads far under
+/// this, and one that ran an increment per edit reads at it. Coalescing is an
+/// optimization, so the bound admits both. The measured reading is **13 opens**
+/// over 18 steps.
+///
+/// **What the slack absorbs is exactly that spread**: no coalescing at all is
+/// the twelve edits arriving as twelve increments, each opening the hammered
+/// path again, plus the six wide documents — eighteen opens, which is this
+/// ceiling to the unit. The measured 13 is what one host's coalescing happened
+/// to spend, and the bound deliberately does not hold it to that.
 const BURST_OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
     floor: 0,
-    per_change: 4,
+    per_change: 1,
+    counted_in: ChangedSetIn::Steps,
     named_input: "steps the workload applied",
 };
 
-/// **The bound's own negative control**, over the arithmetic rather than a host.
+/// **The arithmetic these bounds are stated in, checked against itself.**
 ///
-/// A bound is only worth stating if a reading can fail it, and the two ways one
-/// can are stated here: a counter one over the ceiling for its changed set, and
-/// the same counter against a bound tightened to admit nothing per change.
+/// Not a control over a host: nothing here attaches, and every number in it is
+/// one this test chose. What it says is that [`WorkBound::holds`] means what the
+/// bounds above read as — a reading at the ceiling passes, one past it fails,
+/// and a bound tightened to admit nothing per change refuses a reading its
+/// untightened self admitted.
+///
+/// **The controls that stand over a host are elsewhere.** That these counters
+/// really move with the churn is `one_seeded_edit_moves_the_maintenance_account`'s
+/// claim; that a ceiling never grows wide enough to admit re-reading the vault is
+/// asserted in `assert_maintenance_is_bracketed`, beside every reading it takes.
 #[test]
-fn a_work_bound_refuses_work_that_outgrew_its_changed_set() {
+fn the_work_bound_arithmetic_admits_its_ceiling_and_refuses_one_past_it() {
     let changes = 8;
-    for bound in [&OPENS, &UPSERTS, &BURST_OPENS] {
+    for bound in [&OPENS, &UPSERTS, &TOOL_OPENS, &BURST_OPENS] {
         let ceiling = bound.ceiling(changes);
         assert!(
             bound.holds(ceiling, changes),
@@ -694,9 +861,9 @@ fn a_work_bound_refuses_work_that_outgrew_its_changed_set() {
 enum When {
     /// Before anything attaches, so the attach heal is what derives them.
     Before,
-    /// After the host has reached `Ready` over the tree as generated.
+    /// After a host has reached `Ready` over the tree as it stands.
     Settled,
-    /// While the attach heal is still running.
+    /// While an attach heal is still running.
     DuringTheHeal,
 }
 
@@ -710,6 +877,9 @@ struct Churned {
     folding: Folding,
     census: Census,
     applied: Applied,
+    /// What the entry's trust state was when the last phase's first act landed,
+    /// where that phase ran against a heal rather than after one.
+    overlapped: Option<String>,
     /// What the host's jobs spent maintaining the churn, and nothing for the
     /// attach heal that came before it.
     #[cfg(feature = "induced-failure")]
@@ -720,14 +890,30 @@ fn sandbox(label: &str) -> Sandbox {
     Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label).expect("a sandbox")
 }
 
-/// Generate a tree, attach a host, run `script` against it, and settle.
-fn churn_the_vault(label: &str, script: &Script, when: When) -> Churned {
-    churn_the_vault_in(sandbox(label), script, when)
+/// Generate a tree, attach a host, and run `workload`'s two phases with a
+/// settle between them.
+///
+/// The settle between the phases is what makes the second one a workload
+/// against rows rather than against an empty store, and it is why a bracket
+/// taken afterwards is a bracket on maintenance: the account and the census
+/// this hands back are the changing phase's alone.
+fn churn_the_vault(label: &str, workload: &churn::Phased) -> Churned {
+    churn_the_vault_in(sandbox(label), workload)
 }
 
 /// The same, over a sandbox the caller already made — which is what a case that
 /// had to ask the volume something before generating a tree needs.
-fn churn_the_vault_in(sandbox: Sandbox, script: &Script, when: When) -> Churned {
+fn churn_the_vault_in(sandbox: Sandbox, workload: &churn::Phased) -> Churned {
+    attach_and_churn(sandbox, workload.opening(), When::Settled)
+        .then(workload.changing(), When::Settled)
+}
+
+/// Generate a tree, attach a host, run one script against it, and settle.
+///
+/// The phase-by-phase way in, for the cases that state their own phases: a
+/// workload landing before anything attaches, and one landing while a heal
+/// runs.
+fn attach_and_churn(sandbox: Sandbox, script: &Script, when: When) -> Churned {
     // Asked before the tree is generated and outside the vault, so the probe's
     // own file is never a change a host is asked to reconcile.
     let folding = declared_folding(&sandbox.work_dir());
@@ -740,6 +926,7 @@ fn churn_the_vault_in(sandbox: Sandbox, script: &Script, when: When) -> Churned 
         folding,
         census,
         applied: Applied::default(),
+        overlapped: None,
         #[cfg(feature = "induced-failure")]
         maintenance: EvidenceReading::default(),
     };
@@ -754,6 +941,7 @@ impl Churned {
     /// opening.
     fn then(mut self, script: &Script, when: When) -> Churned {
         let mut applied = Applied::default();
+        self.overlapped = None;
         if when == When::Before {
             apply(script, self.vault.path(), &mut applied);
             let host = self.vault.host();
@@ -761,9 +949,16 @@ impl Churned {
             self.census = census(self.vault.path(), self.folding);
             self.census
                 .assert_the_script_read_the_tree_the_same_way(script);
-            settle(&self.vault, &host, &self.census, applied.steps());
+            settle(&self.vault, &host, &self.census, &applied);
             drop(lease);
             self.applied = applied;
+            // The account of the phase before this one is not this phase's, and
+            // an attach heal's is not a changed set's, so nothing is carried
+            // forward for a bracket to read.
+            #[cfg(feature = "induced-failure")]
+            {
+                self.maintenance = EvidenceReading::default();
+            }
             return self;
         }
 
@@ -785,6 +980,12 @@ impl Churned {
             ),
             _ => None,
         };
+        if when == When::DuringTheHeal {
+            // Read between the demand and the first act, which is the only
+            // moment that says whether the two really overlapped. It is a
+            // reading rather than a wait: a case asserts on it afterwards.
+            self.overlapped = Some(format!("{:?}", host.state(self.vault.name())));
+        }
         apply(script, self.vault.path(), &mut applied);
         let waited = match when {
             When::DuringTheHeal => Some(attach::attach_and_wait(&host, self.vault.name())),
@@ -793,7 +994,7 @@ impl Churned {
         self.census = census(self.vault.path(), self.folding);
         self.census
             .assert_the_script_read_the_tree_the_same_way(script);
-        settle(&self.vault, &host, &self.census, applied.steps());
+        settle(&self.vault, &host, &self.census, &applied);
         #[cfg(feature = "induced-failure")]
         {
             self.maintenance = host.evidence().since(before);
@@ -902,6 +1103,26 @@ impl Churned {
         );
     }
 
+    /// **The workload really landed against a heal in flight.**
+    ///
+    /// The entry's state was read between the demand and the workload's first
+    /// act, and a heal that had already finished by then would have left it
+    /// `Ready` — which would make the case a catch-up against a settled host
+    /// wearing another name, and every claim it makes about concurrency
+    /// vacuous.
+    fn assert_the_workload_overlapped_a_heal(&self) {
+        let observed = self
+            .overlapped
+            .as_deref()
+            .expect("this case ran a phase against an active heal");
+        assert!(
+            !observed.contains("Ready"),
+            "the entry was already {observed} when the workload's first act landed, so the heal \
+             this case means to churn against had finished before the churn began\n{}",
+            self.applied
+        );
+    }
+
     /// The churned store holds `hash` at `path`.
     fn assert_derived_hash(&self, path: &str, hash: &str) {
         let mut store = self.vault.store();
@@ -964,17 +1185,39 @@ impl Churned {
             self.maintenance
         );
         // A bound that admitted re-reading the vault would not be a changed-set
-        // bound however well the reading fits under it.
+        // bound however well the reading fits under it — and a ceiling at most
+        // of the vault is barely narrower than one at all of it. The guard is
+        // therefore stated as a fraction: a ceiling past half the documents is
+        // a bound a whole-vault pass could hide inside twice over.
         let vault = norn_fixtures::Profile::by_name(PROFILE)
             .expect("the profile this suite churns")
             .docs as u64;
         assert!(
-            bound.ceiling(changes) < vault,
-            "the ceiling on {} for {changes} {} is {}, which admits re-reading all {vault} \
-             documents of `{PROFILE}`",
+            bound.ceiling(changes) < vault / 2,
+            "the ceiling on {} for {changes} {} is {}, which is over half the {vault} documents \
+             of `{PROFILE}` and so admits most of a whole-vault re-read",
             bound.what,
             bound.named_input,
             bound.ceiling(changes)
+        );
+    }
+
+    /// **The phase acted on rows the host was holding.**
+    ///
+    /// A prune is the one thing a workload cannot get by appearing: a place
+    /// nothing stood at derives a row and writes no death, so a reading of no
+    /// deletions and no tombstones says the whole workload reached the host as
+    /// "these files are new" however many removals and renames its script
+    /// spells. Every case that states this runs a phase whose script takes a
+    /// document away or moves one, and each of those is a row the phase before
+    /// it settled over.
+    fn assert_rows_were_taken_away(&self) {
+        assert!(
+            self.maintenance.documents_deleted > 0 && self.maintenance.tombstones_recorded > 0,
+            "this phase removed or moved a document the host held a row for, and the account \
+             records no death: {:?}\n{}",
+            self.maintenance,
+            self.applied
         );
     }
 
@@ -1001,10 +1244,9 @@ impl Churned {
 
     /// How many units of the changed set this bound is stated over.
     fn changed_set(&self, bound: &WorkBound) -> usize {
-        if bound.named_input.starts_with("steps") {
-            self.applied.steps()
-        } else {
-            self.applied.places().len()
+        match bound.counted_in {
+            ChangedSetIn::Places => self.applied.places().len(),
+            ChangedSetIn::Steps => self.applied.steps(),
         }
     }
 }
@@ -1015,6 +1257,8 @@ impl Churned {
     fn assert_maintenance_is_bracketed(&self, _: &WorkBound) {}
 
     fn assert_the_account_moved(&self) {}
+
+    fn assert_rows_were_taken_away(&self) {}
 }
 
 fn apply(script: &Script, root: &Path, applied: &mut Applied) {
@@ -1026,13 +1270,18 @@ fn apply(script: &Script, root: &Path, applied: &mut Applied) {
 /// **The settle.** Wait until the derived store agrees with the tree about
 /// which places hold documents and what bytes they hold.
 ///
-/// The condition is coarse on purpose — paths and content hashes, which is the
-/// cheapest thing that says the host caught up — and what is judged afterwards
-/// is everything a store holds. A wait on the whole judgment would be the bar
-/// waiting for itself.
-fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, changes: usize) {
+/// The condition is coarse on purpose — paths, content hashes and the pinned
+/// schema, which is the cheapest thing that says the host caught up — and what
+/// is judged afterwards is everything a store holds. A wait on the whole
+/// judgment would be the bar waiting for itself.
+///
+/// **A settle that runs out says what the workload did.** The steps that really
+/// ran are printed beside the disagreement, because a wait failing on a hash at
+/// a path names one place and the script names the acts that put every place in
+/// the state the host is behind on.
+fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, applied: &Applied) {
     let mut store = vault.store();
-    let budget = SETTLING.budget_for(changes);
+    let budget = SETTLING.budget_for(applied.steps());
     wait_until(
         "the derived store to agree with the tree the workload left",
         budget,
@@ -1047,7 +1296,7 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ch
             }
         },
     )
-    .unwrap_or_else(|failure| panic!("{failure}"));
+    .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,6 +1317,13 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ch
 /// agree about the *spelling* a document is rendered at is the equivalence
 /// comparator's question, asked of the whole projection rather than of this
 /// coarse signal.
+///
+/// **What keying by identity costs is duplicates.** Two derived rows whose
+/// spellings fold together collapse into one entry here, so a store holding
+/// both would look to this wait exactly like a store holding the right one. That
+/// is a limit of the signal and not a gap in the suite: the equivalence
+/// comparator reads every row of both projections, and the case that flips a
+/// name's case asks directly how many rows stand at the flipped identity.
 #[derive(Clone, Debug)]
 struct Census {
     /// What the volume does with case, which is what makes two spellings one
@@ -1079,6 +1335,14 @@ struct Census {
     without_rows: BTreeSet<String>,
     /// Each identity's spelling on disk, which is what a failure names.
     spellings: BTreeMap<String, String>,
+    /// The vault's own schema declaration, as the tree holds it.
+    ///
+    /// **A schema replacement changes no path and no hash**, so a store that
+    /// has not yet taken it agrees with every other part of this reading. A
+    /// settle that stopped there would let a case go on to drop the host with
+    /// the re-pin still pending — which discards it — and fail downstream as a
+    /// flake about findings nothing re-derived.
+    schema: Option<Vec<u8>>,
 }
 
 /// A path as its identity on a volume with this case behavior.
@@ -1156,6 +1420,22 @@ impl Census {
                 ));
             }
         }
+        if let Some(declared) = self.schema.as_ref() {
+            let pinned = store
+                .begin_request()
+                .vault_schema_pin()
+                .expect("reading the pinned vault schema");
+            match pinned {
+                Some(pin) if &pin.bytes == declared => {}
+                Some(_) => apart.push(
+                    "the store pins bytes the vault's schema declaration no longer holds"
+                        .to_string(),
+                ),
+                None => {
+                    apart.push("the vault declares a schema and the store pins none".to_string())
+                }
+            }
+        }
         if apart.is_empty() {
             return None;
         }
@@ -1173,6 +1453,7 @@ fn census(root: &Path, folding: Folding) -> Census {
         rows: BTreeMap::new(),
         without_rows: BTreeSet::new(),
         spellings: BTreeMap::new(),
+        schema: std::fs::read(root.join(".norn/schema.yaml")).ok(),
     };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -1224,31 +1505,20 @@ fn markdown_place(root: &Path, path: &Path) -> Option<String> {
     Some(relative.to_string_lossy().into_owned())
 }
 
-/// Every derived path and the hash the row holds, read a bounded page at a
-/// time.
+/// Every derived path and the hash the row holds.
+///
+/// The page loop is the attach fixture's, which every suite in this crate reads
+/// a whole vault through: the bound on one page is the point of it, and one
+/// place to state it is one place to keep it bounded.
 fn derived_hashes(store: &mut Store) -> BTreeMap<String, String> {
-    /// How many rows one page asks for: well under the page bound the store
-    /// accepts, so reading a vault is many bounded pages and never one wide one.
-    const PAGE: usize = 64;
-
-    let request = store.begin_request();
     let mut held = BTreeMap::new();
-    let mut after: Option<DocumentPath> = None;
-    loop {
-        let page = request
-            .stored_documents_after_ordered(after.as_ref(), PAGE, StoredPathOrder::Sensitive)
-            .expect("reading a page of derived documents");
-        let Some(last) = page.last() else {
-            return held;
-        };
-        after = Some(last.path.clone());
-        for document in page {
-            held.insert(
-                document.path.as_str().to_string(),
-                document.content_hash.clone(),
-            );
-        }
-    }
+    attach::for_each_derived_document(store, |document| {
+        held.insert(
+            document.path.as_str().to_string(),
+            document.content_hash.clone(),
+        );
+    });
+    held
 }
 
 /// The kinds of every finding standing at `path`, sorted.

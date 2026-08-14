@@ -42,6 +42,10 @@
 //! [`ordinary_editing`], [`atomic_replacement`] with [`case_flip`] beside it,
 //! [`burst`], [`validity_transitions`] and [`external_tools`].
 //!
+//! Each of them is a [`Phased`] pair rather than one script, because an edit is
+//! only an edit against a row a host already holds — see that type for why a
+//! workload that landed whole would say nothing but "files appeared".
+//!
 //! # The writes here are foreign on purpose
 //!
 //! `norn-fs` owns every write norn makes to a vault, and nothing in this module
@@ -131,23 +135,71 @@ pub enum Act {
     ReplaceWithDirectory { at: String },
 }
 
-impl Act {
-    /// Every vault-relative place this act names.
-    ///
-    /// A rename names two, which is what makes the changed set of a move two
-    /// places rather than one: a host owes work at the name that emptied as
-    /// well as at the name that filled.
-    pub fn places(&self) -> Vec<&str> {
-        match self {
-            Act::Write { at, .. }
-            | Act::AtomicReplace { at, .. }
-            | Act::Remove { at }
-            | Act::CreateDirectory { at }
-            | Act::RemoveDirectory { at }
-            | Act::ReplaceWithDirectory { at } => vec![at.as_str()],
-            Act::Rename { from, to } => vec![from.as_str(), to.as_str()],
+/// The document places `act` changes, read from the tree `act` is about to run
+/// against.
+///
+/// **A directory is not a place a document lives.** A bound stated over the
+/// changed set is stated over places a host may have to open, judge and write,
+/// and a directory is none of those: what a directory act really changes is the
+/// documents standing under it, so those are what this reports and the
+/// directory's own name is not. Counting the name as well would let a workload
+/// inflate its own changed set by naming directories, which is a bound growing
+/// to fit its reading.
+///
+/// **A rename names two places per document it moves** — the name that emptied
+/// and the name that filled — because a host owes work at both ends of a move.
+/// A rename of a directory is therefore the same account as renaming each
+/// document under it one at a time, which is what it is.
+///
+/// The tree is read here rather than after the act, because the documents a
+/// directory act changes are the ones standing under it while it still stands.
+fn document_places(root: &Path, act: &Act) -> Vec<String> {
+    match act {
+        Act::Write { at, .. }
+        | Act::AtomicReplace { at, .. }
+        | Act::Remove { at }
+        | Act::ReplaceWithDirectory { at } => documents([at.clone()]),
+        Act::CreateDirectory { .. } => Vec::new(),
+        Act::RemoveDirectory { at } => documents_under(root, at),
+        Act::Rename { from, to } if root.join(from).is_dir() => documents_under(root, from)
+            .into_iter()
+            .flat_map(|moved| {
+                let tail = moved[from.len()..].to_string();
+                [moved.clone(), format!("{to}{tail}")]
+            })
+            .collect(),
+        Act::Rename { from, to } => documents([from.clone(), to.clone()]),
+    }
+}
+
+/// Those of `named` that are markdown places, which is where a document lives.
+fn documents(named: impl IntoIterator<Item = String>) -> Vec<String> {
+    named.into_iter().filter(|at| at.ends_with(".md")).collect()
+}
+
+/// Every vault-relative markdown place standing under the directory `at`.
+///
+/// A symbolic link is not one: a vault walk refuses to follow one, so a `.md`
+/// link under a renamed directory is no document a host owes work at.
+fn documents_under(root: &Path, at: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![at.to_string()];
+    while let Some(relative) = pending.pop() {
+        let Ok(entries) = fs::read_dir(root.join(&relative)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let under = format!("{relative}/{name}");
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(under),
+                Ok(kind) if kind.is_file() && under.ends_with(".md") => found.push(under),
+                _ => {}
+            }
         }
     }
+    found.sort();
+    found
 }
 
 /// One act, and the sentence that says what it does.
@@ -200,12 +252,15 @@ impl Script {
 
     /// Declare that no document row stands at `at` once this script has run.
     ///
-    /// A convergence wait asks whether every markdown place in the tree has the
-    /// row its bytes imply, and the places named here are the exceptions the
-    /// workload put there deliberately: bytes no decoder accepts, and names
-    /// norn renders rather than spells. A wait that did not know about them
-    /// would never see the tree converge; a wait that admitted any missing row
-    /// would pass over a document the host dropped.
+    /// **This is a cross-check and not an instruction.** A suite reading the
+    /// tree afterwards decides for itself which places derive a row — a name
+    /// the document-path grammar refuses derives none, and neither do bytes no
+    /// decoder accepts — so a convergence wait does not need this declaration
+    /// to know where to expect one. What the declaration adds is a second
+    /// answer to the same question, made where the workload is written: a
+    /// workload that meant to leave a quarantined place and left a readable one
+    /// is caught against its own claim rather than passing a bar about a state
+    /// it never reached.
     pub fn without_rows_at(mut self, at: impl Into<String>) -> Script {
         self.places_without_rows.insert(at.into());
         self
@@ -268,6 +323,44 @@ impl fmt::Display for Script {
     }
 }
 
+/// A workload in the two phases a suite settles between.
+///
+/// **A modification is only a modification against a row a host already
+/// holds.** Everything a script writes between two of a host's polls arrives as
+/// one changed set, so a workload whose creations and its edits land together
+/// says nothing but "these files appeared": no row is re-derived, none is
+/// pruned, and no tombstone is written however many edits and deletions the
+/// script spells. Each family here is therefore two scripts — the [`opening`]
+/// puts content in the tree, and the [`changing`] acts on the rows a host that
+/// settled over the opening is holding by then.
+///
+/// The phase whose cost a suite brackets is the changing one, because that is
+/// the phase whose changed set is the subject.
+///
+/// [`opening`]: Phased::opening
+/// [`changing`]: Phased::changing
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Phased {
+    opening: Script,
+    changing: Script,
+}
+
+impl Phased {
+    pub fn new(opening: Script, changing: Script) -> Phased {
+        Phased { opening, changing }
+    }
+
+    /// The script that puts the content in the tree.
+    pub fn opening(&self) -> &Script {
+        &self.opening
+    }
+
+    /// The script that acts on the rows the host holds by then.
+    pub fn changing(&self) -> &Script {
+        &self.changing
+    }
+}
+
 /// What really happened to a tree.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Applied {
@@ -285,9 +378,12 @@ impl Applied {
         self.log.len()
     }
 
-    /// Every distinct place the steps named.
+    /// Every distinct place where document content changed.
     ///
-    /// This is the named input a spread-out workload's bound is stated over.
+    /// This is the named input a spread-out workload's bound is stated over,
+    /// and it counts documents rather than directories — see [`document_places`]
+    /// for what each act contributes and why a directory contributes its
+    /// contents rather than its name.
     pub fn places(&self) -> &BTreeSet<String> {
         &self.places
     }
@@ -353,6 +449,7 @@ pub fn apply_step(root: &Path, step: &Step, applied: &mut Applied) -> Result<(),
         at: at.to_path_buf(),
         source,
     };
+    let changed = document_places(root, &step.act);
     match &step.act {
         Act::Write { at, bytes } => {
             let path = root.join(at);
@@ -394,9 +491,7 @@ pub fn apply_step(root: &Path, step: &Step, applied: &mut Applied) -> Result<(),
         }
     }
     applied.log.push(step.says.clone());
-    applied
-        .places
-        .extend(step.act.places().into_iter().map(str::to_string));
+    applied.places.extend(changed);
     Ok(())
 }
 
@@ -492,65 +587,78 @@ pub const UNDECODABLE: &[u8] = b"# a title\n\nthese bytes are not text: \xff\xfe
 /// that the places a host is asked about are not all siblings: a directory that
 /// did not exist gains documents, documents that existed are edited, and a
 /// document and a whole directory are removed.
-pub fn ordinary_editing(seed: u64) -> Script {
+///
+/// The changing phase is where the re-derivation and the prune live: every
+/// place it names is one the opening phase already put a document at, so a host
+/// that settled over the opening is being asked to rewrite rows it holds and to
+/// take two of them away.
+pub fn ordinary_editing(seed: u64) -> Phased {
     let mut ink = Ink::new(seed);
-    let steps = vec![
-        Step::new(
-            "create a document at the vault root",
-            Act::Write {
-                at: "churn/root-note.md".to_string(),
-                bytes: ink.document("root note"),
-            },
-        ),
-        Step::new(
-            "create a document two directories down",
-            Act::Write {
-                at: "churn/inner/deeper/nested-note.md".to_string(),
-                bytes: ink.document("nested note"),
-            },
-        ),
-        Step::new(
-            "create a second document beside it",
-            Act::Write {
-                at: "churn/inner/deeper/sibling-note.md".to_string(),
-                bytes: ink.document("sibling note"),
-            },
-        ),
-        Step::new(
-            "create a document in a directory of its own",
-            Act::Write {
-                at: "churn/leaving/departing-note.md".to_string(),
-                bytes: ink.document("departing note"),
-            },
-        ),
-        Step::new(
-            "rewrite the root document with different text",
-            Act::Write {
-                at: "churn/root-note.md".to_string(),
-                bytes: ink.document("root note, revised"),
-            },
-        ),
-        Step::new(
-            "rewrite the nested document with different text",
-            Act::Write {
-                at: "churn/inner/deeper/nested-note.md".to_string(),
-                bytes: ink.long_document("nested note, revised", 4),
-            },
-        ),
-        Step::new(
-            "delete the document beside the nested one",
-            Act::Remove {
-                at: "churn/inner/deeper/sibling-note.md".to_string(),
-            },
-        ),
-        Step::new(
-            "delete the directory the departing document sits in, and the document with it",
-            Act::RemoveDirectory {
-                at: "churn/leaving".to_string(),
-            },
-        ),
-    ];
-    Script::new("ordinary editing across nested directories", steps)
+    let opening = Script::new(
+        "ordinary editing across nested directories: the documents that will change",
+        vec![
+            Step::new(
+                "create a document at the vault root",
+                Act::Write {
+                    at: "churn/root-note.md".to_string(),
+                    bytes: ink.document("root note"),
+                },
+            ),
+            Step::new(
+                "create a document two directories down",
+                Act::Write {
+                    at: "churn/inner/deeper/nested-note.md".to_string(),
+                    bytes: ink.document("nested note"),
+                },
+            ),
+            Step::new(
+                "create a second document beside it",
+                Act::Write {
+                    at: "churn/inner/deeper/sibling-note.md".to_string(),
+                    bytes: ink.document("sibling note"),
+                },
+            ),
+            Step::new(
+                "create a document in a directory of its own",
+                Act::Write {
+                    at: "churn/leaving/departing-note.md".to_string(),
+                    bytes: ink.document("departing note"),
+                },
+            ),
+        ],
+    );
+    let changing = Script::new(
+        "ordinary editing across nested directories: rewrites and removals over standing rows",
+        vec![
+            Step::new(
+                "rewrite the root document, which the host holds a row for",
+                Act::Write {
+                    at: "churn/root-note.md".to_string(),
+                    bytes: ink.document("root note, revised"),
+                },
+            ),
+            Step::new(
+                "rewrite the nested document, which the host holds a row for",
+                Act::Write {
+                    at: "churn/inner/deeper/nested-note.md".to_string(),
+                    bytes: ink.long_document("nested note, revised", 4),
+                },
+            ),
+            Step::new(
+                "delete the document beside the nested one, which the host holds a row for",
+                Act::Remove {
+                    at: "churn/inner/deeper/sibling-note.md".to_string(),
+                },
+            ),
+            Step::new(
+                "delete the directory the departing document sits in, and the document with it",
+                Act::RemoveDirectory {
+                    at: "churn/leaving".to_string(),
+                },
+            ),
+        ],
+    );
+    Phased::new(opening, changing)
 }
 
 /// **Family 2. Atomic replacement and movement.**
@@ -559,46 +667,58 @@ pub fn ordinary_editing(seed: u64) -> Script {
 /// directories. The case flip is [`case_flip`]'s, because what a flip means is
 /// the volume's own answer while this workload's claim is the same on every
 /// volume.
-pub fn atomic_replacement(seed: u64) -> Script {
+///
+/// Both acts of the changing phase are made against rows the host holds: the
+/// replacement lands over a document that already derived, and the move takes a
+/// standing row's name away from it.
+pub fn atomic_replacement(seed: u64) -> Phased {
     let mut ink = Ink::new(seed);
-    let steps = vec![
-        Step::new(
-            "land a document whole at a name that held nothing",
-            Act::AtomicReplace {
-                at: "churn/replaced/landing.md".to_string(),
-                bytes: ink.document("landing"),
-            },
-        ),
-        Step::new(
-            "land different content whole over the same name",
-            Act::AtomicReplace {
-                at: "churn/replaced/landing.md".to_string(),
-                bytes: ink.long_document("landing, revised", 6),
-            },
-        ),
-        Step::new(
-            "write a document that is about to move",
-            Act::Write {
-                at: "churn/replaced/travelling.md".to_string(),
-                bytes: ink.document("travelling"),
-            },
-        ),
-        Step::new(
-            "move it into a directory that did not exist",
-            Act::Rename {
-                from: "churn/replaced/travelling.md".to_string(),
-                to: "churn/arrived/travelling.md".to_string(),
-            },
-        ),
-        Step::new(
-            "move it again, keeping the directory and changing the name",
-            Act::Rename {
-                from: "churn/arrived/travelling.md".to_string(),
-                to: "churn/arrived/settled.md".to_string(),
-            },
-        ),
-    ];
-    Script::new("atomic replacement and movement", steps)
+    let opening = Script::new(
+        "atomic replacement and movement: the documents that will change",
+        vec![
+            Step::new(
+                "land a document whole at a name that held nothing",
+                Act::AtomicReplace {
+                    at: "churn/replaced/landing.md".to_string(),
+                    bytes: ink.document("landing"),
+                },
+            ),
+            Step::new(
+                "write a document that is about to move",
+                Act::Write {
+                    at: "churn/replaced/travelling.md".to_string(),
+                    bytes: ink.document("travelling"),
+                },
+            ),
+        ],
+    );
+    let changing = Script::new(
+        "atomic replacement and movement: content landing over a row, and a row's name moving",
+        vec![
+            Step::new(
+                "land different content whole over the name the host holds a row for",
+                Act::AtomicReplace {
+                    at: "churn/replaced/landing.md".to_string(),
+                    bytes: ink.long_document("landing, revised", 6),
+                },
+            ),
+            Step::new(
+                "move the standing row's document into a directory that did not exist",
+                Act::Rename {
+                    from: "churn/replaced/travelling.md".to_string(),
+                    to: "churn/arrived/travelling.md".to_string(),
+                },
+            ),
+            Step::new(
+                "move it again, keeping the directory and changing the name",
+                Act::Rename {
+                    from: "churn/arrived/travelling.md".to_string(),
+                    to: "churn/arrived/settled.md".to_string(),
+                },
+            ),
+        ],
+    );
+    Phased::new(opening, changing)
 }
 
 /// The name the case flip starts at.
@@ -617,39 +737,50 @@ pub const FLIPPED_TO: &str = "churn/replaced/FLIPPING.md";
 ///
 /// The acts are the same either way, which is the point: a workload does what a
 /// person does, and the volume decides what that means.
-pub fn case_flip(seed: u64, folding: Folding) -> Script {
+///
+/// The flip is the changing phase's, so the spelling that moves is a spelling
+/// the host is already holding a row at rather than one it has never seen.
+pub fn case_flip(seed: u64, folding: Folding) -> Phased {
     let mut ink = Ink::new(seed);
-    let steps = vec![
-        Step::new(
+    let opening = Script::new(
+        format!("a case flip on {folding}: the document that will flip"),
+        vec![Step::new(
             "write the document whose spelling is about to flip case",
             Act::Write {
                 at: FLIPPED_FROM.to_string(),
                 bytes: ink.document("flipping"),
             },
-        ),
-        Step::new(
-            match folding {
-                Folding::Distinct => {
-                    "flip the case of its name, which is a second place on this volume"
-                }
-                Folding::Folded => {
-                    "flip the case of its name, which re-spells the one place on this volume"
-                }
-            },
-            Act::Rename {
-                from: FLIPPED_FROM.to_string(),
-                to: FLIPPED_TO.to_string(),
-            },
-        ),
-        Step::new(
-            "land content whole at the flipped spelling",
-            Act::AtomicReplace {
-                at: FLIPPED_TO.to_string(),
-                bytes: ink.document("flipping, revised"),
-            },
-        ),
-    ];
-    Script::new(format!("a case flip on {folding}"), steps)
+        )],
+    );
+    let changing = Script::new(
+        format!("a case flip on {folding}"),
+        vec![
+            Step::new(
+                match folding {
+                    Folding::Distinct => {
+                        "flip the case of the standing row's name, which is a second place on \
+                         this volume"
+                    }
+                    Folding::Folded => {
+                        "flip the case of the standing row's name, which re-spells the one place \
+                         on this volume"
+                    }
+                },
+                Act::Rename {
+                    from: FLIPPED_FROM.to_string(),
+                    to: FLIPPED_TO.to_string(),
+                },
+            ),
+            Step::new(
+                "land content whole at the flipped spelling",
+                Act::AtomicReplace {
+                    at: FLIPPED_TO.to_string(),
+                    bytes: ink.document("flipping, revised"),
+                },
+            ),
+        ],
+    );
+    Phased::new(opening, changing)
 }
 
 /// How many times the burst rewrites the one path it hammers.
@@ -665,12 +796,26 @@ pub const BURST_EDITS: usize = 12;
 /// either is its own business — coalescing is an optimization and not a
 /// contract — and what it converges on is not: the last bytes written to the
 /// hammered path are the ones the store ends up holding.
-pub fn burst(seed: u64) -> Script {
+///
+/// The opening phase puts the hammered path there and lets the host settle over
+/// it, so every one of the burst's edits is a rewrite of a standing row rather
+/// than the arrival of a document nothing has seen.
+pub fn burst(seed: u64) -> Phased {
     let mut ink = Ink::new(seed);
+    let opening = Script::new(
+        "a burst against one path and a burst across many: the path to be hammered",
+        vec![Step::new(
+            "write the path the burst is about to hammer",
+            Act::Write {
+                at: "churn/burst/hammered.md".to_string(),
+                bytes: ink.document("hammered, before the burst"),
+            },
+        )],
+    );
     let mut steps = Vec::new();
     for edit in 0..BURST_EDITS {
         steps.push(Step::new(
-            format!("rewrite the hammered path, edit {edit}"),
+            format!("rewrite the standing row's hammered path, edit {edit}"),
             Act::Write {
                 at: "churn/burst/hammered.md".to_string(),
                 bytes: ink.document(&format!("hammered, edit {edit}")),
@@ -686,7 +831,10 @@ pub fn burst(seed: u64) -> Script {
             },
         ));
     }
-    Script::new("a burst against one path and a burst across many", steps)
+    Phased::new(
+        opening,
+        Script::new("a burst against one path and a burst across many", steps),
+    )
 }
 
 /// Where the vault's own schema declaration sits, and the two spellings a
@@ -715,78 +863,91 @@ pub struct SchemaGround<'a> {
 /// `oversized` is a document whose frontmatter block is past the bound the text
 /// layer reads, which — like the schema — is a fact about the layer that reads
 /// it rather than one a script can spell.
-pub fn validity_transitions(seed: u64, schema: SchemaGround<'_>, oversized: &[u8]) -> Script {
+///
+/// The opening phase establishes each of the four states and is settled over,
+/// so every transition in the changing phase is a crossing the host has to
+/// *unmake* something for: a row it holds goes, a finding it filed clears, a
+/// row it holds loses its frontmatter projection. Each phase declares the place
+/// that derives no row while it stands, and those are two different places.
+pub fn validity_transitions(seed: u64, schema: SchemaGround<'_>, oversized: &[u8]) -> Phased {
     let mut ink = Ink::new(seed);
-    let steps = vec![
-        Step::new(
-            "write a document nothing will happen to",
-            Act::Write {
-                at: "churn/states/steady.md".to_string(),
-                bytes: ink.document("steady"),
-            },
-        ),
-        Step::new(
-            "write a readable document",
-            Act::Write {
-                at: "churn/states/souring.md".to_string(),
-                bytes: ink.document("souring"),
-            },
-        ),
-        Step::new(
-            "write a document no decoder accepts",
-            Act::Write {
-                at: "churn/states/recovering.md".to_string(),
-                bytes: UNDECODABLE.to_vec(),
-            },
-        ),
-        Step::new(
-            "write a document whose frontmatter block is past the read bound",
-            Act::Write {
-                at: "churn/states/overlong.md".to_string(),
-                bytes: oversized.to_vec(),
-            },
-        ),
-        Step::new(
-            "replace the readable document with bytes no decoder accepts",
-            Act::Write {
-                at: "churn/states/souring.md".to_string(),
-                bytes: UNDECODABLE.to_vec(),
-            },
-        ),
-        Step::new(
-            "replace the undecodable document with text",
-            Act::Write {
-                at: "churn/states/recovering.md".to_string(),
-                bytes: ink.document("recovering"),
-            },
-        ),
-        Step::new(
-            "bring the overlong document's frontmatter block back inside the bound",
-            Act::Write {
-                at: "churn/states/overlong.md".to_string(),
-                bytes: ink.document("overlong, shortened"),
-            },
-        ),
-        Step::new(
-            "put a document past the read bound that was inside it",
-            Act::Write {
-                at: "churn/states/steady.md".to_string(),
-                bytes: oversized.to_vec(),
-            },
-        ),
-        Step::new(
-            "replace the vault's schema declaration",
-            Act::Write {
-                at: schema.at.to_string(),
-                bytes: schema.replacement.to_vec(),
-            },
-        ),
-    ];
-    Script::new(
-        "transitions between readable, quarantined and valid states",
-        steps,
+    let opening = Script::new(
+        "transitions between readable, quarantined and valid states: the four states",
+        vec![
+            Step::new(
+                "write a document nothing will happen to",
+                Act::Write {
+                    at: "churn/states/steady.md".to_string(),
+                    bytes: ink.document("steady"),
+                },
+            ),
+            Step::new(
+                "write a readable document",
+                Act::Write {
+                    at: "churn/states/souring.md".to_string(),
+                    bytes: ink.document("souring"),
+                },
+            ),
+            Step::new(
+                "write a document no decoder accepts",
+                Act::Write {
+                    at: "churn/states/recovering.md".to_string(),
+                    bytes: UNDECODABLE.to_vec(),
+                },
+            ),
+            Step::new(
+                "write a document whose frontmatter block is past the read bound",
+                Act::Write {
+                    at: "churn/states/overlong.md".to_string(),
+                    bytes: oversized.to_vec(),
+                },
+            ),
+        ],
     )
-    .without_rows_at("churn/states/souring.md")
+    .without_rows_at("churn/states/recovering.md");
+    let changing = Script::new(
+        "transitions between readable, quarantined and valid states",
+        vec![
+            Step::new(
+                "replace the readable document the host holds a row for with bytes no decoder \
+                 accepts",
+                Act::Write {
+                    at: "churn/states/souring.md".to_string(),
+                    bytes: UNDECODABLE.to_vec(),
+                },
+            ),
+            Step::new(
+                "replace the undecodable document the host holds no row for with text",
+                Act::Write {
+                    at: "churn/states/recovering.md".to_string(),
+                    bytes: ink.document("recovering"),
+                },
+            ),
+            Step::new(
+                "bring the overlong document's frontmatter block back inside the bound",
+                Act::Write {
+                    at: "churn/states/overlong.md".to_string(),
+                    bytes: ink.document("overlong, shortened"),
+                },
+            ),
+            Step::new(
+                "put a document past the read bound that was inside it",
+                Act::Write {
+                    at: "churn/states/steady.md".to_string(),
+                    bytes: oversized.to_vec(),
+                },
+            ),
+            Step::new(
+                "replace the vault's schema declaration",
+                Act::Write {
+                    at: schema.at.to_string(),
+                    bytes: schema.replacement.to_vec(),
+                },
+            ),
+        ],
+    )
+    .without_rows_at("churn/states/souring.md");
+    Phased::new(opening, changing)
 }
 
 /// **Family 5. What external tools do to a vault.**
@@ -799,41 +960,47 @@ pub fn validity_transitions(seed: u64, schema: SchemaGround<'_>, oversized: &[u8
 /// between them for a host to react to. And a tool that renames a directory
 /// moves every document under it in one act.
 ///
-/// A suite applies this one in parts: the catch-up batch is what it lands
-/// between a host's polls, and the editor saves are what it lands while a heal
-/// is running.
-pub fn external_tools(seed: u64) -> Script {
+/// The opening phase is the tree the tools find: a document the editor has
+/// already saved once, and the two documents the synchronization client is
+/// about to edit and remove. Everything the changing phase does is therefore
+/// done to a row the host holds — the second editor save re-derives one, the
+/// catch-up edits one and takes one away, and the directory rename moves every
+/// one of them at once.
+pub fn external_tools(seed: u64) -> Phased {
     let mut ink = Ink::new(seed);
-    let mut steps = vec![
-        Step::new(
-            "the editor opens a new file and saves it",
-            Act::AtomicReplace {
-                at: "churn/tools/drafted.md".to_string(),
-                bytes: ink.document("drafted"),
-            },
-        ),
-        Step::new(
-            "the editor saves the same document again",
-            Act::AtomicReplace {
-                at: "churn/tools/drafted.md".to_string(),
-                bytes: ink.long_document("drafted, second save", 3),
-            },
-        ),
-        Step::new(
-            "a document the synchronization client is about to remove",
-            Act::Write {
-                at: "churn/tools/synced/withdrawn.md".to_string(),
-                bytes: ink.document("withdrawn"),
-            },
-        ),
-        Step::new(
-            "a document the synchronization client is about to edit",
-            Act::Write {
-                at: "churn/tools/synced/amended.md".to_string(),
-                bytes: ink.document("amended"),
-            },
-        ),
-    ];
+    let opening = Script::new(
+        "what external tools do to a vault: the tree they find",
+        vec![
+            Step::new(
+                "the editor opens a new file and saves it",
+                Act::AtomicReplace {
+                    at: "churn/tools/drafted.md".to_string(),
+                    bytes: ink.document("drafted"),
+                },
+            ),
+            Step::new(
+                "a document the synchronization client is about to remove",
+                Act::Write {
+                    at: "churn/tools/synced/withdrawn.md".to_string(),
+                    bytes: ink.document("withdrawn"),
+                },
+            ),
+            Step::new(
+                "a document the synchronization client is about to edit",
+                Act::Write {
+                    at: "churn/tools/synced/amended.md".to_string(),
+                    bytes: ink.document("amended"),
+                },
+            ),
+        ],
+    );
+    let mut steps = vec![Step::new(
+        "the editor saves the document the host holds a row for again",
+        Act::AtomicReplace {
+            at: "churn/tools/drafted.md".to_string(),
+            bytes: ink.long_document("drafted, second save", 3),
+        },
+    )];
     // The catch-up batch: everything a sleeping machine missed, landing with
     // nothing between one change and the next.
     for arriving in 0..4 {
@@ -846,14 +1013,14 @@ pub fn external_tools(seed: u64) -> Script {
         ));
     }
     steps.push(Step::new(
-        "the sleep's catch-up edits a document that was already there",
+        "the sleep's catch-up edits a document the host holds a row for",
         Act::Write {
             at: "churn/tools/synced/amended.md".to_string(),
             bytes: ink.long_document("amended by the catch-up", 5),
         },
     ));
     steps.push(Step::new(
-        "the sleep's catch-up removes a document that was already there",
+        "the sleep's catch-up removes a document the host holds a row for",
         Act::Remove {
             at: "churn/tools/synced/withdrawn.md".to_string(),
         },
@@ -865,7 +1032,10 @@ pub fn external_tools(seed: u64) -> Script {
             to: "churn/tools/reconciled".to_string(),
         },
     ));
-    Script::new("what external tools do to a vault", steps)
+    Phased::new(
+        opening,
+        Script::new("what external tools do to a vault", steps),
+    )
 }
 
 #[cfg(test)]
@@ -892,7 +1062,7 @@ mod tests {
 
     #[test]
     fn a_script_renders_as_its_steps() {
-        let rendered = ordinary_editing(3).to_string();
+        let rendered = ordinary_editing(3).opening().to_string();
         assert!(
             rendered.contains("workload `ordinary editing"),
             "{rendered}"
@@ -903,21 +1073,100 @@ mod tests {
         );
     }
 
+    /// Applying both phases in order leaves the tree the family describes, and
+    /// the account of the second phase names the documents it changed.
     #[test]
     fn applying_a_script_writes_and_removes_what_it_says() {
         let root = scratch("ordinary");
-        let applied = ordinary_editing(5)
+        let workload = ordinary_editing(5);
+        workload
+            .opening()
             .apply(&root)
-            .expect("the script applies");
-        assert_eq!(applied.steps(), ordinary_editing(5).steps().len());
+            .expect("the opening phase applies");
+        let applied = workload
+            .changing()
+            .apply(&root)
+            .expect("the changing phase applies");
+        assert_eq!(applied.steps(), workload.changing().steps().len());
         assert!(root.join("churn/root-note.md").is_file());
         assert!(root.join("churn/inner/deeper/nested-note.md").is_file());
         assert!(!root.join("churn/inner/deeper/sibling-note.md").exists());
         assert!(!root.join("churn/leaving").exists());
-        assert!(
-            applied.places().contains("churn/leaving"),
-            "{}",
-            applied.places().len()
+        fs::remove_dir_all(&root).expect("removing the scratch tree");
+    }
+
+    /// **A directory act is accounted for by the documents under it.** The
+    /// removal names one directory and takes one document with it, and it is
+    /// the document that stands in the changed set: a bound counting the
+    /// directory as well would be a bound a workload could loosen by naming
+    /// directories.
+    #[test]
+    fn a_directory_act_names_the_documents_under_it_and_not_the_directory() {
+        let root = scratch("directory-places");
+        let workload = ordinary_editing(5);
+        workload
+            .opening()
+            .apply(&root)
+            .expect("the opening phase applies");
+        let applied = workload
+            .changing()
+            .apply(&root)
+            .expect("the changing phase applies");
+        assert_eq!(
+            applied.places().iter().cloned().collect::<Vec<String>>(),
+            vec![
+                "churn/inner/deeper/nested-note.md".to_string(),
+                "churn/inner/deeper/sibling-note.md".to_string(),
+                "churn/leaving/departing-note.md".to_string(),
+                "churn/root-note.md".to_string(),
+            ],
+            "{applied}"
+        );
+        fs::remove_dir_all(&root).expect("removing the scratch tree");
+    }
+
+    /// **A directory rename is accounted for at both ends of every document it
+    /// moves.** A host owes work where each name emptied and where each filled,
+    /// and the directory's own two names are neither.
+    #[test]
+    fn a_directory_rename_names_both_ends_of_every_document_it_moves() {
+        let root = scratch("directory-rename");
+        let script = Script::new(
+            "a directory of two documents, renamed",
+            vec![
+                Step::new(
+                    "write one",
+                    Act::Write {
+                        at: "from/one.md".to_string(),
+                        bytes: b"# one\n".to_vec(),
+                    },
+                ),
+                Step::new(
+                    "write another, a level down",
+                    Act::Write {
+                        at: "from/under/two.md".to_string(),
+                        bytes: b"# two\n".to_vec(),
+                    },
+                ),
+                Step::new(
+                    "rename the directory",
+                    Act::Rename {
+                        from: "from".to_string(),
+                        to: "to".to_string(),
+                    },
+                ),
+            ],
+        );
+        let applied = script.apply(&root).expect("the script applies");
+        assert_eq!(
+            applied.places().iter().cloned().collect::<Vec<String>>(),
+            vec![
+                "from/one.md".to_string(),
+                "from/under/two.md".to_string(),
+                "to/one.md".to_string(),
+                "to/under/two.md".to_string(),
+            ],
+            "{applied}"
         );
         fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
@@ -927,9 +1176,15 @@ mod tests {
     #[test]
     fn an_atomic_replacement_leaves_no_staging_file() {
         let root = scratch("atomic");
-        atomic_replacement(5)
+        let workload = atomic_replacement(5);
+        workload
+            .opening()
             .apply(&root)
-            .expect("the script applies");
+            .expect("the opening phase applies");
+        workload
+            .changing()
+            .apply(&root)
+            .expect("the changing phase applies");
         let left: Vec<String> = fs::read_dir(root.join("churn/replaced"))
             .expect("the directory the replacement landed in")
             .map(|entry| {
@@ -970,7 +1225,8 @@ mod tests {
     #[test]
     fn a_script_applied_in_parts_accounts_for_every_part() {
         let root = scratch("parts");
-        let script = burst(9);
+        let workload = burst(9);
+        let script = workload.changing();
         let mut applied = Applied::default();
         script
             .apply_range(&root, 0..3, &mut applied)
@@ -980,7 +1236,12 @@ mod tests {
             .apply_range(&root, 3..script.steps().len(), &mut applied)
             .expect("the rest applies");
         assert_eq!(applied.steps(), script.steps().len());
-        assert!(applied.to_string().contains("rewrite the hammered path"));
+        assert!(
+            applied
+                .to_string()
+                .contains("rewrite the standing row's hammered path"),
+            "{applied}"
+        );
         fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
@@ -997,19 +1258,30 @@ mod tests {
         fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
+    /// Each phase declares the place that derives no row while that phase's
+    /// tree stands, and the two phases name two different places.
     #[test]
     fn a_quarantining_workload_declares_the_place_that_holds_no_row() {
         let schema = SchemaGround {
             at: ".norn/schema.yaml",
             replacement: b"version: 1\n",
         };
-        let script = validity_transitions(4, schema, b"---\nkey: value\n---\n");
+        let workload = validity_transitions(4, schema, b"---\nkey: value\n---\n");
         assert!(
-            script
+            workload
+                .opening()
+                .places_without_rows()
+                .contains("churn/states/recovering.md"),
+            "{:?}",
+            workload.opening().places_without_rows()
+        );
+        assert!(
+            workload
+                .changing()
                 .places_without_rows()
                 .contains("churn/states/souring.md"),
             "{:?}",
-            script.places_without_rows()
+            workload.changing().places_without_rows()
         );
     }
 }
