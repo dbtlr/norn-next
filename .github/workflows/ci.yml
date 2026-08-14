@@ -62,6 +62,16 @@ jobs:
         run: cargo build --locked --workspace
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The lint above never sees norn-fs's library with the feature off. That
+      # crate is its own dev-dependency with `induced-failure` on, so
+      # `--all-targets` pulls the dev graph in and cargo unifies the feature to
+      # on for every target in the run — including the library. The shipped
+      # build is the feature-off one, and the items the fault seam leaves behind
+      # there are held clean by `cfg_attr` allows that nothing else checks. This
+      # step is the lane that checks them: the library alone, no dev targets, no
+      # feature.
+      - name: Lint the shipped norn-fs
+        run: cargo clippy --locked -p norn-fs --lib -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
       # Two crates declare an `induced-failure` feature, and the workspace test

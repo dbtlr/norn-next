@@ -31,6 +31,13 @@
 //! built by different routes, and one comparator is what keeps them from
 //! drifting into two meanings of "the same derived state".
 //!
+//! [`fidelity`] is the seam that judgment is recorded through. A comparison
+//! that only passes or fails answers one case and leaves no history, so every
+//! comparison a suite makes can be written out as one record — the populations
+//! it stood on and the first field it named. Nothing reads those records yet;
+//! the seam exists so the drift scans and the post-lockdown comparison attach to
+//! one vocabulary rather than inventing one apiece.
+//!
 //! [`churn`] is the other half of that judgment's subject. The comparator says
 //! whether two derived stores agree; the churn driver is what puts one of the
 //! two trees through the editing a host has to converge over — scripted, seeded
@@ -94,6 +101,7 @@ pub mod corpus;
 pub mod counters;
 pub mod equivalence;
 pub mod explain;
+pub mod fidelity;
 pub mod generated;
 pub mod invalidation;
 pub mod invariants;

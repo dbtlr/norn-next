@@ -572,7 +572,17 @@ pub mod induced_failure {
     pub const INCREMENT_SEAM: &str = "norn-store/increment";
 
     /// The seam the store schema's armed condition records itself under.
-    pub const CREATE_SEAM: &str = "norn-store/create";
+    ///
+    /// Crate-private where [`INCREMENT_SEAM`] is public, because the two arms
+    /// are judged by different processes. A changeset tear ends the process it
+    /// fires in, so the only evidence a parent has that the arm fired rather
+    /// than being deleted is the record — which is why the seam it is written
+    /// under is a name another crate's suite reads. A store schema refused at a
+    /// statement returns the refusal to its caller in the same process, and the
+    /// case that arms it asserts on that error. The record is written for a
+    /// reader that has to attribute an arm without a return value, and the
+    /// export arrives with the first such reader.
+    pub(crate) const CREATE_SEAM: &str = "norn-store/create";
 
     /// Record a store schema pair this build did not produce.
     ///

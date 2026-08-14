@@ -80,6 +80,7 @@ use norn_testkit::churn::{self, Act, Applied, Folding, Script, Step};
 use norn_testkit::equivalence::{
     Population, StoreProjection, assert_operationally_valid, tombstones,
 };
+use norn_testkit::fidelity;
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Convergence, Observed, wait_until};
 use norn_wire::{FindingKind, TrustState, WarmingPhase};
@@ -1204,6 +1205,10 @@ impl Churned {
         ] {
             projection.assert_population_at_least(&format!("{subject}: {label}"), floor);
         }
+        // The verdict is recorded before it is asserted on, so a run holds a
+        // reading for the case that failed as well as for the ones that passed —
+        // which is the half of a trend a passing-only record cannot carry.
+        fidelity::record(subject, &left.compare(&right));
         left.assert_equivalent(&right, &format!("{subject}\n{}", self.applied));
         // Kept, because the class and finding claims a case makes after this
         // one are asked of both derivations.

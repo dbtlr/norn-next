@@ -74,9 +74,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use norn_store::{
-    BlockFact, DocumentPath, HeadingFact, IndexedTerm, LinkFact, PillarReport, Store, StoreError,
-    StoredFinding, StoredPathOrder, StoredTombstone, TagFact, ddl,
+    BlockFact, DocumentPath, FindingCursor, HeadingFact, IndexedTerm, LinkFact, PillarReport,
+    Store, StoreError, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, ddl,
 };
+use norn_wire::{FindingKind, FindingScope};
 
 /// How many rows one page of a drain asks for.
 ///
@@ -155,7 +156,10 @@ pub struct ProjectedSchema {
 ///
 /// Every comparison reports one, so a verdict of "equal" is read beside what was
 /// compared rather than on its own.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Serializable because [`crate::fidelity`] is what a run's comparisons are
+/// recorded through, and a population is half of what a reading carries.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Population {
     pub documents: usize,
     pub facts: usize,
@@ -198,7 +202,11 @@ impl std::fmt::Display for Population {
 /// It names one field of one subject, because that is what a reader has to go
 /// and look at: a report that said only "unequal" would leave a failing case to
 /// be diagnosed by printing both projections and reading them side by side.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Serializable for the reason [`Population`] is: a divergence is the other half
+/// of a [`crate::fidelity`] reading, and naming one field is what makes a
+/// history of them worth scanning.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Divergence {
     /// The field, spelled as the path to it — `document[docs/a.md].content_hash`.
     pub field: String,
@@ -547,6 +555,24 @@ impl StoreProjection {
 ///   evolution path is: a store schema change is a rebuild from zero and
 ///   consumes no version number, so a row here would be a migration nothing
 ///   applied.
+/// - **Every finding stands where its kind says it may.** A finding's kind
+///   decides its scope, and the scope is a claim about the row beside it: a
+///   place-scoped finding — the three cause classes nothing is derivable from —
+///   is withheld while a document row stands at its subject, and a
+///   document-scoped finding — a frontmatter block nothing read — stands beside
+///   the row it is about and is meaningless without one. So the pairing is
+///   two-directional and this leg reads it both ways, over every finding the
+///   store holds rather than over the ones a case thought to ask about. See
+///   [ADR 0020]; the vocabulary is `norn-wire`'s `FindingKind::scope`.
+///
+///   **Nothing structural holds this.** The findings table keys by path and
+///   carries no foreign key to `documents` — deliberately, because a
+///   place-scoped finding outlives the absence it reports — so what enforces
+///   the pairing today is a withholding branch on the record path and a
+///   re-derivation condition on the heal. A store at rest is where the two meet,
+///   which is why the claim is asked here.
+///
+///   [ADR 0020]: https://github.com/dbtlr/norn/blob/main/docs/decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md
 /// - Every stored suffix key is the key its own path produces. The column is a
 ///   derived one the resolution ladder ranges over, and no read that answers a
 ///   caller's question compares it with the path beside it, so a row whose key
@@ -610,6 +636,8 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
         );
     }
 
+    assert_every_finding_stands_where_its_scope_allows(store, subject);
+
     for_each_stored_suffix_key(store, |path, stored| {
         assert_eq!(
             stored,
@@ -619,6 +647,67 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
         );
     })
     .unwrap_or_else(|problem| panic!("{subject}: draining the stored suffix keys: {problem}"));
+}
+
+/// **The finding-vs-live-row invariant.** Every finding the store holds stands
+/// at a path whose document row its kind's scope allows.
+///
+/// Both directions are read, because each catches a different loss. A
+/// place-scoped finding co-resident with a row is a report about a place nothing
+/// derived, standing at a place something derived — the withholding that keeps a
+/// readable document's spelling from being reported as a collision, lost. A
+/// document-scoped finding with no row is a report about a document's
+/// frontmatter with no document: whatever pruned the row left the finding, and a
+/// reader asking "what is wrong with this document" is answered about one that
+/// is not there.
+///
+/// The findings are drained through the store's own enumerator so an empty
+/// answer is an empty pillar, and the row beside each is asked for by key.
+fn assert_every_finding_stands_where_its_scope_allows(store: &mut Store, subject: &str) {
+    let request = store.begin_request();
+    let mut after: Option<FindingCursor> = None;
+    loop {
+        let page = request
+            .stored_findings_after(after, PAGE)
+            .unwrap_or_else(|problem| panic!("{subject}: draining the findings pillar: {problem}"));
+        let Some((last, _)) = page.last() else {
+            return;
+        };
+        after = Some(*last);
+        for (_, finding) in &page {
+            let kind = FindingKind::try_from(finding.kind.as_str()).unwrap_or_else(|_| {
+                panic!(
+                    "{subject}: the finding at `{}` carries the kind `{}`, which is outside the \
+                     closed vocabulary",
+                    finding.path.as_str(),
+                    finding.kind
+                )
+            });
+            let row = request
+                .stored_document(&finding.path)
+                .unwrap_or_else(|problem| {
+                    panic!(
+                        "{subject}: reading the row at `{}`: {problem}",
+                        finding.path.as_str()
+                    )
+                });
+            match (kind.scope(), row.is_some()) {
+                (FindingScope::Place, true) => panic!(
+                    "{subject}: the `{kind}` finding at `{}` is place-scoped and a document row \
+                     stands there. A place-scoped finding reports that nothing was derivable at \
+                     the place, and is withheld while a document occupies it.",
+                    finding.path.as_str()
+                ),
+                (FindingScope::Document, false) => panic!(
+                    "{subject}: the `{kind}` finding at `{}` is document-scoped and no document \
+                     row stands there. A document-scoped finding is about the document derived at \
+                     its subject, so it has nothing to be about.",
+                    finding.path.as_str()
+                ),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Hand every row's stored suffix key over beside its path, a bounded page at a
