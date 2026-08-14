@@ -1857,7 +1857,11 @@ impl<O: EntryOps> Host<O> {
         }
         // A parked entry is one nothing re-attaches, so the lease is recorded
         // and answered with the park itself rather than with a trust state that
-        // says nothing about why no work follows it.
+        // says nothing about why no work follows it. The arm is the park's own,
+        // because the lease it returns is the one shape this call has that
+        // schedules nothing; the two arms below answer through
+        // `EntryState::published_demand`, so which of a park and a label a
+        // caller is handed is settled in the one place that ranks them.
         if let Some(park) = state.parked() {
             drop(state);
             return Ok(DemandLease {
@@ -1872,7 +1876,7 @@ impl<O: EntryOps> Host<O> {
             // `schedule_demanded_work` schedules that same job: what the entry
             // needs is one fact, read the same way at either door.
             schedule_demand(&mut state, name);
-            let answer = Demand::State(state.trust.clone());
+            let answer = state.published_demand();
             drop(state);
             dispatch_pending(&self.shared, &entry)?;
             return Ok(DemandLease {
@@ -1882,7 +1886,7 @@ impl<O: EntryOps> Host<O> {
                 recovery_demand,
             });
         }
-        let answer = Demand::State(state.trust.clone());
+        let answer = state.published_demand();
         drop(state);
         Ok(DemandLease {
             outcome: answer,
@@ -3077,6 +3081,22 @@ fn dispatch_followup<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
             }
         }
     }
+}
+
+/// One trust state as a surface answers it, for a case that names the state it
+/// expects rather than the envelope that state becomes: the state itself where
+/// a poll walks out of it, and the envelope its reason is spelled in where one
+/// does not.
+///
+/// Every suite in this crate that reads [`Host::state`] renders its expectation
+/// through this, so a case names a state and the surface's own mapping decides
+/// how that state crosses.
+///
+/// The name is a placeholder: [`Demand::State`] reads nothing off it, and only
+/// [`Demand::UnknownVault`] echoes one.
+#[cfg(test)]
+pub(crate) fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
+    Demand::State(state).answer(&VaultName::new("answered").expect("a legal vault name"))
 }
 
 #[cfg(test)]
@@ -10375,15 +10395,6 @@ mod tests {
             work: state.claim.marker().and_then(scheduled_work),
             published: state.published_demand().answer(&name),
         }
-    }
-
-    /// One trust state as a surface answers it, for a case that names the state
-    /// it expects rather than the envelope that state becomes.
-    ///
-    /// The name is a placeholder: [`Demand::State`] reads nothing off it, and
-    /// only [`Demand::UnknownVault`] echoes one.
-    fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
-        Demand::State(state).answer(&VaultName::new("answered").expect("a legal vault name"))
     }
 
     /// One choice serves both demand sites, and it is a choice of two facts:

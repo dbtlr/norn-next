@@ -2999,6 +2999,7 @@ fn map_incumbent(incumbent: norn_fs::Incumbent) -> MaintainerIdentity {
 mod tests {
     use super::*;
     use crate::AttachMode;
+    use crate::lifecycle::answered;
     use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_store::OpenOutcome;
     use norn_testkit::wait::{Budget, Observed, wait_until};
@@ -8561,17 +8562,6 @@ mod tests {
             .begin_request()
             .stored_document(&DocumentPath::new(path).unwrap())
             .unwrap()
-    }
-
-    /// One trust state as a surface answers it: itself where a poll walks out
-    /// of it, and the envelope its reason is spelled in where one does not.
-    ///
-    /// The name is a placeholder, because only an unknown vault echoes one.
-    fn answered(
-        state: norn_wire::TrustState,
-    ) -> Result<norn_wire::TrustState, norn_wire::ErrorEnvelope> {
-        crate::lifecycle::Demand::State(state)
-            .answer(&VaultName::new("answered").expect("a legal vault name"))
     }
 
     /// Wait for the surface to answer one exact trust state.
