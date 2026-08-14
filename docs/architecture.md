@@ -128,9 +128,9 @@ the verdict, because every other route is an entry that holds the store the rung
 against itself is the only thing that meets damage no read fails on, so it runs as bounded
 lifecycle maintenance beside the shadow sweep — off the request path, never per request.
 
-**Every rung is to be reached by a test, across two suites**, and both are built. The churn
-suite reaches everything it states; the induced-failure suite reaches every row of its table
-but the two named below. Each suite below says where it stands.
+**Every rung is reached by a test, across two suites**, and both are built: the churn suite
+reaches everything it states, and the induced-failure suite reaches every row of its table.
+Each suite below says how.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
@@ -176,21 +176,36 @@ wall-clock ceiling on settling — its budget grows with the changed set and is 
 bound, and a ceiling tight enough to fail a slow convergence stays the scheduled lane's.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
-is its contract — each row an injection and the outcome required of it — and two of its
-rows are unreached: nothing stands a full disk or a revoked permission in front of a rung-2
-heal over vault paths. Both conditions are arranged elsewhere for other bars — `norn-fs`
-injects the shadow write that cannot take its content, which is the full-disk arm of its
-own write protocol, and its suites revoke permissions to reach their own refusals — so what
-these two rows wait on is the heal-side injection they are stated over.
+is its contract — each row an injection and the outcome required of it — and **every row of
+it is reached**. Each condition is met by the production path it is stated over rather than
+described to it: a **full disk** is the derived store's connection held to the page count
+its database already has, so the heal's own increment meets `SQLITE_FULL` from the engine; a
+**revoked permission** is a real mode taken away from a subtree between two attaches, so the
+heal's walk meets `EACCES` where it expected documents. Both are refusals, so each is
+followed by its recovery: the condition is cleared, the vault is demanded again, and what
+converges is compared against a derivation built from zero over the same tree.
+
+**A condition met by a process that dies is judged by the process that spawned it.** An
+abort is the only thing that leaves a database the way a killed process leaves one — no
+unwinding, no rollback through a destructor — so a tear is a child process that arms one
+boundary through the fenced seam, attaches through the same production entry operations
+every other case does, and never returns. Each arm **records the boundary it fired at**
+before it ends the process, and the parent asserts on that record beside the state at rest:
+what is left on disk cannot tell a hook that fired from a hook that was deleted, since a
+heal with no tear point in it converges and satisfies every outcome the row states by not
+having failed. The same discipline carries the write kernel's own checkpoints, where
+`norn-fs`'s fault seam is widened once — under a feature, at the public write entry point,
+read from the environment a child is started with — so that process death at each named
+stage of a compare-and-swap publication has a bar over what is at rest afterwards.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it. **The state such a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. Two signals in the rows' own state are what demand it, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document a tear left bare. Between the tear and the next heal over that path the finding is absent, so the vault under-reports across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. A tear inside one changeset is injected today; a tear at a chunk boundary and a tear between a flush's increment and its findings are the suite's to reach. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it. **The state such a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. Two signals in the rows' own state are what demand it, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document a tear left bare. Between the tear and the next heal over that path the finding is absent, so the vault under-reports across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. All three tears are injected: inside one changeset, at a chunk boundary, and between a flush's increment and its findings. The last is the one whose recovery is the row-borne signals above rather than a repair path, so its case is stated over both of them — a tombstone standing where a quarantined path had a row, and a degraded row standing bare — and asserts the findings are re-recorded by the next heal with no edit to either file. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
 | A document whose frontmatter block is read by nothing | **Degraded at rung 2.** The document keeps the row the act could derive — identity and body facts, no frontmatter projection — and a document-scoped finding naming the cause stands beside that row until an ordinary re-derivation finds the block readable. |
-| Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt — by the open where the corruption is in the store schema, and by the host's rung-3 leg where a warm read, a warm write or the scheduled verification is what met it. |
+| Corruption injection | **Handled at rung 3.** The database is discarded and rebuilt — by the open where the corruption is in the store schema, and by the host's rung-3 leg where a warm read, a warm write or the scheduled verification is what met it. **A rung 3 that cannot write the database it discarded to is the one state above the top of the ladder**, and the required behavior there is to give the entry back rather than to climb again: the store schema's own statement list types a corrupt database as damage at the statement that met it, the rung releases coverage, the store and the maintainer lock in that order, and a later attach is free to take the vault on. |
 | Stale store schema (DDL fingerprint mismatch) | **Handled at rung 3.** Pre-release — which is what the suite asserts today — a fingerprint mismatch means the DDL was edited, and the database is discarded and rebuilt. Once version 1 freezes as the migratable baseline, store schema *evolution* becomes the migrations pillar's job, and rung 3 is reached by a store schema that is damaged rather than merely out of date. |
 
 **Refusal is resolution.** Rung 3's second trigger reads "any state the lower rungs cannot
