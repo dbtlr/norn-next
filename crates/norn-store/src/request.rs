@@ -1323,26 +1323,65 @@ fn subject_discard_sql(scope: DiscardScope<'_>) -> String {
 /// three scopes rather than three operations: the cursor, the ordering and the
 /// scope's bounds are the same question of each of them, and a second spelling
 /// of any of the three is a second answer to it.
+///
+/// # A page has exactly one lower bound, and the cursor is it
+///
+/// Every predicate here is shaped by one rule: **the row the page starts at has
+/// to be reachable by a seek.** A cursor written as `?1 IS NULL OR path > ?1`
+/// reads as a filter rather than a bound, so SQLite starts at the beginning of
+/// the scope and steps to the cursor before returning anything — which costs a
+/// page the rows already paged, and costs a full walk the vault once per page.
+///
+/// So the lower bound is `COALESCE(cursor, exact, descendant_lower)`: one term,
+/// index-usable, and the empty string where a scope has no floor of its own. It
+/// is a sound floor because [`DocumentPath`] refuses the empty spelling, so
+/// every stored path sorts above it under either collation.
+///
+/// **The coalesce is the whole point, and two `>=` terms is the trap it avoids.**
+/// Writing the scope's floor and the cursor as separate bounds gives SQLite two
+/// candidates for one seek; it takes the scope's and demotes the cursor to a
+/// filter, which is the quadratic shape again with an index in front of it. The
+/// cursor is always inside the scope, so coalescing to it is always the tighter
+/// of the two. `MAX()` would express the same intent and get it wrong: it
+/// compares under `BINARY`, and against a folded scope the wrong argument wins.
+///
+/// A bounded scope is **one** range and not two. A root sorts ahead of the
+/// separator its descendants open with, so one range spans the root and
+/// everything under it, and the disjunction inside the range drops what sorts
+/// between them — a root's textual neighbours, `ab` while `a` is being healed.
+/// Two ranges are a union, and a union of two seeks has to be sorted before it
+/// can be paged. A directory scope binds no exact subject, and the disjunction
+/// stands anyway: `path = NULL` is never true, so the term reads as the
+/// descendant range alone. Spelling that scope its own predicate would state the
+/// membership rule twice, and an `OR` is not a bound in either scope — which is
+/// what leaves the coalesced floor as the one term a seek can take.
+///
+/// The folded forms carry the fold in the bounds and the cursor both, because a
+/// scope's membership and a page's order are the same total order: `NOCASE`
+/// first, the bytewise tie-break second, which is what keeps a page total where
+/// two rows fold together. The tie-break is why the folded cursor still names
+/// the row it is: `path > ?1 COLLATE NOCASE OR path > ?1`, under a lower bound
+/// that already excludes everything below the cursor's folded key, admits a row
+/// equal under the fold only where it sorts after the cursor bytewise.
 fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String {
-    let cursor = match order {
-        StoredPathOrder::Sensitive => "(?1 IS NULL OR path > ?1)",
-        StoredPathOrder::AsciiCaseInsensitive => {
-            "(?1 IS NULL OR
-                    path > ?1 COLLATE NOCASE OR
-                    (path = ?1 COLLATE NOCASE AND path > ?1))"
+    let predicate = match (scope, order) {
+        (SubjectScope::Vault, StoredPathOrder::Sensitive) => "path > COALESCE(?1, '')",
+        (SubjectScope::Vault, StoredPathOrder::AsciiCaseInsensitive) => {
+            "path >= COALESCE(?1, '') COLLATE NOCASE
+               AND (?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)"
         }
-    };
-    let bounded = match (scope, order) {
-        (SubjectScope::Vault, _) => "",
         (SubjectScope::Subtree(_) | SubjectScope::Under(_), StoredPathOrder::Sensitive) => {
-            "\n               AND (path = ?2 OR (path >= ?3 AND path < ?4))"
+            "path >= COALESCE(?1, ?2, ?3) AND path < ?4
+               AND (path = ?2 OR path >= ?3)
+               AND (?1 IS NULL OR path > ?1)"
         }
         (
             SubjectScope::Subtree(_) | SubjectScope::Under(_),
             StoredPathOrder::AsciiCaseInsensitive,
         ) => {
-            "\n               AND (path = ?2 COLLATE NOCASE OR
-                    (path >= ?3 COLLATE NOCASE AND path < ?4 COLLATE NOCASE))"
+            "path >= COALESCE(?1, ?2, ?3) COLLATE NOCASE AND path < ?4 COLLATE NOCASE
+               AND (path = ?2 COLLATE NOCASE OR path >= ?3 COLLATE NOCASE)
+               AND (?1 IS NULL OR path > ?1 COLLATE NOCASE OR path > ?1)"
         }
     };
     let ordering = document_page_ordering(order);
@@ -1350,7 +1389,7 @@ fn document_page_sql(scope: SubjectScope<'_>, order: StoredPathOrder) -> String 
     format!(
         "SELECT {DOCUMENT_PAGE_COLUMNS}
              FROM documents
-             WHERE {cursor}{bounded}
+             WHERE {predicate}
              ORDER BY {ordering}
              LIMIT ?{limit}"
     )
@@ -1402,6 +1441,23 @@ fn document_page_parameters(
 /// decides: a case-insensitive vault folds a subtree's bounds the way that
 /// subtree's rows are folded, so the two sides of one walk address one set of
 /// places.
+///
+/// **The cursor is the page's lower bound rather than a test applied to rows the
+/// page already read.** `?1 IS NULL OR path > ?1` is not a bound, so a prune of
+/// a scope would pass over the findings index once per page of it instead of
+/// once in total. `path > COALESCE(?1, '')` is one term and index-usable in
+/// both cursor states — `''` is a sound floor because [`DocumentPath`] refuses
+/// the empty spelling.
+///
+/// The two orders reach that bound differently, because only one collation is
+/// `findings_path`'s. Bytewise, the cursor and the scope's floor are both
+/// candidates for the one seek, so they coalesce into one term — cursor first,
+/// since a cursor is always inside the scope and so always the tighter of the
+/// two. Folded, the scope's bounds compare under `NOCASE` against an index that
+/// orders bytewise, so no scope term can be a bound at all: the cursor is the
+/// seek and the fold is a filter over the rows it reaches. That is the shape
+/// this page's stated bar has: one pass over the findings index across the whole
+/// prune, and a narrower bound would be a second index no reader has asked for.
 fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPathOrder) -> String {
     // One range holds a root and its descendants both, because a root sorts
     // ahead of the separator its descendants open with — so the seek is the
@@ -1409,20 +1465,22 @@ fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPath
     // between the two, which are a root's textual neighbours rather than
     // anything under it. Spelling the root's own subject as a second range
     // instead costs the ordering: two ranges are a union, and a union of two
-    // seeks has to be sorted before it can be paged.
-    let bounded = match (scope, order) {
-        (SubjectScope::Vault, _) => "",
-        (SubjectScope::Subtree(_), StoredPathOrder::Sensitive) => {
-            " AND path >= ?2 AND path < ?4
-               AND (path = ?2 OR path >= ?3)"
+    // seeks has to be sorted before it can be paged. A directory scope binds no
+    // exact subject, and `path = NULL` is never true, so the same disjunction
+    // reads as the descendant range alone.
+    let scoped = match (scope, order) {
+        (SubjectScope::Vault, _) => "path > COALESCE(?1, '')",
+        (SubjectScope::Subtree(_) | SubjectScope::Under(_), StoredPathOrder::Sensitive) => {
+            "path >= COALESCE(?1, ?2, ?3) AND path < ?4
+               AND (path = ?2 OR path >= ?3)
+               AND (?1 IS NULL OR path > ?1)"
         }
-        (SubjectScope::Subtree(_), StoredPathOrder::AsciiCaseInsensitive) => {
-            " AND path >= ?2 COLLATE NOCASE AND path < ?4 COLLATE NOCASE
+        (
+            SubjectScope::Subtree(_) | SubjectScope::Under(_),
+            StoredPathOrder::AsciiCaseInsensitive,
+        ) => {
+            "path > COALESCE(?1, '') AND path < ?4 COLLATE NOCASE
                AND (path = ?2 COLLATE NOCASE OR path >= ?3 COLLATE NOCASE)"
-        }
-        (SubjectScope::Under(_), StoredPathOrder::Sensitive) => " AND path >= ?3 AND path < ?4",
-        (SubjectScope::Under(_), StoredPathOrder::AsciiCaseInsensitive) => {
-            " AND path >= ?3 COLLATE NOCASE AND path < ?4 COLLATE NOCASE"
         }
     };
     let first_kind = if scope.bounds().is_some() { 5 } else { 2 };
@@ -1433,7 +1491,7 @@ fn finding_subjects_sql(scope: SubjectScope<'_>, kinds: usize, order: StoredPath
     let limit = first_kind + kinds;
     format!(
         "SELECT DISTINCT path FROM findings
-             WHERE (?1 IS NULL OR path > ?1){bounded}
+             WHERE {scoped}
                AND kind IN ({placeholders})
                AND NOT EXISTS (SELECT 1 FROM documents WHERE documents.path = findings.path)
              ORDER BY path

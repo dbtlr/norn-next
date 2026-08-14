@@ -1441,6 +1441,65 @@ fn the_walked_scope_page_names_the_subjects_no_document_row_stands_at() {
     ));
 }
 
+/// **A vault that folds ASCII case bounds a prune's scope under the same fold,
+/// and pages it bytewise all the same.** Scope membership is the walk's question
+/// — the two sides of one walk have to address one set of places, so a root
+/// spelled one way holds a subject spelled the other — while the cursor and the
+/// order are the page's own, and a page read against a caller's set needs only a
+/// total order. A page of one is what states that the cursor is exclusive under
+/// that split rather than only the first page of it.
+#[test]
+fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
+    let scratch = Scratch::new("walked-scope-page-folded");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let kinds = &[FindingKind::BodyBytesNotUtf8];
+    for at in ["One", "One/Gone.md", "one/deep/gone.md", "two/gone.md"] {
+        request
+            .record_finding(&violation(at))
+            .expect("recording a finding");
+    }
+    let drained = |scope: norn_store::SubjectScope<'_>| {
+        let mut seen: Vec<String> = Vec::new();
+        let mut after: Option<norn_store::DocumentPath> = None;
+        loop {
+            let page = request
+                .finding_subjects_without_rows_after(
+                    scope,
+                    kinds,
+                    after.as_ref(),
+                    1,
+                    norn_store::StoredPathOrder::AsciiCaseInsensitive,
+                )
+                .expect("a page of one");
+            let Some(subject) = page.into_iter().next() else {
+                return seen;
+            };
+            assert!(
+                seen.len() < 8,
+                "the cursor did not advance past {seen:?} in a scope this small"
+            );
+            seen.push(subject.as_str().to_string());
+            after = Some(subject);
+        }
+    };
+
+    // The root's own subject and its descendants, whichever case each is spelled
+    // in — and never the subject under a root the fold does not reach.
+    assert_eq!(
+        drained(norn_store::SubjectScope::Subtree(&path("one"))),
+        ["One", "One/Gone.md", "one/deep/gone.md"]
+    );
+    // A directory names no subject of its own, so the same span read that way
+    // holds the descendants alone.
+    assert_eq!(
+        drained(norn_store::SubjectScope::Under(
+            &norn_store::DirectoryPrefix::new("ONE").expect("a directory")
+        )),
+        ["One/Gone.md", "one/deep/gone.md"]
+    );
+}
+
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
 /// the idempotence story.** Re-deriving a class empties it and records what holds
 /// now, so two derivations of one class cannot leave two copies — and every

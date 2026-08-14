@@ -151,6 +151,124 @@ fn ascii_folded_subtree_pages_are_segment_safe_and_cursor_stable() {
     );
 }
 
+/// Every path a scope holds, drained one page at a time at the smallest page
+/// there is. A page of one is what a cursor is judged by: a cursor that does not
+/// advance repeats a row forever, and a cursor that advances too far drops the
+/// row after it.
+fn drained(
+    request: &norn_store::Request<'_>,
+    scope: norn_store::SubjectScope<'_>,
+    order: StoredPathOrder,
+) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<DocumentPath> = None;
+    loop {
+        let page = match scope {
+            norn_store::SubjectScope::Vault => {
+                request.stored_documents_after_ordered(after.as_ref(), 1, order)
+            }
+            norn_store::SubjectScope::Subtree(root) => {
+                request.stored_documents_in_subtree_after_ordered(root, after.as_ref(), 1, order)
+            }
+            norn_store::SubjectScope::Under(prefix) => {
+                request.stored_documents_under_after_ordered(prefix, after.as_ref(), 1, order)
+            }
+        }
+        .expect("a page of one");
+        assert!(page.len() <= 1, "a page of one returned {}", page.len());
+        let Some(row) = page.into_iter().next() else {
+            return seen;
+        };
+        assert!(
+            seen.len() < 16,
+            "the cursor did not advance past {seen:?} in a scope this small"
+        );
+        seen.push(row.path.as_str().to_string());
+        after = Some(row.path);
+    }
+}
+
+/// **Two rows a folding vault reads as one name are both paged, in one order,
+/// once each.** The path index is unique under a bytewise comparison, so a case
+/// rename leaves `A.md` standing beside `a.md` on a vault that folds them
+/// together — which is the pair a heal exists to reconcile, and the pair a
+/// folded cursor has to be total over. A page of one is where a cursor that
+/// stalls on the fold shows itself.
+#[test]
+fn a_folded_page_of_one_steps_between_two_rows_that_fold_together() {
+    let scratch = Scratch::new("document-page-alias");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("A.md", "hash-upper", "upper\n"),
+            document("a.md", "hash-lower", "lower\n"),
+            document("b.md", "hash-b", "b\n"),
+        ],
+    );
+
+    assert_eq!(
+        drained(
+            &request,
+            norn_store::SubjectScope::Vault,
+            StoredPathOrder::AsciiCaseInsensitive
+        ),
+        ["A.md", "a.md", "b.md"]
+    );
+    assert_eq!(
+        drained(
+            &request,
+            norn_store::SubjectScope::Vault,
+            StoredPathOrder::Sensitive
+        ),
+        ["A.md", "a.md", "b.md"]
+    );
+}
+
+/// **A subtree page holds the root's own row and its descendants, and never a
+/// name that merely sorts between them.** `a-b/no.md` falls inside the span the
+/// page seeks — the separator sorts above `-` — and is not under `a`; `ab/no.md`
+/// falls outside it. Draining the scope one row at a time is what states that
+/// the neighbours are dropped by every page rather than only by the first.
+#[test]
+fn a_subtree_page_of_one_walks_the_root_and_its_descendants_and_no_neighbour() {
+    let scratch = Scratch::new("document-page-neighbours");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("a", "hash-root", "root\n"),
+            document("a/one.md", "hash-one", "one\n"),
+            document("a/nested/deep.md", "hash-deep", "deep\n"),
+            document("a-b/no.md", "hash-dash", "no\n"),
+            document("ab/no.md", "hash-ab", "no\n"),
+            document("b.md", "hash-b", "b\n"),
+        ],
+    );
+
+    let root = path("a");
+    let prefix = DirectoryPrefix::new("a").expect("a directory");
+    for order in [
+        StoredPathOrder::Sensitive,
+        StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        assert_eq!(
+            drained(&request, norn_store::SubjectScope::Subtree(&root), order),
+            ["a", "a/nested/deep.md", "a/one.md"],
+            "a subtree page of one took a textual neighbour or dropped a descendant"
+        );
+        // The same span read as a directory holds the descendants and not the
+        // row standing at the directory's own name.
+        assert_eq!(
+            drained(&request, norn_store::SubjectScope::Under(&prefix), order),
+            ["a/nested/deep.md", "a/one.md"],
+            "a directory page of one took the row at the directory's own name"
+        );
+    }
+}
+
 #[test]
 fn stored_document_subtree_pages_are_segment_safe_bounded_and_exclusive() {
     let scratch = Scratch::new("document-subtree-pages");

@@ -312,16 +312,23 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and five named statements carry an index bar through it: suffix candidates,
+connection — and six named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
-and the page a walk reads its scope's unaccounted finding subjects through, whose bar is the
-weaker one its shape admits: an ordered pass over the findings index per scope a job walked,
-never a read of the table, never a sorter, and an indexed seek per row for the document the
-place may hold. A scope the vault spells as it stores it narrows that pass to a seek; a vault
-that folds ASCII case bounds the scope under the folding and reads the pass, which is what
-the row page beside it already costs per scope, over the larger table and through a sorter.
-None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
+the page a walk reads its scope's unaccounted finding subjects through, and the ordered
+document page a heal merges its walk against.
+
+The two paged statements are barred in the same terms, because a page is judged by what it
+reads before it returns its first row: the cursor is a bound on an index rather than a test
+applied to rows already read. The document page seeks the index that holds the order it
+states — the unique path index where the vault compares bytes, and an index declared under
+the same ASCII fold where the vault folds case — in all three scopes and both orders, and
+never sorts. The finding-subject page carries the weaker bar its shape admits: one ordered
+pass over the findings index per prune, never a read of the table, never a sorter, and an
+indexed seek per row for the document the place may hold. A scope the vault spells as it
+stores it narrows that pass to a seek of the scope's own range; a vault that folds ASCII
+case bounds the scope under the folding while that index orders bytewise, so the fold reads
+as a filter over the one pass the cursor seeks into. None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
 query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
 per PR, and no query shape carries a timing or a memory bar.
 

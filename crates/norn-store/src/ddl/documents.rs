@@ -31,6 +31,36 @@
 //! no statement reads and that a bad write could make disagree with the path
 //! beside it.
 //!
+//! # Two indexes over one column, because the vault decides the order
+//!
+//! `documents_path` is unique and compares bytes, which is what the store's
+//! default collation gives it. `documents_path_nocase` declares
+//! `path COLLATE NOCASE, path`, which is the order a case-insensitive vault
+//! root proves for its own names, term for term: ASCII case folded, ties broken
+//! bytewise. SQLite's `NOCASE` maps `A`-`Z` to `a`-`z` and leaves every other
+//! byte alone, which is the filesystem seam's fold exactly — including its
+//! refusal to invent a Unicode policy over path bytes that need not be UTF-8.
+//!
+//! **The fold is still the vault's rather than the store's.** Which of the two
+//! orders applies is a filesystem behaviour, proven at the vault root and
+//! carried here as a parameter of the read; an index serves an order a caller
+//! asked for, and records no truth about a path. Nothing here folds a value on
+//! its own account, and the column holds the one spelling it was given.
+//!
+//! The reader that pays for the second index is the heal's ordered document
+//! page. It merges a bounded page of rows against a walk that yields files in
+//! the vault's own order, so the two sides need one total order — and a page
+//! has to *seek* into that order, because a page that sorts for it has read
+//! everything the scope holds before returning its first row. It is declared
+//! for every store, folding vault or not: the schema is one statement list, the
+//! fold is a per-read parameter, and DDL conditional on a vault the store has
+//! not been shown is a shape no fingerprint could state.
+//!
+//! The bytewise tie-break is load-bearing rather than decorative. `documents_path`
+//! is unique under `BINARY`, so `A.md` and `a.md` can both hold rows even on a
+//! vault that folds them together — the stale row a case rename leaves, which
+//! the heal reaches by paging over exactly this order.
+//!
 //! # The rest of the row
 //!
 //! - `content_hash` — the hash the filesystem seam computed over the bytes it
@@ -82,5 +112,6 @@ const STATEMENTS: &[&str] = &[
     derived_at                   INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
+    "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
 ];
