@@ -23,8 +23,8 @@
 //! which checkpoint it answered at, in the child, before it answers — and a
 //! hook removed from the protocol fails these cases on the missing record. The
 //! [`unarmed`](the_child_role_publishes_under_whatever_it_was_armed_at) control
-//! is the other half: the same code with nothing armed records nothing and
-//! lands the write.
+//! is the other half: the same code, spawned the same way with the same live
+//! record file and nothing armed, records nothing and lands the write.
 //!
 //! This is a binary of its own because its cases spawn processes, and a suite
 //! that spawns none should not wait on one that does.
@@ -85,11 +85,19 @@ const SIGABRT: i32 = 6;
 /// this binary starts, so the call below is the ordinary public entry point and
 /// nothing here knows a checkpoint was armed.
 ///
-/// In an ordinary run of the suite it is the **control**, and it is what makes
-/// the record assertions mean something: the same call with nothing armed
-/// reaches the end of the protocol, lands the write, and writes no seam record
-/// at all. A case that asserts a record therefore asserts something this run
-/// proves is not free.
+/// In an ordinary run of the suite it spawns itself with nothing armed, which
+/// is the **control**, and that is what makes the record assertions mean
+/// something: the same call reaches the end of the protocol, lands the write,
+/// and writes no seam record at all. A case that asserts a record therefore
+/// asserts something this run proves is not free.
+///
+/// **The control runs as a child for the sake of the record file.** An arm
+/// records itself only where the environment names a file to record into, so a
+/// control that ran here in the parent — where nothing names one — would satisfy
+/// "no checkpoint recorded" by having no sink, and the absence assertion every
+/// death case rests on would hold over a protocol with no checkpoints left in
+/// it. Spawned, the control differs from an armed case in the arm and in
+/// nothing else.
 #[test]
 fn the_child_role_publishes_under_whatever_it_was_armed_at() {
     if let Some(root) = std::env::var_os(ROLE) {
@@ -98,7 +106,14 @@ fn the_child_role_publishes_under_whatever_it_was_armed_at() {
     }
 
     let tree = Tree::new("unarmed");
-    publish(tree.root());
+    let outcome = tree.spawn(&[], None);
+
+    assert_eq!(
+        outcome.status,
+        RunStatus::Exited(0),
+        "{}",
+        outcome.stderr_text()
+    );
     assert_eq!(tree.destination_bytes(), Some(NEW.to_vec()));
     assert_eq!(tree.shadow_names(), Vec::<String>::new());
 
