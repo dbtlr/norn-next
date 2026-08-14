@@ -390,6 +390,24 @@ fn a_row_identifier_a_generation_and_a_timestamp_leave_two_stores_equal() {
     );
 }
 
+/// **The suffix key is checked against the path that produced it.** The column
+/// is written once, by the path type, and read back only as the range the
+/// resolution ladder seeks: a key that drifted from its path answers probes it
+/// does not belong to, and every read that would notice goes through the same
+/// drifted range. Nothing but a recompute at rest catches it, so the leg
+/// recomputes — and this is the drift, moved through the fenced seam because no
+/// writer reaches the column without the path beside it.
+#[test]
+#[should_panic(expected = "holds a suffix key its own path does not produce")]
+fn a_suffix_key_that_drifted_from_its_path_fails_the_operational_leg() {
+    let scratch = Scratch::new("operational-leg-suffix-key");
+    let mut store = scratch.open();
+    populate(&mut store);
+    induced_failure::execute_out_of_band(&mut store, "UPDATE documents SET suffix_key = 'drift/'")
+        .expect("moving the stored suffix key alone");
+    assert_operationally_valid(&mut store, "a store whose suffix key drifted from its path");
+}
+
 /// **The tombstone exclusion, pinned the way a vault produces it.** One store
 /// derived a document and then watched it leave; the other never saw it. The
 /// tree they describe now is the same tree, so they are equivalent — a

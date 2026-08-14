@@ -251,6 +251,16 @@ impl DocumentFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredDocument {
     pub path: DocumentPath,
+    /// The suffix key as the column holds it.
+    ///
+    /// `path` recomputes the same key from the path bytes, and this is the
+    /// value the row was written with. They are two answers to one question, so
+    /// a caller that wants the key reads it off `path` and a caller verifying
+    /// derived state at rest compares the two: a stored column drifts from the
+    /// function that produced it — through an out-of-band write, or a build
+    /// whose key rule moved under rows already written — and nothing else
+    /// reads it back to notice.
+    pub stored_suffix_key: String,
     pub content_hash: String,
     pub byte_length: u64,
     pub body_offset: u64,

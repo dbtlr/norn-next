@@ -114,8 +114,8 @@ const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
 /// selects those ahead of these and tells [`stored_document`] where the row
 /// begins.
-const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_offset, frontmatter,
-            frontmatter_diagnostic_count, generation, derived_at";
+const STORED_DOCUMENT_COLUMNS: &str = "path, suffix_key, content_hash, byte_length, body_offset,
+            frontmatter, frontmatter_diagnostic_count, generation, derived_at";
 
 /// How many finding ids one further-query batches its `IN` list by.
 ///
@@ -1864,15 +1864,17 @@ pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
 /// A document row, read from `first` onwards.
 fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     let path: String = row.get(first)?;
-    let content_hash: String = row.get(first + 1)?;
-    let byte_length: u64 = row.get(first + 2)?;
-    let body_offset: u64 = row.get(first + 3)?;
-    let frontmatter: Option<String> = row.get(first + 4)?;
-    let frontmatter_diagnostic_count: u32 = row.get(first + 5)?;
-    let generation: i64 = row.get(first + 6)?;
-    let derived_at: i64 = row.get(first + 7)?;
+    let stored_suffix_key: String = row.get(first + 1)?;
+    let content_hash: String = row.get(first + 2)?;
+    let byte_length: u64 = row.get(first + 3)?;
+    let body_offset: u64 = row.get(first + 4)?;
+    let frontmatter: Option<String> = row.get(first + 5)?;
+    let frontmatter_diagnostic_count: u32 = row.get(first + 6)?;
+    let generation: i64 = row.get(first + 7)?;
+    let derived_at: i64 = row.get(first + 8)?;
     Ok(DocumentPath::new(&path).map(|path| StoredDocument {
         path,
+        stored_suffix_key,
         content_hash,
         byte_length,
         body_offset,

@@ -525,6 +525,13 @@ impl StoreProjection {
 ///   evolution path is: a store schema change is a rebuild from zero and
 ///   consumes no version number, so a row here would be a migration nothing
 ///   applied.
+/// - Every stored suffix key is the key its own path produces. The column is a
+///   derived one the resolution ladder ranges over, and no read compares it
+///   with the path beside it, so a row whose key drifted answers a suffix probe
+///   it does not belong to and stands outside the range of the one it does.
+///   This is a claim about one store rather than about two — the key is a pure
+///   function of the path both stores hold — which is why it is asked here and
+///   not in the projection.
 pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
     store.verify_integrity().unwrap_or_else(|problem| {
         panic!("{subject}: the store is not internally consistent: {problem}")
@@ -577,6 +584,39 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
              orders it against a later fact about the same path",
             death.path.as_str()
         );
+    }
+
+    for_each_stored_document(store, |document| {
+        assert_eq!(
+            document.stored_suffix_key,
+            document.path.suffix_key(),
+            "{subject}: the row at `{}` holds a suffix key its own path does not produce",
+            document.path.as_str()
+        );
+    })
+    .unwrap_or_else(|problem| panic!("{subject}: draining the document rows: {problem}"));
+}
+
+/// Hand every stored document row over, a bounded page at a time.
+fn for_each_stored_document(
+    store: &mut Store,
+    mut visit: impl FnMut(&norn_store::StoredDocument),
+) -> Result<(), StoreError> {
+    let request = store.begin_request();
+    let mut after: Option<DocumentPath> = None;
+    loop {
+        let page = request.stored_documents_after_ordered(
+            after.as_ref(),
+            PAGE,
+            StoredPathOrder::Sensitive,
+        )?;
+        let Some(last) = page.last() else {
+            return Ok(());
+        };
+        after = Some(last.path.clone());
+        for document in &page {
+            visit(document);
+        }
     }
 }
 
