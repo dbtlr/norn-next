@@ -18,15 +18,22 @@
 //!
 //! [derivation counters]: norn_store::DerivationCounters
 //!
-//! # Attribution is per job, because a job runs on one thread
+//! # What a job's account holds, exactly
 //!
-//! The filesystem's own reads are counted where they happen, in `norn-fs`, and
-//! that tally is per thread. A lifecycle job runs on one worker thread from the
-//! entry point to its return, so folding the thread's tally into this account at
-//! the end of every entry point attributes exactly the reads that job made. The
-//! changeset tallies work the same way: the job code that applies a changeset
-//! records what the store told it, on its own thread, and the entry point folds
-//! it in.
+//! A lifecycle job runs on one worker thread from the entry point to its
+//! return. The entry point opens a [window] over that thread's filesystem reads
+//! and holds it for the length of the job, so what is folded in at the end is
+//! what the thread read **while the job ran**: reads made before the window
+//! opened are not this job's and never reach it, and reads made when no window
+//! stands reach no account at all. One window stands per thread, so nothing
+//! else can take the reading a running job is standing on.
+//!
+//! The changeset tallies are scoped the same way and by the same guard: the job
+//! code that applies a changeset records what the store told it on its own
+//! thread, the guard empties that tally as it is made, and the entry point
+//! folds in what stands when the job leaves.
+//!
+//! [window]: norn_fs::reads::ReadWindow
 //!
 //! # What is not here
 //!
@@ -40,6 +47,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use norn_fs::reads::ReadWindow;
 use norn_store::IncrementOutcome;
 
 /// One host's cumulative account of what its jobs spent and did.
@@ -132,13 +140,14 @@ impl JobEvidence {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Take everything this thread has accumulated since the last fold, and add
-    /// it to the account.
+    /// Add what one job's window reported, and what that job's changesets did,
+    /// to the account.
     ///
-    /// Both tallies are emptied as they are read, so no reading is folded twice
-    /// and nothing a job spent is left behind for the next one.
-    pub(crate) fn absorb_this_thread(&self) {
-        let reads = norn_fs::reads::take_tally();
+    /// The window is consumed by its own report and the changeset tally is
+    /// emptied as it is read, so no reading is folded twice and nothing a job
+    /// spent is left behind for the next one.
+    fn absorb(&self, window: ReadWindow) {
+        let reads = window.finish();
         self.document_opens
             .fetch_add(reads.document_opens, Ordering::Relaxed);
         self.stats.fetch_add(reads.stats, Ordering::Relaxed);
@@ -158,20 +167,39 @@ impl JobEvidence {
             .fetch_add(changesets.findings_discarded, Ordering::Relaxed);
     }
 
-    /// Fold this thread's tallies into the account when the guard is dropped,
-    /// whichever way the job leaves.
+    /// Open a job's window, and fold what it reports into the account when the
+    /// guard is dropped, whichever way the job leaves.
     pub(crate) fn attributing(self: &Arc<Self>) -> Attribution {
-        Attribution(Arc::clone(self))
+        // Both tallies start where the guard does. The changeset tally has no
+        // window type of its own because nothing outside this crate writes it:
+        // emptying it here is the same statement the read window makes for
+        // itself.
+        let window = ReadWindow::open();
+        let _ = take_changeset_tally();
+        Attribution {
+            account: Arc::clone(self),
+            window: Some(window),
+        }
     }
 }
 
 /// A job's attribution window: what this thread spends while it stands belongs
-/// to the account it was made from.
-pub(crate) struct Attribution(Arc<JobEvidence>);
+/// to the account it was made from, and nothing else does.
+pub(crate) struct Attribution {
+    account: Arc<JobEvidence>,
+    /// The window this job's reads are counted in. It is taken out of the
+    /// option to be consumed by the fold, which is the only place it is taken:
+    /// a window stands from the guard's making to the guard's drop.
+    window: Option<ReadWindow>,
+}
 
 impl Drop for Attribution {
     fn drop(&mut self) {
-        self.0.absorb_this_thread();
+        let window = self
+            .window
+            .take()
+            .expect("a job's read window stands until the job's guard is dropped");
+        self.account.absorb(window);
     }
 }
 
@@ -237,8 +265,6 @@ mod tests {
     #[test]
     fn a_changeset_a_job_applied_reaches_the_account_when_the_job_ends() {
         let evidence = Arc::new(JobEvidence::default());
-        let _ = take_changeset_tally();
-        let _ = norn_fs::reads::take_tally();
         {
             let _job = evidence.attributing();
             count_changeset(&outcome());
@@ -257,14 +283,14 @@ mod tests {
         assert_eq!(read.findings_discarded, 6);
     }
 
-    /// A tally folded once is not folded again, so a second job over the same
-    /// thread reports its own work.
+    /// A tally folded once is not folded again, and work done between two jobs
+    /// belongs to neither: a second job over the same thread reports its own.
     #[test]
     fn a_second_job_over_one_thread_reports_only_its_own() {
         let evidence = Arc::new(JobEvidence::default());
-        let _ = take_changeset_tally();
         drop(evidence.attributing());
         let before = evidence.read();
+        count_changeset(&outcome());
         {
             let _job = evidence.attributing();
             count_changeset(&outcome());
