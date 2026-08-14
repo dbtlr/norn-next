@@ -763,16 +763,76 @@ fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
             subjects.assert_uses_index("findings_path");
             subjects.assert_uses_index("documents_path");
             subjects.assert_no_temp_btree();
+            // The cursor is a bound on `findings_path` rather than a filter over
+            // it, so a page seeks the index in every scope and both orders —
+            // which is what makes the pass one per prune rather than one per
+            // page of it.
+            subjects.assert_searches("findings");
             // A scope bounded by paths the vault spells as they are stored is a
             // seek of that range and not a pass over the index: one range holds
             // a root and everything under it, which is what keeps the page's
-            // order the index's.
+            // order the index's. A vault that folds ASCII case bounds its scope
+            // under the folding, and `findings_path` orders bytewise — so the
+            // fold is a filter on the pass the cursor seeks into, and the pass
+            // is over the whole prune rather than over each of its pages.
             if order == norn_store::StoredPathOrder::Sensitive
                 && scope != norn_store::SubjectScope::Vault
             {
                 subjects.assert_no_full_scan_of("findings");
-                subjects.assert_searches("findings");
             }
+        }
+    }
+}
+
+/// **A heal's page is a seek, in every scope and both orders.** The merge that
+/// heals a vault pages the rows through one of these three statements and walks
+/// the files beside them, so a page that reads more of the table than it returns
+/// makes the whole heal cost the vault once per page. The bar is the plan's:
+/// each page reaches its first row through the index that already holds the
+/// order the page states, and nothing sorts — a page that sorts has read
+/// everything the scope holds before it returns its first row.
+#[test]
+fn a_heal_page_seeks_the_index_that_holds_its_order() {
+    let scratch = Scratch::new("heal-page-plans");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("one/glossary.md", "hash-1", "a body\n"),
+            document("one/nested/deep.md", "hash-2", "a body\n"),
+            document("two/glossary.md", "hash-3", "a body\n"),
+        ],
+    );
+
+    let root = path("one/glossary.md");
+    let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
+    for scope in [
+        norn_store::SubjectScope::Vault,
+        norn_store::SubjectScope::Subtree(&root),
+        norn_store::SubjectScope::Under(&prefix),
+    ] {
+        for order in [
+            norn_store::StoredPathOrder::Sensitive,
+            norn_store::StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            let page = plan(
+                request
+                    .emitted_plan(ExplainedStatement::StoredDocumentPage(scope, order))
+                    .expect("a query plan"),
+            );
+            page.assert_no_table_scan();
+            page.assert_no_full_scan_of("documents");
+            page.assert_searches("documents");
+            // The order the page states is the order an index holds, and which
+            // index that is, is the vault's proven case behaviour: a bytewise
+            // vault pages through the unique path index, and a vault that folds
+            // ASCII case pages through the index declared under the same fold.
+            page.assert_uses_index(match order {
+                norn_store::StoredPathOrder::Sensitive => "documents_path",
+                norn_store::StoredPathOrder::AsciiCaseInsensitive => "documents_path_nocase",
+            });
+            page.assert_no_temp_btree();
         }
     }
 }
