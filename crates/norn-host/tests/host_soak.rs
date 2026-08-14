@@ -61,7 +61,7 @@ use norn_fs::ContentHash;
 use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, TrustState, VaultName};
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.
@@ -400,7 +400,7 @@ fn run_load(root: &Path) {
         // changed. A poll taken between a write and the reconcile it triggers
         // legitimately sees warming, and anything else is an attachment that
         // needs demanding again before it serves.
-        let observed = host.state(vault.name()).expect("registered vault state");
+        let observed = host.state(vault.name());
         if !serving(&observed) {
             recoveries += 1;
             lease = recovered(&host, vault.name(), &observed);
@@ -426,10 +426,14 @@ fn run_load(root: &Path) {
     }
 }
 
-/// Whether a state is one the host answers requests in: ready, or healing
-/// toward it.
-fn serving(state: &TrustState) -> bool {
-    matches!(state, TrustState::Ready | TrustState::Warming { .. })
+/// Whether what the host answered is one it serves requests in: ready, or
+/// healing toward it.
+///
+/// A refusal is never serving. The states this load has to survive — a watcher
+/// overflow, coverage lost — cross as envelopes rather than as labels, so they
+/// are read here as the `Err` they are and met with a fresh demand below.
+fn serving(state: &Result<TrustState, ErrorEnvelope>) -> bool {
+    matches!(state, Ok(TrustState::Ready | TrustState::Warming { .. }))
 }
 
 /// Ask for an attachment that stopped serving again, and wait for it to come
@@ -448,7 +452,7 @@ fn serving(state: &TrustState) -> bool {
 fn recovered(
     host: &Host<ProductionEntryOps>,
     name: &VaultName,
-    observed: &TrustState,
+    observed: &Result<TrustState, ErrorEnvelope>,
 ) -> DemandLease<ProductionEntryOps> {
     let mut last = observed.clone();
     for _ in 0..RECOVERY_ATTEMPTS {
@@ -457,8 +461,8 @@ fn recovered(
             .expect("re-requesting the attachment");
         let deadline = Instant::now() + RECOVERY_LIMIT;
         loop {
-            last = host.state(name).expect("registered vault state");
-            if last == TrustState::Ready {
+            last = host.state(name);
+            if last == Ok(TrustState::Ready) {
                 return lease;
             }
             if Instant::now() >= deadline {

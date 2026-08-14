@@ -25,6 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::demand::AttachMode;
+use crate::name::VaultName;
 use crate::trust::UntrustedReason;
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
@@ -134,8 +135,11 @@ pub enum ErrorDetail {
     #[serde(rename = "host/unknown-vault")]
     #[non_exhaustive]
     UnknownVault {
-        /// The vault name the request asked for, echoed back as typed data.
-        name: String,
+        /// The vault name the request asked for, echoed back as the typed
+        /// name: the request named it through the grammar, and the refusal
+        /// hands the same parsed value back rather than a string a reader
+        /// would have to parse again.
+        name: VaultName,
     },
     /// The detail of `host/unsupported-attach-mode`: the mode the demand
     /// named.
@@ -171,8 +175,8 @@ impl ErrorDetail {
     }
 
     /// The detail of `host/unknown-vault`, for the requested `name`.
-    pub fn unknown_vault(name: impl Into<String>) -> Self {
-        ErrorDetail::UnknownVault { name: name.into() }
+    pub const fn unknown_vault(name: VaultName) -> Self {
+        ErrorDetail::UnknownVault { name }
     }
 
     /// The detail of `host/unsupported-attach-mode`, for the `mode` the demand
@@ -319,7 +323,9 @@ mod tests {
             ReasonCode::HostMaintainerContended => ErrorDetail::maintainer_contended(
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
             ),
-            ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault("notes"),
+            ReasonCode::HostUnknownVault => {
+                ErrorDetail::unknown_vault(VaultName::new("notes").expect("a legal vault name"))
+            }
             ReasonCode::HostUnsupportedAttachMode => {
                 ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
             }

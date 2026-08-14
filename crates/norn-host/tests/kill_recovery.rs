@@ -138,8 +138,8 @@ fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
         .expect("request production attachment");
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
-        let observed = host.state(name).expect("registered vault state");
-        if observed == TrustState::Ready {
+        let observed = host.state(name);
+        if observed == Ok(TrustState::Ready) {
             break;
         }
         assert!(

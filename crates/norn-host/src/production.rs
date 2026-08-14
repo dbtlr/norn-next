@@ -8225,10 +8225,19 @@ mod tests {
             "coverage to be reported lost",
             lifecycle_budget(),
             || match host.state(&name) {
-                Some(norn_wire::TrustState::Untrusted {
-                    reason: norn_wire::UntrustedReason::WatcherLost { .. },
-                    ..
-                }) => Observed::Met(()),
+                // Lost coverage is a state a poll does not walk out of, so the
+                // surface answers it as the refusal its reason is spelled in.
+                Err(ref envelope)
+                    if matches!(
+                        envelope.detail(),
+                        norn_wire::ErrorDetail::EntryUntrusted {
+                            reason: norn_wire::UntrustedReason::WatcherLost { .. },
+                            ..
+                        }
+                    ) =>
+                {
+                    Observed::Met(())
+                }
                 state => Observed::Pending(format!("the state is {state:?}")),
             },
         )
@@ -8554,7 +8563,18 @@ mod tests {
             .unwrap()
     }
 
-    /// Wait for one exact trust state, reporting the last state observed.
+    /// One trust state as a surface answers it: itself where a poll walks out
+    /// of it, and the envelope its reason is spelled in where one does not.
+    ///
+    /// The name is a placeholder, because only an unknown vault echoes one.
+    fn answered(
+        state: norn_wire::TrustState,
+    ) -> Result<norn_wire::TrustState, norn_wire::ErrorEnvelope> {
+        crate::lifecycle::Demand::State(state)
+            .answer(&VaultName::new("answered").expect("a legal vault name"))
+    }
+
+    /// Wait for the surface to answer one exact trust state.
     ///
     /// The observation is the whole state, phase included, because that is
     /// what tells the two ways a wait expires apart: an entry still installing
@@ -8565,12 +8585,17 @@ mod tests {
         name: &VaultName,
         expected: norn_wire::TrustState,
     ) {
+        let expected = answered(expected);
         wait_until(
             &format!("trust state {expected:?}"),
             lifecycle_budget(),
-            || match host.state(name) {
-                Some(state) if state == expected => Observed::Met(()),
-                state => Observed::Pending(format!("the state is {state:?}")),
+            || {
+                let state = host.state(name);
+                if state == expected {
+                    Observed::Met(())
+                } else {
+                    Observed::Pending(format!("the state is {state:?}"))
+                }
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
@@ -8581,17 +8606,24 @@ mod tests {
     /// watcher-overflow refusal when the platform delivered a rescan scope
     /// instead — both are the same in-flight fact, and pinning one of them
     /// pins the watcher backend's batch granularity.
+    ///
+    /// The overflow half is read out of the refusal the surface answers with,
+    /// because a state a poll does not walk out of crosses as an envelope
+    /// rather than as a label.
     fn wait_pump_in_flight<O: EntryOps>(host: &crate::Host<O>, name: &VaultName) {
         wait_until("an in-flight trust state", lifecycle_budget(), || {
             let state = host.state(name);
-            if matches!(
-                state,
-                Some(norn_wire::TrustState::Warming { .. })
-                    | Some(norn_wire::TrustState::Untrusted {
+            let in_flight = match &state {
+                Ok(state) => matches!(state, norn_wire::TrustState::Warming { .. }),
+                Err(envelope) => matches!(
+                    envelope.detail(),
+                    norn_wire::ErrorDetail::EntryUntrusted {
                         reason: norn_wire::UntrustedReason::WatcherOverflow,
                         ..
-                    })
-            ) {
+                    }
+                ),
+            };
+            if in_flight {
                 Observed::Met(())
             } else {
                 Observed::Pending(format!("the state is {state:?}"))

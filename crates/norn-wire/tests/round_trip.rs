@@ -115,7 +115,7 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::duplicate_root(["notes", "vault"]),
         ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
-        ErrorDetail::unknown_vault("notes"),
+        ErrorDetail::unknown_vault(VaultName::new("notes").expect("a legal vault name")),
     ]);
     details.extend(
         attach_modes()
@@ -661,7 +661,7 @@ fn a_registry_refusal_carries_the_names_the_registry_holds() {
     assert_eq!(
         wire(&ErrorEnvelope::new(
             "no vault is registered as `notes`",
-            ErrorDetail::unknown_vault("notes"),
+            ErrorDetail::unknown_vault(VaultName::new("notes").expect("a legal vault name")),
         )),
         concat!(
             r#"{"code":"host/unknown-vault","message":"no vault is registered as `notes`","#,

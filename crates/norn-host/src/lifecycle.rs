@@ -711,42 +711,22 @@ impl<A: SnapshotSource> EntryState<A> {
         self.duplicate_root = None;
     }
 
-    /// The trust label a caller reads off this entry.
+    /// What a caller reads off this entry: the park it stands on, or its trust
+    /// state where nothing parks it.
     ///
-    /// A root reached under more than one name is a refusal, and the two
-    /// settled labels that are not — Ready, and Unattached — say the opposite
-    /// of one: that the entry is readable, or that it is free to be demanded
-    /// and warmed. Answering the refusal in their place is what keeps the
-    /// status surface and the refusal surface from describing the same instant
-    /// differently.
-    ///
-    /// Warming and Untrusted stand as they are. A release in flight publishes
-    /// the phase that names it, and an untrusted entry already carries a reason
-    /// of its own — the identity park writes exactly that reason where it
-    /// parks, so this is the label it answers with either way.
-    ///
-    /// Maintainer contention is a diagnostic beside the state rather than a
-    /// state of its own: an entry another process maintains holds nothing and
-    /// says so, and its trust label is not what the contention changes.
-    fn published_trust(&self) -> TrustState {
-        match (&self.duplicate_root, &self.trust) {
-            (Some(conflict), TrustState::Ready | TrustState::Unattached) => TrustState::untrusted(
-                UntrustedReason::environmental_refusal(duplicate_root_detail(conflict)),
-            ),
-            _ => self.trust.clone(),
-        }
+    /// A park outranks the label underneath it unconditionally. The park is
+    /// what says whether anything more is coming, and a trust state published
+    /// over one says nothing about that — a release in flight under a duplicate
+    /// root publishes `Warming`, and polling that window walks out of nothing.
+    /// Reading the park first is therefore what keeps the status surface and
+    /// the refusal surface from describing one instant differently: both render
+    /// this one demand through [`Demand::answer`], which carries no wildcard, so
+    /// a park variant minted without a stance in the vocabulary does not
+    /// compile rather than falling through to a label.
+    fn published_demand(&self) -> Demand {
+        self.parked()
+            .unwrap_or_else(|| Demand::State(self.trust.clone()))
     }
-}
-
-/// A duplicate root in words, for a person reading a state or a log.
-fn duplicate_root_detail(conflict: &AliasConflict) -> String {
-    let names = conflict
-        .aliases()
-        .iter()
-        .map(VaultName::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("more than one registered name resolves to this vault's root: {names}")
 }
 
 #[derive(Clone)]
@@ -1557,10 +1537,11 @@ impl<O: EntryOps> DemandLease<O> {
         let Some(entry) = shared.entries.get(&self.name) else {
             return Demand::UnknownVault;
         };
-        let state = entry.gate.lock().expect("entry gate poisoned");
-        state
-            .parked()
-            .unwrap_or_else(|| Demand::State(state.trust.clone()))
+        entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .published_demand()
     }
 
     /// This lease's current completion in the wire vocabulary: the trust state
@@ -1762,20 +1743,34 @@ impl<O: EntryOps> Host<O> {
         })
     }
 
-    /// Where one entry stands, and nothing where the host serves no such name.
+    /// Where one entry stands: the trust state it answers with, or the refusal
+    /// it is.
     ///
-    /// The label is `EntryState::published_trust`'s, which is what keeps this
-    /// surface from contradicting the one a lease answers with: an entry a
-    /// duplicate root has parked refuses every demand raised over it, and this
-    /// says so rather than reporting the settled label underneath the park.
-    pub fn state(&self, name: &VaultName) -> Option<TrustState> {
-        self.shared.entries.get(name).map(|entry| {
-            entry
-                .gate
-                .lock()
-                .expect("entry gate poisoned")
-                .published_trust()
-        })
+    /// A name the host serves no entry under is `host/unknown-vault`, which is
+    /// the vocabulary's own spelling for the ask having no entry behind it.
+    /// Every other answer is `EntryState::published_demand` rendered through
+    /// [`Demand::answer`] — the same demand, through the same mapping, that a
+    /// lease answers with. That shared rendering is what keeps this surface
+    /// from contradicting the one a lease reports: an entry standing on a park
+    /// refuses here with the park's own code and typed detail, rather than with
+    /// a reason read off the label underneath it.
+    ///
+    /// Reading the settled label from underneath a park is therefore not
+    /// something this answers. A park is a fact about whether the entry may be
+    /// served at all, and the label beneath it is a separate question this
+    /// surface does not take.
+    pub fn state(&self, name: &VaultName) -> Result<TrustState, ErrorEnvelope> {
+        self.shared
+            .entries
+            .get(name)
+            .map_or(Demand::UnknownVault, |entry| {
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .published_demand()
+            })
+            .answer(name)
     }
 
     /// Record client demand and, where necessary, start one asynchronous job
@@ -3747,7 +3742,15 @@ mod tests {
         lifecycle_wait_budget().dominating(HELD_OPEN_OUTER_WAITS)
     }
 
-    /// Wait for one exact trust state, reporting the last state observed.
+    /// Wait for the surface to answer one exact trust state.
+    ///
+    /// `expected` is the state, and what is waited for is that state as
+    /// [`Host::state`] answers it — a state a poll walks out of crosses as
+    /// itself, and one it does not crosses as the envelope its reason is
+    /// spelled in. Rendering the expectation the same way the surface renders
+    /// its answer is what lets a case name the state it means either way, and
+    /// what makes a park standing over the entry a mismatch rather than a
+    /// match on the label underneath it.
     ///
     /// The failure is the testkit's own: which bound it passed, how long it
     /// ran, how many times it asked, and the state it last saw. A wait that
@@ -3755,12 +3758,17 @@ mod tests {
     /// state never came are different diagnoses, and only that report tells
     /// them apart.
     fn wait_for_state<O: EntryOps>(host: &Host<O>, name: &VaultName, expected: TrustState) {
+        let expected = answered(expected);
         wait_until(
             &format!("the trust state to become {expected:?}"),
             lifecycle_wait_budget(),
-            || match host.state(name) {
-                Some(state) if state == expected => Observed::Met(()),
-                state => Observed::pending(format!("the state is {state:?}")),
+            || {
+                let state = host.state(name);
+                if state == expected {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("the state is {state:?}"))
+                }
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
@@ -3872,15 +3880,23 @@ mod tests {
         TrustState::untrusted(UntrustedReason::watcher_lost(cause, detail))
     }
 
-    /// Whether a state is an environmental refusal, judged by the reason alone.
-    /// The detail beside it is the platform's own account of the refusal, which
-    /// is prose rather than a value to match — but a refusal carries an account
-    /// of itself, so the prose is there.
-    fn refuses_environmentally(state: Option<&TrustState>) -> bool {
-        let Some(TrustState::Untrusted {
+    /// Whether what a surface answered is an environmental refusal, judged by
+    /// the reason alone. The detail beside it is the platform's own account of
+    /// the refusal, which is prose rather than a value to match — but a refusal
+    /// carries an account of itself, so the prose is there.
+    ///
+    /// The argument is what [`Host::state`] answers, so an entry standing
+    /// environmentally refused is read here through the envelope it answers
+    /// with rather than through a label a caller would have to inspect for a
+    /// reason.
+    fn refuses_environmentally(answer: &Result<TrustState, ErrorEnvelope>) -> bool {
+        let Err(envelope) = answer else {
+            return false;
+        };
+        let ErrorDetail::EntryUntrusted {
             reason: UntrustedReason::EnvironmentalRefusal { detail, .. },
             ..
-        }) = state
+        } = envelope.detail()
         else {
             return false;
         };
@@ -3916,7 +3932,7 @@ mod tests {
             lifecycle_wait_budget(),
             || {
                 let state = host.state(name);
-                if refuses_environmentally(state.as_ref()) {
+                if refuses_environmentally(&state) {
                     Observed::Met(())
                 } else {
                     Observed::pending(format!("the state is {state:?}"))
@@ -4063,7 +4079,7 @@ mod tests {
         wait_for_flag("attach_started", &ops.attach_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::warming(
+            answered(TrustState::warming(
                 WarmingPhase::InstallingCoverage,
                 0,
                 None
@@ -4087,7 +4103,7 @@ mod tests {
         wait_for_flag("attach_started", &ops.attach_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::warming(WarmingPhase::Healing, 1, Some(2)))
+            answered(TrustState::warming(WarmingPhase::Healing, 1, Some(2)))
         );
         ops.attach_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
@@ -4105,19 +4121,27 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
 
+    /// A contended attach parks the entry and schedules nothing behind it.
+    ///
+    /// The status surface answers the contention, not the label the park
+    /// stands over. The label underneath really is `Unattached` — the attach
+    /// took nothing — but `Unattached` is a state that crosses, so answering
+    /// it would invite the very demand the contention refuses.
     #[test]
     fn stored_contention_is_reported_without_scheduling_a_hidden_retry() {
         let ops = Arc::new(FakeOps::default());
         ops.contend_attach.store(true, Ordering::SeqCst);
         let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
         let initial = host.demand(&name, AttachMode::Durable).unwrap();
+        let contended = ErrorDetail::maintainer_contended(MaintainerIdentity::unknown());
         wait_until(
             "the contended attach to park the entry",
             lifecycle_wait_budget(),
             || {
                 let attaches = ops.attaches.load(Ordering::SeqCst);
                 let state = host.state(&name);
-                if attaches == 1 && state == Some(TrustState::Unattached) {
+                let refuses = state.as_ref().err().map(ErrorEnvelope::detail) == Some(&contended);
+                if attaches == 1 && refuses {
                     Observed::Met(())
                 } else {
                     Observed::pending(format!("{attaches} attaches, state is {state:?}"))
@@ -4125,6 +4149,11 @@ mod tests {
             },
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            published_label(&host, &name),
+            Some(TrustState::Unattached),
+            "the label the contention parks over is not the settled one"
+        );
         assert!(matches!(
             initial.completion(),
             Demand::MaintainerContended(_)
@@ -4156,7 +4185,7 @@ mod tests {
         host.reap_idle(Instant::now()).unwrap();
         wait_for_flag("detach_started", &ops.detach_started);
         let releasing = TrustState::warming(WarmingPhase::ReleasingCoverage, 0, None);
-        assert_eq!(host.state(&name), Some(releasing.clone()));
+        assert_eq!(host.state(&name), answered(releasing.clone()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         assert_eq!(
@@ -4218,7 +4247,7 @@ mod tests {
         let lease = provoke(&ops, &host, &name);
         wait_for_flag("detach_started", &ops.detach_started);
         assert_eq!(
-            host.state(&name),
+            published_label(&host, &name),
             Some(releasing()),
             "the entry reported its resources released while they were still out"
         );
@@ -4226,7 +4255,7 @@ mod tests {
         drop(lease);
 
         ops.detach_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
     }
@@ -4508,8 +4537,8 @@ mod tests {
         // release.
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
         wait_for_flag("detach_started", &ops.detach_started);
-        assert_eq!(host.state(&a), Some(releasing()));
-        assert_eq!(host.state(&b), Some(releasing()));
+        assert_eq!(published_label(&host, &a), Some(releasing()));
+        assert_eq!(published_label(&host, &b), Some(releasing()));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
         ops.detach_release.store(true, Ordering::SeqCst);
@@ -4648,7 +4677,7 @@ mod tests {
         wait_for_flag("detach_started", &ops.detach_started);
 
         refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
-        assert_eq!(host.state(&name), Some(releasing()));
+        assert_eq!(published_label(&host, &name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
         poll.join().unwrap();
@@ -4694,7 +4723,7 @@ mod tests {
         wait_for_flag("detach_started", &ops.detach_started);
 
         refuse_conflict(&host.shared, &AliasConflict::new([name.clone()]));
-        assert_eq!(host.state(&name), Some(releasing()));
+        assert_eq!(published_label(&host, &name), Some(releasing()));
 
         ops.detach_release.store(true, Ordering::SeqCst);
         wait_for_published_label(&host, &name, TrustState::Unattached);
@@ -4741,7 +4770,7 @@ mod tests {
         let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
         wait_for_flag("detach_started", &ops.detach_started);
         assert_eq!(
-            (host.state(&a), host.state(&b)),
+            (published_label(&host, &a), published_label(&host, &b)),
             (Some(releasing()), Some(releasing())),
             "a refused alias published released over resources that were still out"
         );
@@ -4765,7 +4794,7 @@ mod tests {
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         assert_eq!(
-            host.state(&a),
+            published_label(&host, &a),
             Some(releasing()),
             "the refused alias published released while its poll's coverage was still out"
         );
@@ -4998,7 +5027,7 @@ mod tests {
 
         refuse_conflict(&host.shared, &second);
         assert_eq!(
-            (host.state(&a), host.state(&b)),
+            (published_label(&host, &a), published_label(&host, &b)),
             (Some(releasing()), Some(releasing())),
             "a refusal published released over a release that had given nothing back"
         );
@@ -5115,7 +5144,7 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert!(
-            refuses_environmentally(host.state(&name).as_ref()),
+            refuses_environmentally(&host.state(&name)),
             "the entry published no refusal over the root the registry cannot read"
         );
         settle();
@@ -5339,6 +5368,11 @@ mod tests {
     /// a caller polls says so rather than reporting the settled label the park
     /// stands over — a label that would invite exactly the demand the park
     /// refuses.
+    ///
+    /// What is pinned is the code and its typed payload, not merely that some
+    /// refusal stands: the two surfaces render one demand through one mapping,
+    /// so an entry whose park carries a branchable alias list answers that list
+    /// on both, and neither may spell the fact in a vocabulary of its own.
     #[test]
     fn a_parked_entry_refuses_at_the_status_surface_too() {
         let ops = Arc::new(FakeOps::default());
@@ -5348,14 +5382,106 @@ mod tests {
         wait_for_published_label(&host, &a, TrustState::Unattached);
 
         assert!(matches!(lease.completion(), Demand::DuplicateRoot(_)));
-        let state = host.state(&a).expect("the vault is registered");
-        assert!(
-            state.refusal().is_some(),
-            "the status surface answered {state:?} for an entry the refusal surface refuses"
+        let answered = host.state(&a);
+        assert_eq!(
+            answered
+                .as_ref()
+                .expect_err("a parked entry refuses")
+                .detail(),
+            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            "the status surface spelled the park in a vocabulary of its own"
         );
-        assert!(lease.answer().is_err());
+        assert_eq!(
+            answered,
+            lease.answer(),
+            "the two surfaces describe one instant differently"
+        );
 
         drop((lease, host));
+    }
+
+    /// A contended entry refuses at the status surface with the incumbent its
+    /// park carries.
+    ///
+    /// Contention leaves the settled label `Unattached`, and the entry really
+    /// does hold nothing — but `Unattached` is a state that crosses, so a
+    /// surface answering it invites the demand no acquisition can serve while
+    /// another process holds the lock. The park is what both surfaces answer,
+    /// and the incumbent rides along as the branchable half of it.
+    #[test]
+    fn a_contended_entry_refuses_at_the_status_surface_with_its_incumbent() {
+        let ops = Arc::new(FakeOps::default());
+        ops.contend_attach.store(true, Ordering::SeqCst);
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_park(
+            &host,
+            &name,
+            Demand::MaintainerContended(MaintainerIdentity::unknown()),
+        );
+
+        assert_eq!(
+            published_label(&host, &name),
+            Some(TrustState::Unattached),
+            "the label the contention parks over is not the settled one"
+        );
+        let answered = host.state(&name);
+        assert_eq!(
+            answered
+                .as_ref()
+                .expect_err("a contended entry refuses")
+                .detail(),
+            &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+            "the status surface answered the label under the contention"
+        );
+        assert_eq!(
+            answered,
+            lease.answer(),
+            "the two surfaces describe one instant differently"
+        );
+
+        drop((lease, host));
+    }
+
+    /// The release a refusal opens is a window inside the park, not a gap in
+    /// it.
+    ///
+    /// `refuse_conflict` parks the entry and then hands its resources back, and
+    /// for the length of that release the label is `ReleasingCoverage` — a
+    /// warming state, and warming is answered rather than refused. A surface
+    /// reading the label would therefore stop refusing for exactly as long as
+    /// the release runs, on an entry no demand may be raised against. The park
+    /// outranks the label unconditionally, so the window answers the park.
+    #[test]
+    fn a_park_answers_through_the_release_window_it_opened() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, a, b) = two_alias_host(Arc::clone(&ops));
+
+        ops.block_detach.store(true, Ordering::SeqCst);
+        let shared = Arc::clone(&host.shared);
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        // The refusal runs off the test thread because it releases both
+        // aliases inline, and this case reads the entry from inside that
+        // release.
+        let refusal = thread::spawn(move || refuse_conflict(&shared, &conflict));
+        wait_for_flag("detach_started", &ops.detach_started);
+
+        assert_eq!(
+            published_label(&host, &a),
+            Some(releasing()),
+            "the entry is not in the release window this case is about"
+        );
+        assert_eq!(
+            host.state(&a)
+                .expect_err("a parked entry refuses through its release")
+                .detail(),
+            &ErrorDetail::duplicate_root([a.as_str(), b.as_str()]),
+            "the release window answered the warming label under the park"
+        );
+
+        ops.detach_release.store(true, Ordering::SeqCst);
+        refusal.join().unwrap();
+        drop(host);
     }
 
     /// The watcher signal that a root stopped being covered is what puts a live
@@ -5523,8 +5649,8 @@ mod tests {
         );
         settle();
         assert_eq!(
-            host.state(&b).and_then(|state| state.refusal().cloned()),
-            host.state(&a).and_then(|state| state.refusal().cloned()),
+            host.state(&b),
+            host.state(&a),
             "one root's two names stand at different states"
         );
 
@@ -5579,8 +5705,7 @@ mod tests {
             "the demand dropped a conflict no acquisition is coming to read"
         );
         assert!(
-            host.state(&a)
-                .is_some_and(|state| state.refusal().is_some()),
+            host.state(&a).is_err(),
             "the status surface invited the demand the conflict refuses"
         );
         settle();
@@ -5625,7 +5750,7 @@ mod tests {
         let refusal = unknown.answer().expect_err("an unregistered vault refuses");
         assert_eq!(
             refusal.detail(),
-            &ErrorDetail::unknown_vault(missing.as_str()),
+            &ErrorDetail::unknown_vault(missing.clone()),
             "the refusal echoes a name this lease was not demanded under"
         );
 
@@ -5726,11 +5851,24 @@ mod tests {
         assert!(matches!(lease.outcome(), Demand::MaintainerContended(_)));
 
         ops.detach_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         settle();
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        let answered = host.state(&name);
+        assert_eq!(
+            answered
+                .as_ref()
+                .expect_err("a contended entry refuses")
+                .detail(),
+            &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+            "the status surface invited the demand the contention refuses"
+        );
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(matches!(lease.completion(), Demand::MaintainerContended(_)));
+        assert_eq!(
+            answered,
+            lease.answer(),
+            "the two surfaces describe one instant differently"
+        );
         drop(lease);
     }
 
@@ -6002,7 +6140,7 @@ mod tests {
         thread::sleep(Duration::from_millis(30));
         drop(lease);
         host.reap_idle(Instant::now()).unwrap();
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         thread::sleep(Duration::from_millis(25));
         host.reap_idle(Instant::now()).unwrap();
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -6019,13 +6157,13 @@ mod tests {
         // and more while the lease is held, so the reap that follows is the
         // one a fresh interval has to survive.
         thread::sleep(idle_after + Duration::from_millis(50));
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
         let released = Instant::now();
         drop(lease);
         host.reap_idle(released + idle_after / 2).unwrap();
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         wait_for_state(&host, &name, TrustState::Unattached);
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
@@ -6083,7 +6221,7 @@ mod tests {
         wait_for_state(&host, &name, TrustState::Ready);
         host.reap_idle(Instant::now()).unwrap();
         settle();
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
         drop(lease);
         wait_for_state(&host, &name, TrustState::Unattached);
@@ -6178,13 +6316,13 @@ mod tests {
             ops.polls.lock().unwrap().get(&name).copied().unwrap_or(0) > polls_at_loss + 4,
             "the dispatcher stopped polling the entry"
         );
-        assert_eq!(host.state(&name), Some(expected.clone()));
+        assert_eq!(host.state(&name), answered(expected.clone()));
 
         report_through_an_ambient_poll(&ops.off_thread_rescan_poll_batches);
         settle();
         assert_eq!(
             host.state(&name),
-            Some(expected),
+            answered(expected),
             "a rescan replaced the cause that ended coverage"
         );
         assert_eq!(
@@ -6196,9 +6334,10 @@ mod tests {
     }
 
     /// Contention reported by a poll parks the entry the way the attach path
-    /// does: the entry publishes Unattached, nothing re-attaches against the
-    /// lock another process holds, and demand keeps answering contention until
-    /// a retry clears it.
+    /// does: the entry gives its resources back and settles on Unattached
+    /// underneath the park, nothing re-attaches against the lock another
+    /// process holds, and every surface keeps answering the contention until a
+    /// retry clears it.
     #[test]
     fn contention_reported_by_a_poll_parks_the_entry_until_retry() {
         let ops = Arc::new(FakeOps::default());
@@ -6206,9 +6345,15 @@ mod tests {
         let held = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
         ops.contend_poll.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &name, TrustState::Unattached);
+        wait_for_published_label(&host, &name, TrustState::Unattached);
         settle();
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(
+            host.state(&name)
+                .expect_err("a contended entry refuses")
+                .detail(),
+            &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+            "the status surface invited the demand the contention refuses"
+        );
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert!(matches!(
@@ -6250,10 +6395,7 @@ mod tests {
 
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_flag("reconcile_started", &ops.reconcile_started);
-        assert!(matches!(
-            host.state(&name),
-            Some(TrustState::Warming { .. })
-        ));
+        assert!(matches!(host.state(&name), Ok(TrustState::Warming { .. })));
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
@@ -6271,7 +6413,7 @@ mod tests {
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            answered(TrustState::untrusted(UntrustedReason::WatcherOverflow))
         );
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -6334,7 +6476,7 @@ mod tests {
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 2);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            answered(TrustState::untrusted(UntrustedReason::WatcherOverflow))
         );
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -6402,7 +6544,7 @@ mod tests {
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), failed_count);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(
+            answered(TrustState::untrusted(
                 UntrustedReason::environmental_refusal("refused")
             ))
         );
@@ -6451,7 +6593,7 @@ mod tests {
         wait_for_flag("rebuild_started", &ops.rebuild_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(
+            answered(TrustState::untrusted(
                 UntrustedReason::store_damaged_rebuilding("the database disk image is malformed")
             )),
             "the entry retired the damage verdict before the rung resolving it had"
@@ -6491,7 +6633,7 @@ mod tests {
             lifecycle_wait_budget(),
             || {
                 if ops.rebuilds.load(Ordering::SeqCst) == 1
-                    && host.state(&name) == Some(TrustState::Ready)
+                    && host.state(&name) == answered(TrustState::Ready)
                 {
                     Observed::Met(())
                 } else {
@@ -6536,7 +6678,7 @@ mod tests {
 
         assert_eq!(
             host.state(&name),
-            Some(awaiting),
+            answered(awaiting),
             "the entry moved off a verdict nothing had answered"
         );
         assert_eq!(
@@ -6605,7 +6747,7 @@ mod tests {
             lifecycle_wait_budget(),
             || {
                 if ops.rebuilds.load(Ordering::SeqCst) == 1
-                    && host.state(&name) == Some(TrustState::Ready)
+                    && host.state(&name) == answered(TrustState::Ready)
                 {
                     Observed::Met(())
                 } else {
@@ -6679,7 +6821,7 @@ mod tests {
             lifecycle_wait_budget(),
             || {
                 if ops.rebuilds.load(Ordering::SeqCst) >= 1
-                    && host.state(&damaged) == Some(TrustState::Ready)
+                    && host.state(&damaged) == answered(TrustState::Ready)
                 {
                     Observed::Met(())
                 } else {
@@ -6700,7 +6842,7 @@ mod tests {
         );
         assert_eq!(
             host.state(&sibling),
-            Some(TrustState::Ready),
+            answered(TrustState::Ready),
             "one vault's damaged store withdrew another vault"
         );
     }
@@ -6759,7 +6901,7 @@ mod tests {
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(
+            answered(TrustState::untrusted(
                 UntrustedReason::environmental_refusal("refused")
             ))
         );
@@ -6799,7 +6941,7 @@ mod tests {
             refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
             "the classification that refused the root raised no park"
         );
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -6814,7 +6956,7 @@ mod tests {
             1,
             "the entry re-attached against a root the registry refuses"
         );
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
         drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -6884,7 +7026,7 @@ mod tests {
         let lease = host.demand(name, AttachMode::Durable).unwrap();
         assert_eq!(
             host.state(name),
-            Some(backend_lost()),
+            answered(backend_lost()),
             "the demand reached an unclaimed entry and scheduled the work itself"
         );
         lease
@@ -6982,7 +7124,7 @@ mod tests {
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, backend_lost());
         settle();
-        assert_eq!(host.state(&name), Some(backend_lost()));
+        assert_eq!(host.state(&name), answered(backend_lost()));
         assert_eq!(
             ops.recovers.load(Ordering::SeqCst),
             0,
@@ -7023,7 +7165,7 @@ mod tests {
 
         finish_release(&host.shared, &entry, &name, epoch, Some(attachment));
 
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        assert_eq!(host.state(&name), answered(TrustState::Unattached));
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             1,
@@ -7080,7 +7222,7 @@ mod tests {
             0,
             "a demand nobody was holding restarted the entry on its own"
         );
-        assert_eq!(host.state(&name), Some(backend_lost()));
+        assert_eq!(host.state(&name), answered(backend_lost()));
 
         let retry = host.demand(&name, AttachMode::Durable).unwrap();
         wait_for_state(&host, &name, TrustState::Ready);
@@ -7736,14 +7878,14 @@ mod tests {
             refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
             "the classification that refused the root raised no park"
         );
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_detaches(&ops, 1, "the refused alias to detach");
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
         drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -7773,7 +7915,7 @@ mod tests {
         wait_for_flag("poll_started", &ops.poll_started);
         refuse_root_identity(&root);
         park_on_current_classification(&host.shared, &name);
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
 
         // The root answers again. The poll still holds the entry, so the lease
         // the demand below returns is recorded against an entry nothing can
@@ -7888,7 +8030,7 @@ mod tests {
         );
         assert_eq!(
             host.state(&name),
-            Some(backend_lost()),
+            answered(backend_lost()),
             "the entry moved off the failure nothing addressed"
         );
         assert!(
@@ -8033,7 +8175,7 @@ mod tests {
             1,
             "the entry re-attached against a root the registry refuses"
         );
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
@@ -8099,7 +8241,9 @@ mod tests {
         // because the count saturates at its floor.
         drop(refused);
         settle();
-        assert_eq!(host.state(&name), Some(TrustState::Unattached));
+        // Read underneath the identity park the case installed: what is pinned
+        // is that the entry never left the state the refusal found it in.
+        assert_eq!(published_label(&host, &name), Some(TrustState::Unattached));
         assert_eq!(
             ops.attaches.load(Ordering::SeqCst),
             0,
@@ -8315,8 +8459,8 @@ mod tests {
             refuses_identity(&entry_park(&host, &refused).expect("the entry stands on a park")),
             "the classification that refused the root raised no park"
         );
-        assert!(refuses_environmentally(host.state(&refused).as_ref()));
-        assert_eq!(host.state(&healthy), Some(TrustState::Ready));
+        assert!(refuses_environmentally(&host.state(&refused)));
+        assert_eq!(host.state(&healthy), answered(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
 
         drop((renewed_healthy, refused_lease, healthy_lease, host));
@@ -8350,7 +8494,7 @@ mod tests {
             "warming progress to advance past zero",
             lifecycle_wait_budget(),
             || match host.state(&name) {
-                Some(TrustState::Warming { healed, .. }) if healed > 0 => Observed::Met(()),
+                Ok(TrustState::Warming { healed, .. }) if healed > 0 => Observed::Met(()),
                 state => Observed::pending(format!("the state is {state:?}")),
             },
         )
@@ -8388,7 +8532,7 @@ mod tests {
             "the polled batch to open a warming leg",
             lifecycle_wait_budget(),
             || match host.state(&name) {
-                Some(TrustState::Warming { .. }) => Observed::Met(()),
+                Ok(TrustState::Warming { .. }) => Observed::Met(()),
                 state => Observed::pending(format!("the state is {state:?}")),
             },
         )
@@ -8689,7 +8833,7 @@ mod tests {
             0,
             "a teardown ran under a read still holding the entry"
         );
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
 
         drop(hold);
         host.reap_idle(Instant::now()).unwrap();
@@ -8870,7 +9014,7 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.maintenances.load(Ordering::SeqCst), 1);
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         drop(lease);
     }
 
@@ -9113,7 +9257,7 @@ mod tests {
             !scheduled && !runnable,
             "an entry owing a recovery kept a job scheduled against coverage it no longer has"
         );
-        assert!(refuses_environmentally(host.state(&name).as_ref()));
+        assert!(refuses_environmentally(&host.state(&name)));
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
 
         drop(lease);
@@ -9558,7 +9702,7 @@ mod tests {
             "a tick took an entry whose next job was already on its way to a worker"
         );
         assert!(
-            matches!(host.state(&working), Some(TrustState::Warming { .. })),
+            matches!(host.state(&working), Ok(TrustState::Warming { .. })),
             "the entry stopped waiting for the reconcile its leg handed it"
         );
 
@@ -9818,7 +9962,7 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.reconciles.load(Ordering::SeqCst), 0);
-        assert_eq!(host.state(&name), Some(TrustState::Ready));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
         let _ = newer;
         drop(lease);
     }
@@ -9920,7 +10064,7 @@ mod tests {
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_rescan_poll_batches);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+            answered(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
             "the reported rescan left the entry trusted while nothing had reread it"
         );
 
@@ -9952,7 +10096,7 @@ mod tests {
         report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::warming(WarmingPhase::Healing, 0, None)),
+            answered(TrustState::warming(WarmingPhase::Healing, 0, None)),
             "the entry went on serving against facts nothing had reconciled"
         );
 
@@ -10059,7 +10203,7 @@ mod tests {
         wait_for_a_scheduled_detach(&host, &working);
         assert_eq!(
             host.state(&working),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
+            answered(TrustState::untrusted(UntrustedReason::WatcherOverflow)),
             "the entry the demand below reads is not holding an overflow"
         );
 
@@ -10138,7 +10282,7 @@ mod tests {
     #[derive(Debug, Eq, PartialEq)]
     struct Scheduled {
         work: Option<DemandedWork>,
-        published: Option<TrustState>,
+        published: Result<TrustState, ErrorEnvelope>,
     }
 
     /// What a client demand leaves on an entry in this shape.
@@ -10169,8 +10313,17 @@ mod tests {
         schedule_demanded_work(&mut state, &name);
         Scheduled {
             work: state.claim.marker().and_then(scheduled_work),
-            published: Some(state.trust.clone()),
+            published: state.published_demand().answer(&name),
         }
+    }
+
+    /// One trust state as a surface answers it, for a case that names the state
+    /// it expects rather than the envelope that state becomes.
+    ///
+    /// The name is a placeholder: [`Demand::State`] reads nothing off it, and
+    /// only [`Demand::UnknownVault`] echoes one.
+    fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
+        Demand::State(state).answer(&VaultName::new("answered").expect("a legal vault name"))
     }
 
     /// One choice serves both demand sites, and it is a choice of two facts:
@@ -10216,7 +10369,7 @@ mod tests {
         ] {
             let expected = Scheduled {
                 work: Some(work),
-                published: Some(published),
+                published: answered(published),
             };
             let by_demand = scheduled_by_a_client_demand(coverage, recovery);
             let for_a_standing_lease = scheduled_for_a_standing_lease(coverage, recovery);
@@ -10251,10 +10404,7 @@ mod tests {
         ops.maintenance_release.store(true, Ordering::SeqCst);
 
         wait_for_flag("reconcile_started", &ops.reconcile_started);
-        assert!(matches!(
-            host.state(&name),
-            Some(TrustState::Warming { .. })
-        ));
+        assert!(matches!(host.state(&name), Ok(TrustState::Warming { .. })));
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
         wait_for_state(&host, &name, TrustState::Ready);
@@ -10280,7 +10430,7 @@ mod tests {
         wait_for_flag("reconcile_started", &ops.reconcile_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::WatcherOverflow))
+            answered(TrustState::untrusted(UntrustedReason::WatcherOverflow))
         );
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -10391,7 +10541,7 @@ mod tests {
             wait_for_state(&host, &joined, TrustState::Ready);
             assert_eq!(
                 host.state(&served),
-                Some(TrustState::Unattached),
+                answered(TrustState::Unattached),
                 "the insertion disturbed the entry that was already served"
             );
             let attached = ops.attach_roots.lock().unwrap();
@@ -10491,7 +10641,13 @@ mod tests {
                 host.demand(&name, AttachMode::Durable).unwrap().outcome(),
                 &Demand::UnknownVault
             );
-            assert_eq!(host.state(&name), None);
+            assert_eq!(
+                host.state(&name)
+                    .expect_err("a removed vault refuses")
+                    .detail(),
+                &ErrorDetail::unknown_vault(name.clone()),
+                "the status surface answered for a name the host serves nothing under"
+            );
             settle();
             assert_eq!(
                 ops.attaches.load(Ordering::SeqCst),
@@ -10555,7 +10711,7 @@ mod tests {
                 || {
                     retry_pending_dispatches(&host.shared);
                     match host.state(&after) {
-                        Some(TrustState::Ready) => Observed::Met(()),
+                        Ok(TrustState::Ready) => Observed::Met(()),
                         state => Observed::pending(format!("the state is {state:?}")),
                     }
                 },
@@ -10572,8 +10728,10 @@ mod tests {
                 "the attaches are the two vaults the set still serves and no other"
             );
             assert_eq!(
-                host.state(&leaving),
-                None,
+                host.state(&leaving)
+                    .expect_err("a removed vault refuses")
+                    .detail(),
+                &ErrorDetail::unknown_vault(leaving.clone()),
                 "the arrival put back the entry the removal took out"
             );
             drop(occupier);
@@ -10621,7 +10779,7 @@ mod tests {
             );
             assert_eq!(
                 host.state(&bystander),
-                Some(TrustState::Unattached),
+                answered(TrustState::Unattached),
                 "the arrival for an unserved name ran against the entry beside it"
             );
         }
@@ -10665,7 +10823,7 @@ mod tests {
                 Err(ServingRefusal::Held),
                 "an entry holding its coverage left the set"
             );
-            assert_eq!(host.state(&name), Some(TrustState::Ready));
+            assert_eq!(host.state(&name), answered(TrustState::Ready));
             assert_eq!(
                 host.demand(&name, AttachMode::Durable).unwrap().outcome(),
                 &Demand::State(TrustState::Ready)

@@ -414,7 +414,9 @@ fn a_detail_refers_to_the_reason_type_it_carries() {
 
 /// An unknown vault advertises the requested name as a field of its detail, so
 /// a surface reads the name the request asked for as typed data rather than
-/// out of the message.
+/// out of the message. The field refers to the name's own definition, so the
+/// echo a refusal carries advertises the grammar the request was parsed
+/// through rather than a bare string.
 #[test]
 fn an_unknown_vault_advertises_the_requested_name() {
     let schema = schema_of::<ErrorDetail>();
@@ -427,8 +429,13 @@ fn an_unknown_vault_advertises_the_requested_name() {
         ["code", "name"].into_iter().collect()
     );
     assert_eq!(
-        branch["properties"]["name"]["type"].as_str(),
-        Some("string")
+        branch["properties"]["name"]["$ref"].as_str(),
+        Some("#/$defs/VaultName")
+    );
+    assert_eq!(
+        schema["$defs"]["VaultName"]["pattern"].as_str(),
+        schema_of::<VaultName>()["pattern"].as_str(),
+        "the referenced definition is not the name's own grammar: {schema}"
     );
 }
 

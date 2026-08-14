@@ -198,8 +198,8 @@ fn detach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
 fn wait_for_state(host: &Host<ProductionEntryOps>, name: &VaultName, expected: TrustState) {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
-        let observed = host.state(name).expect("registered vault state");
-        if observed == expected {
+        let observed = host.state(name);
+        if observed == Ok(expected.clone()) {
             return;
         }
         assert!(

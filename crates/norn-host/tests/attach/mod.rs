@@ -284,8 +284,8 @@ pub fn attach_and_wait(
         .expect("request attachment");
     let deadline = Instant::now() + READY_LIMIT;
     loop {
-        let observed = host.state(name).expect("registered vault state");
-        if observed == TrustState::Ready {
+        let observed = host.state(name);
+        if observed == Ok(TrustState::Ready) {
             return lease;
         }
         assert!(

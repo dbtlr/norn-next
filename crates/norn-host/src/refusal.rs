@@ -73,7 +73,7 @@ impl Demand {
             )),
             Demand::UnknownVault => Err(ErrorEnvelope::new(
                 format!("no vault is registered under the name `{name}`"),
-                ErrorDetail::unknown_vault(name.as_str()),
+                ErrorDetail::unknown_vault(name.clone()),
             )),
             Demand::UnsupportedMode(mode) => Err(ErrorEnvelope::new(
                 "this host attaches registered vaults durably and holds no lifecycle for the \
@@ -254,7 +254,7 @@ mod tests {
             ),
             (
                 Demand::UnknownVault,
-                Some(ErrorDetail::unknown_vault(asked().as_str())),
+                Some(ErrorDetail::unknown_vault(asked())),
             ),
             (
                 Demand::UnsupportedMode(AttachMode::Throwaway),
@@ -354,7 +354,7 @@ mod tests {
             .expect_err("an unknown vault refuses");
         assert_eq!(
             envelope.detail(),
-            &ErrorDetail::unknown_vault("ledger"),
+            &ErrorDetail::unknown_vault(name("ledger")),
             "the refusal echoes another name"
         );
     }
