@@ -15,7 +15,12 @@
 //! - `path` — the vault-root-relative path, already normalized. Case,
 //!   dot-prefix and separator normalization belong to the filesystem seam, so
 //!   the store compares bytes under the default `BINARY` collation and never
-//!   folds anything itself. This is the document's name and its unique key.
+//!   folds anything itself. This is the document's name and its unique key. It
+//!   refuses the empty spelling in the table as well as at
+//!   [`crate::path::DocumentPath`], because a paged read takes `''` for the
+//!   floor a scope bounded by nothing seeks from — so "no path sorts at or
+//!   below `''`" is a fact a statement relies on rather than one a constructor
+//!   happens to keep.
 //! - `suffix_key` — the segment-reversed form the suffix-resolution ladder
 //!   probes, described in [`crate::path`]. It exists so that
 //!   right-to-left, segment-aligned suffix resolution is a range scan over an
@@ -100,7 +105,7 @@ pub(crate) fn statements() -> Vec<String> {
 const STATEMENTS: &[&str] = &[
     "CREATE TABLE documents (
     id                           INTEGER PRIMARY KEY,
-    path                         TEXT    NOT NULL,
+    path                         TEXT    NOT NULL CHECK (path <> ''),
     suffix_key                   TEXT    NOT NULL,
     content_hash                 TEXT    NOT NULL,
     byte_length                  INTEGER NOT NULL,
