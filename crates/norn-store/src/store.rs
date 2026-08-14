@@ -539,14 +539,27 @@ impl Drop for Store {
 /// does.
 ///
 /// The whole module lives behind the `induced-failure` feature, off by
-/// default, so a shipped build carries none of the three hooks these
-/// arrangements reach: the out-of-band executor here, the busy-injection a
-/// pinned-scalar read checks on every call, and the tear the increment checks
-/// between two entries.
+/// default, so a shipped build carries none of the hooks these arrangements
+/// reach: the out-of-band executor here, the busy-injection a pinned-scalar
+/// read checks on every call, the two tears the increment checks — between two
+/// entries and at a changeset's own boundaries — the page cap an open applies,
+/// and the damage the store schema's statement list meets.
+///
+/// **Two of the arrangements are per-thread and the rest are per-process**, and
+/// the split is not incidental. A tear armed and met on one thread is the
+/// store's own suite arranging its own call. An arrangement a *host* has to
+/// meet is armed by a suite thread and fires on a worker thread the host owns,
+/// so nothing thread-local would ever be read; those are process-wide, and the
+/// process either does not survive them or clears them by name.
 #[cfg(feature = "induced-failure")]
 #[doc(hidden)]
 pub mod induced_failure {
-    use super::{Store, StoreError, error, put_meta};
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        CHANGESETS_COMMITTED, DISARMED, PAGE_CAP, REFUSE_NEXT_CREATION, Store, StoreError,
+        TEAR_AFTER_COMMIT, TEAR_AT_CHUNK_BOUNDARY, error, put_meta,
+    };
     use crate::ddl;
 
     /// Record a store schema pair this build did not produce.
@@ -622,6 +635,128 @@ pub mod induced_failure {
     pub fn abort_after_changeset_entries(entries: u64) {
         super::TEAR_CHANGESET_AFTER.set(Some(entries));
     }
+
+    /// Kill this process the moment `changesets` of them have committed, with
+    /// the findings recorded beside the last one still unwritten.
+    ///
+    /// **One flush is a changeset plus the findings recorded after it, each in
+    /// its own transaction**, and this is the window between the two. What it
+    /// leaves is the increment landed with nothing beside it saying why — a
+    /// tombstone where a quarantined path had a row, a degraded row asserting a
+    /// frontmatter nothing read — which is the state the rows themselves are
+    /// required to demand their own re-derivation from.
+    ///
+    /// Process-wide, because the flush this tears is a host worker's.
+    pub fn abort_after_committing_changesets(changesets: u64) {
+        TEAR_AFTER_COMMIT.store(changesets, Ordering::SeqCst);
+    }
+
+    /// Kill this process at the first statement of the changeset after
+    /// `changesets` of them have completed whole.
+    ///
+    /// **A heal-scale increment is chunked into separately atomic changesets**,
+    /// and this is the boundary between two of them: the chunk before it
+    /// committed and recorded its findings, the chunk after it has not opened a
+    /// transaction. What it leaves is every chunk that landed and no part of
+    /// the one that had not begun — each generation whole, the vault's coverage
+    /// short by whatever the walk had not reached.
+    ///
+    /// It is a different point from
+    /// [`abort_after_committing_changesets`], which stops inside one flush, and
+    /// from [`abort_after_changeset_entries`], which stops inside one
+    /// transaction. Process-wide, for the same reason.
+    pub fn abort_at_the_chunk_boundary(changesets: u64) {
+        TEAR_AT_CHUNK_BOUNDARY.store(changesets, Ordering::SeqCst);
+    }
+
+    /// How many changesets have committed in this process so far.
+    ///
+    /// What a tear is armed against, so a case that has to tear the changeset
+    /// carrying a particular document can read where the count stands rather
+    /// than assume it.
+    pub fn changesets_committed() -> u64 {
+        CHANGESETS_COMMITTED.load(Ordering::SeqCst)
+    }
+
+    /// Hold every store this process opens from here on to `pages` pages.
+    ///
+    /// **This is a full disk, met by the engine rather than described to it.**
+    /// Past the cap, every statement that has to grow the file reports
+    /// `SQLITE_FULL` — the code a disk with no room left produces — so an
+    /// increment refuses through the store's own error typing and everything
+    /// downstream of it classifies a real condition rather than a fabricated
+    /// one. It is not damage, and the store must not answer it as damage.
+    ///
+    /// The cap is read when a connection is opened, so it reaches a store a
+    /// host opens for itself. Cap at the count a database already holds and it
+    /// cannot grow at all; [`uncap_the_pages`] clears it, which is what a
+    /// recovery case does before demanding the vault again.
+    pub fn cap_the_pages(pages: u64) {
+        PAGE_CAP.store(pages, Ordering::SeqCst);
+    }
+
+    /// Let every store this process opens from here on grow again.
+    pub fn uncap_the_pages() {
+        PAGE_CAP.store(0, Ordering::SeqCst);
+    }
+
+    /// How many pages this database is holding.
+    ///
+    /// What [`cap_the_pages`] is armed against: a cap is only a full disk when
+    /// it is the count the file already stands at, and a number guessed from a
+    /// file size is a number that leaves the case passing for the wrong reason.
+    pub fn page_count(store: &mut Store) -> Result<u64, StoreError> {
+        store
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .map_err(|error| error::sql("reading the page count", error))
+    }
+
+    /// Make the next store schema this process writes meet a corrupt database
+    /// partway through its statement list.
+    ///
+    /// **A database that cannot be created is the damage no rung resolves.**
+    /// Rung 3's answer to damage is to discard the file and write the store
+    /// schema again, so a creation that is itself damaged is the state above
+    /// the top of the ladder — and the required behavior there is to give the
+    /// entry back rather than to climb again.
+    ///
+    /// The arrangement is the error the statement meets, and nothing else: it
+    /// is handed to the same `sql_at_statement` a real driver error goes to, so
+    /// the typing, the message and the routing under it are the production
+    /// ones. Corrupting the file on disk first reaches nothing — a create
+    /// writes over whatever was there — which is why the condition is armed
+    /// here rather than arranged on disk. One-shot, and process-wide.
+    pub fn corrupt_the_next_store_creation() {
+        REFUSE_NEXT_CREATION.store(rusqlite::ffi::SQLITE_CORRUPT, Ordering::SeqCst);
+    }
+
+    /// Make the next store schema this process writes meet a **refusal** partway
+    /// through its statement list: a read-only database, which says nothing
+    /// about the file's contents.
+    ///
+    /// The pair with [`corrupt_the_next_store_creation`] is what holds the two
+    /// halves of the creation's error handling apart. Damage is typed the same
+    /// whichever statement met it, so the damage arm above says nothing about
+    /// *which* statement failed. This arm does: a refusal carries the statement
+    /// it was met at, and a creation that stopped naming it is a creation
+    /// nobody can debug from the message it reports.
+    pub fn refuse_the_next_store_creation() {
+        REFUSE_NEXT_CREATION.store(rusqlite::ffi::SQLITE_READONLY, Ordering::SeqCst);
+    }
+
+    /// Disarm every process-wide arrangement above.
+    ///
+    /// The per-thread ones are absent by design: nothing survives the abort
+    /// they arm. These are here because a suite in one process arms a cap,
+    /// watches a request refuse under it, and then has to watch the same
+    /// request converge without it.
+    pub fn disarm() {
+        PAGE_CAP.store(0, Ordering::SeqCst);
+        REFUSE_NEXT_CREATION.store(0, Ordering::SeqCst);
+        TEAR_AFTER_COMMIT.store(DISARMED, Ordering::SeqCst);
+        TEAR_AT_CHUNK_BOUNDARY.store(DISARMED, Ordering::SeqCst);
+    }
 }
 
 /// What connecting to a path produced.
@@ -692,7 +827,28 @@ fn connect(path: &Path) -> Result<Attempt, StoreError> {
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|error| error::sql("turning foreign keys on", error))?;
+    #[cfg(feature = "induced-failure")]
+    cap_the_pages(&connection)?;
     Ok(Attempt::Connected(connection))
+}
+
+/// Hold this connection to the page count an arrangement capped it at.
+///
+/// The cap is what a database on a disk with no room left meets, and it is met
+/// by the engine rather than by a fabricated error: past the limit every
+/// statement that has to grow the file reports `SQLITE_FULL`, which is the code
+/// a real full disk produces and which every reader downstream classifies
+/// exactly as it classifies one. A build without the feature never reads the
+/// cap.
+#[cfg(feature = "induced-failure")]
+fn cap_the_pages(connection: &Connection) -> Result<(), StoreError> {
+    let pages = PAGE_CAP.load(std::sync::atomic::Ordering::Relaxed);
+    if pages == 0 {
+        return Ok(());
+    }
+    connection
+        .pragma_update(None, "max_page_count", pages)
+        .map_err(|error| error::sql("capping the page count", error))
 }
 
 /// Read the store schema this database carries, and decide whether it is the
@@ -838,7 +994,15 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
         .unchecked_transaction()
         .map_err(|error| error::sql("opening the store schema transaction", error))?;
     for statement in ddl::statements() {
-        transaction.execute_batch(&statement).map_err(|error| {
+        #[cfg(feature = "induced-failure")]
+        let armed = failure_armed_for_the_store_schema();
+        #[cfg(not(feature = "induced-failure"))]
+        let armed: Option<rusqlite::Error> = None;
+        let ran = match armed {
+            Some(error) => Err(error),
+            None => transaction.execute_batch(&statement),
+        };
+        ran.map_err(|error| {
             error::sql_at_statement("creating the store schema", &statement, error)
         })?;
     }
@@ -971,16 +1135,130 @@ std::thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// The seam the changeset tears record themselves under.
+#[cfg(feature = "induced-failure")]
+const INCREMENT_SEAM: &str = "norn-store/increment";
+
+/// The value the process-wide tears hold while nothing is armed. A count no run
+/// reaches, so the comparison is one load and a mismatch.
+#[cfg(feature = "induced-failure")]
+const DISARMED: u64 = u64::MAX;
+
+/// How many changesets have committed in this process.
+#[cfg(feature = "induced-failure")]
+static CHANGESETS_COMMITTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The committed-changeset count this process ends at, with the findings beside
+/// that changeset unwritten.
+#[cfg(feature = "induced-failure")]
+static TEAR_AFTER_COMMIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(DISARMED);
+
+/// The completed-flush count after which this process ends at the next
+/// changeset's first statement.
+#[cfg(feature = "induced-failure")]
+static TEAR_AT_CHUNK_BOUNDARY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(DISARMED);
+
+/// The page count every connection opened from here on is held to, or zero for
+/// a database nothing caps.
+#[cfg(feature = "induced-failure")]
+static PAGE_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The driver code the next store schema written in this process meets, or zero
+/// where it meets none.
+#[cfg(feature = "induced-failure")]
+static REFUSE_NEXT_CREATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 /// End the process where an arrangement asked for a changeset to be torn after
 /// this many entries.
 ///
 /// The abort is deliberate rather than a panic: a panic unwinds, and an unwind
 /// rolls the transaction back through the driver's own destructor — which is the
-/// tidy end, not the one rung 2 has to survive.
+/// tidy end, not the one rung 2 has to survive. Every abort below is the same
+/// act for the same reason.
 #[cfg(feature = "induced-failure")]
 pub(crate) fn abort_if_the_changeset_is_torn(applied: u64) {
     if TEAR_CHANGESET_AFTER.get() == Some(applied) {
+        record_arm(INCREMENT_SEAM, "boundary=entries");
         std::process::abort();
+    }
+}
+
+/// End the process at a changeset's first statement, where the flushes before
+/// it are as many as an arrangement asked to leave standing.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn abort_if_the_chunk_boundary_is_torn() {
+    use std::sync::atomic::Ordering;
+    let committed = CHANGESETS_COMMITTED.load(Ordering::SeqCst);
+    if TEAR_AT_CHUNK_BOUNDARY.load(Ordering::SeqCst) == committed {
+        record_arm(
+            INCREMENT_SEAM,
+            &format!("boundary=chunk changesets={committed}"),
+        );
+        std::process::abort();
+    }
+}
+
+/// Count a changeset that committed, and end the process where the findings
+/// beside it are what an arrangement asked to lose.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn note_the_changeset_committed() {
+    use std::sync::atomic::Ordering;
+    let committed = CHANGESETS_COMMITTED.fetch_add(1, Ordering::SeqCst) + 1;
+    if TEAR_AFTER_COMMIT.load(Ordering::SeqCst) == committed {
+        record_arm(
+            INCREMENT_SEAM,
+            &format!("boundary=after-commit changesets={committed}"),
+        );
+        std::process::abort();
+    }
+}
+
+/// The error the store schema's statement list meets where an arrangement armed
+/// one, or nothing where it did not.
+///
+/// One-shot: the arm is taken by the first statement that asks, so a rung that
+/// creates a database, fails, and is asked to create another one meets the
+/// condition once rather than forever.
+#[cfg(feature = "induced-failure")]
+fn failure_armed_for_the_store_schema() -> Option<rusqlite::Error> {
+    use std::sync::atomic::Ordering;
+    let code = REFUSE_NEXT_CREATION.swap(0, Ordering::SeqCst);
+    if code == 0 {
+        return None;
+    }
+    record_arm("norn-store/create", &format!("code={code}"));
+    Some(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(code),
+        Some("the store schema met an armed condition".to_string()),
+    ))
+}
+
+/// Append one record saying which arm fired, where a harness asked for one.
+///
+/// The process an arm fires in is usually about to end, so this opens, writes,
+/// syncs and closes rather than buffering: a record still in memory when the
+/// abort lands is a record the parent never reads. A harness that named no file
+/// gets no record and pays one environment read for it.
+#[cfg(feature = "induced-failure")]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, which is not a database.
+fn record_arm(seam: &str, fields: &str) {
+    use std::io::Write as _;
+    static HITS: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = HITS
+        .get_or_init(|| std::env::var_os("NORN_STORE_ARM_HITS").map(std::path::PathBuf::from))
+        .as_ref()
+    else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "seam={seam} {fields}");
+        let _ = file.sync_all();
     }
 }
 

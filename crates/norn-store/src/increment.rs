@@ -144,6 +144,13 @@ pub(crate) fn apply(
         });
     };
 
+    // The boundary between two chunks: everything before this changeset has
+    // committed and recorded its findings, and this one has taken no lock and
+    // opened no transaction. A build without the `induced-failure` feature
+    // carries no check here.
+    #[cfg(feature = "induced-failure")]
+    store::abort_if_the_chunk_boundary_is_torn();
+
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
@@ -195,6 +202,13 @@ pub(crate) fn apply(
     transaction
         .commit()
         .map_err(|error| error::sql("committing an increment", error))?;
+
+    // The changeset is at rest and whatever the caller records beside it is
+    // not. A flush torn here leaves the increment landed with no finding
+    // stating why, which is the state the rows themselves demand their own
+    // re-derivation from.
+    #[cfg(feature = "induced-failure")]
+    store::note_the_changeset_committed();
 
     // Counters record what happened, so they move after the commit that made it
     // happen.
