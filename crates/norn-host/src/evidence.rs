@@ -220,11 +220,13 @@ pub(crate) struct Attribution {
 
 impl Drop for Attribution {
     fn drop(&mut self) {
-        let window = self
-            .window
-            .take()
-            .expect("a job's read window stands until the job's guard is dropped");
-        self.account.absorb(window);
+        // This drop runs while a failed job unwinds, and a panic here would
+        // abort the process rather than let that unwind finish. The window is
+        // taken by whether it is there, so the fold is the same act it always
+        // was and the guard has nothing left to panic about.
+        if let Some(window) = self.window.take() {
+            self.account.absorb(window);
+        }
     }
 }
 
