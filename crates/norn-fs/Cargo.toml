@@ -24,6 +24,16 @@ publish.workspace = true
 #
 # `notify` is the platform watcher backend. Its event vocabulary never crosses
 # this crate boundary; callers receive only typed dirty sets and rescan scopes.
+# `induced-failure` gates the one place this crate's write-protocol fault seam
+# is reachable from outside it: `write` arms itself from the environment instead
+# of passing no faults at all. It exists because the process-death bars over the
+# publication protocol cannot be stated by a caller that returns — a child dies
+# inside the swap and its parent reads what was left at rest — and because a
+# full disk has no `io::ErrorKind` a test can otherwise ask for. Off by default,
+# so a shipped build reads neither variable and carries no arm.
+[features]
+induced-failure = []
+
 [dependencies]
 libc = { workspace = true }
 notify = { workspace = true }
@@ -31,6 +41,10 @@ notify = { workspace = true }
 rustix = { workspace = true }
 sha2 = { workspace = true }
 
+# This crate is its own dev-dependency, with the feature turned on, because the
+# lockdown suite in `tests/` links against `norn-fs` as an external crate and
+# arms the widened seam through the environment the public entry point reads.
 [dev-dependencies]
 norn-fixtures = { path = "../norn-fixtures" }
+norn-fs = { path = ".", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

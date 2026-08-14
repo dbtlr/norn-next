@@ -7,23 +7,52 @@
 //! reachable by writing files into a temporary directory.
 //!
 //! So each stage of the protocol asks [`Faults`] whether it is the stage that
-//! fails. The public entry points pass [`Faults::NONE`], which asks nothing and
-//! costs one comparison; the in-crate suite passes a stage and an error and
-//! reads what the protocol did with it.
+//! fails. [`Faults::entry`] is what the public entry points pass; the in-crate
+//! suite passes a stage and an [`Answer`] and reads what the protocol did with
+//! it.
 //!
 //! The same shape carries the other half of what a test cannot arrange: a
 //! foreign writer landing inside a window one call wide. [`Window`] names those
 //! windows, and a disturbance is handed the window it is standing in.
 //!
 //! **The seam is deliberately small.** It names *where* a write can be made to
-//! fail or be disturbed, and never *what happens next* — the answer to that is
-//! the code under test. Both halves are `pub(crate)` and behind `cfg(test)`
-//! where they take a value, so nothing outside this crate injects through them
-//! today; a lockdown layer that wants the disk-full and process-kill bars widens
-//! this seam rather than growing a second one, and that widening is its decision
-//! to take.
+//! fail, and *how* — an error, a full disk, or the end of the process — and
+//! never what the protocol does next, which is the code under test.
+//!
+//! # Reaching it from outside
+//!
+//! One stage of the widening is taken and no more: under the `induced-failure`
+//! feature, [`write`](crate::write) arms itself from this process's environment
+//! rather than passing [`Faults::NONE`]. That is what a lockdown suite's
+//! process-death bars need and what nothing else can give them — a stage whose
+//! required outcome is "this process does not survive here" cannot be reached
+//! by a caller that has to return to make its assertion, so the arm is read by
+//! the child that dies and the assertion is made by the parent that spawned it.
+//!
+//! Two variables carry it, both read once:
+//!
+//! - `NORN_FS_ARMED_STAGES` — the arm, as comma-separated `stage=answer` pairs,
+//!   spelled `create`, `write`, `sync`, `swap`, `parent-sync`, `cleanup` and
+//!   `fails`, `full-disk`, `ends`. A pair this module cannot read is a mistake
+//!   in the harness rather than a stage nothing is armed at, so it panics.
+//! - `NORN_FS_ARM_HITS` — a file each fired arm appends one record to before it
+//!   answers, so a parent reads *which* checkpoint the protocol reached rather
+//!   than inferring it from what the child left behind. Neutering a stage's
+//!   `check` call takes its record away, which is what makes a bypassed hook
+//!   fail the case it was supposed to carry.
+//!
+//! Nothing outside this crate arms anything without the feature, and a shipped
+//! build has no reader for either variable.
 
 use std::io;
+
+/// The environment variable naming the stages this process is armed at.
+#[cfg(feature = "induced-failure")]
+pub(crate) const ARMED_STAGES: &str = "NORN_FS_ARMED_STAGES";
+
+/// The environment variable naming the file fired arms record themselves in.
+#[cfg(feature = "induced-failure")]
+pub(crate) const ARM_HITS: &str = "NORN_FS_ARM_HITS";
 
 /// A point in the write protocol that can be made to fail.
 ///
@@ -48,6 +77,110 @@ pub(crate) enum Stage {
     /// here stands in for a removal the filesystem refused — the one condition
     /// whose required behavior is to change nothing at all about the outcome.
     Cleanup,
+}
+
+// The stage vocabulary — the roster and the names — is what a harness arms and
+// what a record names, so it compiles where something reads it and nowhere
+// else. It still belongs to the seam rather than to the suite: the names are
+// what the widened half is stated over, and a build that carried a different
+// set would be a different seam. The variants themselves carry no such gate:
+// the protocol names one at every stage it checks, in every build.
+impl Stage {
+    /// Every stage, in the order the replacement protocol runs them.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub(crate) const ALL: [Stage; 6] = [
+        Stage::Create,
+        Stage::Write,
+        Stage::Sync,
+        Stage::Swap,
+        Stage::ParentSync,
+        Stage::Cleanup,
+    ];
+
+    /// The name a harness arms this stage under, which is also the name a
+    /// record of it carries.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Stage::Create => "create",
+            Stage::Write => "write",
+            Stage::Sync => "sync",
+            Stage::Swap => "swap",
+            Stage::ParentSync => "parent-sync",
+            Stage::Cleanup => "cleanup",
+        }
+    }
+
+    /// The stage `name` spells, or nothing where it spells none.
+    #[cfg(feature = "induced-failure")]
+    fn named(name: &str) -> Option<Stage> {
+        Stage::ALL.into_iter().find(|stage| stage.name() == name)
+    }
+}
+
+/// What an armed stage does when the protocol reaches it.
+///
+/// The three are the three shapes a write's environment fails in, and each has
+/// a different required outcome: an error the protocol refuses on, a disk with
+/// no room left, and a machine that stops between two system calls. Naming them
+/// apart is what lets one arm say `ENOSPC` — which has no
+/// [`io::ErrorKind`](std::io::ErrorKind) of its own, and which a caller reads
+/// off the refusal as an error number — and another say nothing at all, because
+/// the process it was armed in does not reach a return.
+// The allow stays at the enum rather than moving onto its items: nothing in a
+// build that arms nothing constructs an answer at all, and a variant nobody
+// names is what the lint reads as dead. The variants are the seam's vocabulary
+// even so — an unarmed build has to hold the same three, or the arm a harness
+// spells means something different from the arm this seam answers.
+#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Answer {
+    /// The stage meets this error.
+    Fails(io::ErrorKind),
+    /// The stage meets a full disk: `ENOSPC`, carrying the error number, which
+    /// is the only way a refusal can be told apart from any other write failure.
+    MeetsAFullDisk,
+    /// The process ends at the stage, before the stage's own work runs. No
+    /// unwinding, no destructor, no shadow removed on the way out — which is
+    /// what a machine losing power between two system calls leaves behind, and
+    /// the only thing the process-death bars can be stated over.
+    Ends,
+}
+
+impl Answer {
+    /// The name a harness arms this answer under.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Answer::Fails(_) => "fails",
+            Answer::MeetsAFullDisk => "full-disk",
+            Answer::Ends => "ends",
+        }
+    }
+
+    /// The answer `name` spells, or nothing where it spells none.
+    #[cfg(feature = "induced-failure")]
+    fn named(name: &str) -> Option<Answer> {
+        match name {
+            "fails" => Some(Answer::Fails(io::ErrorKind::Other)),
+            "full-disk" => Some(Answer::MeetsAFullDisk),
+            "ends" => Some(Answer::Ends),
+            _ => None,
+        }
+    }
+
+    /// The error this answer meets a stage with.
+    fn error(self, stage: Stage) -> io::Error {
+        match self {
+            Answer::Fails(kind) => {
+                io::Error::new(kind, format!("injected failure at the {stage:?} stage"))
+            }
+            Answer::MeetsAFullDisk => io::Error::from_raw_os_error(libc::ENOSPC),
+            // Nothing reaches this: `check` ends the process before it asks for
+            // an error to return.
+            Answer::Ends => io::Error::other("the process was armed to end here"),
+        }
+    }
 }
 
 /// A point in the protocol where a foreign actor's act can be made to land.
@@ -81,31 +214,138 @@ pub(crate) enum Window {
 /// leaks, and it is unreachable if only one stage at a time can be made to fail.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Faults {
-    injected: &'static [(Stage, io::ErrorKind)],
+    injected: &'static [(Stage, Answer)],
 }
 
 impl Faults {
-    /// A write that fails only where the machine makes it fail. This is what
-    /// every public entry point passes.
+    /// A write that fails only where the machine makes it fail.
     pub(crate) const NONE: Faults = Faults { injected: &[] };
 
-    /// A write that fails at each named stage.
+    /// A write that answers each named stage the named way.
     #[cfg(test)]
-    pub(crate) const fn at(injected: &'static [(Stage, io::ErrorKind)]) -> Faults {
+    pub(crate) const fn at(injected: &'static [(Stage, Answer)]) -> Faults {
         Faults { injected }
     }
 
+    /// What a public entry point passes.
+    ///
+    /// Without the `induced-failure` feature this is [`Faults::NONE`] and the
+    /// entry point asks one comparison against an empty list. With it, the
+    /// answer is whatever this process was started armed with — read once, and
+    /// empty in every process that armed nothing, which is every process that
+    /// is not a lockdown suite's child.
+    pub(crate) fn entry() -> Faults {
+        #[cfg(feature = "induced-failure")]
+        {
+            Faults {
+                injected: armed::stages(),
+            }
+        }
+        #[cfg(not(feature = "induced-failure"))]
+        {
+            Faults::NONE
+        }
+    }
+
     /// The error `stage` is supposed to meet, if it is one of the injected ones.
+    ///
+    /// A stage the arm names is recorded before it is answered, so a record
+    /// stands for every checkpoint the protocol actually reached — including the
+    /// one the process does not return from.
     pub(crate) fn check(&self, stage: Stage) -> io::Result<()> {
-        for (injected, kind) in self.injected {
+        for (injected, answer) in self.injected {
             if *injected == stage {
-                return Err(io::Error::new(
-                    *kind,
-                    format!("injected failure at the {stage:?} stage"),
-                ));
+                #[cfg(feature = "induced-failure")]
+                armed::record(stage, *answer);
+                if *answer == Answer::Ends {
+                    // Deliberately an abort rather than a panic: a panic unwinds,
+                    // and an unwind runs the removals that make a half-published
+                    // write tidy again. The tidy end is not the one this bar is
+                    // about.
+                    std::process::abort();
+                }
+                return Err(answer.error(stage));
             }
         }
         Ok(())
+    }
+}
+
+/// The arm this process was started under.
+///
+/// Both readings happen once and are then held: a write asks the seam six times
+/// and a heal-scale run asks it a great many more, so re-reading the environment
+/// per stage would make the feature's cost a function of how much is written.
+#[cfg(feature = "induced-failure")]
+mod armed {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+
+    use super::{ARM_HITS, ARMED_STAGES, Answer, Stage};
+
+    /// The stages this process is armed at, in the order they were named.
+    pub(super) fn stages() -> &'static [(Stage, Answer)] {
+        static STAGES: OnceLock<Vec<(Stage, Answer)>> = OnceLock::new();
+        STAGES.get_or_init(|| match std::env::var_os(ARMED_STAGES) {
+            None => Vec::new(),
+            Some(spelling) => parse(
+                spelling
+                    .to_str()
+                    .unwrap_or_else(|| panic!("{ARMED_STAGES} is not UTF-8")),
+            ),
+        })
+    }
+
+    /// Read `stage=answer` pairs, and refuse a spelling that names neither.
+    ///
+    /// A misspelled arm that quietly armed nothing would pass every bar it was
+    /// supposed to carry, so an unreadable pair ends the process saying so.
+    fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
+        spelling
+            .split(',')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (stage, answer) = pair
+                    .split_once('=')
+                    .unwrap_or_else(|| panic!("`{pair}` in {ARMED_STAGES} is not `stage=answer`"));
+                let stage = Stage::named(stage)
+                    .unwrap_or_else(|| panic!("`{stage}` in {ARMED_STAGES} names no stage"));
+                let answer = Answer::named(answer)
+                    .unwrap_or_else(|| panic!("`{answer}` in {ARMED_STAGES} names no answer"));
+                (stage, answer)
+            })
+            .collect()
+    }
+
+    /// Append one record saying which checkpoint fired and how it answered.
+    ///
+    /// Best effort by construction: the process this runs in is often about to
+    /// end, and a harness that armed no record file wants none. What it must not
+    /// do is buffer — a record still in this process's memory when the abort
+    /// lands is a record the parent never reads — so it opens, writes, syncs and
+    /// closes each time.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, outside the vault.
+    pub(super) fn record(stage: Stage, answer: Answer) {
+        static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        let Some(path) = HITS
+            .get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
+            .as_ref()
+        else {
+            return;
+        };
+        let record = format!(
+            "seam=norn-fs/write stage={} answer={}\n",
+            stage.name(),
+            answer.name()
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(record.as_bytes());
+            let _ = file.sync_all();
+        }
     }
 }
 
@@ -117,14 +357,7 @@ mod tests {
     /// somewhere would make every ordinary write a test of this module.
     #[test]
     fn no_fault_lets_every_stage_through() {
-        for stage in [
-            Stage::Create,
-            Stage::Write,
-            Stage::Sync,
-            Stage::Swap,
-            Stage::ParentSync,
-            Stage::Cleanup,
-        ] {
+        for stage in Stage::ALL {
             Faults::NONE.check(stage).expect("no injected failure");
         }
     }
@@ -133,18 +366,39 @@ mod tests {
     /// names rather than the first one the protocol happens to run.
     #[test]
     fn an_injected_fault_fires_at_one_stage_only() {
-        let faults = Faults::at(&[(Stage::Swap, io::ErrorKind::PermissionDenied)]);
+        let faults = Faults::at(&[(Stage::Swap, Answer::Fails(io::ErrorKind::PermissionDenied))]);
         let error = faults.check(Stage::Swap).expect_err("the injected stage");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("Swap"), "{error}");
-        for other in [
-            Stage::Create,
-            Stage::Write,
-            Stage::Sync,
-            Stage::ParentSync,
-            Stage::Cleanup,
-        ] {
+        for other in Stage::ALL.into_iter().filter(|it| *it != Stage::Swap) {
             faults.check(other).expect("a stage nothing injected");
+        }
+    }
+
+    /// A full disk carries the error number a caller classifies on. There is no
+    /// [`io::ErrorKind`] for it, so a refusal that lost the number is a refusal
+    /// nothing can tell apart from any other failed write.
+    #[test]
+    fn a_full_disk_carries_the_error_number_that_names_it() {
+        let faults = Faults::at(&[(Stage::Write, Answer::MeetsAFullDisk)]);
+        let error = faults.check(Stage::Write).expect_err("the injected stage");
+        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+    }
+
+    /// Every stage and every answer a harness arms round-trips through the name
+    /// it is armed under, so a widened seam and the suite arming it cannot drift
+    /// into naming different things.
+    #[test]
+    fn every_stage_and_answer_has_one_name() {
+        let names: std::collections::BTreeSet<&str> =
+            Stage::ALL.iter().map(|stage| stage.name()).collect();
+        assert_eq!(names.len(), Stage::ALL.len());
+        for answer in [
+            Answer::Fails(io::ErrorKind::Other),
+            Answer::MeetsAFullDisk,
+            Answer::Ends,
+        ] {
+            assert!(!answer.name().is_empty());
         }
     }
 }

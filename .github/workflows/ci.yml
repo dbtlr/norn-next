@@ -64,9 +64,13 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
-      # The workspace test above never enables `induced-failure`, so
-      # norn-host's crash-convergence proof (kill_recovery.rs) compiles to
-      # zero tests above. Scoped to the one crate the feature belongs to.
+      # Two crates declare an `induced-failure` feature, and the workspace test
+      # above reaches only one of them. norn-fs turns its own on through a self
+      # dev-dependency, so that crate's lockdown suite runs above already.
+      # norn-host's is a feature a caller asks for, and nothing above asks: its
+      # crash-convergence proof (kill_recovery.rs) and its lockdown suite are
+      # whole files behind it and compile to zero tests there. This step is
+      # scoped to that crate for that reason.
       - name: Induced-failure recovery
         run: cargo test --locked -p norn-host --features induced-failure
 
@@ -79,6 +83,12 @@ jobs:
   # APFS's default here, and no other CI platform. Pin the image rather than
   # following macos-latest, and assert the machine architecture so a future
   # runner-label migration refuses instead of silently weakening the gate.
+  #
+  # The host step names `induced-failure` because the suite behind that feature
+  # is filesystem behavior too: a revoked directory mode answering `EACCES`, and
+  # a database left the way an aborted process leaves it. Without the feature
+  # those files compile to zero tests, and the second filesystem this job exists
+  # for would never see them.
   platform:
     name: determinism and filesystem (macOS ARM64)
     runs-on: macos-15
@@ -95,7 +105,7 @@ jobs:
       - name: Filesystem contracts
         run: cargo test --locked -p norn-fs
       - name: Host filesystem contracts
-        run: cargo test --locked -p norn-host
+        run: cargo test --locked -p norn-host --features induced-failure
 
   # The architecture gate: it reads `cargo metadata` once per entry in the
   # pinned feature matrix and asserts the workspace normal-dependency graph
