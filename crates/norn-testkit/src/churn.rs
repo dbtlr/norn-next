@@ -39,8 +39,8 @@
 //! Five constructors build the workload families a churn suite runs, and each
 //! is data rather than a procedure: a suite may apply one whole, apply it a step
 //! at a time around its own waits, or interleave two. They are
-//! [`ordinary_editing`], [`atomic_replacement`], [`burst`],
-//! [`validity_transitions`] and [`external_tools`].
+//! [`ordinary_editing`], [`atomic_replacement`] with [`case_flip`] beside it,
+//! [`burst`], [`validity_transitions`] and [`external_tools`].
 //!
 //! # The writes here are foreign on purpose
 //!
@@ -555,14 +555,13 @@ pub fn ordinary_editing(seed: u64) -> Script {
 
 /// **Family 2. Atomic replacement and movement.**
 ///
-/// Content that arrives whole at a name, names that move between directories,
-/// and the case-flip the volume decides the meaning of. The `folding` argument
-/// is the volume's answer, and the script differs by it: on a volume that folds,
-/// a case flip re-spells one place, and on one that does not, it moves a
-/// document to a second place that can stand beside the first.
-pub fn atomic_replacement(seed: u64, folding: Folding) -> Script {
+/// Content that arrives whole at a name, and names that move between
+/// directories. The case flip is [`case_flip`]'s, because what a flip means is
+/// the volume's own answer while this workload's claim is the same on every
+/// volume.
+pub fn atomic_replacement(seed: u64) -> Script {
     let mut ink = Ink::new(seed);
-    let mut steps = vec![
+    let steps = vec![
         Step::new(
             "land a document whole at a name that held nothing",
             Act::AtomicReplace {
@@ -598,43 +597,59 @@ pub fn atomic_replacement(seed: u64, folding: Folding) -> Script {
                 to: "churn/arrived/settled.md".to_string(),
             },
         ),
+    ];
+    Script::new("atomic replacement and movement", steps)
+}
+
+/// The name the case flip starts at.
+pub const FLIPPED_FROM: &str = "churn/replaced/flipping.md";
+
+/// The name the case flip leaves on disk.
+pub const FLIPPED_TO: &str = "churn/replaced/FLIPPING.md";
+
+/// **Family 2's normalized-identity half: a name whose case flips.**
+///
+/// What a flip *is* differs by volume, and the sentence each step carries says
+/// which it is. Where two spellings are two places the flip is a move, and the
+/// name it arrives at is one nothing stood at. Where they are one place it
+/// re-spells that place, and the content landing whole afterwards is what says
+/// the one document is still being maintained under its new spelling.
+///
+/// The acts are the same either way, which is the point: a workload does what a
+/// person does, and the volume decides what that means.
+pub fn case_flip(seed: u64, folding: Folding) -> Script {
+    let mut ink = Ink::new(seed);
+    let steps = vec![
         Step::new(
             "write the document whose spelling is about to flip case",
             Act::Write {
-                at: "churn/replaced/flipping.md".to_string(),
+                at: FLIPPED_FROM.to_string(),
                 bytes: ink.document("flipping"),
             },
         ),
-    ];
-    match folding {
-        Folding::Distinct => steps.push(Step::new(
-            "flip the case of its name, which is a second place on this volume",
-            Act::Rename {
-                from: "churn/replaced/flipping.md".to_string(),
-                to: "churn/replaced/FLIPPING.md".to_string(),
+        Step::new(
+            match folding {
+                Folding::Distinct => {
+                    "flip the case of its name, which is a second place on this volume"
+                }
+                Folding::Folded => {
+                    "flip the case of its name, which re-spells the one place on this volume"
+                }
             },
-        )),
-        Folding::Folded => {
-            steps.push(Step::new(
-                "flip the case of its name, which re-spells the one place on this volume",
-                Act::Rename {
-                    from: "churn/replaced/flipping.md".to_string(),
-                    to: "churn/replaced/FLIPPING.md".to_string(),
-                },
-            ));
-            steps.push(Step::new(
-                "land content whole at the folded spelling, which is the same place",
-                Act::AtomicReplace {
-                    at: "churn/replaced/FLIPPING.md".to_string(),
-                    bytes: ink.document("flipping, revised"),
-                },
-            ));
-        }
-    }
-    Script::new(
-        format!("atomic replacement and movement on {folding}"),
-        steps,
-    )
+            Act::Rename {
+                from: FLIPPED_FROM.to_string(),
+                to: FLIPPED_TO.to_string(),
+            },
+        ),
+        Step::new(
+            "land content whole at the flipped spelling",
+            Act::AtomicReplace {
+                at: FLIPPED_TO.to_string(),
+                bytes: ink.document("flipping, revised"),
+            },
+        ),
+    ];
+    Script::new(format!("a case flip on {folding}"), steps)
 }
 
 /// How many times the burst rewrites the one path it hammers.
@@ -912,7 +927,7 @@ mod tests {
     #[test]
     fn an_atomic_replacement_leaves_no_staging_file() {
         let root = scratch("atomic");
-        atomic_replacement(5, Folding::Distinct)
+        atomic_replacement(5)
             .apply(&root)
             .expect("the script applies");
         let left: Vec<String> = fs::read_dir(root.join("churn/replaced"))
