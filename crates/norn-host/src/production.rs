@@ -766,7 +766,7 @@ where
         match (fs_path, db_path) {
             (None, None) => break,
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_eq() => {
-                let read = open_enumerated(&mut files)?;
+                let read = open_enumerated(&mut files, &mut pending)?;
                 match read {
                     Some(read) => {
                         let hash = read.content_hash().to_string();
@@ -796,7 +796,7 @@ where
                 index += 1;
             }
             (Some(fp), Some(dp)) if sensitivity.compare(&fp, &dp).is_lt() => {
-                if let Some(read) = open_enumerated(&mut files)? {
+                if let Some(read) = open_enumerated(&mut files, &mut pending)? {
                     pending.derive(&fp, read.bytes(), read.content_hash().to_string());
                 }
             }
@@ -810,7 +810,7 @@ where
                 });
             }
             (Some(fp), None) => {
-                if let Some(read) = open_enumerated(&mut files)? {
+                if let Some(read) = open_enumerated(&mut files, &mut pending)? {
                     pending.derive(&fp, read.bytes(), read.content_hash().to_string());
                 }
             }
@@ -871,14 +871,29 @@ fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result
 /// edit landing in the window between enumeration and open; a machine failure
 /// still refuses, so a denied directory or an exhausted descriptor table never
 /// reads as a deletion.
-fn open_enumerated<I>(files: &mut Peekable<I>) -> Result<Option<norn_fs::ReadFile>, JobFailure>
+///
+/// **A name that opened nothing is a name this walk read nothing at**, so it is
+/// withheld. The row axis converges it on the answer a walk begun now holds —
+/// no document is there, so the row goes — and that walk is one that either
+/// never yields the name or names a link, a pipe or a directory at it and reads
+/// through none of them. Either way nothing renders onto the place, which is
+/// what leaves the findings standing there for the walk that does read it.
+fn open_enumerated<I>(
+    files: &mut Peekable<I>,
+    pending: &mut Pending<'_>,
+) -> Result<Option<norn_fs::ReadFile>, JobFailure>
 where
     I: Iterator<Item = Result<norn_fs::WalkFact, norn_fs::WalkError>>,
 {
     let norn_fs::WalkFact::File(file) = files.next().expect("peeked").map_err(effect)? else {
         panic!("the merge stands on the file whose name it read");
     };
-    file.read_optional().map_err(effect)
+    let path = file.path().as_path().to_owned();
+    let read = file.read_optional().map_err(effect)?;
+    if read.is_none() {
+        pending.withhold(&path);
+    }
+    Ok(read)
 }
 
 fn scoped_increment(
@@ -1395,7 +1410,7 @@ where
             None => return Ok(None),
             Some(Err(error)) => return Err(effect(error)),
             Some(Ok(norn_fs::WalkFact::Skipped(skipped))) => {
-                let skipped = skipped.clone();
+                let skipped = skipped.path().as_path().to_owned();
                 files.next();
                 pending.withhold(&skipped);
                 continue;
@@ -2079,11 +2094,13 @@ impl Filed {
     }
 }
 
-/// The roots a walk of this job did not enter.
+/// The roots a walk of this job read nothing under.
 ///
 /// A walk names the roots it deliberately passes over — an excluded tree, a
 /// symbolic link, a device-like entry, norn's own mechanism paths — and reads
-/// nothing under them. **A root it withheld lends no prune authority over the
+/// nothing under them. A name it enumerated and then opened nothing at is the
+/// same answer reached a moment later, since what is at that name now is one of
+/// those or is gone. **A root it withheld lends no prune authority over the
 /// places beneath it**: a document there is one no act of this job read, so a
 /// finding standing at its place is one no act of this job could re-file.
 ///
@@ -2513,10 +2530,11 @@ impl<'s> Pending<'s> {
         });
     }
 
-    /// Record that a walk of this scope did not enter `skipped`, so the job's
-    /// prune leaves the findings under it standing.
-    fn withhold(&mut self, skipped: &norn_fs::SkipFact) {
-        self.account.withheld.absorb(skipped.path().as_path());
+    /// Record that a walk of this scope read nothing under `path` — a root it
+    /// passed over, or a name it enumerated and opened nothing at — so the job's
+    /// prune leaves the findings there standing.
+    fn withhold(&mut self, path: &Path) {
+        self.account.withheld.absorb(path);
     }
 
     /// Whether the changeset or the findings beside it have reached the bound
@@ -4958,6 +4976,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
+    }
+
+    /// **The same window on the subject axis: a name that opened nothing is a
+    /// place this walk read nothing at.** The row axis converges on the answer a
+    /// walk begun now holds, and on the subject axis that walk is one that names
+    /// a link at this spelling and never reads through it — so the place keeps
+    /// the finding standing at it, exactly as the dirty-path leg keeps it for
+    /// the same on-disk state. Taking it would delete a true statement with
+    /// nothing left to re-derive it, on a race with an ordinary edit.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_opens_nothing_between_enumeration_and_open_keeps_its_findings() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::watcherless("heal-open-window-finding");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
+        let mut store = Store::open(f.root.join("window-finding.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+        assert_eq!(findings_at(&mut store, "bad.md").len(), 1);
+
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        fs::remove_file(f.vault().join("bad.md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("bad.md")).unwrap();
+
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, f.vault().as_path(), &[], policy, &mut account).unwrap();
+
+        assert_eq!(
+            findings_at(&mut store, "bad.md").len(),
+            1,
+            "the merge took the finding at a place its own open read nothing at"
+        );
     }
 
     /// Bytes no Markdown document can be read from.
