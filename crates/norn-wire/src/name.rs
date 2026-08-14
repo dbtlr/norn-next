@@ -61,7 +61,7 @@ impl VaultName {
         let text = text.as_ref();
         let refuse = |problem: &'static str| {
             Err(IllegalVaultName {
-                name: text.to_string(),
+                name: elided(text),
                 problem,
             })
         };
@@ -132,21 +132,58 @@ impl JsonSchema for VaultName {
     /// The advertised schema is the grammar the constructor keeps, so a
     /// surface that validates against the schema and a reader that parses the
     /// string refuse the same names.
+    ///
+    /// This is the crate's one hand-written schema. Every other type derives
+    /// one, and a derive lifts the description out of the doc comment over the
+    /// type; here the description is maintained beside that doc rather than
+    /// lifted from it, so the two are two spellings of one sentence and the
+    /// schema suite pins them equal.
+    ///
+    /// **The pattern is ECMA-262**, the dialect JSON Schema names, and a
+    /// validator reading it as another flavor of regular expression admits
+    /// names this reader refuses. Python's `re` — what the common `jsonschema`
+    /// library matches through, via `re.search` — lets `$` stand before a
+    /// trailing newline, so `"notes\n"` passes there and is refused here.
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
         json_schema!({
             "type": "string",
-            "description": "A vault's name: a lowercase letter, then lowercase letters, digits, `+`, `.` and `-`.",
+            "description": "A vault's name: a lowercase letter, then lowercase letters, digits, `+`, `.` and `-`, at most 255 bytes of them.",
             "pattern": VaultName::PATTERN,
             "maxLength": VaultName::MAXIMUM_BYTES,
         })
     }
 }
 
+/// The marker an echoed name that was cut carries in place of its tail.
+const ELISION: &str = "…";
+
+/// The offered string as a refusal echoes it: at most
+/// [`VaultName::MAXIMUM_BYTES`] bytes, then [`ELISION`] where a tail was cut.
+///
+/// The echo identifies the offender; it does not reproduce it. The bound is
+/// already stated by the problem the refusal carries, and a string offered as a
+/// name is any string at all — a megabyte of one arriving off the wire would
+/// otherwise ride whole into the refusal, into its `Display`, and into the
+/// serde error built from that. The cut is taken at a character boundary,
+/// because what was offered is arbitrary UTF-8 even though every name the
+/// grammar accepts is ASCII.
+fn elided(text: &str) -> String {
+    if text.len() <= VaultName::MAXIMUM_BYTES {
+        return text.to_string();
+    }
+    let mut end = VaultName::MAXIMUM_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ELISION}", &text[..end])
+}
+
 /// A string that spells no vault name.
 ///
 /// A name outside the grammar is read as a refusal rather than as a name, the
 /// same way the tagged vocabulary refuses a variant it does not know. It
-/// carries the string that was offered and what the grammar wanted, because a
+/// carries the string that was offered — bounded, so an enormous one names its
+/// offender without riding along whole — and what the grammar wanted, because a
 /// person who typed one is the reader of both.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IllegalVaultName {
@@ -155,7 +192,9 @@ pub struct IllegalVaultName {
 }
 
 impl IllegalVaultName {
-    /// The string that was offered as a name.
+    /// The string that was offered as a name, bounded: at most
+    /// [`VaultName::MAXIMUM_BYTES`] bytes of it, with an elision marker where
+    /// a tail was cut. A name inside the bound is echoed whole.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -256,5 +295,51 @@ mod tests {
 
         let refusal = VaultName::new(format!("{longest}x")).expect_err("a name past the bound");
         assert!(refusal.problem().contains("255 bytes"), "{refusal}");
+        assert_eq!(
+            refusal.name(),
+            format!("{longest}{ELISION}"),
+            "a name one byte past the bound lost more than its tail"
+        );
+    }
+
+    /// A refusal identifies the offender rather than reproducing it. What is
+    /// offered as a name is any string at all — a megabyte of one arrives off
+    /// the wire — so the echo is cut at the bound the problem already states,
+    /// and the refusal a person reads stays a line rather than the megabyte
+    /// that earned it.
+    #[test]
+    fn a_refusal_echoes_a_bounded_prefix_of_an_enormous_name() {
+        let enormous = "a".repeat(4 * 1024 * 1024);
+        let refusal = VaultName::new(&enormous).expect_err("a name past the bound");
+        assert!(
+            refusal.name().ends_with(ELISION),
+            "the echo carries no elision marker: {}",
+            refusal.name()
+        );
+        assert_eq!(
+            refusal.name().len(),
+            VaultName::MAXIMUM_BYTES + ELISION.len()
+        );
+        let rendered = refusal.to_string();
+        assert!(
+            rendered.len() < 512,
+            "the refusal renders {} bytes",
+            rendered.len()
+        );
+    }
+
+    /// The cut lands where a character ends. What is offered is arbitrary
+    /// UTF-8 even though every name the grammar accepts is ASCII, and a slice
+    /// taken mid-character panics.
+    #[test]
+    fn the_echo_is_cut_where_a_character_ends() {
+        let offered = "é".repeat(4096);
+        let refusal = VaultName::new(&offered).expect_err("a name past the bound");
+        let echoed = refusal
+            .name()
+            .strip_suffix(ELISION)
+            .expect("an echo that was cut");
+        assert!(echoed.len() <= VaultName::MAXIMUM_BYTES);
+        assert!(echoed.chars().all(|character| character == 'é'));
     }
 }

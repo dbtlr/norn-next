@@ -22,10 +22,6 @@ fn a_name_outside_the_grammar_reads_as_this_crates_refusal() {
         ("notes_1", "lowercase ASCII letters, digits"),
         ("notes/deep", "lowercase ASCII letters, digits"),
         ("..", "lowercase ASCII letter"),
-        (
-            &format!("a{}", "x".repeat(VaultName::MAXIMUM_BYTES)),
-            "255 bytes",
-        ),
     ] {
         let refusal = VaultName::new(text).expect_err(&format!("`{text}` is not a vault name"));
         let error = ConfigError::from(refusal);
@@ -38,6 +34,29 @@ fn a_name_outside_the_grammar_reads_as_this_crates_refusal() {
             "`{text}` was refused with `{problem}`, which does not mention `{needle}`"
         );
     }
+}
+
+/// A name past the bound crosses into this crate's refusal echoed rather than
+/// whole. The problem beside it states the bound; the echo only identifies the
+/// offender, and a registry file offering a megabyte where a name belongs is a
+/// file this crate reads.
+#[test]
+fn a_name_past_the_bound_is_echoed_bounded_into_this_crates_refusal() {
+    let offered = format!("a{}", "x".repeat(4 * 1024 * 1024));
+    let refusal = VaultName::new(&offered).expect_err("a name past the bound");
+    let ConfigError::IllegalName { name, problem } = ConfigError::from(refusal) else {
+        panic!("a name past the bound was refused as something other than an illegal name");
+    };
+    assert!(problem.contains("255 bytes"), "{problem}");
+    assert!(
+        name.len() < VaultName::MAXIMUM_BYTES + 8,
+        "the refusal carries {} bytes of the name it was offered",
+        name.len()
+    );
+    assert!(
+        name.starts_with("axx") && !name.ends_with('x'),
+        "the echo names another string, or drops its tail unmarked: {name}"
+    );
 }
 
 #[test]

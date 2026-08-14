@@ -723,11 +723,12 @@ protocols only.
 `norn-fs` and `norn-config` each own their own spelling of the same three idioms: an
 exclusive `flock` with a bounded ABA recheck, a temporary-file/fsync/rename durability
 sequence, and a `(device, inode)` stat-identity comparison. **The split is purposeful and
-recorded rather than extracted**, and invariant 11 is why it has to be: both crates sit
-near the bottom of the graph and the rest of the workspace depends on them, so neither may
-depend on the other, and a
-third crate holding the mechanics would be edges the allowlist does not carry — added for
-code that looks alike rather than for a boundary that means something.
+recorded rather than extracted**, and invariant 11 is why it has to be: the allowlist
+carries no edge between the two crates in either direction, because a vault-effect
+mechanism reaching machine-local state — or the reverse — blurs the seam that owns its
+meaning, and a
+third crate holding the mechanics would be edges the allowlist does not carry either —
+added for code that looks alike rather than for a boundary that means something.
 
 What the two spellings say is not the same thing:
 

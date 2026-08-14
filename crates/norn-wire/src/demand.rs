@@ -27,7 +27,7 @@ pub enum AttachMode {
     /// warm: what every registered vault is served under.
     Durable,
     /// Disposable derivation over a throwaway store, discarded with the work
-    /// that asked for it. A demand naming this mode is refused: the lifecycle
-    /// behind it is not built.
+    /// that asked for it. A demand naming this mode is refused, coded
+    /// `host/unsupported-attach-mode` and carrying the mode back.
     Throwaway,
 }

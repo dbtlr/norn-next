@@ -43,7 +43,11 @@
 //! different inode. A mismatch drops the handle and takes the lock again.
 //!
 //! `norn-fs` locks the maintainer lock file with a second spelling of this same
-//! idiom, because both crates are leaves and neither may depend on the other.
+//! idiom. The allowlist carries no edge between the two crates in either
+//! direction, and invariant 11 is why it may not: a vault-effect mechanism
+//! reaching machine-local state — or the reverse — blurs the seam that owns its
+//! meaning, and a third crate holding the shared mechanics would be edges the
+//! allowlist does not carry either.
 //! `docs/architecture.md` records the split and names the three things that
 //! stay aligned across the two: the `O_NOFOLLOW` open, this handle-versus-name
 //! recheck with its bounded retry, and the

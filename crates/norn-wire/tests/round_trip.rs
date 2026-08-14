@@ -20,6 +20,7 @@ use norn_wire::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 
 /// Every cause a lost watcher carries.
@@ -144,6 +145,119 @@ where
 
 fn wire(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("serializing a wire type")
+}
+
+// ── The vectors are the vocabulary ───────────────────────────────────────
+
+/// The members a schema advertises, as the strings they are on the wire: the
+/// constant each `oneOf` branch pins, read off the branch itself where the
+/// enum is a flat string and off its `tag` property where the enum is
+/// internally tagged.
+fn advertised<T: schemars::JsonSchema>(tag: Option<&str>) -> BTreeSet<String> {
+    let schema = serde_json::to_value(schemars::schema_for!(T)).expect("a schema as JSON");
+    let branches = schema["oneOf"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the schema describes no enum: {schema}"))
+        .clone();
+    assert!(!branches.is_empty(), "the schema advertises no member");
+    branches
+        .iter()
+        .map(|branch| {
+            let constant = match tag {
+                Some(tag) => &branch["properties"][tag]["const"],
+                None => &branch["const"],
+            };
+            constant
+                .as_str()
+                .unwrap_or_else(|| panic!("a branch pins no constant: {branch}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The string a value is on the wire, where the enum is a flat string.
+fn flat_string(value: &impl Serialize) -> String {
+    serde_json::to_value(value)
+        .expect("a wire value as JSON")
+        .as_str()
+        .expect("a flat string on the wire")
+        .to_owned()
+}
+
+/// The constant a value pins its `tag` to, where the enum is internally
+/// tagged.
+fn tag_string(value: &impl Serialize, tag: &str) -> String {
+    serde_json::to_value(value).expect("a wire value as JSON")[tag]
+        .as_str()
+        .expect("a tag on the wire")
+        .to_owned()
+}
+
+/// **Every vector above holds the whole vocabulary, and the schema is what
+/// says so.** The vectors are written out by hand — these enums are
+/// `#[non_exhaustive]` and carry no list of their own — so a member minted
+/// without a row above would be a member no case here round-trips, no case
+/// here pins the bytes of, and nothing here reports missing. The schema is the
+/// enum's own account of itself, and holding the two equal is what fails when
+/// a vector falls behind the enum beside it.
+#[test]
+fn every_vector_here_holds_the_members_the_schema_advertises() {
+    assert_eq!(
+        untrusted_reasons()
+            .iter()
+            .map(|reason| tag_string(reason, "kind"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<UntrustedReason>(Some("kind")),
+        "the reasons built here are not the reasons the vocabulary holds"
+    );
+    assert_eq!(
+        reason_codes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<ReasonCode>(None),
+        "the codes built here are not the codes the vocabulary holds"
+    );
+    assert_eq!(
+        watcher_loss_causes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<WatcherLossCause>(None),
+        "the causes built here are not the causes the vocabulary holds"
+    );
+    assert_eq!(
+        attach_modes()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<AttachMode>(None),
+        "the modes built here are not the modes the vocabulary holds"
+    );
+    assert_eq!(
+        warming_phases()
+            .iter()
+            .map(flat_string)
+            .collect::<BTreeSet<_>>(),
+        advertised::<WarmingPhase>(None),
+        "the phases built here are not the phases the vocabulary holds"
+    );
+    assert_eq!(
+        trust_states()
+            .iter()
+            .map(|state| tag_string(state, "state"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<TrustState>(Some("state")),
+        "the states built here are not the states the vocabulary holds"
+    );
+    assert_eq!(
+        error_details()
+            .iter()
+            .map(|detail| tag_string(detail, "code"))
+            .collect::<BTreeSet<_>>(),
+        advertised::<ErrorDetail>(Some("code")),
+        "the details built here are not the details the vocabulary holds"
+    );
 }
 
 // ── The round trip ───────────────────────────────────────────────────────

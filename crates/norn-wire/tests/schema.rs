@@ -213,6 +213,13 @@ fn a_refused_mode_advertises_the_typed_mode_it_carries() {
 
 /// A name advertises the grammar its constructor keeps: a surface validating
 /// against the schema refuses the strings the reader refuses.
+///
+/// The description is pinned here because a name is the one type whose schema
+/// is written by hand: a derive lifts its description out of the type's doc
+/// comment, and this one is a second spelling of that doc. The literal below
+/// is the third, and it is what makes the two say the same sentence — the
+/// bound clause at its end is the clause the hand-written spelling can lose
+/// while the type's doc keeps it.
 #[test]
 fn a_vault_name_advertises_the_grammar_it_is_parsed_through() {
     let schema = schema_of::<VaultName>();
@@ -221,6 +228,12 @@ fn a_vault_name_advertises_the_grammar_it_is_parsed_through() {
     assert_eq!(
         schema["maxLength"].as_u64(),
         Some(VaultName::MAXIMUM_BYTES as u64)
+    );
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "A vault's name: a lowercase letter, then lowercase letters, digits, `+`, `.` and `-`, at most 255 bytes of them."
+        )
     );
 }
 
