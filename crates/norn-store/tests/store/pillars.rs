@@ -8,7 +8,7 @@
 
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, classes, document, document_with_every_fact,
-    path, record_death, vector, violation, write_document, write_documents,
+    drained, path, record_death, vector, violation, write_document, write_documents,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
@@ -586,12 +586,32 @@ fn the_candidate_order_is_total_and_survives_a_re_derivation() {
     );
 }
 
+/// Which test bars each named statement.
+///
+/// The `match` is exhaustive over [`ExplainedStatement`], so a statement named
+/// through that seam without a bar behind it does not compile: the author has to
+/// say which test covers it, and the only two answers are the two tests below.
+fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
+    match statement {
+        ExplainedStatement::SuffixCandidates(_)
+        | ExplainedStatement::FindingsInClass(_)
+        | ExplainedStatement::ClassDiscard(_)
+        | ExplainedStatement::SubjectDiscard(..)
+        | ExplainedStatement::FindingSubjectsWithoutRows(..) => {
+            "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for"
+        }
+        ExplainedStatement::StoredDocumentPage(..) => {
+            "a_heal_page_seeks_the_index_that_holds_its_order"
+        }
+    }
+}
+
 /// **Every statement findings maintenance runs reaches its rows through an
 /// index.** The bar is asserted against the statement the store actually
 /// emitted, which is why the store hands the pair out rather than the caller
 /// re-spelling the SQL.
 #[test]
-fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
+fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for() {
     let scratch = Scratch::new("plans");
     let mut store = scratch.open();
     let mut request = store.begin_request();
@@ -766,22 +786,51 @@ fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
             // The cursor is a bound on `findings_path` rather than a filter over
             // it, so a page seeks the index in every scope and both orders —
             // which is what makes the pass one per prune rather than one per
-            // page of it.
+            // page of it. What the two orders differ in is how much of the index
+            // that seek skips, not whether there is one: a scope the vault
+            // spells as it stores it narrows the seek to the scope's own range,
+            // while a vault that folds ASCII case bounds its scope under the
+            // folding against an index that orders bytewise, so there the fold
+            // is a filter over the rows the cursor's seek reaches.
             subjects.assert_searches("findings");
-            // A scope bounded by paths the vault spells as they are stored is a
-            // seek of that range and not a pass over the index: one range holds
-            // a root and everything under it, which is what keeps the page's
-            // order the index's. A vault that folds ASCII case bounds its scope
-            // under the folding, and `findings_path` orders bytewise — so the
-            // fold is a filter on the pass the cursor seeks into, and the pass
-            // is over the whole prune rather than over each of its pages.
-            if order == norn_store::StoredPathOrder::Sensitive
-                && scope != norn_store::SubjectScope::Vault
-            {
-                subjects.assert_no_full_scan_of("findings");
-            }
+            subjects.assert_no_full_scan_of("findings");
         }
     }
+
+    // Every statement the plan seam names carries a bar, and `barred_by` is
+    // where that is stated: its `match` is exhaustive, so a variant added to
+    // `ExplainedStatement` does not compile until its author names the test that
+    // covers it. Both tests are named here, so a variant cannot be routed to a
+    // bar that does not exist.
+    let probe = class_probe("glossary").expect("a class stem");
+    let subject = path("one/glossary.md");
+    let bars: std::collections::BTreeSet<&str> = [
+        ExplainedStatement::SuffixCandidates(&probe),
+        ExplainedStatement::FindingsInClass(&probe),
+        ExplainedStatement::ClassDiscard(&probe),
+        ExplainedStatement::SubjectDiscard(&subject, DiscardScope::EveryKind),
+        ExplainedStatement::FindingSubjectsWithoutRows(
+            norn_store::SubjectScope::Vault,
+            &[FindingKind::PathNamesNoDocument],
+            norn_store::StoredPathOrder::Sensitive,
+        ),
+        ExplainedStatement::StoredDocumentPage(
+            norn_store::SubjectScope::Vault,
+            norn_store::StoredPathOrder::Sensitive,
+        ),
+    ]
+    .into_iter()
+    .map(barred_by)
+    .collect();
+    assert_eq!(
+        bars,
+        [
+            "a_heal_page_seeks_the_index_that_holds_its_order",
+            "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<&str>>()
+    );
 }
 
 /// **A heal's page is a seek, in every scope and both orders.** The merge that
@@ -835,6 +884,75 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
             page.assert_no_temp_btree();
         }
     }
+}
+
+/// **A paged statement names its cursor as the floor it seeks from.**
+///
+/// This bar reads the statement rather than its plan, because the plan cannot
+/// answer the question. A bounded scope's plan reports `SEARCH … (path>? AND
+/// path<?)` whether the seek took the cursor or took the scope's own floor and
+/// left the cursor a filter — the two are byte-identical as plan text, and the
+/// difference between them is the whole defect: one is a page, the other is a
+/// pass over everything already paged. So the shape is pinned where it is
+/// visible, in the emitted SQL: the cursor is `COALESCE`'s first argument, which
+/// is what makes it the bound.
+///
+/// **What this is and is not.** It pins a spelling, not a cost. A rewrite that
+/// seeks from the cursor by some other spelling would fail it, and a reviewer
+/// would have to move the bar rather than route around it — which is the trade
+/// taken deliberately, because the alternative available today is no bar at all
+/// on the branch three mutants survived. The bar that would measure the work
+/// instead of the wording is a per-statement step count, and that is a
+/// store-side reporting surface this does not open.
+#[test]
+fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
+    let scratch = Scratch::new("paged-statement-text");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[document("one/glossary.md", "hash-1", "a body\n")],
+    );
+
+    let root = path("one/glossary.md");
+    let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
+    let mut judged = 0;
+    for scope in [
+        norn_store::SubjectScope::Vault,
+        norn_store::SubjectScope::Subtree(&root),
+        norn_store::SubjectScope::Under(&prefix),
+    ] {
+        for order in [
+            norn_store::StoredPathOrder::Sensitive,
+            norn_store::StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            for statement in [
+                ExplainedStatement::StoredDocumentPage(scope, order),
+                ExplainedStatement::FindingSubjectsWithoutRows(
+                    scope,
+                    &[
+                        FindingKind::PathNamesNoDocument,
+                        FindingKind::BodyBytesNotUtf8,
+                    ],
+                    order,
+                ),
+            ] {
+                let sql = request.emitted_plan(statement).expect("a query plan").sql;
+                assert!(
+                    sql.contains("COALESCE(?1,"),
+                    "the cursor is not the first argument of the page's floor, so the seek \
+                     starts where the scope does and steps over every row already paged: {sql}"
+                );
+                assert!(
+                    !sql.contains("WHERE (?1 IS NULL"),
+                    "the page opens on the cursor as a filter, which is the shape a seek \
+                     cannot use: {sql}"
+                );
+                judged += 1;
+            }
+        }
+    }
+    assert_eq!(judged, 12, "a scope or an order went unjudged");
 }
 
 /// **Findings maintenance is scoped by affected ambiguity class.** A changed path
@@ -1459,41 +1577,30 @@ fn a_folded_prune_scope_holds_the_subjects_its_fold_reaches() {
             .record_finding(&violation(at))
             .expect("recording a finding");
     }
-    let drained = |scope: norn_store::SubjectScope<'_>| {
-        let mut seen: Vec<String> = Vec::new();
-        let mut after: Option<norn_store::DocumentPath> = None;
-        loop {
-            let page = request
+    let drained_subjects = |scope: norn_store::SubjectScope<'_>| {
+        drained(|after| {
+            request
                 .finding_subjects_without_rows_after(
                     scope,
                     kinds,
-                    after.as_ref(),
+                    after,
                     1,
                     norn_store::StoredPathOrder::AsciiCaseInsensitive,
                 )
-                .expect("a page of one");
-            let Some(subject) = page.into_iter().next() else {
-                return seen;
-            };
-            assert!(
-                seen.len() < 8,
-                "the cursor did not advance past {seen:?} in a scope this small"
-            );
-            seen.push(subject.as_str().to_string());
-            after = Some(subject);
-        }
+                .expect("a page of one")
+        })
     };
 
     // The root's own subject and its descendants, whichever case each is spelled
     // in — and never the subject under a root the fold does not reach.
     assert_eq!(
-        drained(norn_store::SubjectScope::Subtree(&path("one"))),
+        drained_subjects(norn_store::SubjectScope::Subtree(&path("one"))),
         ["One", "One/Gone.md", "one/deep/gone.md"]
     );
     // A directory names no subject of its own, so the same span read that way
     // holds the descendants alone.
     assert_eq!(
-        drained(norn_store::SubjectScope::Under(
+        drained_subjects(norn_store::SubjectScope::Under(
             &norn_store::DirectoryPrefix::new("ONE").expect("a directory")
         )),
         ["One/Gone.md", "one/deep/gone.md"]

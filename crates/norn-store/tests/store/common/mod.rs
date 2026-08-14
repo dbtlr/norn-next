@@ -108,6 +108,38 @@ pub fn write_documents(request: &mut Request<'_>, facts: &[DocumentFacts]) -> In
         .expect("applying a changeset")
 }
 
+/// How many pages of one a case may draw before the drain calls the cursor
+/// stuck. Every case that drains is a handful of rows by construction, so a
+/// bound well above any of them still catches a cursor that never advances
+/// before a test hangs.
+const RUNAWAY_PAGES: usize = 32;
+
+/// Every path a scope holds, drained one page at a time at the smallest page
+/// there is.
+///
+/// A page of one is what a keyset cursor is judged by: a cursor that does not
+/// advance repeats a row forever, and a cursor that advances too far drops the
+/// row after it. Both show up here and in no larger page. `page` reads one page
+/// from the cursor it is handed, so a case supplies the reader and the scope and
+/// this owns the paging.
+pub fn drained(mut page: impl FnMut(Option<&DocumentPath>) -> Vec<DocumentPath>) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<DocumentPath> = None;
+    loop {
+        let read = page(after.as_ref());
+        assert!(read.len() <= 1, "a page of one returned {}", read.len());
+        let Some(next) = read.into_iter().next() else {
+            return seen;
+        };
+        assert!(
+            seen.len() < RUNAWAY_PAGES,
+            "the cursor did not advance past {seen:?}"
+        );
+        seen.push(next.as_str().to_string());
+        after = Some(next);
+    }
+}
+
 /// A document path, or a panic naming what was wrong with it.
 pub fn path(text: &str) -> DocumentPath {
     DocumentPath::new(text)

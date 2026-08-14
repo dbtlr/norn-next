@@ -328,7 +328,16 @@ pass over the findings index per prune, never a read of the table, never a sorte
 indexed seek per row for the document the place may hold. A scope the vault spells as it
 stores it narrows that pass to a seek of the scope's own range; a vault that folds ASCII
 case bounds the scope under the folding while that index orders bytewise, so the fold reads
-as a filter over the one pass the cursor seeks into. None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
+as a filter over the one pass the cursor seeks into.
+
+A plan does not say which of two candidate bounds a seek took — a scope's floor and a
+cursor report the same plan text — so the two paged statements carry one further bar, taken
+over the emitted SQL rather than its plan: the cursor is the coalesced floor's first
+argument. It pins a spelling rather than a cost, and it is the strongest bar available
+until a per-statement work count is, which is a store-side reporting surface no task has
+opened.
+
+None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
 query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
 per PR, and no query shape carries a timing or a memory bar.
 

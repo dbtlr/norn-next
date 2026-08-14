@@ -13,12 +13,12 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::common::{
-    Scratch, ambiguity, classes, document, document_with_every_fact, path, snapshot, unread_block,
-    violation, write_document, write_documents,
+    Scratch, ambiguity, classes, document, document_with_every_fact, drained, path, snapshot,
+    unread_block, violation, write_document, write_documents,
 };
 use norn_store::{
-    Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Store,
-    StoreError, StoredPathOrder,
+    Change, DirectoryPrefix, DocumentPath, IncrementProvenance, OpenOutcome, Provenance, Request,
+    Store, StoreError, StoredPathOrder, SubjectScope,
 };
 
 /// One upsert entry, from a document and a hash.
@@ -151,41 +151,27 @@ fn ascii_folded_subtree_pages_are_segment_safe_and_cursor_stable() {
     );
 }
 
-/// Every path a scope holds, drained one page at a time at the smallest page
-/// there is. A page of one is what a cursor is judged by: a cursor that does not
-/// advance repeats a row forever, and a cursor that advances too far drops the
-/// row after it.
-fn drained(
-    request: &norn_store::Request<'_>,
-    scope: norn_store::SubjectScope<'_>,
+/// One scope's pages of one, as the paths they name.
+fn drained_pages(
+    request: &Request<'_>,
+    scope: SubjectScope<'_>,
     order: StoredPathOrder,
 ) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut after: Option<DocumentPath> = None;
-    loop {
-        let page = match scope {
-            norn_store::SubjectScope::Vault => {
-                request.stored_documents_after_ordered(after.as_ref(), 1, order)
+    drained(|after| {
+        match scope {
+            SubjectScope::Vault => request.stored_documents_after_ordered(after, 1, order),
+            SubjectScope::Subtree(root) => {
+                request.stored_documents_in_subtree_after_ordered(root, after, 1, order)
             }
-            norn_store::SubjectScope::Subtree(root) => {
-                request.stored_documents_in_subtree_after_ordered(root, after.as_ref(), 1, order)
-            }
-            norn_store::SubjectScope::Under(prefix) => {
-                request.stored_documents_under_after_ordered(prefix, after.as_ref(), 1, order)
+            SubjectScope::Under(prefix) => {
+                request.stored_documents_under_after_ordered(prefix, after, 1, order)
             }
         }
-        .expect("a page of one");
-        assert!(page.len() <= 1, "a page of one returned {}", page.len());
-        let Some(row) = page.into_iter().next() else {
-            return seen;
-        };
-        assert!(
-            seen.len() < 16,
-            "the cursor did not advance past {seen:?} in a scope this small"
-        );
-        seen.push(row.path.as_str().to_string());
-        after = Some(row.path);
-    }
+        .expect("a page of one")
+        .into_iter()
+        .map(|row| row.path)
+        .collect()
+    })
 }
 
 /// **Two rows a folding vault reads as one name are both paged, in one order,
@@ -209,19 +195,15 @@ fn a_folded_page_of_one_steps_between_two_rows_that_fold_together() {
     );
 
     assert_eq!(
-        drained(
+        drained_pages(
             &request,
-            norn_store::SubjectScope::Vault,
+            SubjectScope::Vault,
             StoredPathOrder::AsciiCaseInsensitive
         ),
         ["A.md", "a.md", "b.md"]
     );
     assert_eq!(
-        drained(
-            &request,
-            norn_store::SubjectScope::Vault,
-            StoredPathOrder::Sensitive
-        ),
+        drained_pages(&request, SubjectScope::Vault, StoredPathOrder::Sensitive),
         ["A.md", "a.md", "b.md"]
     );
 }
@@ -255,14 +237,14 @@ fn a_subtree_page_of_one_walks_the_root_and_its_descendants_and_no_neighbour() {
         StoredPathOrder::AsciiCaseInsensitive,
     ] {
         assert_eq!(
-            drained(&request, norn_store::SubjectScope::Subtree(&root), order),
+            drained_pages(&request, SubjectScope::Subtree(&root), order),
             ["a", "a/nested/deep.md", "a/one.md"],
             "a subtree page of one took a textual neighbour or dropped a descendant"
         );
         // The same span read as a directory holds the descendants and not the
         // row standing at the directory's own name.
         assert_eq!(
-            drained(&request, norn_store::SubjectScope::Under(&prefix), order),
+            drained_pages(&request, SubjectScope::Under(&prefix), order),
             ["a/nested/deep.md", "a/one.md"],
             "a directory page of one took the row at the directory's own name"
         );
