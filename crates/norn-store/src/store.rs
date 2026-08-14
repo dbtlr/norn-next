@@ -562,6 +562,18 @@ pub mod induced_failure {
     };
     use crate::ddl;
 
+    /// The environment variable naming the file fired arms record themselves in.
+    ///
+    /// A harness that names no file gets no record, so a suite asserting over an
+    /// arm's absence has to point this at a live file to be asserting anything.
+    pub const ARM_HITS: &str = "NORN_STORE_ARM_HITS";
+
+    /// The seam the changeset tears record themselves under.
+    pub const INCREMENT_SEAM: &str = "norn-store/increment";
+
+    /// The seam the store schema's armed condition records itself under.
+    pub const CREATE_SEAM: &str = "norn-store/create";
+
     /// Record a store schema pair this build did not produce.
     ///
     /// The next open reads it, disagrees and rebuilds from zero — which is
@@ -757,12 +769,16 @@ pub mod induced_failure {
             Some((database.to_path_buf(), code));
     }
 
-    /// Disarm every process-wide arrangement above.
+    /// Disarm every process-wide arrangement above: the page cap, the store
+    /// schema's armed condition, and the two tears.
     ///
     /// The per-thread ones are absent by design: nothing survives the abort
-    /// they arm. These are here because a suite in one process arms a cap,
-    /// watches a request refuse under it, and then has to watch the same
-    /// request converge without it.
+    /// they arm. The committed-changeset count is absent for a different
+    /// reason — it is a counter rather than an arm, it is what a tear is armed
+    /// *against*, and a run that reset it would move the boundary every arm
+    /// still standing in this process names. These are here because a suite in
+    /// one process arms a cap, watches a request refuse under it, and then has
+    /// to watch the same request converge without it.
     pub fn disarm() {
         PAGE_CAP.store(0, Ordering::SeqCst);
         *super::ARMED_STORE_SCHEMA
@@ -1149,10 +1165,6 @@ std::thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The seam the changeset tears record themselves under.
-#[cfg(feature = "induced-failure")]
-const INCREMENT_SEAM: &str = "norn-store/increment";
-
 /// The value the process-wide tears hold while nothing is armed. A count no run
 /// reaches, so the comparison is one load and a mismatch.
 #[cfg(feature = "induced-failure")]
@@ -1194,7 +1206,7 @@ static ARMED_STORE_SCHEMA: std::sync::Mutex<Option<(PathBuf, i32)>> = std::sync:
 #[cfg(feature = "induced-failure")]
 pub(crate) fn abort_if_the_changeset_is_torn(applied: u64) {
     if TEAR_CHANGESET_AFTER.get() == Some(applied) {
-        record_arm(INCREMENT_SEAM, "boundary=entries");
+        record_arm(induced_failure::INCREMENT_SEAM, "boundary=entries");
         std::process::abort();
     }
 }
@@ -1207,7 +1219,7 @@ pub(crate) fn abort_if_the_chunk_boundary_is_torn() {
     let committed = CHANGESETS_COMMITTED.load(Ordering::SeqCst);
     if TEAR_AT_CHUNK_BOUNDARY.load(Ordering::SeqCst) == committed {
         record_arm(
-            INCREMENT_SEAM,
+            induced_failure::INCREMENT_SEAM,
             &format!("boundary=chunk changesets={committed}"),
         );
         std::process::abort();
@@ -1222,7 +1234,7 @@ pub(crate) fn note_the_changeset_committed() {
     let committed = CHANGESETS_COMMITTED.fetch_add(1, Ordering::SeqCst) + 1;
     if TEAR_AFTER_COMMIT.load(Ordering::SeqCst) == committed {
         record_arm(
-            INCREMENT_SEAM,
+            induced_failure::INCREMENT_SEAM,
             &format!("boundary=after-commit changesets={committed}"),
         );
         std::process::abort();
@@ -1249,7 +1261,7 @@ fn failure_armed_for_the_store_schema(connection: &Connection) -> Option<rusqlit
     let code = *code;
     *armed = None;
     drop(armed);
-    record_arm("norn-store/create", &format!("code={code}"));
+    record_arm(induced_failure::CREATE_SEAM, &format!("code={code}"));
     Some(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(code),
         Some("the store schema met an armed condition".to_string()),
@@ -1259,12 +1271,15 @@ fn failure_armed_for_the_store_schema(connection: &Connection) -> Option<rusqlit
 /// Whether two spellings name one database file.
 ///
 /// The path SQLite reports back is the one it opened, and a platform may
-/// resolve that differently from the one the caller handed over — on macOS a
-/// temporary directory under `/var` is reported under `/private/var`. So the
-/// comparison is over the components from the file name back, with the root
-/// dropped: one spelling being a suffix of the other is what says they are the
-/// same file, and the scratch trees a suite arms over carry a serial in their
-/// names, so no two of them share one.
+/// prefix that with components the caller never wrote — on macOS a temporary
+/// directory under `/var` is reported under `/private/var`. So the comparison
+/// is over the components from the file name back, with the root dropped, and
+/// in one direction only: the reported spelling ends with the armed one. That
+/// is the constraint the platform imposes, and it is the whole of it — an
+/// armed path that merely ends with the reported one names a different file,
+/// and matching it would arm a database nobody asked for. The scratch trees a
+/// suite arms over carry a serial in their names, so no two of them share a
+/// tail.
 #[cfg(feature = "induced-failure")]
 fn names_one_database(reported: &Path, armed: &Path) -> bool {
     fn relative(path: &Path) -> PathBuf {
@@ -1277,9 +1292,7 @@ fn names_one_database(reported: &Path, armed: &Path) -> bool {
             })
             .collect()
     }
-    let reported = relative(reported);
-    let armed = relative(armed);
-    reported.ends_with(&armed) || armed.ends_with(&reported)
+    relative(reported).ends_with(relative(armed))
 }
 
 /// Append one record saying which arm fired, where a harness asked for one.
@@ -1294,7 +1307,7 @@ fn record_arm(seam: &str, fields: &str) {
     use std::io::Write as _;
     static HITS: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     let Some(path) = HITS
-        .get_or_init(|| std::env::var_os("NORN_STORE_ARM_HITS").map(std::path::PathBuf::from))
+        .get_or_init(|| std::env::var_os(induced_failure::ARM_HITS).map(std::path::PathBuf::from))
         .as_ref()
     else {
         return;
