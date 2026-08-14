@@ -557,8 +557,8 @@ pub mod induced_failure {
     use std::sync::atomic::Ordering;
 
     use super::{
-        CHANGESETS_COMMITTED, DISARMED, PAGE_CAP, REFUSE_NEXT_CREATION, Store, StoreError,
-        TEAR_AFTER_COMMIT, TEAR_AT_CHUNK_BOUNDARY, error, put_meta,
+        CHANGESETS_COMMITTED, DISARMED, PAGE_CAP, Store, StoreError, TEAR_AFTER_COMMIT,
+        TEAR_AT_CHUNK_BOUNDARY, error, put_meta,
     };
     use crate::ddl;
 
@@ -712,8 +712,8 @@ pub mod induced_failure {
             .map_err(|error| error::sql("reading the page count", error))
     }
 
-    /// Make the next store schema this process writes meet a corrupt database
-    /// partway through its statement list.
+    /// Make the next store schema written at `database` meet a corrupt
+    /// database partway through its statement list.
     ///
     /// **A database that cannot be created is the damage no rung resolves.**
     /// Rung 3's answer to damage is to discard the file and write the store
@@ -726,23 +726,35 @@ pub mod induced_failure {
     /// the typing, the message and the routing under it are the production
     /// ones. Corrupting the file on disk first reaches nothing — a create
     /// writes over whatever was there — which is why the condition is armed
-    /// here rather than arranged on disk. One-shot, and process-wide.
-    pub fn corrupt_the_next_store_creation() {
-        REFUSE_NEXT_CREATION.store(rusqlite::ffi::SQLITE_CORRUPT, Ordering::SeqCst);
+    /// here rather than arranged on disk.
+    ///
+    /// **It is armed at one file rather than at the next creation anywhere.**
+    /// A suite runs its cases on threads of one process, so an arrangement
+    /// keyed on "next" is an arrangement whichever case happens to create a
+    /// store next takes. One-shot at the file it names.
+    pub fn corrupt_the_next_store_creation_at(database: &std::path::Path) {
+        arm_the_store_schema(database, rusqlite::ffi::SQLITE_CORRUPT);
     }
 
-    /// Make the next store schema this process writes meet a **refusal** partway
-    /// through its statement list: a read-only database, which says nothing
-    /// about the file's contents.
+    /// Make the next store schema written at `database` meet a **refusal**
+    /// partway through its statement list: a read-only database, which says
+    /// nothing about the file's contents.
     ///
-    /// The pair with [`corrupt_the_next_store_creation`] is what holds the two
-    /// halves of the creation's error handling apart. Damage is typed the same
-    /// whichever statement met it, so the damage arm above says nothing about
-    /// *which* statement failed. This arm does: a refusal carries the statement
-    /// it was met at, and a creation that stopped naming it is a creation
-    /// nobody can debug from the message it reports.
-    pub fn refuse_the_next_store_creation() {
-        REFUSE_NEXT_CREATION.store(rusqlite::ffi::SQLITE_READONLY, Ordering::SeqCst);
+    /// The pair with [`corrupt_the_next_store_creation_at`] is what holds the
+    /// two halves of the creation's error handling apart. Damage is typed the
+    /// same whichever statement met it, so the damage arm above says nothing
+    /// about *which* statement failed. This arm does: a refusal carries the
+    /// statement it was met at, and a creation that stopped naming it is a
+    /// creation nobody can debug from the message it reports.
+    pub fn refuse_the_next_store_creation_at(database: &std::path::Path) {
+        arm_the_store_schema(database, rusqlite::ffi::SQLITE_READONLY);
+    }
+
+    fn arm_the_store_schema(database: &std::path::Path, code: i32) {
+        *super::ARMED_STORE_SCHEMA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((database.to_path_buf(), code));
     }
 
     /// Disarm every process-wide arrangement above.
@@ -753,7 +765,9 @@ pub mod induced_failure {
     /// request converge without it.
     pub fn disarm() {
         PAGE_CAP.store(0, Ordering::SeqCst);
-        REFUSE_NEXT_CREATION.store(0, Ordering::SeqCst);
+        *super::ARMED_STORE_SCHEMA
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         TEAR_AFTER_COMMIT.store(DISARMED, Ordering::SeqCst);
         TEAR_AT_CHUNK_BOUNDARY.store(DISARMED, Ordering::SeqCst);
     }
@@ -995,7 +1009,7 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
         .map_err(|error| error::sql("opening the store schema transaction", error))?;
     for statement in ddl::statements() {
         #[cfg(feature = "induced-failure")]
-        let armed = failure_armed_for_the_store_schema();
+        let armed = failure_armed_for_the_store_schema(connection);
         #[cfg(not(feature = "induced-failure"))]
         let armed: Option<rusqlite::Error> = None;
         let ran = match armed {
@@ -1165,10 +1179,10 @@ static TEAR_AT_CHUNK_BOUNDARY: std::sync::atomic::AtomicU64 =
 #[cfg(feature = "induced-failure")]
 static PAGE_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The driver code the next store schema written in this process meets, or zero
-/// where it meets none.
+/// The database whose next store schema meets a driver error, and the code it
+/// meets — or nothing, which is what every ordinary process holds.
 #[cfg(feature = "induced-failure")]
-static REFUSE_NEXT_CREATION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static ARMED_STORE_SCHEMA: std::sync::Mutex<Option<(PathBuf, i32)>> = std::sync::Mutex::new(None);
 
 /// End the process where an arrangement asked for a changeset to be torn after
 /// this many entries.
@@ -1218,21 +1232,54 @@ pub(crate) fn note_the_changeset_committed() {
 /// The error the store schema's statement list meets where an arrangement armed
 /// one, or nothing where it did not.
 ///
-/// One-shot: the arm is taken by the first statement that asks, so a rung that
-/// creates a database, fails, and is asked to create another one meets the
-/// condition once rather than forever.
+/// One-shot, and matched against the database being created: the arm is taken
+/// by the first statement written at the file it names, so a rung that creates a
+/// database, fails, and is asked to create another one meets the condition once
+/// rather than forever — and a case running beside it on another thread meets it
+/// never.
 #[cfg(feature = "induced-failure")]
-fn failure_armed_for_the_store_schema() -> Option<rusqlite::Error> {
-    use std::sync::atomic::Ordering;
-    let code = REFUSE_NEXT_CREATION.swap(0, Ordering::SeqCst);
-    if code == 0 {
+fn failure_armed_for_the_store_schema(connection: &Connection) -> Option<rusqlite::Error> {
+    let mut armed = ARMED_STORE_SCHEMA
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (database, code) = armed.as_ref()?;
+    if !names_one_database(Path::new(connection.path()?), database) {
         return None;
     }
+    let code = *code;
+    *armed = None;
+    drop(armed);
     record_arm("norn-store/create", &format!("code={code}"));
     Some(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(code),
         Some("the store schema met an armed condition".to_string()),
     ))
+}
+
+/// Whether two spellings name one database file.
+///
+/// The path SQLite reports back is the one it opened, and a platform may
+/// resolve that differently from the one the caller handed over — on macOS a
+/// temporary directory under `/var` is reported under `/private/var`. So the
+/// comparison is over the components from the file name back, with the root
+/// dropped: one spelling being a suffix of the other is what says they are the
+/// same file, and the scratch trees a suite arms over carry a serial in their
+/// names, so no two of them share one.
+#[cfg(feature = "induced-failure")]
+fn names_one_database(reported: &Path, armed: &Path) -> bool {
+    fn relative(path: &Path) -> PathBuf {
+        path.components()
+            .filter(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            })
+            .collect()
+    }
+    let reported = relative(reported);
+    let armed = relative(armed);
+    reported.ends_with(&armed) || armed.ends_with(&reported)
 }
 
 /// Append one record saying which arm fired, where a harness asked for one.

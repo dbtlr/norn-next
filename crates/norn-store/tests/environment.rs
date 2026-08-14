@@ -178,7 +178,7 @@ fn a_store_schema_that_meets_a_corrupt_database_is_damage() {
     let _disarmed = Disarmed;
     let scratch = Scratch::new("create-corrupt");
 
-    induced_failure::corrupt_the_next_store_creation();
+    induced_failure::corrupt_the_next_store_creation_at(&scratch.database());
     let error = Store::open(scratch.database()).expect_err("a store schema that met corruption");
     assert!(
         error.damage().is_some(),
@@ -209,7 +209,7 @@ fn a_store_schema_refused_at_a_statement_names_the_statement() {
         .and_then(|statement| statement.lines().next().map(str::to_string))
         .expect("the statement list is not empty");
 
-    induced_failure::refuse_the_next_store_creation();
+    induced_failure::refuse_the_next_store_creation_at(&scratch.database());
     let error = Store::open(scratch.database()).expect_err("a store schema that was refused");
     assert!(
         error.damage().is_none(),
