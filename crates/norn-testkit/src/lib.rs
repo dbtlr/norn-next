@@ -53,7 +53,9 @@
 //! from drifting into two meanings of one name.
 //!
 //! The measurement machinery is the same shape: [`counters`] compares counter
-//! readings, [`explain`] states plan assertions over emitted SQL, [`scale`]
+//! readings, [`explain`] states plan assertions over emitted SQL, [`work`]
+//! holds a drain's engine-step count under a line in the rows it drained,
+//! [`scale`]
 //! expresses the size-independence pair, [`process`] spawns a child under
 //! isolation and measures what it cost, and [`readings`] renders what a
 //! measurement found and records it under the run. Each is helpers only — the
@@ -105,3 +107,4 @@ pub mod readings;
 pub mod regression;
 pub mod scale;
 pub mod wait;
+pub mod work;

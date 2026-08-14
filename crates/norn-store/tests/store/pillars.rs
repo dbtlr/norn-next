@@ -15,6 +15,8 @@ use norn_store::{
     class_probe, induced_failure, suffix_probe,
 };
 use norn_testkit::explain::{PlanRow, QueryPlan};
+use norn_testkit::readings;
+use norn_testkit::work::WorkBar;
 use norn_wire::FindingKind;
 
 /// The plan the store reported for one of its named statements, in the shape the
@@ -1115,11 +1117,11 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
 ///
 /// **What this is and is not.** It pins a spelling, not a cost. A rewrite that
 /// seeks from the cursor by some other spelling would fail it, and a reviewer
-/// would have to move the bar rather than route around it — which is the trade
-/// taken deliberately, because the alternative available today is no bar at all
-/// on the branch three mutants survived. The bar that would measure the work
-/// instead of the wording is a per-statement step count, and that is a
-/// store-side reporting surface this does not open.
+/// would have to move the bar rather than route around it. That is why it is
+/// half of a pair: this bar catches the spelling the defect had, and
+/// [`a_paged_reader_costs_a_line_in_the_rows_it_drained`] catches a spelling
+/// nobody anticipated by measuring what the engine spent instead of reading
+/// what the crate wrote.
 #[test]
 fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
     let scratch = Scratch::new("paged-statement-text");
@@ -1189,6 +1191,301 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
         judged += 1;
     }
     assert_eq!(judged, 16, "a scope, an order or a pillar went unjudged");
+}
+
+/// How many rows the work bar drains.
+///
+/// Large enough that the two shapes are an order of magnitude apart — a drain
+/// that re-reads costs about `rows / 2` times what one that seeks costs — and
+/// small enough that six subjects drained a row at a time cost the suite
+/// milliseconds.
+const DRAINED_ROWS: usize = 200;
+
+/// **The work bar**, measured against the SQLite build this workspace's
+/// lockfile pins.
+///
+/// A page of one row through a seeking cursor steps the engine a small constant
+/// number of times: open the cursor at the coalesced floor, step to the first
+/// row, read its columns, stop. Drained a row at a time over 200 rows, the
+/// measured cost per row is 20 for stored suffix keys, 23 for tombstones, 26 for
+/// the heal page in path order, 28 for indexed terms, 37 for the heal page in
+/// folded order,
+/// and 51 for the findings page — the widest, because a findings page issues two
+/// further chunked statements per page to collect each finding's candidates and
+/// its classes.
+///
+/// `per_row` is about three times that widest reading, and `floor` absorbs the
+/// empty page every advancing drain ends on. **The absorber is deliberately
+/// wide** because a step count is engine-version sensitive: the same statement
+/// over the same rows steps a different number of times under a different SQLite
+/// build. What this bar separates is a line from a parabola, and the controls
+/// beside it come in at 618 to 3753 steps per row — three to twenty times this
+/// ceiling — so a coefficient loose enough to survive an engine bump still fails
+/// the shape the bar exists to exclude. What gives a passing reading its
+/// authority is the control, not the tightness of this number.
+const READER_WORK: WorkBar = WorkBar {
+    floor: 500,
+    per_row: 160,
+};
+
+/// **A paged reader costs a line in the rows it drained, and a re-reading one
+/// does not.**
+///
+/// Every reader below is drained twice over the same rows. Once with its cursor
+/// advancing, which is how a heal merges and how the comparator projects: each
+/// page seeks to the row after the last one it saw. Once with the cursor left at
+/// the start and the page bound widened by one each time, which is what a cursor
+/// demoted to a filter costs — the i-th row is reached by reading the i-1 rows
+/// ahead of it, so the drain pays about `rows²/2` where the first pays `rows`.
+///
+/// **The pair is the point.** The first assertion alone would pass under a bar
+/// wide enough to admit anything; the second is what says the bar can fail. Both
+/// go through the public paged readers, so what is measured is the statement the
+/// crate really runs rather than one the test spelled.
+#[test]
+fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
+    let scratch = Scratch::new("reader-work");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    seed_a_drainable_store(&mut request, DRAINED_ROWS);
+
+    let rows = DRAINED_ROWS as u64;
+    for order in [
+        norn_store::StoredPathOrder::Sensitive,
+        norn_store::StoredPathOrder::AsciiCaseInsensitive,
+    ] {
+        judge_a_drain(
+            &request,
+            &format!("the heal page, {order:?}"),
+            rows,
+            |request| {
+                let mut cursor: Option<norn_store::DocumentPath> = None;
+                let mut reached = 0;
+                while let Some(row) = request
+                    .stored_documents_after_ordered(cursor.as_ref(), 1, order)
+                    .expect("a page of stored documents")
+                    .pop()
+                {
+                    cursor = Some(row.path);
+                    reached += 1;
+                }
+                reached
+            },
+            |request| {
+                for width in 1..=DRAINED_ROWS {
+                    let page = request
+                        .stored_documents_after_ordered(None, width, order)
+                        .expect("a page of stored documents");
+                    assert_eq!(page.len(), width, "the control did not reach its i-th row");
+                }
+                DRAINED_ROWS
+            },
+        );
+    }
+
+    judge_a_drain(
+        &request,
+        "the findings enumeration",
+        rows,
+        |request| {
+            let mut cursor = None;
+            let mut reached = 0;
+            while let Some((next, _)) = request
+                .stored_findings_after(cursor, 1)
+                .expect("a page of findings")
+                .pop()
+            {
+                cursor = Some(next);
+                reached += 1;
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .stored_findings_after(None, width)
+                    .expect("a page of findings");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+
+    judge_a_drain(
+        &request,
+        "the tombstone enumeration",
+        rows,
+        |request| {
+            let mut cursor: Option<norn_store::DocumentPath> = None;
+            let mut reached = 0;
+            while let Some(death) = request
+                .stored_tombstones_after(cursor.as_ref(), 1)
+                .expect("a page of tombstones")
+                .pop()
+            {
+                cursor = Some(death.path);
+                reached += 1;
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .stored_tombstones_after(None, width)
+                    .expect("a page of tombstones");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+
+    judge_a_drain(
+        &request,
+        "the suffix-key enumeration",
+        rows,
+        |request| {
+            let mut cursor: Option<norn_store::DocumentPath> = None;
+            let mut reached = 0;
+            while let Some((at, _)) = request
+                .suffix_keys_after(cursor.as_ref(), 1)
+                .expect("a page of stored suffix keys")
+                .pop()
+            {
+                cursor = Some(at);
+                reached += 1;
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .suffix_keys_after(None, width)
+                    .expect("a page of stored suffix keys");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+
+    judge_a_drain(
+        &request,
+        "the indexed-term enumeration",
+        rows,
+        |request| {
+            let mut cursor: Option<String> = None;
+            let mut reached = 0;
+            while let Some(term) = request
+                .indexed_terms_after(cursor.as_deref(), 1)
+                .expect("a page of indexed terms")
+                .pop()
+            {
+                cursor = Some(term.term);
+                reached += 1;
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .indexed_terms_after(None, width)
+                    .expect("a page of indexed terms");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+}
+
+/// Drain one reader both ways and judge the pair, recording what each cost.
+///
+/// Each drain is bracketed by [`norn_store::Request::read_steps`], so what is
+/// judged is the work those statements spent and not the request's whole
+/// history. Both drains are required to reach `rows` rows, because a bar over a
+/// drain that stopped early is a bar over nothing.
+fn judge_a_drain(
+    request: &norn_store::Request<'_>,
+    subject: &str,
+    rows: u64,
+    seeking: impl FnOnce(&norn_store::Request<'_>) -> usize,
+    re_reading: impl FnOnce(&norn_store::Request<'_>) -> usize,
+) {
+    let opened = request.read_steps();
+    let reached = seeking(request);
+    let seeking_steps = request.read_steps() - opened;
+    assert_eq!(
+        reached as u64, rows,
+        "{subject}: the advancing drain did not reach every row"
+    );
+
+    let opened = request.read_steps();
+    let reached = re_reading(request);
+    let re_reading_steps = request.read_steps() - opened;
+    assert_eq!(
+        reached as u64, rows,
+        "{subject}: the control did not reach every row"
+    );
+
+    readings::record(
+        &format!("work bar: {subject}"),
+        &[
+            (
+                "steps per row, advancing",
+                readings::multiple(readings::per_mille(seeking_steps, rows)),
+            ),
+            (
+                "steps per row, re-reading",
+                readings::multiple(readings::per_mille(re_reading_steps, rows)),
+            ),
+            ("ceiling", READER_WORK.ceiling(rows).to_string()),
+        ],
+    );
+
+    READER_WORK.assert_within(subject, rows, seeking_steps);
+    READER_WORK.assert_exceeded(
+        &format!("{subject}, drained by a cursor demoted to a filter"),
+        rows,
+        re_reading_steps,
+    );
+}
+
+/// Enough rows in every pillar the work bar drains for the line and the parabola
+/// to be told apart.
+///
+/// The documents go in first and whole, because a changeset discards the
+/// findings in every class its paths are in. Each body carries a term of its
+/// own, so the full-text vocabulary has a row per document; each document is
+/// its own ambiguity class, so no finding takes another's place; and the deaths
+/// are recorded at paths no document stands at, so the tombstone pillar is
+/// populated without pruning what was just written.
+fn seed_a_drainable_store(request: &mut norn_store::Request<'_>, rows: usize) {
+    let documents: Vec<_> = (0..rows)
+        .map(|n| {
+            document(
+                &format!("drained/{n:04}.md",),
+                &format!("hash-{n}"),
+                &format!("term{n:04}\n"),
+            )
+        })
+        .collect();
+    write_documents(request, &documents);
+    for n in 0..rows {
+        request
+            .record_finding(&ambiguity(
+                &format!("drained/{n:04}.md"),
+                &format!("target{n:04}"),
+                &format!("target{n:04}/"),
+                &[],
+                3,
+            ))
+            .expect("recording a finding");
+    }
+    for n in 0..rows {
+        record_death(
+            request,
+            &path(&format!("gone/{n:04}.md")),
+            Provenance::HealPrune,
+        );
+    }
 }
 
 /// **Findings maintenance is scoped by affected ambiguity class.** A changed path

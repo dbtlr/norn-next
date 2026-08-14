@@ -51,12 +51,14 @@
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
 //! compose these primitives rather than re-spelling the ranges.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use norn_wire::FindingKind;
 use rusqlite::types::Value;
 use rusqlite::{
-    Connection, OptionalExtension, Params, Row, TransactionBehavior, params, params_from_iter,
+    Connection, OptionalExtension, Params, Row, StatementStatus, TransactionBehavior, params,
+    params_from_iter,
 };
 
 use crate::counters::{Counter, DerivationCounters};
@@ -134,6 +136,10 @@ const FINDING_ID_CHUNK: usize = 4;
 pub struct Request<'a> {
     store: &'a mut Store,
     counters: DerivationCounters,
+    /// The engine work this request's paged reads have cost, read back by
+    /// [`Request::read_steps`]. A [`Cell`] because the readers take `&self` —
+    /// the connection they borrow is a field of the same struct.
+    read_steps: Cell<u64>,
 }
 
 impl<'a> Request<'a> {
@@ -141,6 +147,7 @@ impl<'a> Request<'a> {
         Request {
             store,
             counters: DerivationCounters::default(),
+            read_steps: Cell::new(0),
         }
     }
 
@@ -632,8 +639,7 @@ impl<'a> Request<'a> {
             });
         }
         let scope = SubjectScope::Vault;
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             &document_page_sql(scope, order),
             params_from_iter(document_page_parameters(scope, after, limit)),
             |row| stored_document(row, 0),
@@ -706,8 +712,7 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             &document_page_sql(scope, order),
             params_from_iter(document_page_parameters(scope, after, limit)),
             |row| stored_document(row, 0),
@@ -752,8 +757,9 @@ impl<'a> Request<'a> {
         Ok(Some(StoredFacts {
             document,
             body,
-            links: Self::read_all(
+            links: Self::read_all_on(
                 &transaction,
+                &self.read_steps,
                 "SELECT family, embed, protocol, target, title, anchor, block_ref,
                         span_line, span_column, span_offset
                  FROM links WHERE document = ?1 ORDER BY ordinal",
@@ -761,8 +767,9 @@ impl<'a> Request<'a> {
                 stored_link,
                 "reading a document's links",
             )?,
-            headings: Self::read_all(
+            headings: Self::read_all_on(
                 &transaction,
+                &self.read_steps,
                 "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
                         inside_container
                  FROM headings WHERE document = ?1 ORDER BY ordinal",
@@ -770,16 +777,18 @@ impl<'a> Request<'a> {
                 stored_heading,
                 "reading a document's headings",
             )?,
-            blocks: Self::read_all(
+            blocks: Self::read_all_on(
                 &transaction,
+                &self.read_steps,
                 "SELECT block_id, span_line, span_column, span_offset
                  FROM blocks WHERE document = ?1 ORDER BY ordinal",
                 params![id],
                 stored_block,
                 "reading a document's block ids",
             )?,
-            tags: Self::read_all(
+            tags: Self::read_all_on(
                 &transaction,
+                &self.read_steps,
                 "SELECT name, source, span_line, span_column, span_offset
                  FROM document_tags WHERE document = ?1 ORDER BY ordinal",
                 params![id],
@@ -843,8 +852,7 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             &finding_subjects_sql(scope, kinds.len(), order),
             params_from_iter(finding_subject_parameters(scope, kinds, after, limit)),
             |row| {
@@ -923,8 +931,7 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             TOMBSTONE_PAGE_SQL,
             params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
             stored_tombstone,
@@ -959,8 +966,7 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             SUFFIX_KEY_PAGE_SQL,
             params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
             stored_suffix_key,
@@ -992,8 +998,7 @@ impl<'a> Request<'a> {
                 given: limit,
             });
         }
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             INDEXED_TERM_PAGE_SQL,
             params_from_iter(text_page_parameters(after, limit)),
             |row| {
@@ -1055,8 +1060,7 @@ impl<'a> Request<'a> {
     /// fall out in row-insertion order is a ladder that reorders itself when a
     /// document is re-derived.
     pub fn suffix_candidates(&self, probe: &SuffixProbe) -> Result<Vec<DocumentPath>, StoreError> {
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             &suffix_candidates_sql(probe.range_count()),
             probe_parameters(probe),
             |row| Ok(DocumentPath::new(&row.get::<_, String>(0)?)),
@@ -1096,8 +1100,7 @@ impl<'a> Request<'a> {
     /// `documents.body` no longer carries is an index that has drifted, and
     /// [`crate::Store::verify_integrity`] is what states that as damage.
     pub fn full_text_matches(&self, expression: &str) -> Result<Vec<DocumentPath>, StoreError> {
-        Self::read_all(
-            &self.store.connection,
+        self.read_all(
             "SELECT documents.path FROM documents_fts
              JOIN documents ON documents.id = documents_fts.rowid
              WHERE documents_fts MATCH ?1
@@ -1147,66 +1150,66 @@ impl<'a> Request<'a> {
             }))
         };
         let explained = format!("EXPLAIN QUERY PLAN {sql}");
-        let steps = match statement {
-            ExplainedStatement::SuffixCandidates(probe)
-            | ExplainedStatement::FindingsInClass(probe)
-            | ExplainedStatement::ClassDiscard(probe) => Self::read_all(
-                &self.store.connection,
-                &explained,
-                probe_parameters(probe),
-                read,
-                "explaining an emitted statement",
-            )?,
-            ExplainedStatement::SubjectDiscard(path, scope) => Self::read_all(
-                &self.store.connection,
-                &explained,
-                params_from_iter(subject_discard_parameters(path, scope)),
-                read,
-                "explaining an emitted statement",
-            )?,
-            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
-                let cursor = explained_page_cursor(scope);
-                Self::read_all(
-                    &self.store.connection,
+        // An explain is a report *about* a statement rather than a run of it, so
+        // what taking it steps is not work [`Request::read_steps`] attributes to
+        // this request's readers. The count is restored whichever way the
+        // explain went.
+        let before_the_explain = self.read_steps.get();
+        let taken = (|| -> Result<Vec<PlanStep>, StoreError> {
+            Ok(match statement {
+                ExplainedStatement::SuffixCandidates(probe)
+                | ExplainedStatement::FindingsInClass(probe)
+                | ExplainedStatement::ClassDiscard(probe) => self.read_all(
                     &explained,
-                    params_from_iter(finding_subject_parameters(
-                        scope,
-                        kinds,
-                        Some(&cursor),
+                    probe_parameters(probe),
+                    read,
+                    "explaining an emitted statement",
+                )?,
+                ExplainedStatement::SubjectDiscard(path, scope) => self.read_all(
+                    &explained,
+                    params_from_iter(subject_discard_parameters(path, scope)),
+                    read,
+                    "explaining an emitted statement",
+                )?,
+                ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
+                    let cursor = explained_page_cursor(scope);
+                    self.read_all(
+                        &explained,
+                        params_from_iter(finding_subject_parameters(
+                            scope,
+                            kinds,
+                            Some(&cursor),
+                            MAX_PAGE,
+                        )),
+                        read,
+                        "explaining an emitted statement",
+                    )?
+                }
+                ExplainedStatement::StoredDocumentPage(scope, _) => {
+                    let cursor = explained_page_cursor(scope);
+                    self.read_all(
+                        &explained,
+                        params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
+                        read,
+                        "explaining an emitted statement",
+                    )?
+                }
+                // Each of the four enumerations is explained with its cursor
+                // bound, for the reason [`explained_page_cursor`] states: the
+                // statement text does not branch on the cursor, so the plan is the
+                // same either way today, and an edit that ever gave the cursor its
+                // own text would otherwise be explained on the first page alone.
+                ExplainedStatement::StoredFindingPage => self.read_all(
+                    &explained,
+                    params_from_iter(finding_page_parameters(
+                        Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
                         MAX_PAGE,
                     )),
                     read,
                     "explaining an emitted statement",
-                )?
-            }
-            ExplainedStatement::StoredDocumentPage(scope, _) => {
-                let cursor = explained_page_cursor(scope);
-                Self::read_all(
-                    &self.store.connection,
-                    &explained,
-                    params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
-                    read,
-                    "explaining an emitted statement",
-                )?
-            }
-            // Each of the four enumerations is explained with its cursor
-            // bound, for the reason [`explained_page_cursor`] states: the
-            // statement text does not branch on the cursor, so the plan is the
-            // same either way today, and an edit that ever gave the cursor its
-            // own text would otherwise be explained on the first page alone.
-            ExplainedStatement::StoredFindingPage => Self::read_all(
-                &self.store.connection,
-                &explained,
-                params_from_iter(finding_page_parameters(
-                    Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
-                    MAX_PAGE,
-                )),
-                read,
-                "explaining an emitted statement",
-            )?,
-            ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
-                Self::read_all(
-                    &self.store.connection,
+                )?,
+                ExplainedStatement::StoredTombstonePage
+                | ExplainedStatement::StoredSuffixKeyPage => self.read_all(
                     &explained,
                     params_from_iter(text_page_parameters(
                         Some(EXPLAINED_PAGE_CURSOR_LEAF),
@@ -1214,17 +1217,54 @@ impl<'a> Request<'a> {
                     )),
                     read,
                     "explaining an emitted statement",
-                )?
-            }
-            ExplainedStatement::IndexedTermPage => Self::read_all(
-                &self.store.connection,
-                &explained,
-                params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
-                read,
-                "explaining an emitted statement",
-            )?,
-        };
-        Ok(EmittedPlan { sql, steps })
+                )?,
+                ExplainedStatement::IndexedTermPage => self.read_all(
+                    &explained,
+                    params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
+                    read,
+                    "explaining an emitted statement",
+                )?,
+            })
+        })();
+        self.read_steps.set(before_the_explain);
+        Ok(EmittedPlan { sql, steps: taken? })
+    }
+
+    /// **The work bar's reading.** How many SQLite virtual-machine steps this
+    /// request's multi-row reads have cost so far.
+    ///
+    /// # This is harness evidence, not a derivation counter
+    ///
+    /// A [`DerivationCounters`] reading answers *what changed in the derived
+    /// state* — a document upserted, a finding written — and is a closed
+    /// vocabulary the product itself is defined in terms of: a warm request
+    /// finishes at zero because it changed nothing, and that is a claim about
+    /// semantic truth. A step count answers *what the engine spent reaching an
+    /// answer*. The two never merge:
+    ///
+    /// - Reading rows back derives nothing, so a step count in the counter
+    ///   vocabulary would move on every warm read and break the zero-on-warm bar
+    ///   by construction.
+    /// - A step count is engine-version-sensitive. The same statement over the
+    ///   same rows steps a different number of times under a different SQLite
+    ///   build, so nothing may be *specified* in terms of it.
+    /// - What it is good for is an authored-bound grammar: a bar of the shape
+    ///   `floor + coefficient × rows` distinguishes a reader that seeks from one
+    ///   that scans, whatever the engine's constant factor. That is a harness
+    ///   judgment about execution cost, and it lives here for the same reason
+    ///   [`Request::emitted_plan`] does — no crate outside this one may open a
+    ///   connection and measure a statement of its own.
+    ///
+    /// # What it counts
+    ///
+    /// Every statement run through the multi-row reader, which is every paged
+    /// reader and every enumeration. A keyed single-row read goes through
+    /// SQLite's own one-row convenience and exposes no statement handle, so it
+    /// contributes nothing; a bar states its subject as a drain, which is what
+    /// the paged readers are. Taking an [`Request::emitted_plan`] contributes
+    /// nothing either.
+    pub fn read_steps(&self) -> u64 {
+        self.read_steps.get()
     }
 
     // ---- readers ----
@@ -1256,13 +1296,7 @@ impl<'a> Request<'a> {
         sql: &str,
         parameters: impl Params,
     ) -> Result<Vec<(i64, StoredFinding)>, StoreError> {
-        let found = Self::read_all(
-            &self.store.connection,
-            sql,
-            parameters,
-            stored_finding,
-            "reading findings",
-        )?;
+        let found = self.read_all(sql, parameters, stored_finding, "reading findings")?;
         if found.is_empty() {
             return Ok(Vec::new());
         }
@@ -1280,8 +1314,7 @@ impl<'a> Request<'a> {
                 .map(|index| format!("?{index}"))
                 .collect::<Vec<String>>()
                 .join(", ");
-            let candidates = Self::read_all(
-                &self.store.connection,
+            let candidates = self.read_all(
                 &format!(
                     "SELECT finding, path, suffix FROM finding_candidates
                      WHERE finding IN ({placeholders}) ORDER BY finding, rank"
@@ -1295,8 +1328,7 @@ impl<'a> Request<'a> {
                     findings[*position].candidates.push(candidate);
                 }
             }
-            let classes = Self::read_all(
-                &self.store.connection,
+            let classes = self.read_all(
                 &format!(
                     "SELECT finding, class_key FROM finding_classes
                      WHERE finding IN ({placeholders}) ORDER BY finding, class_key"
@@ -1328,8 +1360,30 @@ impl<'a> Request<'a> {
             .transpose()
     }
 
+    /// Run a multi-row statement on this request's connection, adding what it
+    /// stepped to [`Request::read_steps`].
     fn read_all<T>(
+        &self,
+        sql: &str,
+        parameters: impl Params,
+        read: impl FnMut(&Row<'_>) -> Reading<T>,
+        operation: &'static str,
+    ) -> Result<Vec<T>, StoreError> {
+        Self::read_all_on(
+            &self.store.connection,
+            &self.read_steps,
+            sql,
+            parameters,
+            read,
+            operation,
+        )
+    }
+
+    /// The same, on a connection the caller names — a read snapshot's own
+    /// transaction — with the step count still this request's.
+    fn read_all_on<T>(
         connection: &Connection,
+        steps: &Cell<u64>,
         sql: &str,
         parameters: impl Params,
         read: impl FnMut(&Row<'_>) -> Reading<T>,
@@ -1345,6 +1399,11 @@ impl<'a> Request<'a> {
         for row in rows {
             found.push(row.map_err(|error| error::sql(operation, error))??);
         }
+        // Read after the rows are drained and while the handle is still alive:
+        // the count is the statement's own, and it is final once the statement
+        // has run to the end.
+        let stepped = statement.get_status(StatementStatus::VmStep);
+        steps.set(steps.get().saturating_add(stepped.max(0) as u64));
         Ok(found)
     }
 }
