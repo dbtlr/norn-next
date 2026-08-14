@@ -872,12 +872,14 @@ fn stands_without_its_finding(store: &mut Store, row: &StoredDocument) -> Result
 /// still refuses, so a denied directory or an exhausted descriptor table never
 /// reads as a deletion.
 ///
-/// **A name that opened nothing is a name this walk read nothing at**, so it is
-/// withheld. The row axis converges it on the answer a walk begun now holds —
-/// no document is there, so the row goes — and that walk is one that either
-/// never yields the name or names a link, a pipe or a directory at it and reads
-/// through none of them. Either way nothing renders onto the place, which is
-/// what leaves the findings standing there for the walk that does read it.
+/// **A name that opened nothing is a name this walk read nothing at**, so the
+/// one place it stands at is withheld. The row axis converges it on the answer a
+/// walk begun now holds — no document is there, so the row goes — and that walk
+/// is one that either never yields the name or names a link, a pipe or a
+/// directory at it and reads through none of them. Either way nothing renders
+/// onto the place, which is what leaves the findings standing there for the walk
+/// that does read it. The hold is over that place rather than over a subtree,
+/// because the name the merge stands on is a file's.
 fn open_enumerated<I>(
     files: &mut Peekable<I>,
     pending: &mut Pending<'_>,
@@ -891,7 +893,7 @@ where
     let path = file.path().as_path().to_owned();
     let read = file.read_optional().map_err(effect)?;
     if read.is_none() {
-        pending.withhold(&path);
+        pending.withhold_entry(&path);
     }
     Ok(read)
 }
@@ -2131,8 +2133,13 @@ impl Filed {
 /// spelling, because rendering is per segment and leaves an unrefused segment
 /// as written. A root whose own spelling the grammar refuses covers places
 /// nothing here can spell instead — every path under it renders to a place
-/// carrying the marker — so such a root withholds authority over every rendered
-/// place this job would otherwise reach.
+/// carrying the marker, and which of them the root hides is unknowable from
+/// outside it — so such a root withholds authority over every rendered place
+/// this job would otherwise reach.
+///
+/// **That job-wide hold belongs to roots alone.** A single entry a walk opened
+/// nothing at is a file, which hides no subtree: whatever its spelling, it
+/// stands at one place and withholds that place.
 #[derive(Default)]
 struct Withheld {
     roots: BTreeSet<String>,
@@ -2149,17 +2156,35 @@ impl Withheld {
     /// for its leaf's stem as well — so `..md` addresses `..md/note.md` as
     /// written and stands at the place `\u{fffd}..md` itself. Both go in, and a
     /// spelling the two grammars agree on renders to itself and goes in once.
+    ///
+    /// A root the directory grammar refuses addresses no range of stored paths
+    /// at all, so naming it reaches none of the places it hides and the
+    /// rendered-place hold is what stands in for them.
     fn absorb(&mut self, path: &Path) {
-        match path
-            .to_str()
-            .filter(|spelling| DirectoryPrefix::new(spelling).is_ok())
-        {
+        match addressed_range(path) {
             Some(spelling) => {
                 self.roots.insert(spelling.to_owned());
                 self.roots
                     .insert(DocumentPath::rendered(path).as_str().to_owned());
             }
             None => self.rendered = true,
+        }
+    }
+
+    /// Record one entry a walk enumerated and opened nothing at.
+    ///
+    /// **The entry is a file, so what it hides is its own place.** Its spelling
+    /// renders onto exactly one place whether or not either grammar admits it,
+    /// which is the whole of what this walk read nothing about — a refused
+    /// spelling here names one file, not a subtree of paths nothing can spell.
+    /// The range that spelling addresses goes in beside it wherever the
+    /// directory grammar admits one, since a row stored beneath a name that is a
+    /// file now is a row under a name this walk read nothing at either.
+    fn absorb_entry(&mut self, path: &Path) {
+        self.roots
+            .insert(DocumentPath::rendered(path).as_str().to_owned());
+        if let Some(spelling) = addressed_range(path) {
+            self.roots.insert(spelling.to_owned());
         }
     }
 
@@ -2197,6 +2222,16 @@ impl Withheld {
                 .any(|root| folded_reaches(root, place, order)),
         }
     }
+}
+
+/// The spelling a path addresses a range of stored paths under, where the
+/// directory grammar admits one.
+///
+/// A spelling the grammar refuses poisons every path beneath it, so no row is
+/// stored under one and the range it would name is empty.
+fn addressed_range(path: &Path) -> Option<&str> {
+    path.to_str()
+        .filter(|spelling| DirectoryPrefix::new(spelling).is_ok())
 }
 
 #[cfg(test)]
@@ -2553,11 +2588,19 @@ impl<'s> Pending<'s> {
         });
     }
 
-    /// Record that a walk of this scope read nothing under `path` — a root it
-    /// passed over, or a name it enumerated and opened nothing at — so the job's
-    /// prune leaves the findings there standing.
+    /// Record a root a walk of this scope passed over and read nothing under, so
+    /// the job's prune leaves the findings beneath it standing.
     fn withhold(&mut self, path: &Path) {
         self.account.withheld.absorb(path);
+    }
+
+    /// Record one name a walk of this scope enumerated and opened nothing at, so
+    /// the job's prune leaves the findings at the place it stands at standing.
+    ///
+    /// It is the narrower of the two holds because the name is one file: a root
+    /// hides everything under it, and this hides the place it renders onto.
+    fn withhold_entry(&mut self, path: &Path) {
+        self.account.withheld.absorb_entry(path);
     }
 
     /// Whether the changeset or the findings beside it have reached the bound
@@ -5098,6 +5141,84 @@ mod tests {
             1,
             "the merge took the finding at a place its own open read nothing at"
         );
+    }
+
+    /// **A name that opened nothing withholds the place it renders onto and no
+    /// other.** The entry is a file, so it hides no subtree, and a spelling the
+    /// directory grammar refuses is still one name standing at one place. The
+    /// hold over every rendered place at once is what a *root* whose own
+    /// spelling the grammar refuses earns, because every path under such a root
+    /// renders to a place nothing here can spell instead — and taking it for one
+    /// file would keep every finding this walk read the whole vault against.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_name_that_opens_nothing_withholds_its_own_place_alone() {
+        let f = Fixture::watcherless("heal-open-window-refused-name");
+        let created = write_or_report(&f.vault().join("vanishing\\name.md"), b"body")
+            && write_or_report(&f.vault().join("elsewhere\\name.md"), b"body");
+        if !created {
+            return;
+        }
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let mut store = Store::open(f.root.join("refused-window.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_kinds(&mut store, "vanishing\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal did not file the vanishing spelling, so this proves nothing"
+        );
+        assert_eq!(
+            sorted_kinds(&mut store, "elsewhere\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal did not file the unrelated spelling, so this proves nothing"
+        );
+
+        // One refused spelling leaves ahead of the enumeration, so nothing the
+        // walk below reads renders onto its place and the walk accounts for it.
+        fs::remove_file(f.vault().join("elsewhere\\name.md")).unwrap();
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+        // The other leaves inside the window between that enumeration and the
+        // open, so the merge reads nothing at the one name.
+        fs::remove_file(f.vault().join("vanishing\\name.md")).unwrap();
+
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, f.vault().as_path(), &[], policy, &mut account).unwrap();
+
+        assert_eq!(
+            findings_at(&mut store, "elsewhere\u{fffd}name.md").len(),
+            0,
+            "one name the open read nothing at withheld a rendered place it never names"
+        );
+        assert_eq!(
+            findings_at(&mut store, "vanishing\u{fffd}name.md").len(),
+            1,
+            "the merge took the finding at the place its own open read nothing at"
+        );
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
     /// Bytes no Markdown document can be read from.
