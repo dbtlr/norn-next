@@ -52,8 +52,10 @@
 //!
 //! The real-watcher lease is machine-wide and not reentrant, so each host here
 //! is dropped before the next one attaches. Every case is therefore a sequence
-//! of attachments over one tree — one for each phase it settles, and a last one
-//! for the derivation from zero it is judged against.
+//! of attachments over one tree — one for each phase it settles, a last one for
+//! the derivation from zero it is judged against, and, for the case that lands
+//! a phase inside a heal, one for each attempt that failed to catch a walk in
+//! time.
 //!
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness.
 #![cfg(unix)]
@@ -63,18 +65,20 @@ mod attach;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use norn_fs::{CaseSensitivity, ContentHash, PathNormalizer};
-use norn_host::AttachMode;
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
-use norn_store::{DocumentPath, Store, class_probe};
+use norn_host::{AttachMode, DemandLease, ProductionEntryOps};
+use norn_store::{DocumentPath, Provenance, Store, class_probe};
 use norn_testkit::churn::{self, Act, Applied, Folding, Script, Step};
-use norn_testkit::equivalence::{Population, StoreProjection, assert_operationally_valid};
+use norn_testkit::equivalence::{
+    Population, StoreProjection, assert_operationally_valid, tombstones,
+};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Convergence, Observed, wait_until};
-use norn_wire::{FindingKind, TrustState};
+use norn_wire::{FindingKind, TrustState, WarmingPhase};
 
 /// The profile every case churns over.
 ///
@@ -111,6 +115,15 @@ const SETTLING: Convergence = Convergence::new(
     Duration::from_secs(2),
     Duration::from_secs(10),
 );
+
+/// The runaway bound on catching an attach heal while it is still walking.
+///
+/// **Not a bar.** A walk over this profile is milliseconds long, so the one
+/// case that lands a phase inside one races for it and re-attaches when it
+/// loses — see [`caught_mid_walk`]. This bounds the whole race: reaching it
+/// means an entry that never publishes a walk at all, rather than a machine
+/// that lost a few races.
+const CATCHING_A_HEAL: Duration = Duration::from_secs(60);
 
 /// The bytes the validity workload replaces the vault's schema declaration
 /// with.
@@ -410,14 +423,21 @@ fn an_external_tools_catch_up_converges_on_a_build_from_zero() {
 /// that already holds rows** — the walk enumerates documents the store stands
 /// for, and the workload changes them underneath it.
 ///
-/// **The overlap is witnessed rather than assumed.** The state of the entry is
-/// sampled between the demand and the first act, and a reading of `Ready` there
-/// would mean the heal finished before the workload started — which is the
-/// catch-up case above wearing this one's name. What is *not* witnessable from
-/// outside is finer than that: whether any one edit landed inside the window
-/// between the walk's enumeration and its opens is not something a black-box
-/// case can force, and the case that stages that window exactly is in
-/// `norn-host`'s own unit suite, where the walk and the merge are two calls.
+/// **The overlap is forced and then witnessed.** The attachment is made over
+/// and over until one of them is read part-way through its walk, and the first
+/// act is held until that reading. Holding for `Warming` alone would not do it:
+/// an entry `InstallingCoverage` is still acquiring the store, the lock and the
+/// watcher, and a phase applied there lands wholly before the first document is
+/// read, which is the catch-up case above wearing this one's name.
+///
+/// **The claim is about the first act.** The walk may finish while the rest of
+/// the phase is still landing, and that is fine — what this case states is that
+/// the phase began behind the walk's own cursor, which is the thing the catch-up
+/// case cannot be. What is *not* witnessable from outside is finer still:
+/// whether any one edit landed inside the window between the walk's enumeration
+/// of a path and its open of that path is not something a black-box case can
+/// force, and the case that stages that window exactly is in `norn-host`'s own
+/// unit suite, where the walk and the merge are two calls.
 ///
 /// So what this case proves that the catch-up case does not is that the edits
 /// were concurrent with a heal in flight rather than delivered to a settled
@@ -912,7 +932,7 @@ struct Churned {
     applied: Applied,
     /// What the entry's trust state was when the last phase's first act landed,
     /// where that phase ran against a heal rather than after one.
-    overlapped: Option<String>,
+    overlapped: Option<TrustState>,
     /// What the host's jobs spent maintaining the churn, and nothing for the
     /// attach heal that came before it.
     #[cfg(feature = "induced-failure")]
@@ -995,30 +1015,29 @@ impl Churned {
             return self;
         }
 
-        let host = self.vault.host();
+        // A phase that means to land inside a heal takes the attachment that
+        // caught one part-way through its walk, so the first act lands against
+        // a tree the walk has already read some of. Every other phase attaches
+        // and settles before anything is applied.
+        let (host, demanded) = match when {
+            When::DuringTheHeal => {
+                let (host, demanded, caught) = caught_mid_walk(&self.vault);
+                self.overlapped = Some(caught);
+                (host, Some(demanded))
+            }
+            _ => (self.vault.host(), None),
+        };
         let held = match when {
             When::Settled => Some(attach::attach_and_wait(&host, self.vault.name())),
             When::DuringTheHeal => None,
             When::Before => unreachable!("the pre-attach arm returned above"),
         };
+        // The baseline for this phase's account. A phase landing inside a heal
+        // reads it with that heal already part-way through, so what it hands
+        // back is a floor on the work rather than a changed set's whole cost —
+        // which is why the case that runs that way states no cost bar.
         #[cfg(feature = "induced-failure")]
         let before = host.evidence();
-        let demanded = match when {
-            // The demand is placed and the workload runs at once, so the walk
-            // that establishes the attachment reads a tree somebody else is
-            // still writing to.
-            When::DuringTheHeal => Some(
-                host.demand(self.vault.name(), AttachMode::Durable)
-                    .expect("request attachment"),
-            ),
-            _ => None,
-        };
-        if when == When::DuringTheHeal {
-            // Read between the demand and the first act, which is the only
-            // moment that says whether the two really overlapped. It is a
-            // reading rather than a wait: a case asserts on it afterwards.
-            self.overlapped = Some(format!("{:?}", host.state(self.vault.name())));
-        }
         apply(script, self.vault.path(), &mut applied);
         let waited = match when {
             When::DuringTheHeal => Some(attach::attach_and_wait(&host, self.vault.name())),
@@ -1136,22 +1155,49 @@ impl Churned {
         );
     }
 
-    /// **The workload really landed against a heal in flight.**
+    /// **The workload really landed inside the walk**, witnessed twice.
     ///
-    /// The entry's state was read between the demand and the workload's first
-    /// act, and a heal that had already finished by then would have left it
-    /// `Ready` — which would make the case a catch-up against a settled host
-    /// wearing another name, and every claim it makes about concurrency
-    /// vacuous.
+    /// The first reading is what the race aimed at: the entry's own published
+    /// progress, read between the demand and the phase's first act, showing a
+    /// heal already half way through the vault. `Ready` there would mean the
+    /// heal finished before the churn began and `InstallingCoverage` would mean
+    /// it had not started — either makes this the catch-up case wearing another
+    /// name, with every claim it makes about concurrency vacuous.
+    ///
+    /// **The second reading is what the host did**, and it is the one that
+    /// cannot be arranged by a lucky sample. A walk passes a place once, so a
+    /// row the walk enumerated and found standing is a row only a watcher
+    /// report can take away afterwards — and the store records which of the two
+    /// took each row. Deaths carrying nothing but `heal-prune` are a phase that
+    /// landed wholly ahead of the walk, whatever the entry was publishing at
+    /// the time; a `watcher-removal` among them is the phase having landed
+    /// behind the walk's own cursor, which is as close to "inside the walk" as
+    /// anything outside a host can witness.
     fn assert_the_workload_overlapped_a_heal(&self) {
         let observed = self
             .overlapped
-            .as_deref()
+            .as_ref()
             .expect("this case ran a phase against an active heal");
         assert!(
-            !observed.contains("Ready"),
-            "the entry was already {observed} when the workload's first act landed, so the heal \
-             this case means to churn against had finished before the churn began\n{}",
+            past_the_workloads_places(observed),
+            "the entry was {observed:?} when the workload's first act landed, so the heal this \
+             case means to churn against had not walked past the places the workload names\n{}",
+            self.applied
+        );
+
+        let mut store = self.vault.store();
+        let deaths = tombstones(&mut store).expect("draining the tombstone pillar");
+        assert!(
+            deaths
+                .iter()
+                .any(|death| death.provenance == Provenance::WatcherRemoval),
+            "every death this churn produced was the heal's own prune — {:?} — so the walk had \
+             not yet reached the places the workload changed and this phase landed ahead of it \
+             rather than inside it\n{}",
+            deaths
+                .iter()
+                .map(|death| (death.path.as_str(), death.provenance))
+                .collect::<Vec<(&str, Provenance)>>(),
             self.applied
         );
     }
@@ -1292,6 +1338,87 @@ impl Churned {
     fn assert_the_account_moved(&self) {}
 
     fn assert_rows_were_taken_away(&self) {}
+}
+
+/// **Attach, and catch the heal part-way through its walk.**
+///
+/// A walk over this profile takes milliseconds, so catching one is a race
+/// rather than a wait — and this runs the race until it wins. An attempt whose
+/// entry reaches `Ready` before it was ever read far enough into the walk is
+/// let go and made again over the same tree, which costs an attachment and
+/// changes nothing: the workload has not been applied yet, so a lost race is a
+/// re-attach rather than a churn run twice.
+///
+/// **The look is a tight one.** Consecutive published readings are tens of
+/// microseconds apart, and a poll that backed off between them would sample
+/// past the whole walk — which is why this is not one of the suite's budgeted
+/// waits.
+fn caught_mid_walk(
+    vault: &attach::Vault,
+) -> (
+    attach::ServingHost,
+    DemandLease<ProductionEntryOps>,
+    TrustState,
+) {
+    let deadline = Instant::now() + CATCHING_A_HEAL;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let host = vault.host();
+        let demanded = host
+            .demand(vault.name(), AttachMode::Durable)
+            .expect("request attachment");
+        loop {
+            let observed = host.state(vault.name());
+            match &observed {
+                Ok(state) if past_the_workloads_places(state) => {
+                    return (host, demanded, state.clone());
+                }
+                Ok(TrustState::Ready) => break,
+                _ => {}
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no attach heal walked far enough to churn against inside {CATCHING_A_HEAL:?} \
+                 over {attempts} attachments; the entry is {observed:?}"
+            );
+            std::hint::spin_loop();
+        }
+        drop(demanded);
+        drop(host);
+        assert!(
+            Instant::now() < deadline,
+            "{attempts} attachments reached `Ready` without ever being read part-way through \
+             their walk, inside {CATCHING_A_HEAL:?}"
+        );
+    }
+}
+
+/// Whether this reading is a heal that has already walked past the places the
+/// churn workloads write to.
+///
+/// **A walk passes a place once.** An act landing before the walk reaches its
+/// path is an act the walk itself absorbs — which is the catch-up shape, not
+/// the concurrent one — and an act landing after it is one only a watcher
+/// report can reconcile. The workloads here write under a single directory the
+/// walk reaches inside its first dozen documents, so a heal that has counted
+/// half the vault is past every place they name.
+///
+/// This is what the race aims at. What says it hit is the provenance the store
+/// recorded its deaths under, which
+/// [`Churned::assert_the_workload_overlapped_a_heal`] reads.
+fn past_the_workloads_places(state: &TrustState) -> bool {
+    let vault = norn_fixtures::Profile::by_name(PROFILE)
+        .expect("the profile this suite churns")
+        .docs as u64;
+    matches!(
+        state,
+        TrustState::Warming {
+            phase: WarmingPhase::Healing,
+            healed,
+            ..
+        } if healed * 2 >= vault
+    )
 }
 
 fn apply(script: &Script, root: &Path, applied: &mut Applied) {
