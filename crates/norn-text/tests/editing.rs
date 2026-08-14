@@ -905,10 +905,11 @@ fn no_edit_into_a_flow_written_block_is_accepted() {
 /// entry follows lands: the deleted line carries its own separating comma and
 /// the flow stays closed. What still refuses is everything that would leave
 /// the flow half-written: removing the last key would take the closing brace,
-/// and a set over a plain scalar writes across a value span that runs to the
-/// end of the line and so holds the flow's comma or brace, which re-parses to
-/// something else. A quoted value ends its span at the closing quote, leaving
-/// the punctuation outside it, and its set lands.
+/// and a set over a plain scalar refuses because its value span runs to the
+/// end of the line and so holds the flow's comma or brace. A single-line
+/// quoted value ends its span at the closing quote, leaving the punctuation
+/// outside it, and its set lands; a quoted value continuing onto the next
+/// line has no value span at all, and its set refuses.
 #[test]
 fn a_flow_mapping_braced_on_its_own_lines_takes_a_remove() {
     assert_eq!(
