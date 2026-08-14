@@ -106,6 +106,12 @@ pub struct ProjectedFinding {
 }
 
 /// The pinned vault schema, with the generation it was pinned at left out.
+///
+/// The bytes and the fingerprint are two fields rather than one, because the
+/// fingerprint is the store's own claim *about* the bytes and the comparison is
+/// what cross-checks it: a pair that agreed on the fingerprint while holding
+/// different bytes is exactly the drift a projection summarising the bytes by
+/// their fingerprint would report nothing about.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedSchema {
     pub bytes: Vec<u8>,
@@ -451,19 +457,23 @@ impl StoreProjection {
                 ),
             ));
         }
-        entries.push((
-            "vault schema".to_string(),
-            self.vault_schema.as_ref().map_or_else(
-                || "(none)".to_string(),
-                |schema| {
-                    format!(
-                        "{} bytes, fingerprint {}",
-                        schema.bytes.len(),
-                        quoted(&schema.fingerprint)
-                    )
-                },
-            ),
-        ));
+        // The schema's bytes are rendered as their own escaped content, so the
+        // comparison reads the bytes themselves. A length summarises them and a
+        // digest computed from them here would be a second spelling of the
+        // fingerprint the store recorded — which is the field beside them, and
+        // the one this pair exists to cross-check.
+        const NONE: &str = "(none)";
+        let (bytes, fingerprint) = self.vault_schema.as_ref().map_or_else(
+            || (NONE.to_string(), NONE.to_string()),
+            |schema| {
+                (
+                    schema.bytes.escape_ascii().to_string(),
+                    quoted(&schema.fingerprint),
+                )
+            },
+        );
+        entries.push(("vault schema.bytes".to_string(), bytes));
+        entries.push(("vault schema.fingerprint".to_string(), fingerprint));
         let rendered: BTreeMap<String, String> = entries.iter().cloned().collect();
         assert_eq!(
             rendered.len(),

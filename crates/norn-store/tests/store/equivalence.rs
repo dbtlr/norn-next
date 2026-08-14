@@ -283,16 +283,36 @@ fn a_changed_full_text_index_is_a_divergence() {
     assert_names(&divergence, "indexed term[interloper]");
 }
 
+/// **The schema's bytes, pinned apart from the fingerprint over them.** A store
+/// that re-pinned a changed schema under the fingerprint it already recorded
+/// holds bytes no other store holds, and the fingerprint says nothing about it.
+/// A projection that summarised the bytes — by their length, or by the recorded
+/// fingerprint standing in for them — would compare the two equal.
 #[test]
-fn a_changed_vault_schema_projection_is_a_divergence() {
-    let mut pair = Pair::new("pin-vault-schema");
+fn changed_vault_schema_bytes_are_a_divergence() {
+    let mut pair = Pair::new("pin-vault-schema-bytes");
     let divergence = pair.diverged(|store| {
         store
             .begin_request()
-            .pin_vault_schema(b"version: 2\n", "another-fingerprint")
-            .expect("pinning another vault schema");
+            .pin_vault_schema(b"version: 2\n", "schema-fingerprint")
+            .expect("pinning other bytes under the fingerprint already recorded");
     });
-    assert_names(&divergence, "vault schema");
+    assert_names(&divergence, "vault schema.bytes");
+}
+
+/// **The fingerprint, pinned apart from the bytes it is over.** It is the key
+/// every finding is keyed by, so two stores that hold one schema under two
+/// fingerprints disagree about which schema their findings were derived under.
+#[test]
+fn a_changed_vault_schema_fingerprint_is_a_divergence() {
+    let mut pair = Pair::new("pin-vault-schema-fingerprint");
+    let divergence = pair.diverged(|store| {
+        store
+            .begin_request()
+            .pin_vault_schema(b"version: 1\n", "another-fingerprint")
+            .expect("pinning the same bytes under another fingerprint");
+    });
+    assert_names(&divergence, "vault schema.fingerprint");
 }
 
 #[test]
