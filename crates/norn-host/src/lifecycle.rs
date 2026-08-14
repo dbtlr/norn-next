@@ -3216,6 +3216,12 @@ mod tests {
         /// Report the rebuild itself as damaged, which is rung 3 failing to
         /// resolve what it was scheduled for.
         damaged_rebuild: std::sync::atomic::AtomicBool,
+        /// Report the attach as damaged: the rung 3 an attach runs against the
+        /// database it opened met damage it could not resolve. It is the one
+        /// leg whose damage lands on an entry holding no store, so it is the
+        /// only producer of the reason that waits for a demand. One-shot, so
+        /// the demand that answers the verdict finds the leg sound.
+        damaged_attach: std::sync::atomic::AtomicBool,
         /// The vaults a rebuild has run against, in the order it ran.
         rebuilt_vaults: Mutex<Vec<VaultName>>,
         /// Hold the rebuild open, so the state the entry publishes while rung 3
@@ -3330,6 +3336,11 @@ mod tests {
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
                     MaintainerIdentity::unknown(),
+                ));
+            }
+            if self.damaged_attach.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::StoreDamaged(
+                    "the database disk image is malformed".into(),
                 ));
             }
             Ok(self.coverage())
@@ -6496,6 +6507,80 @@ mod tests {
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
     }
 
+    /// **The verdict an attach reports is the one that waits for a demand, and
+    /// the entry then waits.** The attach acquired nothing, so there is no
+    /// database for rung 3 to discard and no work the entry can owe itself.
+    /// What stands is the verdict, and a demand is what opens a file to
+    /// discard.
+    ///
+    /// The counts beside the reason are what make it the reason rather than
+    /// the rebuilding one: one attach and no rebuild once the queue drains, no
+    /// requirement recorded against the entry, and no job left claimed. An
+    /// entry publishing the rebuilding reason here would be publishing a
+    /// promise that it resumes on its own, which nothing below is doing. The
+    /// second demand is the other half — the entry is not wedged, and the
+    /// attach that demand schedules is the one that reaches Ready.
+    #[test]
+    fn damage_an_attach_reports_waits_for_the_demand_that_opens_a_store_to_discard() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let awaiting = TrustState::untrusted(UntrustedReason::store_damaged_awaiting_demand(
+            "the database disk image is malformed",
+        ));
+
+        ops.damaged_attach.store(true, Ordering::SeqCst);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, awaiting.clone());
+        settle();
+
+        assert_eq!(
+            host.state(&name),
+            Some(awaiting),
+            "the entry moved off a verdict nothing had answered"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the entry resumed itself against a verdict that waits for a demand"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "rung 3 ran against a database the attach never opened"
+        );
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the damage was answered by the ladder that cannot resolve it"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                !state.rebuild_required,
+                "the entry owes a rebuild over a database it does not hold"
+            );
+            assert!(
+                !state.claim.is_held() && state.claim.leg().is_none(),
+                "work stands scheduled against an entry that waits for a demand"
+            );
+        }
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the demand answered the verdict with something other than an attach"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "the demand asked for a rung against a database nothing had opened"
+        );
+        drop((lease, host));
+    }
+
     /// **The handle an entry serves reads from is minted from the store the
     /// rung left standing.** Rung 3 is the one leg that swaps an attached
     /// entry's coverage for other coverage, so the reader minted over the
@@ -8008,14 +8093,11 @@ mod tests {
             );
         }
         // The refused lease is dropped here rather than at the end, so the
-        // entry's own count is read again with nothing outstanding: a lease
-        // holding nothing withdraws nothing on its way out.
+        // rest of the case reads the entry's count with nothing outstanding.
+        // What its drop withdraws is read below, against a lease the entry
+        // holds: a withdrawal against a count already at zero is invisible,
+        // because the count saturates at its floor.
         drop(refused);
-        assert_eq!(
-            entry.gate.lock().unwrap().demand_leases,
-            0,
-            "dropping the refused lease withdrew a lease the entry never recorded"
-        );
         settle();
         assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(
@@ -8037,14 +8119,36 @@ mod tests {
             Demand::UnsupportedMode(AttachMode::Throwaway),
             "the retry admitted a mode it holds no lifecycle for"
         );
-        drop(refused_retry);
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
         assert!(
             matches!(*lease.outcome(), Demand::MaintainerContended(_)),
             "the refused retry retired the park it never reached"
         );
+        // A lease holding nothing withdraws nothing on its way out, and the
+        // durable lease above is what makes that readable: the entry counts
+        // one, the refused lease is dropped against that count, and the count
+        // still stands at one. Against a count of zero the same drop reads the
+        // same whether it withdrew nothing or withdrew below a floor that
+        // saturates.
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            1,
+            "the durable demand recorded no lease to withdraw against"
+        );
+        drop(refused_retry);
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            1,
+            "dropping the refused lease withdrew the lease standing beside it"
+        );
+        drop(lease);
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            0,
+            "the durable lease withdrew nothing on its way out"
+        );
 
-        drop((lease, host));
+        drop(host);
     }
 
     /// The registry refusal an attach finds before it acquires anything parks
