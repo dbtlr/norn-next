@@ -485,12 +485,17 @@ impl StoreProjection {
         // digest computed from them here would be a second spelling of the
         // fingerprint the store recorded — which is the field beside them, and
         // the one this pair exists to cross-check.
+        //
+        // Both halves of the pair are quoted, which is what keeps a pinned
+        // schema apart from an absent one: a rendering left bare could spell the
+        // absent marker with content, and quoting puts the marker outside the
+        // range every present value renders into.
         const NONE: &str = "(none)";
         let (bytes, fingerprint) = self.vault_schema.as_ref().map_or_else(
             || (NONE.to_string(), NONE.to_string()),
             |schema| {
                 (
-                    schema.bytes.escape_ascii().to_string(),
+                    quoted(&schema.bytes.escape_ascii().to_string()),
                     quoted(&schema.fingerprint),
                 )
             },
