@@ -39,6 +39,14 @@
 //! left behind, and knows nothing of hosts or stores: the suite that attaches,
 //! settles and judges lives with the host it exercises.
 //!
+//! [`attestation`] is what an induced-failure bar reads to know its arm fired.
+//! A case about a process that dies is judged by a process that did not meet
+//! the condition, and state at rest cannot tell a hook that fired from a hook
+//! that was deleted — so each arm records itself where it fires and the parent
+//! asserts on the record beside the outcome. The vocabulary and the reading
+//! live here because two crates' seams write records a third crate's suites
+//! read.
+//!
 //! [`invalidation`] is assistance of the same kind, for a judgment two suites
 //! in different crates make about the same reports: whether a watcher's
 //! invalidation root reaches a path. Answering it here is what keeps the two
@@ -77,6 +85,7 @@
 //! can stop, is a wait no call site can tune.
 
 pub mod architecture;
+pub mod attestation;
 pub mod base64;
 pub mod churn;
 pub mod corpus;

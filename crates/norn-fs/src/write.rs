@@ -342,7 +342,12 @@ pub fn write(
         content,
         precondition,
         shadows,
-        Faults::NONE,
+        // The one entry point the fault seam is reachable at from outside this
+        // crate, and only under the `induced-failure` feature: the process-death
+        // bars over this protocol are stated about a process that does not
+        // return, so the arm has to be readable by a child that dies inside the
+        // publication. Every other entry point below passes `Faults::NONE`.
+        Faults::entry(),
         &mut |_| {},
     )
 }
@@ -1132,6 +1137,7 @@ fn drifted(path: &Path, expected: ContentHash, observed: Option<PostState>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::faults::Answer;
     use crate::scratch::Scratch;
 
     /// **The bar on the shadow's fsync.** The shadow's bytes are on the disk
@@ -1150,7 +1156,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
-            Faults::at(&[(Stage::Sync, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::Sync, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect_err("a shadow that cannot be synced");
 
@@ -1180,7 +1186,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
-            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::Write, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect_err("a shadow that cannot be written");
 
@@ -1206,7 +1212,10 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
-            Faults::at(&[(Stage::Swap, std::io::ErrorKind::PermissionDenied)]),
+            Faults::at(&[(
+                Stage::Swap,
+                Answer::Fails(std::io::ErrorKind::PermissionDenied),
+            )]),
         )
         .expect_err("a rename that fails");
 
@@ -1241,7 +1250,7 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
-            Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::ParentSync, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect("a landed write whose durability was not confirmed");
 
@@ -1257,7 +1266,7 @@ mod tests {
             b"fresh",
             Precondition::Create,
             scratch.shadows(),
-            Faults::at(&[(Stage::ParentSync, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::ParentSync, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect("a landed create whose durability was not confirmed");
         assert!(landed.wrote());
@@ -1276,7 +1285,7 @@ mod tests {
             b"fresh",
             Precondition::Create,
             scratch.shadows(),
-            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::Write, Answer::Fails(std::io::ErrorKind::Other))]),
         )
         .expect_err("a create that cannot be written");
 
@@ -1310,7 +1319,7 @@ mod tests {
             b"ours",
             Precondition::Create,
             scratch.shadows(),
-            Faults::at(&[(Stage::Write, std::io::ErrorKind::Other)]),
+            Faults::at(&[(Stage::Write, Answer::Fails(std::io::ErrorKind::Other))]),
             &mut |window| {
                 if window != Window::Claimed {
                     return;
@@ -1360,8 +1369,11 @@ mod tests {
             Precondition::Create,
             scratch.shadows(),
             Faults::at(&[
-                (Stage::Write, std::io::ErrorKind::Other),
-                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+                (Stage::Write, Answer::Fails(std::io::ErrorKind::Other)),
+                (
+                    Stage::Cleanup,
+                    Answer::Fails(std::io::ErrorKind::PermissionDenied),
+                ),
             ]),
         )
         .expect_err("a create that cannot be written with a removal that cannot happen");
@@ -1420,7 +1432,10 @@ mod tests {
             b"fresh",
             Precondition::Create,
             scratch.shadows(),
-            Faults::at(&[(Stage::Create, std::io::ErrorKind::PermissionDenied)]),
+            Faults::at(&[(
+                Stage::Create,
+                Answer::Fails(std::io::ErrorKind::PermissionDenied),
+            )]),
         )
         .expect_err("a create whose open fails");
 
@@ -1447,7 +1462,10 @@ mod tests {
             b"new",
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
-            Faults::at(&[(Stage::Create, std::io::ErrorKind::PermissionDenied)]),
+            Faults::at(&[(
+                Stage::Create,
+                Answer::Fails(std::io::ErrorKind::PermissionDenied),
+            )]),
         )
         .expect_err("a replacement whose shadow cannot be opened");
 
@@ -1708,8 +1726,14 @@ mod tests {
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
             Faults::at(&[
-                (Stage::Swap, std::io::ErrorKind::PermissionDenied),
-                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+                (
+                    Stage::Swap,
+                    Answer::Fails(std::io::ErrorKind::PermissionDenied),
+                ),
+                (
+                    Stage::Cleanup,
+                    Answer::Fails(std::io::ErrorKind::PermissionDenied),
+                ),
             ]),
         )
         .expect_err("a rename that fails with a removal that cannot happen");
@@ -1814,8 +1838,11 @@ mod tests {
             Precondition::Replace(ContentHash::of(b"old")),
             scratch.shadows(),
             Faults::at(&[
-                (Stage::Write, std::io::ErrorKind::Other),
-                (Stage::Cleanup, std::io::ErrorKind::PermissionDenied),
+                (Stage::Write, Answer::Fails(std::io::ErrorKind::Other)),
+                (
+                    Stage::Cleanup,
+                    Answer::Fails(std::io::ErrorKind::PermissionDenied),
+                ),
             ]),
         )
         .expect_err("a shadow that cannot take the content");
