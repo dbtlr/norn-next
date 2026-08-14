@@ -3921,6 +3921,51 @@ mod tests {
         true
     }
 
+    /// Read the identity park at both surfaces it is written across: the
+    /// refusal [`Host::state`] answers, and the untrusted label the entry
+    /// publishes underneath it.
+    ///
+    /// [`park_identity_refusal`] writes the two together, out of one account
+    /// of the root, and a client reads both. The label is what the entry
+    /// answers with in the window a demand opens between retiring the park and
+    /// the attach it schedules publishing again, so a label carrying another
+    /// reason than the park beside it is a fact a client can observe. Reading
+    /// them together is what holds them to being one write: a park spelled
+    /// without its label, or a label spelled with another reason, fails here
+    /// rather than passing on the surface that still agrees.
+    ///
+    /// A case with a leg in flight over the park reads the two surfaces apart
+    /// instead. The park is the entry standing still; a release running
+    /// underneath one publishes its own end, and the label it leaves is that
+    /// leg's rather than the park's.
+    fn assert_the_identity_park_stands_on_both_surfaces<O: EntryOps>(
+        host: &Host<O>,
+        name: &VaultName,
+    ) {
+        let park = entry_park(host, name);
+        let Some(Demand::IdentityRefused(detail)) = park.clone() else {
+            panic!("the entry stands on no identity park: {park:?}");
+        };
+        assert!(
+            !detail.is_empty(),
+            "an identity park reported no account of itself"
+        );
+        let refusal = UntrustedReason::environmental_refusal(detail);
+        assert_eq!(
+            host.state(name)
+                .as_ref()
+                .expect_err("a parked entry refuses")
+                .detail(),
+            &ErrorDetail::entry_untrusted(refusal.clone()),
+            "the status surface answered the identity park with another refusal"
+        );
+        assert_eq!(
+            published_label(host, name),
+            Some(TrustState::untrusted(refusal)),
+            "the label under the identity park carries another reason than the park does"
+        );
+    }
+
     /// Wait for the entry to publish an environmental refusal, on the one
     /// budget, reporting the state it last saw. The refusal's detail is the
     /// platform's own prose, so what is waited for is the reason — and
@@ -5161,13 +5206,29 @@ mod tests {
     /// One park is answered in one order however many stand at once: a
     /// maintainer another process holds outranks a root reached under more than
     /// one name, which outranks a root the registry cannot read.
+    ///
+    /// The status surface answers each of them too, and answers the park
+    /// rather than the label underneath it. The entry below is being attached
+    /// while the parks are written over it, so the label under every one of
+    /// them is a state that crosses — and a surface reading that label would
+    /// invite the very demand each park refuses.
     #[test]
-    fn a_lease_answers_the_widest_park_standing_over_the_entry() {
+    fn every_surface_answers_the_widest_park_standing_over_the_entry() {
         let ops = Arc::new(FakeOps::default());
         let (host, a, b) = two_alias_host(Arc::clone(&ops));
         let lease = host.demand(&a, AttachMode::Durable).unwrap();
         let entry = host.shared.entries.get(&a).unwrap();
         let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        let refused_detail = |detail: &ErrorDetail| {
+            assert_eq!(
+                host.state(&a)
+                    .as_ref()
+                    .expect_err("a parked entry refuses")
+                    .detail(),
+                detail,
+                "the status surface answered the park standing over the entry another way"
+            );
+        };
 
         {
             let mut state = entry.gate.lock().unwrap();
@@ -5179,15 +5240,22 @@ mod tests {
             lease.completion(),
             Demand::MaintainerContended(MaintainerIdentity::unknown())
         );
+        refused_detail(&ErrorDetail::maintainer_contended(
+            MaintainerIdentity::unknown(),
+        ));
 
         entry.gate.lock().unwrap().maintainer_contended = None;
         assert_eq!(lease.completion(), Demand::DuplicateRoot(conflict));
+        refused_detail(&ErrorDetail::duplicate_root([a.clone(), b.clone()]));
 
         entry.gate.lock().unwrap().duplicate_root = None;
         assert_eq!(
             lease.completion(),
             Demand::IdentityRefused("the root cannot be read".into())
         );
+        refused_detail(&ErrorDetail::entry_untrusted(
+            UntrustedReason::environmental_refusal("the root cannot be read"),
+        ));
 
         drop((lease, host));
     }
@@ -5704,9 +5772,13 @@ mod tests {
             Some(Some(conflict)),
             "the demand dropped a conflict no acquisition is coming to read"
         );
-        assert!(
-            host.state(&a).is_err(),
-            "the status surface invited the demand the conflict refuses"
+        assert_eq!(
+            host.state(&a)
+                .as_ref()
+                .expect_err("a contended entry refuses")
+                .detail(),
+            &ErrorDetail::maintainer_contended(MaintainerIdentity::unknown()),
+            "the status surface answered past the contention that outranks the conflict"
         );
         settle();
         assert_eq!(
@@ -6937,11 +7009,7 @@ mod tests {
 
         refuse_root_identity(&root);
         park_on_current_classification(&host.shared, &name);
-        assert!(
-            refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
-            "the classification that refused the root raised no park"
-        );
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
 
         ops.reconcile_release.store(true, Ordering::SeqCst);
@@ -6956,7 +7024,7 @@ mod tests {
             1,
             "the entry re-attached against a root the registry refuses"
         );
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -7874,18 +7942,14 @@ mod tests {
         std::fs::remove_dir(&root).unwrap();
         symlink("root", &root).unwrap();
         park_on_current_classification(&host.shared, &name);
-        assert!(
-            refuses_identity(&entry_park(&host, &name).expect("the entry stands on a park")),
-            "the classification that refused the root raised no park"
-        );
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         ops.poll_release.store(true, Ordering::SeqCst);
         wait_for_detaches(&ops, 1, "the refused alias to detach");
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
         settle();
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         drop(host);
         let _ = std::fs::remove_dir_all(base);
     }
@@ -7915,7 +7979,7 @@ mod tests {
         wait_for_flag("poll_started", &ops.poll_started);
         refuse_root_identity(&root);
         park_on_current_classification(&host.shared, &name);
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
 
         // The root answers again. The poll still holds the entry, so the lease
         // the demand below returns is recorded against an entry nothing can
@@ -8175,7 +8239,7 @@ mod tests {
             1,
             "the entry re-attached against a root the registry refuses"
         );
-        assert!(refuses_environmentally(&host.state(&name)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &name);
 
         drop((lease, host));
         let _ = std::fs::remove_dir_all(base);
@@ -8455,11 +8519,7 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
         park_on_current_classification(&host.shared, &refused);
-        assert!(
-            refuses_identity(&entry_park(&host, &refused).expect("the entry stands on a park")),
-            "the classification that refused the root raised no park"
-        );
-        assert!(refuses_environmentally(&host.state(&refused)));
+        assert_the_identity_park_stands_on_both_surfaces(&host, &refused);
         assert_eq!(host.state(&healthy), answered(TrustState::Ready));
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
 
