@@ -128,8 +128,9 @@ the verdict, because every other route is an entry that holds the store the rung
 against itself is the only thing that meets damage no read fails on, so it runs as bounded
 lifecycle maintenance beside the shadow sweep — off the request path, never per request.
 
-**Every rung is to be reached by a test, across two suites**, and one of the two is built.
-Each suite below says where it stands.
+**Every rung is to be reached by a test, across two suites**, and both are built. The churn
+suite reaches everything it states; the induced-failure suite reaches every row of its table
+but the two named below. Each suite below says where it stands.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
@@ -142,17 +143,27 @@ across nested directories; atomic replacement, movement, and the case flip whose
 the volume decides; burst and coalescing pressure; transitions between readable,
 quarantined and degraded documents under a schema replacement; and what external tools do,
 which is editor saves, a sleep's catch-up batch, and edits landing during an active heal.
-Each settles on a **census** — every markdown place holding the row its bytes imply, keyed
-by identity so a volume that folds case is judged the way it resolves — and is then
-compared with a second derivation built from zero over the same final tree. The window
-between one heal's enumeration and its opens is not reachable from outside a host, so the
-workloads are staged through the same seams in `norn-host`'s own suite. Beside the
-convergence bars are **cost bars**, read off the account a host's jobs write: each is a
-bracket, under a ceiling stated over the changed set and over the floor stated for no
-changes at all, so a bound that admitted re-reading the vault fails its own arithmetic
-control. What the suite does not state is a wall-clock ceiling on settling — its budget
-grows with the changed set and is a runaway bound, and a ceiling tight enough to fail a
-slow convergence stays the scheduled lane's.
+**Every family runs in phases with a settle between them.** A modification is only a
+modification against a row a host already holds, so a workload whose creations and its
+edits land inside one poll window asks a host for nothing but new files; each family
+therefore puts its content in the tree, is settled over, and only then edits, moves and
+removes it. One case lands that changing phase while no host is attached at all, which is
+the lane where the attach heal rather than a watcher report is what has to converge it.
+Each settles on a **census** — every markdown place holding the row its bytes
+imply, keyed by identity so a volume that folds case is judged the way it resolves, and the
+vault's schema declaration agreeing with the pin the store holds — and is then compared
+with a second derivation built from zero over the same final tree. The window between one
+heal's enumeration and its opens is not reachable from outside a host, so the workloads are
+staged through the same seams in `norn-host`'s own suite. Beside the convergence bars are
+**cost bars**, read off the account a host's jobs write: each is a bracket, under a ceiling
+stated over the changed set and over the floor stated for no changes at all. A third claim
+is asserted beside every reading in that same lane — that the ceiling the reading passed
+under is below half the vault's documents — so a bound wide enough to admit re-reading the
+vault fails where it is read rather than in an arithmetic identity check that attaches no
+host. What says those counters move at all is a seeded control: one document, settled over,
+edited once, and the account required to show it. What the suite does not state is a
+wall-clock ceiling on settling — its budget grows with the changed set and is a runaway
+bound, and a ceiling tight enough to fail a slow convergence stays the scheduled lane's.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
 is its contract — each row an injection and the outcome required of it — and two of its
