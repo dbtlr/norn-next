@@ -41,7 +41,7 @@
 //! [`StoreProjection::assert_holds`] states concrete rows a projection must hold,
 //! so a case pairs its relative claim with an absolute one.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use norn_store::{
@@ -389,14 +389,16 @@ impl StoreProjection {
         );
     }
 
-    /// The projection as an ordered list of `(field, value)` pairs.
+    /// The projection as a map from field to value.
     ///
     /// This is the form the comparison is made in, and it exists so that a
     /// disagreement can be reported as one named field rather than as two whole
-    /// projections a reader has to diff by eye. The order is the projection's
-    /// own canonical order, so two stores holding the same facts render the same
-    /// list.
-    fn entries(&self) -> Vec<(String, String)> {
+    /// projections a reader has to diff by eye. **Every field names itself**:
+    /// a document's fields carry its path, a finding's carry its subject, a
+    /// term's carry the term. So a fact one store holds and the other does not
+    /// is a field with nothing opposite it, rather than a shift that renames
+    /// every field after it.
+    fn entries(&self) -> BTreeMap<String, String> {
         let mut entries = Vec::new();
         for document in &self.documents {
             let at = format!("document[{}]", document.path);
@@ -426,11 +428,19 @@ impl StoreProjection {
             push_indexed(&mut entries, &at, "block", &document.blocks);
             push_indexed(&mut entries, &at, "tag", &document.tags);
         }
-        for (ordinal, finding) in self.findings.iter().enumerate() {
+        // A finding has no key of its own that survives being written to a
+        // second store, so its field is its subject and its position among the
+        // findings about that subject. Two findings that differ only in where
+        // they sort therefore report as two fields rather than as one shifted
+        // list.
+        let mut at_subject: BTreeMap<&str, usize> = BTreeMap::new();
+        for finding in &self.findings {
+            let ordinal = at_subject.entry(finding.path.as_str()).or_default();
             entries.push((
-                format!("finding[{ordinal}] at {}", finding.path),
+                format!("finding[{}][{ordinal}]", finding.path),
                 format!("{finding:?}"),
             ));
+            *ordinal += 1;
         }
         for term in &self.terms {
             entries.push((
@@ -454,7 +464,14 @@ impl StoreProjection {
                 },
             ),
         ));
-        entries
+        let rendered: BTreeMap<String, String> = entries.iter().cloned().collect();
+        assert_eq!(
+            rendered.len(),
+            entries.len(),
+            "two facts rendered as one field, so a comparison would judge one of them and \
+             report nothing about the other"
+        );
+        rendered
     }
 }
 
@@ -593,48 +610,31 @@ fn push_indexed<T: std::fmt::Debug>(
     }
 }
 
-/// The first field the two lists disagree about, reading them in order.
+/// The first field the two disagree about, reading every field either of them
+/// carries.
 ///
-/// A field one list carries and the other does not is a disagreement about that
-/// field, reported with `(absent)` on the side that has none — which is what
-/// makes a document only one store derived read as a named divergence rather
-/// than as a length mismatch.
-fn first_divergence(left: &[(String, String)], right: &[(String, String)]) -> Option<Divergence> {
-    let mut left = left.iter();
-    let mut right = right.iter();
-    loop {
-        return match (left.next(), right.next()) {
-            (None, None) => None,
-            (Some((field, held)), None) => Some(Divergence {
+/// A field one side carries and the other does not is a disagreement about that
+/// field, reported with `(absent)` opposite it. Comparing by field rather than
+/// by position is what keeps a fact only one store holds from renaming every
+/// fact after it: one document more on one side is one absent field, not a whole
+/// projection that looks different from there on.
+fn first_divergence(
+    left: &BTreeMap<String, String>,
+    right: &BTreeMap<String, String>,
+) -> Option<Divergence> {
+    const ABSENT: &str = "(absent)";
+    left.keys()
+        .chain(right.keys())
+        .collect::<BTreeSet<&String>>()
+        .into_iter()
+        .find_map(|field| {
+            let (one, two) = (left.get(field), right.get(field));
+            (one != two).then(|| Divergence {
                 field: field.clone(),
-                left: held.clone(),
-                right: "(absent)".to_string(),
-            }),
-            (None, Some((field, held))) => Some(Divergence {
-                field: field.clone(),
-                left: "(absent)".to_string(),
-                right: held.clone(),
-            }),
-            (Some(one), Some(two)) => {
-                if one == two {
-                    continue;
-                }
-                if one.0 == two.0 {
-                    Some(Divergence {
-                        field: one.0.clone(),
-                        left: one.1.clone(),
-                        right: two.1.clone(),
-                    })
-                } else {
-                    Some(Divergence {
-                        field: format!("{} / {}", one.0, two.0),
-                        left: format!("{} = {}", one.0, one.1),
-                        right: format!("{} = {}", two.0, two.1),
-                    })
-                }
-            }
-        };
-    }
+                left: one.map_or(ABSENT, String::as_str).to_string(),
+                right: two.map_or(ABSENT, String::as_str).to_string(),
+            })
+        })
 }
 
 /// A value rendered so that whitespace and emptiness are visible in a failure.
