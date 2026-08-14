@@ -1018,6 +1018,17 @@ fn scoped_increment(
             sensitivity,
             pending.account,
         )?;
+        // **A regular file holds nothing beneath it.** That is the whole reading
+        // the prune above acts on — every row under this path dies — and the
+        // findings under it join the same discipline. The path's own place is
+        // outside the scope on both axes: the row standing there is the one this
+        // leg reads next, and a finding there is what that read files or
+        // discards.
+        if let Some(beneath) = &prefix {
+            pending
+                .account
+                .walked(HealScope::Prefix(beneath), store_order(sensitivity));
+        }
         if !is_markdown(path) {
             continue;
         }
@@ -4248,6 +4259,47 @@ mod tests {
         assert!(
             findings_at(&mut attachment.store, "bad.md").is_empty(),
             "the finding stands at a path the increment read as gone"
+        );
+        assert_eq!(
+            findings_at(&mut attachment.store, "other.md").len(),
+            1,
+            "the increment took a finding outside the path its event named"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A path the filesystem answers is a regular file holds nothing beneath
+    /// it.** That is one answer about the whole range under it, which is what
+    /// the row prune this leg runs acts on — and the findings in that range join
+    /// the same discipline, inside the job the event raised rather than at the
+    /// next vault heal.
+    #[test]
+    fn a_dirty_path_that_became_a_file_takes_the_findings_under_it() {
+        let f = Fixture::new("quarantine-dirty-path-file");
+        fs::create_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes/bad.md"), UNDECODABLE).unwrap();
+        fs::write(f.vault().join("other.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "notes/bad.md").len(), 1);
+
+        fs::remove_file(f.vault().join("notes/bad.md")).unwrap();
+        fs::remove_dir(f.vault().join("notes")).unwrap();
+        fs::write(f.vault().join("notes"), "a file where a directory was").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "notes"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert!(
+            findings_at(&mut attachment.store, "notes/bad.md").is_empty(),
+            "the finding stands under a path the increment read as a file"
         );
         assert_eq!(
             findings_at(&mut attachment.store, "other.md").len(),
