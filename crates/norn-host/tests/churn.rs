@@ -39,9 +39,9 @@
 //! `induced-failure` with the rest of the harness-reachable surface — so the
 //! convergence bars above run in every lane and the cost bars run in that one.
 //! Each bound is a bracket rather than a ceiling: a reading under the ceiling
-//! stated for the changed set, and over the floor stated for no changes at all.
-//! The upper half is the claim; the lower half is what says the instrument
-//! moved.
+//! stated for the changed set, and over what the same bound would admit for a
+//! changed set of nothing. The upper half is the claim; the lower half is what
+//! says the instrument moved.
 //!
 //! # Two hosts never serve at once
 //!
@@ -72,11 +72,18 @@ use norn_wire::{FindingKind, TrustState};
 
 /// The profile every case churns over.
 ///
-/// Twelve documents: small enough that two attachments per case cost
-/// milliseconds, and shaped like a real vault — ambiguity classes, dangling
-/// links, unicode and spaced stems, clutter that is not a document, and symbolic
-/// links a walk refuses to follow. What each case adds on top is its own
-/// workload, so the vault around the churn is the same in every one of them.
+/// 120 documents, shaped like a real vault — ambiguity classes, dangling links,
+/// unicode and spaced stems, clutter that is not a document, and symbolic links
+/// a walk refuses to follow. What each case adds on top is its own workload, so
+/// the vault around the churn is the same in every one of them.
+///
+/// **The scale is chosen so that a changed-set bound can mean something.** Every
+/// workload here names well under ten places, and each cost bar asserts that its
+/// own ceiling is below the document count of this profile — a claim that
+/// maintenance costs the changed set rather than the vault is not a claim at all
+/// over a vault a bound could re-read and still fit. It is also small enough
+/// that the two attachments each case makes cost a fraction of a second, which
+/// is what keeps this suite in the per-PR lane.
 const PROFILE: &str = "small";
 
 /// The runaway bound on settling, derived from the changed set.
@@ -542,9 +549,16 @@ fn one_seeded_edit_moves_the_maintenance_account() {
 /// A bound on one counted kind of maintenance, stated over the changed set.
 ///
 /// **Both halves are read.** The ceiling is the claim — maintenance after an
-/// edit costs the changed set and not the vault — and the floor is what says the
-/// reading is a measurement: a counter sitting at its floor whatever happened
-/// would pass any ceiling.
+/// edit costs the changed set and not the vault. The floor is what a pass costs
+/// before any change is accounted for, and it is read the other way: a reading
+/// the bound would admit for a changed set of *nothing* is a reading the churn
+/// did not move, and no ceiling over it means anything.
+///
+/// **Every floor here is zero**, which is not an oversight but the measurement:
+/// a host asked to maintain nothing opens nothing and writes nothing, so a pass
+/// that reached a document did so because a change named it. A nonzero floor
+/// would be fixed overhead admitted in advance, and the lower half of the
+/// bracket would stop saying anything for a workload smaller than it.
 #[derive(Clone, Copy)]
 struct WorkBound {
     /// Which counter of the host's own account this is a bound on.
@@ -592,11 +606,11 @@ impl WorkBound {
 /// **The bound on documents a maintenance pass opens**, over a workload whose
 /// changed set is counted in places.
 ///
-/// Profile: `tiny`, twelve generated documents, churned by a workload naming
-/// well under that many places. The coefficient admits a place being opened
-/// more than once — a host that split one workload across several increments
-/// opens the paths in each of them — and the floor admits the bookkeeping a
-/// pass does before it reaches a document.
+/// Profile: `small`, 120 generated documents, churned by workloads naming five
+/// to nine places. The measured readings are 6 opens over 5 places and 18 over
+/// 9, so the coefficient sits at roughly twice what a converged host spends:
+/// it admits a place being opened more than once, which is what a host that
+/// split one workload across several increments does.
 const OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
@@ -609,7 +623,9 @@ const OPENS: WorkBound = WorkBound {
 ///
 /// Same profile and same named input. The coefficient is smaller than the one
 /// above because a place is opened before it is judged and written only if it
-/// derives: a removal opens nothing and upserts nothing.
+/// derives — a removal upserts nothing — and because a host that coalesces a
+/// workload writes each surviving document once however many times it was
+/// edited. The measured reading is 2 upserts over 5 places.
 const UPSERTS: WorkBound = WorkBound {
     counted: Counted::DocumentsUpserted,
     what: "document rows upserted",
@@ -621,11 +637,12 @@ const UPSERTS: WorkBound = WorkBound {
 /// **The bound on documents a burst opens**, whose changed set is counted in
 /// steps rather than places.
 ///
-/// Profile: `tiny`. Twelve edits to one path and six documents landing at once
+/// Profile: `small`. Twelve edits to one path and six documents landing at once
 /// are eighteen changes over seven places, and the bound is stated over the
 /// eighteen: a host that coalesced them into one increment reads far under this,
-/// and one that ran an increment per edit reads at it. Coalescing is an
-/// optimization, so the bound admits both.
+/// and one that ran an increment per edit reads near it. Coalescing is an
+/// optimization, so the bound admits both. The measured reading is 27 opens over
+/// 18 steps.
 const BURST_OPENS: WorkBound = WorkBound {
     counted: Counted::DocumentOpens,
     what: "documents opened",
@@ -742,6 +759,8 @@ impl Churned {
             let host = self.vault.host();
             let lease = attach::attach_and_wait(&host, self.vault.name());
             self.census = census(self.vault.path(), self.folding);
+            self.census
+                .assert_the_script_read_the_tree_the_same_way(script);
             settle(&self.vault, &host, &self.census, applied.steps());
             drop(lease);
             self.applied = applied;
@@ -772,6 +791,8 @@ impl Churned {
             _ => None,
         };
         self.census = census(self.vault.path(), self.folding);
+        self.census
+            .assert_the_script_read_the_tree_the_same_way(script);
         settle(&self.vault, &host, &self.census, applied.steps());
         #[cfg(feature = "induced-failure")]
         {
@@ -1073,6 +1094,26 @@ fn identity(path: &str, folding: Folding) -> String {
 }
 
 impl Census {
+    /// **The workload's declaration and the tree agree.** Every place the script
+    /// said derives no row is a place this reading of the tree also finds
+    /// derives none.
+    ///
+    /// The declaration is the driver's, made where the workload is written, and
+    /// this reading is made from the bytes on disk afterwards. They are two
+    /// answers to one question, so a workload that meant to leave a quarantined
+    /// place and left a readable one is caught here rather than passing a bar
+    /// about a state it never reached.
+    fn assert_the_script_read_the_tree_the_same_way(&self, script: &Script) {
+        for declared in script.places_without_rows() {
+            let place = identity(declared, self.folding);
+            assert!(
+                self.without_rows.contains(&place),
+                "`{}` says `{declared}` derives no row, and the tree there does derive one",
+                script.name()
+            );
+        }
+    }
+
     /// How the store disagrees with the tree, and nothing where they agree.
     ///
     /// Every disagreement is reported rather than the first, because the two
