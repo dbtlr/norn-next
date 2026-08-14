@@ -9,6 +9,14 @@
 //! through a heal and what it left at rest has to be something the next heal
 //! converges from with no edit to the vault.
 //!
+//! **The revoked permission is stated in two shapes, because a mode taken away
+//! from a document and a mode taken away from a directory are not the same
+//! condition to the machine.** A document is read by the heal alone, so every
+//! platform reaches the refusal through the heal's own open. A directory is
+//! read by the heal *and* by the watcher backend that has to cover it, so which
+//! of the two meets the denial first is the backend's, and the case that
+//! revokes a subtree is stated over both doors.
+//!
 //! **Every case names its forbidden outcome as an assertion.** A refusal that
 //! reached rung 3 discarded a sound database to fix a broken environment; a
 //! heal that pruned an unreadable path read an error as evidence of deletion; a
@@ -61,7 +69,10 @@ use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid, tom
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::process::{Run, RunStatus, Sandbox};
 use norn_testkit::wait::Budget;
-use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
+use norn_wire::{
+    ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName,
+    WatcherLossCause,
+};
 
 /// The variable that puts a run in the child role, naming the tree it serves.
 const CHILD_ROOT: &str = "NORN_HOST_LOCKDOWN_ROOT";
@@ -190,15 +201,18 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
     };
     // The reason is the case's own arm attesting: a refusal that named anything
     // else is a refusal this arrangement did not cause, and the entry would then
-    // be untrusted for a reason no assertion here is stated over.
+    // be untrusted for a reason no assertion here is stated over. The variant is
+    // matched rather than rendered and searched, so a full disk published as
+    // damage — which is what sends an entry to a rung that discards its database
+    // — fails here rather than passing on a substring.
+    let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
+        panic!(
+            "a full disk was published as something other than a broken environment: {untrusted:?}"
+        )
+    };
     assert!(
-        untrusted.contains("full"),
-        "the entry is untrusted for a reason that does not name the disk: {untrusted}"
-    );
-    assert!(
-        untrusted.contains("EnvironmentalRefusal"),
-        "a full disk was published as something other than a broken environment, which is what \
-         sends an entry to a rung that discards its database: {untrusted}"
+        detail.contains("full"),
+        "the entry is untrusted for a reason that does not name the disk: {detail}"
     );
 
     induced_failure::uncap_the_pages();
@@ -233,6 +247,115 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
 // Rung 2, refused: a revoked permission
 // ---------------------------------------------------------------------------
 
+/// **An unreadable document is an error, never a document with nothing in it.**
+///
+/// One document of the vault has its mode taken away between two attaches, so
+/// the heal's own open meets `EACCES` at a path the walk enumerated and stated
+/// nothing else about. The answer for bytes norn *read* and could derive no
+/// facts from is to quarantine the place, record a finding naming it, and keep
+/// going; the answer for bytes norn could not read at all is the opposite,
+/// because nothing was learned about the document. So the heal refuses and the
+/// entry stays untrusted.
+///
+/// **The forbidden outcome is the quarantine.** An entry that reached `Ready`
+/// with a finding standing at the locked path would be serving the vault while
+/// silently answering as though one of its documents held nothing — a broken
+/// environment turned into data loss, which is the hazard refusal exists to
+/// prevent. The prune is forbidden here for the same reason it is under a locked
+/// subtree, and rung 3 for the same reason a full disk forbids it.
+///
+/// **A document is read by the heal and by nothing else.** Change detection over
+/// a vault is installed over its directories, so revoking a document's mode
+/// leaves every watcher backend covering the tree exactly as before — which is
+/// what makes the heal's door the one door this case has on every platform, and
+/// why the subtree case below is the one stated over two.
+#[test]
+fn an_unreadable_document_refuses_the_heal_rather_than_quarantining_it() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("unreadable-document");
+    vault.write("kept.md", &readable(0));
+    vault.write("locked.md", &readable(1));
+    let locked = vault.path().join("locked.md");
+
+    let before = {
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        let lease = attach_and_wait(&serving, vault.name());
+        drop(lease);
+        let mut store = vault.store();
+        StoreProjection::read(&mut store).expect("projecting the first attach")
+    };
+    assert!(before.document("locked.md").is_some());
+
+    let untrusted = {
+        let _revoked = Revoked::over_file(&locked);
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        let opening = serving.evidence();
+        let _lease = serving
+            .demand(vault.name(), AttachMode::Durable)
+            .expect("request the attachment");
+        let untrusted = wait_for_untrusted(&serving, vault.name());
+        let spent = serving.evidence().since(opening);
+        assert_eq!(
+            spent.rebuilds_run, 0,
+            "a revoked permission reached rung 3, which discards a sound database to fix a \
+             broken environment"
+        );
+        untrusted
+    };
+    // The reason is the case's own arm attesting: it has to name the document
+    // whose mode was taken away and the denial that came of it, or the entry is
+    // untrusted for something this arrangement did not cause.
+    let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
+        panic!(
+            "an unreadable document was published as something other than a broken environment: \
+             {untrusted:?}"
+        )
+    };
+    assert!(
+        detail.contains("locked.md") && detail.contains("Permission denied"),
+        "the entry is untrusted for a reason that is not the revoked document: {detail}"
+    );
+
+    let mut refused = vault.store();
+    let after = StoreProjection::read(&mut refused).expect("projecting the refused attach");
+    assert!(
+        after.document("locked.md").is_some(),
+        "the heal read a document it could not open as evidence that the document was deleted"
+    );
+    assert!(
+        findings_at(&mut refused, "locked.md").is_empty(),
+        "the heal quarantined a document it never read, which turns a revoked permission into a \
+         vault that answers as though the document held nothing"
+    );
+    assert_eq!(
+        tombstones(&mut refused).expect("reading the tombstones"),
+        Vec::new(),
+        "the heal recorded a death for a path nothing said was gone"
+    );
+    assert_eq!(
+        after.documents(),
+        before.documents(),
+        "the refused heal changed what the store holds"
+    );
+    assert_operationally_valid(
+        &mut refused,
+        "the store an unreadable document refused over",
+    );
+    drop(refused);
+
+    // The recovery bar: with the document readable again, an ordinary demand
+    // converges on what a derivation from zero over this tree holds — and does
+    // it by healing the work the refusal withheld rather than by starting over.
+    // The refused heal committed nothing and no document's bytes moved, so the
+    // work left over is nothing at all: the recovery writes no row and commits
+    // no changeset, where a derivation from zero writes both documents in one.
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let healed = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_healed_only("a document that reads again", healed, 0, 0);
+    vault.assert_converged_from_zero("a document that reads again");
+}
+
 /// **An unreadable path is an error, never evidence of deletion.**
 ///
 /// A subtree of the vault has its mode taken away between two attaches, so the
@@ -247,6 +370,28 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
 /// denied directory as a deletion — and the vault would then be serving a
 /// smaller answer than the tree holds, with nothing saying so. Rung 3 is
 /// forbidden for the same reason a full disk forbids it.
+///
+/// **One revocation, two doors, and which one it reaches is the watcher
+/// backend's.** A vault directory is read by the heal's walk and by the backend
+/// installing change detection over the tree, so a mode taken away from a
+/// directory is met by whichever of the two gets there first:
+///
+/// - A backend that covers a tree without reading each directory under it —
+///   FSEvents — installs over the revoked subtree, and the heal's walk is what
+///   meets `EACCES`. The entry goes untrusted under
+///   [`UntrustedReason::EnvironmentalRefusal`].
+/// - A backend that adds a watch per directory — inotify — cannot add the one
+///   over the revoked subtree, so coverage fails before the heal walks. The
+///   entry goes untrusted under [`UntrustedReason::WatcherLost`] with
+///   [`WatcherLossCause::Backend`].
+///
+/// Both doors are the required outcome of the permission-loss row: the heal does
+/// not run over a tree it cannot read, trust is withdrawn naming the subtree,
+/// and nothing under it is pruned. So the reason is matched against exactly
+/// those two — not admitted by a wildcard — and every other assertion here holds
+/// whichever door the platform took. The one shape that reaches the heal's door
+/// on every platform is a revoked *document*, which is its own case above,
+/// because a document is read by nothing but the heal.
 #[test]
 fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
     let _beside = beside_the_arms();
@@ -265,7 +410,7 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
     assert!(before.document("locked/inside.md").is_some());
 
     let untrusted = {
-        let _revoked = Revoked::over(&locked);
+        let _revoked = Revoked::over_directory(&locked);
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
         let opening = serving.evidence();
         let _lease = serving
@@ -281,17 +426,29 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
         untrusted
     };
     // The reason is the case's own arm attesting: it has to name the subtree
-    // whose mode was taken away and the denial that came of it, or the entry is
-    // untrusted for something this arrangement did not cause.
-    assert!(
-        untrusted.contains("locked") && untrusted.contains("Permission denied"),
-        "the entry is untrusted for a reason that is not the revoked subtree: {untrusted}"
-    );
-    assert!(
-        untrusted.contains("EnvironmentalRefusal"),
-        "a revoked permission was published as something other than a broken environment, which \
-         is what sends an entry to a rung that discards its database: {untrusted}"
-    );
+    // whose mode was taken away, or the entry is untrusted for something this
+    // arrangement did not cause. The two arms are the two doors one revocation
+    // reaches, and they are matched rather than admitted by a wildcard: a
+    // revoked permission published as damage — which is what sends an entry to a
+    // rung that discards its database — falls through to the panic below.
+    match &untrusted {
+        UntrustedReason::EnvironmentalRefusal { detail, .. } => assert!(
+            detail.contains("locked") && detail.contains("Permission denied"),
+            "the heal refused for something that is not the revoked subtree: {detail}"
+        ),
+        UntrustedReason::WatcherLost {
+            cause: WatcherLossCause::Backend,
+            detail,
+            ..
+        } => assert!(
+            detail.contains("locked"),
+            "coverage was lost over something that is not the revoked subtree: {detail}"
+        ),
+        other => panic!(
+            "a revoked permission was published as neither of the two doors it reaches — a heal \
+             that refused, or coverage that could not be installed over the subtree: {other:?}"
+        ),
+    }
 
     let mut refused = vault.store();
     let after = StoreProjection::read(&mut refused).expect("projecting the refused attach");
@@ -315,9 +472,15 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
     // The recovery bar: with the subtree readable again, an ordinary demand
     // converges on what a derivation from zero over this tree holds — and does
     // it by healing the work the refusal withheld rather than by starting over.
-    // The refused heal changed nothing and no file moved under it, so the work
-    // left over is nothing at all: the recovery writes no row and commits no
-    // changeset, where a derivation from zero writes both documents in one.
+    // Nothing under the subtree was written and no file moved, so the work left
+    // over is nothing at all whichever door withdrew trust: the recovery writes
+    // no row and commits no changeset, where a derivation from zero writes both
+    // documents in one.
+    //
+    // One demand answers both doors. The refused host is dropped above, so this
+    // is a fresh attach: it installs its own coverage over a subtree that reads
+    // again and heals behind it, which is the same work a demand raised on the
+    // untrusted entry itself would have owed under either reason.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let healed = heal_and_read(&serving, vault.name());
     drop(serving);
@@ -737,14 +900,26 @@ fn attach_and_wait(
 /// as the refusal's detail. So both spellings end this wait, and a state that
 /// reached `Ready` ends it too as a failure: a case about a refusal that served
 /// the vault has shown the opposite of what it states.
-fn wait_for_untrusted(host: &Host<ProductionEntryOps>, name: &VaultName) -> String {
+///
+/// **The reason crosses typed rather than rendered.** Both spellings carry the
+/// same [`UntrustedReason`], so a case reads the variant the host published and
+/// matches it without a wildcard — a refusal minted under a reason no case here
+/// states is a failure at the match rather than a substring that happened not to
+/// appear.
+fn wait_for_untrusted(host: &Host<ProductionEntryOps>, name: &VaultName) -> UntrustedReason {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let observed = host.state(name);
         match &observed {
-            Ok(TrustState::Untrusted { reason, .. }) => return format!("{reason:?}"),
+            Ok(TrustState::Untrusted { reason, .. }) => return reason.clone(),
             Err(envelope) if envelope.code() == &ReasonCode::HostEntryUntrusted => {
-                return format!("{:?}", envelope.detail());
+                let ErrorDetail::EntryUntrusted { reason, .. } = envelope.detail() else {
+                    panic!(
+                        "the refusal is coded `host/entry-untrusted` and carries another \
+                         detail: {envelope:?}"
+                    )
+                };
+                return reason.clone();
             }
             Ok(TrustState::Ready) => {
                 panic!("the entry reached `Ready` under a condition it was required to refuse")
@@ -1037,38 +1212,64 @@ impl std::ops::Deref for Serving {
     }
 }
 
-/// A directory nothing may read, put back when the case is done with it.
+/// A vault path nothing may read, put back when the case is done with it.
 ///
 /// The restore is a destructor rather than a line at the end of the case: a
 /// case that fails while the mode is taken away would otherwise leave a tree
 /// nothing can remove.
+///
+/// Each constructor proves the revocation took by reading the path the way the
+/// production path under test reads it — a directory is listed, a document is
+/// read — because a process that reads a mode-000 path whatever its mode says
+/// arranges nothing, and the case over it would then pass on the absence of a
+/// condition.
 struct Revoked {
     path: PathBuf,
+    /// The mode the path is given back, which is the one its kind carries: a
+    /// directory is entered and listed, a document is only read.
+    restored: u32,
 }
 
 impl Revoked {
-    fn over(path: &Path) -> Revoked {
+    /// A directory nothing may list.
+    fn over_directory(path: &Path) -> Revoked {
         set_mode(path, 0o000);
         assert!(
             std::fs::read_dir(path).is_err(),
+            "this process lists {} whatever its mode says, so the case below would be arranging \
+             nothing. A privileged process cannot carry the permission-loss row.",
+            path.display()
+        );
+        Revoked {
+            path: path.to_path_buf(),
+            restored: 0o755,
+        }
+    }
+
+    /// A document nothing may open.
+    fn over_file(path: &Path) -> Revoked {
+        set_mode(path, 0o000);
+        assert!(
+            std::fs::read(path).is_err(),
             "this process reads {} whatever its mode says, so the case below would be arranging \
              nothing. A privileged process cannot carry the permission-loss row.",
             path.display()
         );
         Revoked {
             path: path.to_path_buf(),
+            restored: 0o644,
         }
     }
 }
 
 impl Drop for Revoked {
     fn drop(&mut self) {
-        set_mode(&self.path, 0o755);
+        set_mode(&self.path, self.restored);
     }
 }
 
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .expect("setting a directory's mode");
+        .expect("setting a vault path's mode");
 }
