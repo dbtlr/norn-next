@@ -731,9 +731,9 @@ fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
 /// The step-over that keeps a quoted scalar's lines out of the scan stops at
 /// the first line holding the quote character, so a scalar carrying one inside
 /// itself re-exposes the lines below. A `? ` there is read as the indicator and
-/// the block refuses, though its split would have held. Refusal is the only
-/// direction the imprecision runs: the block keeps its value model and no edit
-/// lands on bytes the scan misread.
+/// the block refuses, though its split would have held. The block keeps its
+/// value model either way. What the re-exposed lines cost when they spell a
+/// key instead is pinned in the test below.
 #[test]
 fn a_question_mark_below_an_interior_quote_refuses_the_block() {
     for (source, key) in [
@@ -753,6 +753,70 @@ fn a_question_mark_below_an_interior_quote_refuses_the_block() {
             .unwrap_or_else(|| panic!("{source:?}: a mapping"));
         assert!(map.contains_key(key), "for {source:?}");
         assert_eq!(map.get("k"), Some(&Value::Int(1)), "for {source:?}");
+    }
+}
+
+/// A re-exposed line that spells a key is a candidate the block never wrote as
+/// structure, and which layer answers for it depends on the name it carries.
+/// Colliding with a real key it refuses the block outright. Locating a parsed
+/// key nothing else does it becomes a boundary: the entry above is truncated
+/// inside its own quoted scalar and a field is emitted over bytes that belong
+/// to that scalar. The scan does not catch the second shape — the post-image
+/// re-read of what a write would produce is what refuses the edits.
+#[test]
+fn a_key_re_exposed_below_an_interior_quote_is_answered_for_downstream() {
+    // The re-exposed `other:` collides with the real one, so no key is
+    // uniquely located and the block refuses before any span is emitted.
+    let colliding = Document::parse("---\nq: 'a\nb'' c\nother: inside\nz'\nother: 2\n---\nbody\n");
+    assert!(colliding.fields().is_empty());
+    assert_eq!(
+        colliding.remove_field("other"),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    assert_eq!(
+        colliding.frontmatter().and_then(Value::as_map),
+        Some(
+            &[
+                ("q", Value::String("a b' c other: inside z".into())),
+                ("other", Value::Int(2)),
+            ]
+            .into_iter()
+            .collect::<Mapping>()
+        )
+    );
+
+    // Here the re-exposed `title:` is the only line naming the merge-supplied
+    // `title`, so the split proceeds and is wrong in two places at once.
+    let source =
+        "---\nbase: &b {title: real}\n<<: *b\nq: 'a\nb'' c\ntitle: inside\nz'\n---\nbody\n";
+    let split = Document::parse(source);
+    assert_eq!(
+        split
+            .fields()
+            .iter()
+            .map(|field| (field.name.as_str(), &source[field.line_range.clone()]))
+            .collect::<Vec<_>>(),
+        [
+            ("base", "base: &b {title: real}\n"),
+            ("q", "q: 'a\nb'' c\n"),
+            ("title", "title: inside\nz'\n"),
+        ]
+    );
+    for field in ["base", "q", "title"] {
+        assert_eq!(
+            split.remove_field(field),
+            Err(EditError::PostImageMismatch {
+                field: field.to_string()
+            }),
+            "removing {field:?}"
+        );
+        assert_eq!(
+            split.set_field(field, &Value::Int(1)),
+            Err(EditError::FieldNotEditable {
+                field: field.to_string()
+            }),
+            "setting {field:?}"
+        );
     }
 }
 
@@ -840,9 +904,11 @@ fn no_edit_into_a_flow_written_block_is_accepted() {
 /// an ordinary `key:` line, so the split holds and a remove of a key another
 /// entry follows lands: the deleted line carries its own separating comma and
 /// the flow stays closed. What still refuses is everything that would leave
-/// the flow half-written — removing the last key would take the closing brace,
-/// and a set writes over a value span holding the flow's comma or brace, which
-/// re-parses to something else.
+/// the flow half-written: removing the last key would take the closing brace,
+/// and a set over a plain scalar writes across a value span that runs to the
+/// end of the line and so holds the flow's comma or brace, which re-parses to
+/// something else. A quoted value ends its span at the closing quote, leaving
+/// the punctuation outside it, and its set lands.
 #[test]
 fn a_flow_mapping_braced_on_its_own_lines_takes_a_remove() {
     assert_eq!(
@@ -882,6 +948,21 @@ fn a_flow_mapping_braced_on_its_own_lines_takes_a_remove() {
         Err(EditError::PostImageMismatch {
             field: "appended".to_string()
         })
+    );
+    // A quoted value's span stops at its closing quote, so the comma after it
+    // is not written over and the set lands. The quoted bytes may spell a
+    // brace; it is the flow's own punctuation the span has to stay clear of.
+    assert_eq!(
+        set(
+            "---\n{\na: \"x}y\",\nb: 2}\n---\n",
+            "a",
+            Value::String("NEW".into())
+        ),
+        Ok("---\n{\na: \"NEW\",\nb: 2}\n---\n".to_string())
+    );
+    assert_eq!(
+        remove("---\n{\na: \"x}y\",\nb: 2}\n---\n", "a"),
+        Ok("---\n{\nb: 2}\n---\n".to_string())
     );
 }
 

@@ -1069,8 +1069,11 @@ fn a_quoted_key_that_reads_like_a_tagged_directive_is_a_field() {
 }
 
 /// A merge line belongs to no field, so no field's range may absorb it. It
-/// bounds the entry above it instead, and the block it sits in refuses every
-/// field edit — reading is unaffected and the bytes round-trip.
+/// bounds the entry above it instead, which is what keeps a neighbour's remove
+/// off its bytes. A merge that supplies a key the block writes nowhere else
+/// leaves that key attributable to no line and refuses the whole split; a merge
+/// like this one, contributing nothing the block does not already write, leaves
+/// every key located and the block editable.
 #[test]
 fn a_merge_line_is_never_absorbed_into_a_neighbouring_field() {
     // The merge contributes nothing new here, so every parsed key is locatable

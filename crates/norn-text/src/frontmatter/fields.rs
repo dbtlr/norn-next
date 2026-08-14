@@ -356,10 +356,16 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 /// loop reaches as structure. Indentation makes that exact for a block
 /// scalar. The quoted-scalar step-over is best-effort — see
 /// [`absorb_until_line_contains`] — so a scalar carrying its quote character
-/// on an interior line re-exposes the lines below it, and one of those
-/// beginning `? ` refuses a block whose split would have held. Every
-/// imprecision here runs that way: a line the step-over covers is read as no
-/// key either, so the scan under-reports candidates and never invents one.
+/// on an interior line re-exposes the lines below it and they are read as
+/// structure. What that costs depends on what a re-exposed line spells. One
+/// beginning `? ` refuses a block whose split would have held. A `key:`-shaped
+/// one is a candidate the block never wrote as structure: naming no parsed key
+/// it is absorbed into the entry above and nothing changes, colliding with a
+/// real key's name it refuses the block, and locating a parsed key no other
+/// line does — or spelling the merge directive — it becomes a boundary and
+/// truncates the entry above inside that entry's own value. The scan does not
+/// answer for that last case: what refuses the edits over such a split is the
+/// post-image re-read of the bytes a write would produce.
 fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec<RawKeyLine>> {
     let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
