@@ -20,7 +20,7 @@ use norn_store::{
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity, VaultName};
 
-use crate::evidence::{EvidenceReading, JobEvidence, count_changeset};
+use crate::evidence::{JobEvidence, count_changeset};
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 
 /// Maximum number of document changes materialized for one store transaction.
@@ -178,19 +178,17 @@ impl ProductionEntryOps {
         }
     }
 
-    /// What this host's jobs have spent and done, as it stands.
-    ///
-    /// Every field is cumulative, so what one job cost is the difference between
-    /// a reading taken before it and one taken after.
-    pub fn evidence(&self) -> EvidenceReading {
-        self.evidence.read()
-    }
-
     /// A handle on the account, for a caller that is about to give the ops away.
     ///
     /// [`crate::Host::new`] takes the ops by value and hands them back to
     /// nobody, so a caller that means to read the account afterwards takes this
     /// first. It is the same account the ops go on writing to.
+    ///
+    /// **Behind `induced-failure`, with the rest of the harness-reachable
+    /// surface.** The account is written on every build — that is how a job's
+    /// cost stops being discarded — and read on this one, by the suites that
+    /// state what a derivation spent.
+    #[cfg(feature = "induced-failure")]
     pub fn account(&self) -> Arc<JobEvidence> {
         Arc::clone(&self.evidence)
     }

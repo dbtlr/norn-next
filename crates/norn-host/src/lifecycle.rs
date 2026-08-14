@@ -1780,6 +1780,13 @@ impl<O: EntryOps> Host<O> {
     /// counter spent those stats, and a path that leaves it standing spent none.
     /// It is cumulative, so what one act cost is the difference between a
     /// reading before it and one after.
+    ///
+    /// **Behind `induced-failure`, with the rest of the harness-reachable
+    /// surface.** Nothing a client asks for is answered from this number: it
+    /// says what a host did rather than what a vault holds, and the suites that
+    /// read it are the ones that assert an act really stated the roots it
+    /// claims to have stated.
+    #[cfg(feature = "induced-failure")]
     pub fn classifications(&self) -> usize {
         self.shared.entries.classifications()
     }
@@ -1792,6 +1799,11 @@ impl<O: EntryOps> Host<O> {
     /// requirement nobody is waiting on; zero beside an entry that owes none is
     /// an entry with nothing to ask of it, and the two are told apart by
     /// [`Host::state`].
+    ///
+    /// **Behind `induced-failure`.** A client that wants to know what an entry
+    /// owes reads [`Host::state`]; the count of who is waiting is an internal
+    /// bookkeeping fact, opened here for the suites that assert on it.
+    #[cfg(feature = "induced-failure")]
     pub fn recovery_demands(&self, name: &VaultName) -> Option<usize> {
         self.shared.entries.get(name).map(|entry| {
             entry

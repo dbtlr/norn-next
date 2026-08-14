@@ -23,6 +23,7 @@
 use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "induced-failure")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,9 +32,11 @@ use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
 use norn_fixtures::Profile;
 use norn_host::{
-    AttachMode, DemandLease, EvidenceReading, Host, JobEvidence, LifecyclePolicy,
-    ProductionEntryOps, ProductionPolicy, RegistryRead,
+    AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
+    RegistryRead,
 };
+#[cfg(feature = "induced-failure")]
+use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
@@ -243,7 +246,9 @@ impl Vault {
         let lease = Lease::hold(isolation::REAL_WATCHER, lease_budget());
         let ops = ProductionEntryOps::new(self.dirs(), policy);
         // The host takes the ops by value, so the account is taken here or not
-        // at all.
+        // at all. Reading an account is behind `induced-failure`, so a build
+        // without it composes the same host and carries no account.
+        #[cfg(feature = "induced-failure")]
         let account = ops.account();
         let host = Host::new(
             registry,
@@ -257,6 +262,7 @@ impl Vault {
         .expect("production host");
         ServingHost {
             host,
+            #[cfg(feature = "induced-failure")]
             account,
             _watcher_lease: lease,
         }
@@ -288,13 +294,17 @@ fn lease_budget() -> Budget {
 pub struct ServingHost {
     host: Host<ProductionEntryOps>,
     /// What this host's jobs have spent and done. The ops that write it are
-    /// inside the host, so the account is taken where the host is built.
+    /// inside the host, so the account is taken where the host is built. Every
+    /// build writes it and this one reads it, which is what `induced-failure`
+    /// gates.
+    #[cfg(feature = "induced-failure")]
     account: Arc<JobEvidence>,
     // Dropped after `host` by declaration order, which is the order that
     // matters: the watcher goes with the host, and the lease covers it.
     _watcher_lease: Lease,
 }
 
+#[cfg(feature = "induced-failure")]
 impl ServingHost {
     /// What this host's jobs have spent and done, as it stands.
     pub fn evidence(&self) -> EvidenceReading {

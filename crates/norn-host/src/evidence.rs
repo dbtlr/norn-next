@@ -69,6 +69,12 @@ pub struct JobEvidence {
 }
 
 /// One reading of a host's account.
+///
+/// **The account is written on every build and read on this one.** Counting
+/// what a job spent is how the answer stops being discarded, and it happens
+/// whatever features are on; taking a reading is a harness act, so the reader
+/// is behind `induced-failure` with the rest of the harness-reachable surface.
+#[cfg(any(feature = "induced-failure", test))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceReading {
     /// Files opened for their content, over every job.
@@ -93,29 +99,48 @@ pub struct EvidenceReading {
     pub rebuilds_run: u64,
 }
 
+#[cfg(any(feature = "induced-failure", test))]
 impl EvidenceReading {
     /// What happened between an earlier reading and this one.
     ///
-    /// Every field is cumulative and never decreases, so the difference is what
-    /// the work between the two readings spent and did.
+    /// Every field is cumulative and never decreases, so the difference over
+    /// two readings of **one** account is what the work between them spent and
+    /// did. Two readings of two different accounts are not such a pair, and the
+    /// subtraction floors at zero rather than wrapping: a caller that crossed
+    /// accounts reads zeroes instead of a field near `u64::MAX`.
+    ///
+    /// The lane that subtracts two readings is the churn suite's cost bars —
+    /// what one act cost, over a host that has already done other work. A suite
+    /// that reads a host from its first job onwards reads the account directly.
     pub fn since(self, earlier: EvidenceReading) -> EvidenceReading {
         EvidenceReading {
-            document_opens: self.document_opens - earlier.document_opens,
-            stats: self.stats - earlier.stats,
-            walk_dirents: self.walk_dirents - earlier.walk_dirents,
-            changesets_applied: self.changesets_applied - earlier.changesets_applied,
-            documents_upserted: self.documents_upserted - earlier.documents_upserted,
-            documents_deleted: self.documents_deleted - earlier.documents_deleted,
-            tombstones_recorded: self.tombstones_recorded - earlier.tombstones_recorded,
-            findings_discarded: self.findings_discarded - earlier.findings_discarded,
-            recoveries_run: self.recoveries_run - earlier.recoveries_run,
-            rebuilds_run: self.rebuilds_run - earlier.rebuilds_run,
+            document_opens: self.document_opens.saturating_sub(earlier.document_opens),
+            stats: self.stats.saturating_sub(earlier.stats),
+            walk_dirents: self.walk_dirents.saturating_sub(earlier.walk_dirents),
+            changesets_applied: self
+                .changesets_applied
+                .saturating_sub(earlier.changesets_applied),
+            documents_upserted: self
+                .documents_upserted
+                .saturating_sub(earlier.documents_upserted),
+            documents_deleted: self
+                .documents_deleted
+                .saturating_sub(earlier.documents_deleted),
+            tombstones_recorded: self
+                .tombstones_recorded
+                .saturating_sub(earlier.tombstones_recorded),
+            findings_discarded: self
+                .findings_discarded
+                .saturating_sub(earlier.findings_discarded),
+            recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
+            rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
         }
     }
 }
 
 impl JobEvidence {
     /// This host's account as it stands.
+    #[cfg(any(feature = "induced-failure", test))]
     pub fn read(&self) -> EvidenceReading {
         let get = |field: &AtomicU64| field.load(Ordering::Relaxed);
         EvidenceReading {

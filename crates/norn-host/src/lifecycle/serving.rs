@@ -122,10 +122,12 @@ impl<A: SnapshotSource> ServingSet<A> {
     /// served root.
     ///
     /// The set is this crate's own, so a bar outside it reads this through
-    /// [`Host::classifications`] — which is the narrowest surface that reaches
-    /// it, and is why the reading here is not gated to this crate's own cases.
-    ///
-    /// [`Host::classifications`]: crate::Host::classifications
+    /// `Host::classifications`, which is the narrowest surface that reaches it.
+    /// Both stand on the same terms: the count is written by every recheck and
+    /// read by the cases and suites that assert what an act stated, so the
+    /// reader is compiled for this crate's own cases and for the
+    /// harness-reachable feature and for nothing else.
+    #[cfg(any(feature = "induced-failure", test))]
     pub(crate) fn classifications(&self) -> usize {
         self.classifications.load(Ordering::SeqCst)
     }

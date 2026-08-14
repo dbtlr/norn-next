@@ -17,6 +17,12 @@
 //! of this, and this case is the half that says the projection describes a real
 //! attachment.
 //!
+//! **The evidence leg runs where its readers are compiled.** What a host's jobs
+//! spent and did is written on every build and read behind `induced-failure`,
+//! so the claims about what each attachment really read stand under that
+//! feature while the comparison itself — the whole subject of this case — runs
+//! in every lane.
+//!
 //! **This is not the churn suite.** Nothing here edits the tree while a host is
 //! serving it: what is compared is two cold derivations of one unchanging tree,
 //! which is the weakest claim the machinery can carry and the one that has to
@@ -32,6 +38,7 @@ use std::path::Path;
 
 use norn_testkit::equivalence::{Population, StoreProjection, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
+use norn_wire::VaultName;
 
 /// The profile this case derives twice.
 ///
@@ -48,31 +55,8 @@ fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
     let first = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
     let second = first.beside(&sandbox.work_dir().join("second-machine"));
 
-    let first_evidence = derive(&first);
-    let second_evidence = derive(&second);
-
-    // **The evidence says both derivations really read the vault.** A host that
-    // attached without walking would open no document, land no changeset and
-    // still leave a store behind for the comparison to find equal to the other
-    // empty one.
-    for (label, evidence) in [
-        ("the first derivation", first_evidence),
-        ("the second derivation", second_evidence),
-    ] {
-        assert!(
-            evidence.document_opens > 0 && evidence.walk_dirents > 0 && evidence.stats > 0,
-            "{label} asked the filesystem for nothing: {evidence:?}"
-        );
-        assert!(
-            evidence.changesets_applied > 0 && evidence.documents_upserted > 0,
-            "{label} landed no changeset: {evidence:?}"
-        );
-        assert_eq!(
-            (evidence.recoveries_run, evidence.rebuilds_run),
-            (0, 0),
-            "{label} climbed a rung of the ladder over a vault nothing damaged: {evidence:?}"
-        );
-    }
+    derive(&first, "the first derivation");
+    derive(&second, "the second derivation");
 
     let mut left = first.store();
     let mut right = second.store();
@@ -115,25 +99,59 @@ fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
     left.assert_equivalent(&right, "one vault derived twice from zero");
 }
 
-/// Attach `vault`, wait for it to be ready, and hand back what the host's jobs
-/// spent and did.
+/// Attach `vault`, wait for it to be ready, and let it go.
 ///
 /// The host and its demand are dropped inside this call, so what the comparison
 /// reads afterwards is what an attachment left behind rather than a store a host
 /// is still writing to. The two derivations are therefore sequential: each takes
 /// its own maintainer lock and its own platform watcher, one at a time.
-fn derive(vault: &attach::Vault) -> norn_host::EvidenceReading {
+fn derive(vault: &attach::Vault, label: &str) {
     let host = vault.host();
     let lease = attach::attach_and_wait(&host, vault.name());
-    // The classification the attach ran is what read the root and decided no
-    // other served name stands at it; a host that classified nothing attached
-    // over a root it never looked at.
+    assert_the_attach_stated_the_root(&host, vault.name(), label);
+    drop(lease);
+    assert_the_derivation_read_the_vault(&host, label);
+}
+
+/// **The attach stated the root it served.** The classification is what read the
+/// root and decided no other served name stands at it; a host that classified
+/// nothing attached over a root it never looked at. A ready entry owes no
+/// recovery, so nothing is waiting on one either.
+#[cfg(feature = "induced-failure")]
+fn assert_the_attach_stated_the_root(host: &attach::ServingHost, name: &VaultName, label: &str) {
     assert!(
         host.classifications() > 0,
-        "the attach stated no root against the serving set"
+        "{label} stated no root against the serving set"
     );
-    // A ready entry owes no recovery, so nothing is waiting on one.
-    assert_eq!(host.recovery_demands(vault.name()), Some(0));
-    drop(lease);
-    host.evidence()
+    assert_eq!(host.recovery_demands(name), Some(0), "{label}");
 }
+
+/// The same claim, in a build whose readers are not compiled.
+#[cfg(not(feature = "induced-failure"))]
+fn assert_the_attach_stated_the_root(_: &attach::ServingHost, _: &VaultName, _: &str) {}
+
+/// **The evidence says the derivation really read the vault.** A host that
+/// attached without walking would open no document, land no changeset and still
+/// leave a store behind for the comparison to find equal to the other empty
+/// one.
+#[cfg(feature = "induced-failure")]
+fn assert_the_derivation_read_the_vault(host: &attach::ServingHost, label: &str) {
+    let evidence = host.evidence();
+    assert!(
+        evidence.document_opens > 0 && evidence.walk_dirents > 0 && evidence.stats > 0,
+        "{label} asked the filesystem for nothing: {evidence:?}"
+    );
+    assert!(
+        evidence.changesets_applied > 0 && evidence.documents_upserted > 0,
+        "{label} landed no changeset: {evidence:?}"
+    );
+    assert_eq!(
+        (evidence.recoveries_run, evidence.rebuilds_run),
+        (0, 0),
+        "{label} climbed a rung of the ladder over a vault nothing damaged: {evidence:?}"
+    );
+}
+
+/// The same claim, in a build whose readers are not compiled.
+#[cfg(not(feature = "induced-failure"))]
+fn assert_the_derivation_read_the_vault(_: &attach::ServingHost, _: &str) {}
