@@ -11,8 +11,8 @@
 //! restating it.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity, ReasonCode,
-    Severity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
+    AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
+    ReasonCode, Severity, TrustState, UntrustedReason, VaultName, WarmingPhase, WatcherLossCause,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -102,6 +102,8 @@ fn every_wire_type_derives_a_schema() {
         schema_of::<MaintainerIdentity>(),
         schema_of::<ErrorDetail>(),
         schema_of::<ErrorEnvelope>(),
+        schema_of::<AttachMode>(),
+        schema_of::<VaultName>(),
     ] {
         assert!(
             schema.get("$schema").is_some(),
@@ -130,7 +132,8 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
             "watcher_overflow",
             "watcher_lost",
             "environmental_refusal",
-            "store_damaged",
+            "store_damaged_rebuilding",
+            "store_damaged_awaiting_demand",
         ])
     );
 }
@@ -176,8 +179,61 @@ fn an_error_detail_advertises_the_code_as_its_tag() {
             "host/duplicate-root",
             "host/entry-untrusted",
             "host/maintainer-contended",
-            "host/unknown-vault"
+            "host/unknown-vault",
+            "host/unsupported-attach-mode"
         ])
+    );
+}
+
+/// A refused mode advertises the mode as a nested enum, so a surface renders
+/// the branchable fact rather than a sentence naming it.
+#[test]
+fn a_refused_mode_advertises_the_typed_mode_it_carries() {
+    let schema = schema_of::<ErrorDetail>();
+    let refused = branches(&schema)
+        .iter()
+        .find(|branch| tag_constant(branch, "code") == Some("host/unsupported-attach-mode"))
+        .expect("the unsupported-attach-mode branch");
+    assert_eq!(
+        property_names(refused),
+        ["code", "mode"].into_iter().collect()
+    );
+    assert_eq!(
+        refused["properties"]["mode"]["$ref"].as_str(),
+        Some("#/$defs/AttachMode")
+    );
+    assert_eq!(
+        sorted(branches(&schema_of::<AttachMode>()).iter().map(|branch| {
+            string_constant(branch)
+                .unwrap_or_else(|| panic!("a mode branch is not a pinned string: {branch}"))
+        })),
+        sorted(["durable", "throwaway"])
+    );
+}
+
+/// A name advertises the grammar its constructor keeps: a surface validating
+/// against the schema refuses the strings the reader refuses.
+///
+/// The description is pinned here because a name is the one type whose schema
+/// is written by hand: a derive lifts its description out of the type's doc
+/// comment, and this one is a second spelling of that doc. The literal below
+/// is the third, and it is what makes the two say the same sentence — the
+/// bound clause at its end is the clause the hand-written spelling can lose
+/// while the type's doc keeps it.
+#[test]
+fn a_vault_name_advertises_the_grammar_it_is_parsed_through() {
+    let schema = schema_of::<VaultName>();
+    assert_eq!(schema["type"].as_str(), Some("string"));
+    assert_eq!(schema["pattern"].as_str(), Some(VaultName::PATTERN));
+    assert_eq!(
+        schema["maxLength"].as_u64(),
+        Some(VaultName::MAXIMUM_BYTES as u64)
+    );
+    assert_eq!(
+        schema["description"].as_str(),
+        Some(
+            "A vault's name: a lowercase letter, then lowercase letters, digits, `+`, `.` and `-`, at most 255 bytes of them."
+        )
     );
 }
 
@@ -281,7 +337,8 @@ fn a_reason_code_advertises_its_flat_namespaced_string() {
             "host/duplicate-root",
             "host/entry-untrusted",
             "host/maintainer-contended",
-            "host/unknown-vault"
+            "host/unknown-vault",
+            "host/unsupported-attach-mode"
         ])
     );
 }

@@ -7,8 +7,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
-use norn_config::{ConfigDirs, VaultName};
 use norn_host::{
     AttachMode, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy, RegistryRead,
 };
@@ -17,7 +17,7 @@ use norn_store::{
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::TrustState;
+use norn_wire::{TrustState, VaultName};
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";

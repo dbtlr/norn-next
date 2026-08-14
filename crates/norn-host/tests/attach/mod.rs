@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
-use norn_config::{ConfigDirs, VaultName};
 use norn_fixtures::Profile;
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
@@ -36,7 +36,7 @@ use norn_host::{
 use norn_store::{DocumentPath, Store, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::TrustState;
+use norn_wire::{TrustState, VaultName};
 
 /// The seed every generated tree is drawn at. One value, so two readings
 /// differ by the profile alone.

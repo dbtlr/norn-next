@@ -76,10 +76,10 @@ pub const WORKSPACE_CRATES: &[&str] = &[
 
 /// The permitted workspace normal-dependency edges, as `(from, to)`.
 ///
-/// Seven crates are absent from the left column entirely — `norn-wire`,
-/// `norn-text`, `norn-fs`, `norn-embed`, `norn-console`, `norn-config` and
-/// `norn-fixtures` are leaves with zero workspace dependencies, and their
-/// absence is what carries the invariants that say so.
+/// Six crates are absent from the left column entirely — `norn-wire`,
+/// `norn-text`, `norn-fs`, `norn-embed`, `norn-console` and `norn-fixtures`
+/// are leaves with zero workspace dependencies, and their absence is what
+/// carries the invariants that say so.
 pub const ALLOWED_EDGES: &[(&str, &str)] = &[
     ("norn", "norn-serve"),
     ("norn", "norn-client"),
@@ -98,6 +98,7 @@ pub const ALLOWED_EDGES: &[(&str, &str)] = &[
     ("norn-client", "norn-console"),
     ("norn-client", "norn-config"),
     ("norn-store", "norn-wire"),
+    ("norn-config", "norn-wire"),
     ("norn-testkit", "norn-fixtures"),
     ("norn-testkit", "norn-wire"),
     ("norn-testkit", "norn-store"),

@@ -91,6 +91,10 @@ pub enum ConfigError {
     /// A vault name outside the grammar. **No bypass**: the name keys a table,
     /// a directory and a URL-ish identifier at once, and a name that is legal
     /// in one of those and not the others has no safe reading.
+    ///
+    /// The grammar is [`VaultName`](norn_wire::VaultName)'s and the refusal is
+    /// that type's; this is the same refusal read as one of this crate's, so a
+    /// caller reading a registry file handles one error type rather than two.
     IllegalName { name: String, problem: &'static str },
     /// A token label outside the grammar. Same terms as [`IllegalName`]: the
     /// label keys a table and is typed by a person, and a label that is not a
@@ -192,6 +196,18 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+impl From<norn_wire::IllegalVaultName> for ConfigError {
+    /// A name the grammar refused, read as this crate's refusal. The account
+    /// is the grammar's own — the string that was offered and what the grammar
+    /// wanted — so nothing about the refusal changes on the way through.
+    fn from(refusal: norn_wire::IllegalVaultName) -> Self {
+        ConfigError::IllegalName {
+            name: refusal.name().to_string(),
+            problem: refusal.problem(),
+        }
+    }
+}
 
 /// The refusal for an operating-system error met while `operation` was running
 /// against `path`.

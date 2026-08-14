@@ -7,11 +7,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
-# dependencies. Nothing about vaults, stores, protocols or orchestration can
+# One workspace dependency in the allowlist (docs/architecture.md), and it is
+# the vocabulary. Nothing about vaults, stores, protocols or orchestration can
 # reach this crate, and nothing here can reach them — the registry file's
 # *shape* lives here and the registry's *semantics* live in `norn-host`, which
 # an edge in this direction would blur.
+#
+# `norn-wire` owns the vault-name grammar, because a name crosses the
+# client/host seam as well as keying the registry table and naming a directory.
+# The edge points at the leaf everything else already points at: the vocabulary
+# reaches nothing, so this crate reaching it adds no reachability at all.
 #
 # `toml` is the format every machine-local file is written in, and this crate
 # is the only reader and writer of them. The registry's tolerant reader is
@@ -28,6 +33,7 @@ publish.workspace = true
 # per platform by hand is a portability bug waiting for its target.
 [dependencies]
 libc = { workspace = true }
+norn-wire = { path = "../norn-wire" }
 toml = { workspace = true }
 
 # The channel a build is pinned to. Absent is the dev channel, which is what a

@@ -44,15 +44,24 @@
 //! **A broken environment and damaged derived state are two reasons for the
 //! same shape of reason.** [`UntrustedReason::EnvironmentalRefusal`] says the
 //! stored state is sound and the environment is not, so the resolution is the
-//! environment being fixed and the work being tried again.
-//! [`UntrustedReason::StoreDamaged`] says the opposite: the vault is sound and
-//! the derivation over it is not, so trying the same work again resolves
-//! nothing and the entry discards its derived state and builds it from the
-//! vault instead. One word for both would publish a state that resumes by
-//! itself as one that waits on a machine somebody has to repair. Which of the
-//! two a damage verdict is, is read from what the entry is holding rather than
-//! from the reason: derived state to discard is what the rung runs against, and
-//! an entry holding none waits for the demand that establishes it.
+//! environment being fixed and the work being tried again. A damage verdict
+//! says the opposite: the vault is sound and the derivation over it is not, so
+//! trying the same work again resolves nothing and the entry discards its
+//! derived state and builds it from the vault instead. One word for both would
+//! publish a state that resumes by itself as one that waits on a machine
+//! somebody has to repair.
+//!
+//! **Two damage reasons, split by who resumes**, on the same principle the
+//! watcher pair is split on. [`UntrustedReason::StoreDamagedRebuilding`] is an
+//! entry holding the damaged derived state: the rung that discards it runs
+//! against what the entry has, so the entry resumes on its own.
+//! [`UntrustedReason::StoreDamagedAwaitingDemand`] is an entry holding nothing
+//! — the run that met the damage was the one establishing the entry, and it
+//! could not resolve what it met — so there is no database to discard until a
+//! demand opens one, and the entry waits for that demand. The distinction was
+//! once documented as a read of what the entry is holding, which no client can
+//! perform: holdings cross no seam, and a fact a client branches on is a tag
+//! here or it is nothing.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -220,16 +229,22 @@ pub enum UntrustedReason {
     /// The derived state is damaged: the database is not one this build wrote,
     /// its pages are corrupt, or it holds values no reader will accept. The
     /// vault is sound and the derivation over it is not, so the entry discards
-    /// the database and derives it again from the vault.
-    ///
-    /// An entry still holding its derived state resumes on its own: the rung
-    /// runs against what the entry has. An entry holding nothing waits for a
-    /// client to ask, because there is no database to discard until one is
-    /// opened — which is the state this reason carries when the run that
-    /// reported it was the one establishing the entry, and it could not resolve
-    /// the damage it met.
+    /// the database and derives it again from the vault. The entry holds that
+    /// database and rebuilds it on its own.
     #[non_exhaustive]
-    StoreDamaged {
+    StoreDamagedRebuilding {
+        /// The damage in words, for a person reading a message or a log.
+        /// Clients never match on it: the reason's `kind` is what a client
+        /// branches on.
+        detail: String,
+    },
+    /// The derived state is damaged, and the run that met the damage was the
+    /// one establishing the entry, so the entry holds no database to discard.
+    /// The vault is sound and the derivation over it is not; the entry derives
+    /// again when a client demands it, and that demand is what opens a database
+    /// to discard.
+    #[non_exhaustive]
+    StoreDamagedAwaitingDemand {
         /// The damage in words, for a person reading a message or a log.
         /// Clients never match on it: the reason's `kind` is what a client
         /// branches on.
@@ -253,9 +268,18 @@ impl UntrustedReason {
         }
     }
 
-    /// The derived state is damaged, described by `detail`.
-    pub fn store_damaged(detail: impl Into<String>) -> Self {
-        UntrustedReason::StoreDamaged {
+    /// The derived state the entry holds is damaged and is being rebuilt from
+    /// the vault, described by `detail`.
+    pub fn store_damaged_rebuilding(detail: impl Into<String>) -> Self {
+        UntrustedReason::StoreDamagedRebuilding {
+            detail: detail.into(),
+        }
+    }
+
+    /// The derived state is damaged, the entry holds none of it, and a demand
+    /// is what establishes the database to discard, described by `detail`.
+    pub fn store_damaged_awaiting_demand(detail: impl Into<String>) -> Self {
+        UntrustedReason::StoreDamagedAwaitingDemand {
             detail: detail.into(),
         }
     }

@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use norn_config::VaultName;
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_wire::{
-    ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
+    AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
+    WarmingPhase, WatcherLossCause,
 };
 
 use crate::registry::{AliasConflict, RegistryRead};
@@ -265,6 +265,12 @@ pub enum JobFailure {
 /// they answer it whatever trust state stands beside them: a park outlives the
 /// release that publishes Unattached over it, so the answer names what keeps
 /// the entry from re-arming rather than what its resources are doing.
+///
+/// Two variants name no entry at all: a demand for a name the registry does not
+/// hold, and a demand for a mode this host has no lifecycle for. Both are read
+/// before an entry is touched, and both answer through the one mapping every
+/// other demand answers through, so a refusal the host can make is a refusal
+/// the vocabulary spells.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Demand {
     State(TrustState),
@@ -273,63 +279,56 @@ pub enum Demand {
     /// The registry's own account of a root it cannot read.
     IdentityRefused(String),
     UnknownVault,
+    /// The mode the demand named, which this host holds no lifecycle for.
+    UnsupportedMode(AttachMode),
 }
 
-/// How the derived state a demand asks for is held.
+/// The one thing a client can be told the host has gone.
 ///
-/// Registration is what gates durability, so the mode is the demand's own
-/// rather than a property read off the entry: a registered vault's derivation
-/// is durable — a database that outlives the process, watcher coverage, warm
-/// trust — and disposable derivation over a throwaway store is the other mode
-/// the same seam carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AttachMode {
-    /// A durable database, watcher coverage, and trust that warms and stays
-    /// warm: what every registered entry the host serves is attached under.
-    Durable,
-    /// Disposable derivation over a throwaway store, discarded with the work
-    /// that asked for it. The demand seam refuses it: the lifecycle behind this
-    /// mode is not built, and the entry it would run against does not exist.
-    Throwaway,
+/// Every trigger is written inside `Drop for Host`, which takes `&mut self`
+/// while [`Host::demand`] takes `&self`, so no owned-host caller can observe
+/// it: what rides this channel is the host being gone, never a request being
+/// bad. A refusal a request earns is a [`Demand`] and is answered in the wire
+/// vocabulary; a policy that describes no host is [`LifecyclePolicyError`] and
+/// is answered at construction.
+#[derive(Debug)]
+pub enum HostError {
+    WorkerStopped,
 }
 
-impl AttachMode {
-    /// Answer for a mode before anything is read or written under it, so a
-    /// demand the host has no lifecycle for changes nothing on its way to the
-    /// refusal.
-    fn admitted(self) -> Result<(), HostError> {
+impl fmt::Display for HostError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Durable => Ok(()),
-            Self::Throwaway => Err(HostError::ThrowawayUnsupported),
+            Self::WorkerStopped => f.write_str("the host worker pool stopped"),
         }
     }
 }
 
-#[derive(Debug)]
-pub enum HostError {
+impl std::error::Error for HostError {}
+
+/// A [`LifecyclePolicy`] that describes no host.
+///
+/// These are read once, at construction, and no request can reach them: a
+/// policy is the composition root's, so a caller that gets a host holds one
+/// built from a policy that admitted it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecyclePolicyError {
     NoWorkerSlots,
     ZeroWatchPollInterval,
-    WorkerStopped,
-    /// A demand named [`AttachMode::Throwaway`].
-    ThrowawayUnsupported,
 }
 
-impl fmt::Display for HostError {
+impl fmt::Display for LifecyclePolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoWorkerSlots => f.write_str("the host requires at least one worker slot"),
             Self::ZeroWatchPollInterval => {
                 f.write_str("the host requires a nonzero watcher poll interval")
             }
-            Self::WorkerStopped => f.write_str("the host worker pool stopped"),
-            Self::ThrowawayUnsupported => {
-                f.write_str("the host attaches registered vaults durably and nothing throwaway")
-            }
         }
     }
 }
 
-impl std::error::Error for HostError {}
+impl std::error::Error for LifecyclePolicyError {}
 
 /// One vault this host serves.
 ///
@@ -410,8 +409,19 @@ struct EntryState<A: SnapshotSource> {
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
     ///
-    /// It is set beside every publication of [`UntrustedReason::StoreDamaged`]
-    /// and cleared by the rebuild that resolves it, and it dominates
+    /// It is set beside every publication of
+    /// [`UntrustedReason::StoreDamagedRebuilding`] — the reason an entry
+    /// holding the damaged database publishes — and cleared by the rebuild that
+    /// resolves it. The other damage reason,
+    /// [`UntrustedReason::StoreDamagedAwaitingDemand`], sets nothing here,
+    /// because the attach that publishes it acquired no store: there is nothing
+    /// to discard until a demand opens the file again.
+    ///
+    /// The reason does not stand in for the flag. A reason is what the entry
+    /// publishes at one instant and is overwritten by the warming state the
+    /// rebuild runs under, while the requirement stands until the rebuild that
+    /// clears it lands, and it is what every producer of work reads to learn
+    /// which rung is owed. It dominates
     /// `recovery_required` wherever both stand: a store that will not answer
     /// answers no better after coverage is installed over it again, so a
     /// recovery run against damaged state is the loop this flag exists to keep
@@ -844,7 +854,8 @@ impl DemandedWork {
     /// The reconcile arm rests on where the untrusted reasons are written:
     /// every writer of a watcher loss or an environmental refusal against an
     /// entry holding coverage sets `recovery_required` beside it, and every
-    /// writer of damaged derived state sets `rebuild_required`. An overflow is
+    /// writer of damaged derived state over an entry holding its store sets
+    /// `rebuild_required`. An overflow is
     /// the one reason that stands without either, and rereading the facts is
     /// what clears an overflow. The assertion says that invariant out loud, so
     /// a writer that stops pairing a reason with the work it owes is caught
@@ -1466,9 +1477,10 @@ pub struct Host<O: EntryOps> {
 /// One read's hold on a vault entry.
 ///
 /// The handle and the trust label come out of one hold of the entry gate lock,
-/// which is what makes the label a read answers under and the snapshot it
-/// answers from describe the same instant — trust state, not the handle, is
-/// what buys the right to answer.
+/// so the label a read answers under and the snapshot it answers from describe
+/// one instant. Which labels answer and which refuse is
+/// [`TrustState::refusal`]'s answer, given beside the states themselves in
+/// `norn-wire`, and it is read there rather than restated here.
 ///
 /// The hold pins the entry the way a leg running outside the lock does, so a
 /// teardown that reads the pin schedules nothing while a read is in flight, and
@@ -1677,12 +1689,16 @@ impl<O: EntryOps> Drop for Host<O> {
 }
 
 impl<O: EntryOps> Host<O> {
-    pub fn new(registry: RegistryRead, ops: O, policy: LifecyclePolicy) -> Result<Self, HostError> {
+    pub fn new(
+        registry: RegistryRead,
+        ops: O,
+        policy: LifecyclePolicy,
+    ) -> Result<Self, LifecyclePolicyError> {
         if policy.worker_slots == 0 {
-            return Err(HostError::NoWorkerSlots);
+            return Err(LifecyclePolicyError::NoWorkerSlots);
         }
         if policy.watch_poll_interval.is_zero() {
-            return Err(HostError::ZeroWatchPollInterval);
+            return Err(LifecyclePolicyError::ZeroWatchPollInterval);
         }
         // Startup takes the same seam a later registration does: every vault in
         // the set arrived through one insertion, so a vault gained while the
@@ -1792,9 +1808,19 @@ impl<O: EntryOps> Host<O> {
     /// The mode says how the derived state this demand asks for is held, and it
     /// is answered before any lease is recorded: a demand this host has no
     /// lifecycle for is refused rather than served under another mode, and it
-    /// leaves the entry standing exactly where it found it, parks included.
+    /// leaves the entry standing exactly where it found it, parks included. The
+    /// refusal is a lease holding nothing, on the same terms an unregistered
+    /// name is answered under: nothing is recorded against an entry, so nothing
+    /// is withdrawn when the lease is dropped.
     pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        mode.admitted()?;
+        if !matches!(mode, AttachMode::Durable) {
+            return Ok(DemandLease {
+                outcome: Demand::UnsupportedMode(mode),
+                name: name.clone(),
+                held: None,
+                recovery_demand: None,
+            });
+        }
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(DemandLease {
                 outcome: Demand::UnknownVault,
@@ -1882,9 +1908,18 @@ impl<O: EntryOps> Host<O> {
     ///
     /// The retry carries the mode the demand it stands in for would carry: a
     /// park is retired for the demand that follows it, and that demand asks for
-    /// its derived state the same way any other does.
+    /// its derived state the same way any other does. A mode this host has no
+    /// lifecycle for is refused here before the contention park is retired, so
+    /// a retry the mode refuses retires nothing.
     pub fn retry(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        mode.admitted()?;
+        if !matches!(mode, AttachMode::Durable) {
+            return Ok(DemandLease {
+                outcome: Demand::UnsupportedMode(mode),
+                name: name.clone(),
+                held: None,
+                recovery_demand: None,
+            });
+        }
         if let Some(entry) = self.shared.entries.get(name) {
             entry
                 .gate
@@ -2075,7 +2110,9 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.claim.drop_marker();
                         state.claim.end_poll(epoch);
                         state.require_rebuild();
-                        state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                        state.trust = TrustState::untrusted(
+                            UntrustedReason::store_damaged_rebuilding(detail),
+                        );
                         state.coverage.park_by(epoch, attachment);
                         schedule = Some(
                             state
@@ -2447,9 +2484,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // damage reaching here is damage that rung could not resolve.
                 // The attach acquired nothing and there is no store to rebuild
                 // against: what stands is the verdict, and a demand answers it
-                // with another attach that opens the file again.
+                // with another attach that opens the file again. That is the
+                // reason the entry publishes — the one that says a client's
+                // demand is what resumes it, rather than the one that says the
+                // entry is already rebuilding.
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust = TrustState::untrusted(
+                        UntrustedReason::store_damaged_awaiting_demand(detail),
+                    );
                 }
             }
             None
@@ -2548,7 +2590,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.require_rebuild();
                     state.coverage.park_by(epoch, attachment);
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     next = Some(
                         state
                             .claim
@@ -2800,7 +2843,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -2900,7 +2944,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     next = Some(
                         state
                             .claim
@@ -3171,6 +3216,12 @@ mod tests {
         /// Report the rebuild itself as damaged, which is rung 3 failing to
         /// resolve what it was scheduled for.
         damaged_rebuild: std::sync::atomic::AtomicBool,
+        /// Report the attach as damaged: the rung 3 an attach runs against the
+        /// database it opened met damage it could not resolve. It is the one
+        /// leg whose damage lands on an entry holding no store, so it is the
+        /// only producer of the reason that waits for a demand. One-shot, so
+        /// the demand that answers the verdict finds the leg sound.
+        damaged_attach: std::sync::atomic::AtomicBool,
         /// The vaults a rebuild has run against, in the order it ran.
         rebuilt_vaults: Mutex<Vec<VaultName>>,
         /// Hold the rebuild open, so the state the entry publishes while rung 3
@@ -3285,6 +3336,11 @@ mod tests {
             if self.contend_attach.swap(false, Ordering::SeqCst) {
                 return Err(JobFailure::MaintainerContended(
                     MaintainerIdentity::unknown(),
+                ));
+            }
+            if self.damaged_attach.swap(false, Ordering::SeqCst) {
+                return Err(JobFailure::StoreDamaged(
+                    "the database disk image is malformed".into(),
                 ));
             }
             Ok(self.coverage())
@@ -4872,7 +4928,8 @@ mod tests {
             // the entry holds its coverage and owes the rung against it.
             let mut state = entry.gate.lock().unwrap();
             state.require_rebuild();
-            state.trust = TrustState::untrusted(UntrustedReason::store_damaged("malformed"));
+            state.trust =
+                TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("malformed"));
         }
 
         refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
@@ -6385,7 +6442,7 @@ mod tests {
         wait_for_state(
             &host,
             &name,
-            TrustState::untrusted(UntrustedReason::store_damaged(
+            TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
                 "the database disk image is malformed",
             )),
         );
@@ -6394,9 +6451,9 @@ mod tests {
         wait_for_flag("rebuild_started", &ops.rebuild_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::store_damaged(
-                "the database disk image is malformed"
-            ))),
+            Some(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the database disk image is malformed")
+            )),
             "the entry retired the damage verdict before the rung resolving it had"
         );
         ops.rebuild_release.store(true, Ordering::SeqCst);
@@ -6448,6 +6505,80 @@ mod tests {
         )
         .unwrap_or_else(|failure| panic!("{failure}"));
         assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+    }
+
+    /// **The verdict an attach reports is the one that waits for a demand, and
+    /// the entry then waits.** The attach acquired nothing, so there is no
+    /// database for rung 3 to discard and no work the entry can owe itself.
+    /// What stands is the verdict, and a demand is what opens a file to
+    /// discard.
+    ///
+    /// The counts beside the reason are what make it the reason rather than
+    /// the rebuilding one: one attach and no rebuild once the queue drains, no
+    /// requirement recorded against the entry, and no job left claimed. An
+    /// entry publishing the rebuilding reason here would be publishing a
+    /// promise that it resumes on its own, which nothing below is doing. The
+    /// second demand is the other half — the entry is not wedged, and the
+    /// attach that demand schedules is the one that reaches Ready.
+    #[test]
+    fn damage_an_attach_reports_waits_for_the_demand_that_opens_a_store_to_discard() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture(Arc::clone(&ops), Duration::from_secs(60));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let awaiting = TrustState::untrusted(UntrustedReason::store_damaged_awaiting_demand(
+            "the database disk image is malformed",
+        ));
+
+        ops.damaged_attach.store(true, Ordering::SeqCst);
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, awaiting.clone());
+        settle();
+
+        assert_eq!(
+            host.state(&name),
+            Some(awaiting),
+            "the entry moved off a verdict nothing had answered"
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the entry resumed itself against a verdict that waits for a demand"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "rung 3 ran against a database the attach never opened"
+        );
+        assert_eq!(
+            ops.recovers.load(Ordering::SeqCst),
+            0,
+            "the damage was answered by the ladder that cannot resolve it"
+        );
+        {
+            let state = entry.gate.lock().unwrap();
+            assert!(
+                !state.rebuild_required,
+                "the entry owes a rebuild over a database it does not hold"
+            );
+            assert!(
+                !state.claim.is_held() && state.claim.leg().is_none(),
+                "work stands scheduled against an entry that waits for a demand"
+            );
+        }
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the demand answered the verdict with something other than an attach"
+        );
+        assert_eq!(
+            ops.rebuilds.load(Ordering::SeqCst),
+            0,
+            "the demand asked for a rung against a database nothing had opened"
+        );
+        drop((lease, host));
     }
 
     /// **The handle an entry serves reads from is minted from the store the
@@ -7909,8 +8040,13 @@ mod tests {
     }
 
     /// The demand seam carries the attach mode, and the mode it holds no
-    /// lifecycle for is answered at the seam: the call refuses, the entry is
-    /// left as it stood, and no lease is handed back for work that cannot run.
+    /// lifecycle for is answered at the seam: the lease that comes back holds
+    /// nothing, carries the refusal, and leaves the entry as it stood.
+    ///
+    /// The refusal rides the demand vocabulary, so it is read where every other
+    /// refusal is read — off the lease's completion, and in the wire vocabulary
+    /// through the envelope that completion answers with, carrying the mode
+    /// that was named.
     ///
     /// The parks below are what say the refusal comes before the entry is
     /// touched, one for each door. The fixture's root is one the registry reads
@@ -7928,12 +8064,21 @@ mod tests {
         let entry = host.shared.entries.get(&name).unwrap();
 
         entry.gate.lock().unwrap().identity_refused = Some("the root cannot be read".into());
-        assert!(
-            matches!(
-                host.demand(&name, AttachMode::Throwaway),
-                Err(HostError::ThrowawayUnsupported)
-            ),
+        let refused = host
+            .demand(&name, AttachMode::Throwaway)
+            .expect("the mode is refused through the demand vocabulary, not the error channel");
+        assert_eq!(
+            refused.completion(),
+            Demand::UnsupportedMode(AttachMode::Throwaway),
             "the seam admitted a mode it holds no lifecycle for"
+        );
+        let envelope = refused
+            .answer()
+            .expect_err("a mode the host holds no lifecycle for is a refusal");
+        assert_eq!(
+            envelope.detail(),
+            &ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway),
+            "the refusal names another mode"
         );
         {
             let state = entry.gate.lock().unwrap();
@@ -7947,6 +8092,12 @@ mod tests {
                 "the refused demand recorded a lease against the entry"
             );
         }
+        // The refused lease is dropped here rather than at the end, so the
+        // rest of the case reads the entry's count with nothing outstanding.
+        // What its drop withdraws is read below, against a lease the entry
+        // holds: a withdrawal against a count already at zero is invisible,
+        // because the count saturates at its floor.
+        drop(refused);
         settle();
         assert_eq!(host.state(&name), Some(TrustState::Unattached));
         assert_eq!(
@@ -7960,11 +8111,12 @@ mod tests {
             state.identity_refused = None;
             state.maintainer_contended = Some(MaintainerIdentity::unknown());
         }
-        assert!(
-            matches!(
-                host.retry(&name, AttachMode::Throwaway),
-                Err(HostError::ThrowawayUnsupported)
-            ),
+        let refused_retry = host
+            .retry(&name, AttachMode::Throwaway)
+            .expect("the mode is refused through the demand vocabulary, not the error channel");
+        assert_eq!(
+            refused_retry.completion(),
+            Demand::UnsupportedMode(AttachMode::Throwaway),
             "the retry admitted a mode it holds no lifecycle for"
         );
         let lease = host.demand(&name, AttachMode::Durable).unwrap();
@@ -7972,8 +8124,31 @@ mod tests {
             matches!(*lease.outcome(), Demand::MaintainerContended(_)),
             "the refused retry retired the park it never reached"
         );
+        // A lease holding nothing withdraws nothing on its way out, and the
+        // durable lease above is what makes that readable: the entry counts
+        // one, the refused lease is dropped against that count, and the count
+        // still stands at one. Against a count of zero the same drop reads the
+        // same whether it withdrew nothing or withdrew below a floor that
+        // saturates.
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            1,
+            "the durable demand recorded no lease to withdraw against"
+        );
+        drop(refused_retry);
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            1,
+            "dropping the refused lease withdrew the lease standing beside it"
+        );
+        drop(lease);
+        assert_eq!(
+            entry.gate.lock().unwrap().demand_leases,
+            0,
+            "the durable lease withdrew nothing on its way out"
+        );
 
-        drop((lease, host));
+        drop(host);
     }
 
     /// The registry refusal an attach finds before it acquires anything parks

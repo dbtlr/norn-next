@@ -24,6 +24,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
+use crate::demand::AttachMode;
 use crate::trust::UntrustedReason;
 
 /// Who holds a contended maintainer lock, as far as its diagnostic says.
@@ -87,6 +88,11 @@ pub enum ReasonCode {
     /// asked for.
     #[serde(rename = "host/unknown-vault")]
     HostUnknownVault,
+    /// `host/unsupported-attach-mode` — the demand named a mode the host holds
+    /// no lifecycle for, so nothing was read or written under it. The detail is
+    /// the mode that was named.
+    #[serde(rename = "host/unsupported-attach-mode")]
+    HostUnsupportedAttachMode,
 }
 
 /// The typed payload one reason code carries.
@@ -131,6 +137,16 @@ pub enum ErrorDetail {
         /// The vault name the request asked for, echoed back as typed data.
         name: String,
     },
+    /// The detail of `host/unsupported-attach-mode`: the mode the demand
+    /// named.
+    #[serde(rename = "host/unsupported-attach-mode")]
+    #[non_exhaustive]
+    UnsupportedAttachMode {
+        /// The mode the demand asked for, echoed back as the typed mode: a
+        /// client that supports more than one branches on which of them was
+        /// refused.
+        mode: AttachMode,
+    },
 }
 
 impl ErrorDetail {
@@ -159,6 +175,12 @@ impl ErrorDetail {
         ErrorDetail::UnknownVault { name: name.into() }
     }
 
+    /// The detail of `host/unsupported-attach-mode`, for the `mode` the demand
+    /// named.
+    pub const fn unsupported_attach_mode(mode: AttachMode) -> Self {
+        ErrorDetail::UnsupportedAttachMode { mode }
+    }
+
     /// The code this detail is the payload of.
     pub const fn code(&self) -> ReasonCode {
         match self {
@@ -166,6 +188,7 @@ impl ErrorDetail {
             ErrorDetail::EntryUntrusted { .. } => ReasonCode::HostEntryUntrusted,
             ErrorDetail::MaintainerContended { .. } => ReasonCode::HostMaintainerContended,
             ErrorDetail::UnknownVault { .. } => ReasonCode::HostUnknownVault,
+            ErrorDetail::UnsupportedAttachMode { .. } => ReasonCode::HostUnsupportedAttachMode,
         }
     }
 }
@@ -280,6 +303,7 @@ mod tests {
             ReasonCode::HostEntryUntrusted => "host/entry-untrusted",
             ReasonCode::HostMaintainerContended => "host/maintainer-contended",
             ReasonCode::HostUnknownVault => "host/unknown-vault",
+            ReasonCode::HostUnsupportedAttachMode => "host/unsupported-attach-mode",
         }
     }
 
@@ -296,6 +320,9 @@ mod tests {
                 MaintainerIdentity::named(41, "0.1.0", 1_700_000_000),
             ),
             ReasonCode::HostUnknownVault => ErrorDetail::unknown_vault("notes"),
+            ReasonCode::HostUnsupportedAttachMode => {
+                ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)
+            }
         }
     }
 
