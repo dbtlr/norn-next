@@ -463,6 +463,8 @@ fn no_accepted_edit_over_hostile_documents_loses_a_field() {
         "---\nfolded: >-\n  one\n\n  two\ntitle: t\n---\n",
         "---\nliteral: |\n  key: not a key\ntitle: t\n---\n",
         "---\n<<: {a: 1}\ntitle: t\n---\n",
+        "---\n? title\n: My Note\nk: 1\n---\n",
+        "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\n---\n",
         "---\nempty:\ntitle: t\n---\n",
         "---\ntime: 12:30\ntitle: t\n---\n",
         "---\ntrailing: hello   # note\ntitle: t\n---\n",
@@ -586,6 +588,382 @@ fn an_append_into_a_merge_bearing_block_succeeds() {
     assert_eq!(
         set(source, "zz", Value::Int(7)),
         Ok("---\nb: &m {x: 1}\n<<: *m\nx: 2\np: 3\nq: 4\nr: 5\nzz: 7\n---\nbody\n".to_string())
+    );
+}
+
+/// An explicit key — `? key` on one line, `: value` on the next — writes its
+/// key on a line carrying no `key:` separator, so no scanned line can be
+/// attributed to it. A block writing one at the top level refuses every field
+/// edit, whatever the key is, and still reads its whole value model.
+#[test]
+fn an_explicit_key_refuses_every_field_edit() {
+    for (source, keys) in [
+        (
+            "---\n? title\n: My Note\nk: 1\n---\nbody\n",
+            &["title", "k"],
+        ),
+        (
+            "---\nk: 1\n? title\n: My Note\n---\nbody\n",
+            &["k", "title"],
+        ),
+        (
+            "---\n? title\n: |\n  one\n  two\nk: 1\n---\nbody\n",
+            &["title", "k"],
+        ),
+        (
+            "---\n? title\n: My Note\n? other\n: o\nk: 1\n---\nbody\n",
+            &["title", "other"],
+        ),
+        ("---\n? title\nk: 1\n---\nbody\n", &["title", "k"]),
+    ] {
+        let document = Document::parse(source);
+        assert!(document.fields().is_empty(), "for {source:?}");
+        assert!(
+            document
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterNotEditable),
+            "for {source:?}"
+        );
+        for field in ["title", "k", "other", "absent"] {
+            assert_eq!(
+                document.set_field(field, &Value::String("x".into())),
+                Err(EditError::FrontmatterNotEditable),
+                "{source:?}: setting {field:?}"
+            );
+            assert_eq!(
+                document.remove_field(field),
+                Err(EditError::FrontmatterNotEditable),
+                "{source:?}: removing {field:?}"
+            );
+        }
+        // The value model is untouched: the block still derives it whole,
+        // explicit keys folded in like any other.
+        let map = document
+            .frontmatter()
+            .and_then(Value::as_map)
+            .unwrap_or_else(|| panic!("{source:?}: a mapping"));
+        assert!(
+            keys.iter().all(|key| map.contains_key(key)),
+            "{source:?}: read {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // What is refused is the per-field split, not the block. A whole-block
+    // write is built from the value model and the body, both of which the
+    // refusal leaves standing, so it lands and writes the mapping out in the
+    // ordinary form.
+    let document = Document::parse("---\n? title\n: My Note\nk: 1\n---\nbody\n");
+    let map = document
+        .frontmatter()
+        .and_then(Value::as_map)
+        .expect("a mapping");
+    assert_eq!(
+        render_document(map, document.body(), document.line_ending()),
+        Ok("---\ntitle: My Note\nk: 1\n---\nbody\n".to_string())
+    );
+}
+
+/// The merge directive written in the explicit-key form is a directive line no
+/// field owns and none bounds. Absorbing it into the entry above handed a
+/// remove of that entry the directive's bytes as well; the block refuses its
+/// split instead, and the same refusal covers the whole explicit-key class
+/// rather than this one key.
+#[test]
+fn an_explicit_merge_directive_is_never_deleted_by_a_neighbours_remove() {
+    let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\n---\nbody\n";
+    let document = Document::parse(source);
+    assert!(document.fields().is_empty());
+    assert_eq!(
+        document.remove_field("base"),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    assert_eq!(
+        document.set_field("title", &Value::String("new".into())),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    assert_eq!(
+        document.frontmatter(),
+        Some(&Value::Map(
+            [
+                (
+                    "base",
+                    Value::Map([("title", Value::String("x".into()))].into_iter().collect())
+                ),
+                ("title", Value::String("t".into())),
+            ]
+            .into_iter()
+            .collect()
+        ))
+    );
+}
+
+/// What a refused block keeps and what it loses, on a block the explicit-key
+/// rule refuses. The value model reads whole — every field's value is
+/// still there to be read — while the reads that report a field's *bytes* go
+/// empty, because the refusal is exactly the statement that no bytes can be
+/// attributed to a field. A frontmatter tag and a frontmatter wikilink in such
+/// a block are therefore not reported, the same answer every other refused
+/// block already gives.
+#[test]
+fn a_refused_block_reads_its_values_and_reports_none_of_their_bytes() {
+    let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\ntags: [alpha]\n\
+                  link: \"[[Note]]\"\n---\nbody\n";
+    let document = Document::parse(source);
+
+    assert!(document.field_texts().is_empty());
+    assert!(document.frontmatter_tags().is_empty());
+    assert!(document.frontmatter_wikilinks().is_empty());
+
+    let map = document
+        .frontmatter()
+        .and_then(Value::as_map)
+        .expect("a mapping");
+    assert_eq!(
+        map.get("tags"),
+        Some(&Value::Sequence(vec![Value::String("alpha".into())]))
+    );
+    assert_eq!(map.get("link"), Some(&Value::String("[[Note]]".into())));
+    assert_eq!(map.get("title"), Some(&Value::String("t".into())));
+}
+
+/// The step-over that keeps a quoted scalar's lines out of the scan stops at
+/// the first line holding the quote character, so a scalar carrying one inside
+/// itself re-exposes the lines below. A `? ` there is read as the indicator and
+/// the block refuses, though its split would have held. The block keeps its
+/// value model either way. What the re-exposed lines cost when they spell a
+/// key instead is pinned in the test below.
+#[test]
+fn a_question_mark_below_an_interior_quote_refuses_the_block() {
+    for (source, key) in [
+        ("---\nq: 'a\nb'' c\n? d\ne'\nk: 1\n---\nbody\n", "q"),
+        ("---\nq: \"a\n\\\"x\n? d\ne\"\nk: 1\n---\nbody\n", "q"),
+    ] {
+        let document = Document::parse(source);
+        assert!(document.fields().is_empty(), "for {source:?}");
+        assert_eq!(
+            document.remove_field("k"),
+            Err(EditError::FrontmatterNotEditable),
+            "for {source:?}"
+        );
+        let map = document
+            .frontmatter()
+            .and_then(Value::as_map)
+            .unwrap_or_else(|| panic!("{source:?}: a mapping"));
+        assert!(map.contains_key(key), "for {source:?}");
+        assert_eq!(map.get("k"), Some(&Value::Int(1)), "for {source:?}");
+    }
+}
+
+/// A re-exposed line that spells a key is a candidate the block never wrote as
+/// structure, and which layer answers for it depends on the name it carries.
+/// Colliding with a real key it refuses the block outright. Locating a parsed
+/// key nothing else does it becomes a boundary: the entry above is truncated
+/// inside its own quoted scalar and a field is emitted over bytes that belong
+/// to that scalar. The scan does not catch the second shape — the post-image
+/// re-read of what a write would produce is what refuses the edits.
+#[test]
+fn a_key_re_exposed_below_an_interior_quote_is_answered_for_downstream() {
+    // The re-exposed `other:` collides with the real one, so no key is
+    // uniquely located and the block refuses before any span is emitted.
+    let colliding = Document::parse("---\nq: 'a\nb'' c\nother: inside\nz'\nother: 2\n---\nbody\n");
+    assert!(colliding.fields().is_empty());
+    assert_eq!(
+        colliding.remove_field("other"),
+        Err(EditError::FrontmatterNotEditable)
+    );
+    assert_eq!(
+        colliding.frontmatter().and_then(Value::as_map),
+        Some(
+            &[
+                ("q", Value::String("a b' c other: inside z".into())),
+                ("other", Value::Int(2)),
+            ]
+            .into_iter()
+            .collect::<Mapping>()
+        )
+    );
+
+    // Here the re-exposed `title:` is the only line naming the merge-supplied
+    // `title`, so the split proceeds and is wrong in two places at once.
+    let source =
+        "---\nbase: &b {title: real}\n<<: *b\nq: 'a\nb'' c\ntitle: inside\nz'\n---\nbody\n";
+    let split = Document::parse(source);
+    assert_eq!(
+        split
+            .fields()
+            .iter()
+            .map(|field| (field.name.as_str(), &source[field.line_range.clone()]))
+            .collect::<Vec<_>>(),
+        [
+            ("base", "base: &b {title: real}\n"),
+            ("q", "q: 'a\nb'' c\n"),
+            ("title", "title: inside\nz'\n"),
+        ]
+    );
+    for field in ["base", "q", "title"] {
+        assert_eq!(
+            split.remove_field(field),
+            Err(EditError::PostImageMismatch {
+                field: field.to_string()
+            }),
+            "removing {field:?}"
+        );
+        assert_eq!(
+            split.set_field(field, &Value::Int(1)),
+            Err(EditError::FieldNotEditable {
+                field: field.to_string()
+            }),
+            "setting {field:?}"
+        );
+    }
+}
+
+/// The indicator is `?` and the separator after it. A plain key opening with a
+/// `?`, and a quoted key spelling one, are ordinary fields, and the lines of a
+/// value that merely holds an explicit key belong to the entry that opened
+/// them — the scan steps over an unclosed quoted scalar whose interior lines
+/// carry no quote character of their own, and an indented explicit key is
+/// inside a value its own top-level entry owns whole.
+#[test]
+fn a_question_mark_that_opens_no_explicit_key_leaves_the_block_editable() {
+    for (source, edited) in [
+        (
+            "---\n?title: v\nk: 1\n---\nbody\n",
+            "---\n?title: v\n---\nbody\n",
+        ),
+        (
+            "---\n\"? title\": v\nk: 1\n---\nbody\n",
+            "---\n\"? title\": v\n---\nbody\n",
+        ),
+        (
+            "---\nq: \"one\n? two\n: three\"\nk: 1\n---\nbody\n",
+            "---\nq: \"one\n? two\n: three\"\n---\nbody\n",
+        ),
+        (
+            "---\nmeta:\n  ? a\n  : 1\nk: 1\n---\nbody\n",
+            "---\nmeta:\n  ? a\n  : 1\n---\nbody\n",
+        ),
+        (
+            "---\nnotes: |\n  ? a\n  : 1\nk: 1\n---\nbody\n",
+            "---\nnotes: |\n  ? a\n  : 1\n---\nbody\n",
+        ),
+    ] {
+        assert_eq!(
+            remove(source, "k"),
+            Ok(edited.to_string()),
+            "for {source:?}"
+        );
+    }
+}
+
+/// A block written as one flow mapping reads. Where the opening brace shares a
+/// line with a key the scan reads the brace as part of that key's name, so no
+/// parsed key is located and the block refuses its split outright; where a
+/// lone key survives that, its value span carries the flow's punctuation and
+/// refuses, and the post-image re-read answers for the rest. These shapes pin
+/// that nothing gets through, not which layer answers.
+///
+/// A flow mapping whose braces sit on lines of their own is the shape that
+/// does take an edit, and it is pinned in the test below.
+#[test]
+fn no_edit_into_a_flow_written_block_is_accepted() {
+    for source in [
+        "---\n{k: 1, title: t}\n---\nbody\n",
+        "---\n{k: 1,\n title: t}\n---\nbody\n",
+        "---\n{k: 1}\n---\nbody\n",
+        "---\n{\nk: 1}\n---\nbody\n",
+        "---\n{}\n---\nbody\n",
+    ] {
+        let document = Document::parse(source);
+        for field in ["k", "title", "appended"] {
+            assert!(
+                document.set_field(field, &Value::Int(2)).is_err(),
+                "{source:?}: setting {field:?}"
+            );
+            assert!(
+                document.remove_field(field).is_err(),
+                "{source:?}: removing {field:?}"
+            );
+        }
+        assert!(
+            document.frontmatter().and_then(Value::as_map).is_some(),
+            "{source:?}: reads as a mapping"
+        );
+    }
+    // A flow mapping written across lines is one block-level node, so a key
+    // beside it is not a second entry and the block does not parse at all.
+    assert_eq!(
+        remove("---\n{k: 1}\ntitle: t\n---\nbody\n", "k"),
+        Err(EditError::FrontmatterUnreadable)
+    );
+}
+
+/// A flow mapping whose braces sit on lines of their own leaves every key on
+/// an ordinary `key:` line, so the split holds and a remove of a key another
+/// entry follows lands: the deleted line carries its own separating comma and
+/// the flow stays closed. What still refuses is everything that would leave
+/// the flow half-written: removing the last key would take the closing brace,
+/// and a set over a plain scalar refuses because its value span runs to the
+/// end of the line and so holds the flow's comma or brace. A single-line
+/// quoted value ends its span at the closing quote, leaving the punctuation
+/// outside it, and its set lands; a quoted value continuing onto the next
+/// line has no value span at all, and its set refuses.
+#[test]
+fn a_flow_mapping_braced_on_its_own_lines_takes_a_remove() {
+    assert_eq!(
+        remove("---\n{\nk: 1,\ntitle: t}\n---\nbody\n", "k"),
+        Ok("---\n{\ntitle: t}\n---\nbody\n".to_string())
+    );
+    assert_eq!(
+        remove("---\n{\na: 1,\nb: 2,\nc: 3}\n---\n", "b"),
+        Ok("---\n{\na: 1,\nc: 3}\n---\n".to_string())
+    );
+    // The nested flow's own lines belong to the entry that opened it, so that
+    // entry's remove takes them and no more.
+    assert_eq!(
+        remove("---\n{\na: {\nb: 1},\nc: 2}\n---\n", "a"),
+        Ok("---\n{\nc: 2}\n---\n".to_string())
+    );
+    // The last key holds the closing brace, and the re-read of what the remove
+    // would write refuses it.
+    assert_eq!(
+        remove("---\n{\nk: 1,\ntitle: t}\n---\nbody\n", "title"),
+        Err(EditError::PostImageMismatch {
+            field: "title".to_string()
+        })
+    );
+    assert_eq!(
+        set("---\n{\nk: 1,\ntitle: t}\n---\nbody\n", "k", Value::Int(2)),
+        Err(EditError::FieldNotEditable {
+            field: "k".to_string()
+        })
+    );
+    assert_eq!(
+        set(
+            "---\n{\nk: 1,\ntitle: t}\n---\nbody\n",
+            "appended",
+            Value::Int(2)
+        ),
+        Err(EditError::PostImageMismatch {
+            field: "appended".to_string()
+        })
+    );
+    // A quoted value's span stops at its closing quote, so the comma after it
+    // is not written over and the set lands. The quoted bytes may spell a
+    // brace; it is the flow's own punctuation the span has to stay clear of.
+    assert_eq!(
+        set(
+            "---\n{\na: \"x}y\",\nb: 2}\n---\n",
+            "a",
+            Value::String("NEW".into())
+        ),
+        Ok("---\n{\na: \"NEW\",\nb: 2}\n---\n".to_string())
+    );
+    assert_eq!(
+        remove("---\n{\na: \"x}y\",\nb: 2}\n---\n", "a"),
+        Ok("---\n{\nb: 2}\n---\n".to_string())
     );
 }
 

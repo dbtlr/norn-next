@@ -52,7 +52,8 @@ pub enum EditError {
     },
     /// The block parses, and its field spans cannot be trusted: the scanner
     /// and the parser disagree somewhere in it, so no field in it is
-    /// addressable. Reads are unaffected; no edit is attempted.
+    /// addressable. The value model still reads whole; the reads built on
+    /// field spans report nothing. No edit is attempted.
     FrontmatterNotEditable,
     /// This field's value cannot be named as one span. Reads are unaffected;
     /// the edit is not attempted.
@@ -204,8 +205,8 @@ impl<'a> Document<'a> {
         if spans_untrusted {
             diagnostics.push(Diagnostic::warning(
                 DiagnosticCode::FrontmatterNotEditable,
-                "the frontmatter block's field spans cannot be trusted, so field edits refuse; \
-                 reading is unaffected",
+                "the frontmatter block's field spans cannot be trusted, so field edits refuse and \
+                 no field text is reported; the block still reads whole",
             ));
         }
         Document {

@@ -30,9 +30,28 @@
 //! to exactly one candidate line, the scan and the parser disagree somewhere
 //! and there is no safe per-field split — the mis-located key's bytes would be
 //! absorbed into a neighbour and deleted by an unrelated remove. No field gets
-//! a span; reads are unaffected and every field edit refuses. The same holds
-//! when the value model had to drop an entry: the scanner still sees the line
-//! the parser no longer names.
+//! a span and every field edit refuses. The same holds when the value model
+//! had to drop an entry: the scanner still sees the line the parser no longer
+//! names.
+//!
+//! What a refused block keeps is its value model: it reads whole, every entry
+//! the parser folded included. What it loses is every read built on field
+//! spans — `field_texts`, and the frontmatter tags and wikilinks derived from
+//! it — because those report a field's bytes and a refused block has named
+//! none.
+//!
+//! An entry written in YAML's explicit-key form — the `?` indicator, `? key`
+//! on one line and `: value` on the next — is that ambiguity by construction,
+//! and the block refuses on the spelling rather than on its consequences. The
+//! key is written on a line carrying no `key:` separator, so the scan
+//! attributes no line to it: an explicit *field* leaves a parsed key nothing
+//! names, and an explicit merge directive — `? <<` — leaves two lines no field
+//! owns and none bounds, which a neighbour's remove would otherwise take with
+//! it. A top-level `?` indicator is what the refusal is keyed on, so the whole
+//! class answers alike whatever key it writes. An indented `?` is not that
+//! indicator: it sits either inside a value some top-level entry owns whole,
+//! which is an ordinary absorbed tail, or in a block indented throughout,
+//! which names no top-level line at all and refuses on its unlocatable keys.
 //!
 //! # Blank lines and comments end a field
 //!
@@ -117,7 +136,7 @@ pub(crate) fn field_spans(
         return None;
     }
 
-    let candidates = scan_key_lines(content, &frontmatter_range);
+    let candidates = scan_key_lines(content, &frontmatter_range)?;
 
     let mut name_counts: HashMap<&str, usize> = HashMap::new();
     for candidate in &candidates {
@@ -326,11 +345,28 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 }
 
 /// Identify every top-level `key:` line and the scanner's candidate value span
-/// for it. A multi-line value whose continuation can sit at column 0 — an
-/// unclosed flow collection or quoted scalar — is stepped over so its
-/// continuation lines are not misread as new keys; block scalars, folds and
-/// block collections continue on indented lines the scan already skips.
-fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKeyLine> {
+/// for it, or `None` where the block writes a top-level `?` indicator and no
+/// line attribution holds.
+///
+/// A multi-line value whose continuation can sit at column 0 — an unclosed
+/// flow collection or quoted scalar — is stepped over so its continuation
+/// lines are not misread as new keys; block scalars, folds and block
+/// collections continue on indented lines the scan already skips. Those same
+/// steps are what decide where a `?` indicator is read: only on a line this
+/// loop reaches as structure. Indentation makes that exact for a block
+/// scalar. The quoted-scalar step-over is best-effort — see
+/// [`absorb_until_line_contains`] — so a scalar carrying its quote character
+/// on an interior line re-exposes the lines below it and they are read as
+/// structure. What that costs depends on what a re-exposed line spells. One
+/// beginning `? ` refuses a block whose split would have held. A `key:`-shaped
+/// one is a candidate the block never wrote as structure: naming no parsed key
+/// it is absorbed into the entry above and nothing changes, colliding with a
+/// real key's name it refuses the block, and locating a parsed key no other
+/// line does — or spelling the merge directive — it becomes a boundary and
+/// truncates the entry above inside that entry's own value. The scan does not
+/// answer for that last case: what refuses the edits over such a split is the
+/// post-image re-read of the bytes a write would produce.
+fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec<RawKeyLine>> {
     let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
@@ -351,6 +387,10 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         }
         let line_start = line_starts[index];
         let trimmed_line = line.trim_end_matches(['\r', '\n']);
+
+        if opens_explicit_key(trimmed_line) {
+            return None;
+        }
 
         let Some((name, after_colon, spelling)) = parse_top_level_key(trimmed_line) else {
             index += 1;
@@ -377,7 +417,18 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Vec<RawKey
         }
     }
 
-    fields
+    Some(fields)
+}
+
+/// Whether `line` opens an entry in YAML's explicit-key form: the `?`
+/// indicator, alone on the line or separated from the key written after it.
+///
+/// The separator is what makes it an indicator. `?` begins a plain scalar
+/// wherever a space does not follow it, so `?title: v` is a field of that name,
+/// and a quoted `"? title"` is one too — neither reaches here as an indicator.
+fn opens_explicit_key(line: &str) -> bool {
+    let mut bytes = line.bytes();
+    bytes.next() == Some(b'?') && matches!(bytes.next(), None | Some(b' ') | Some(b'\t'))
 }
 
 /// Whether a block scalar's header asks for the blank lines below it to be
@@ -557,8 +608,9 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
 /// with no record that either was written. The line's text is the only place
 /// that spelling survives, so the properties are read past here, and a
 /// directive line written inline — plain, tagged, quoted, or anchored —
-/// bounds the entry above it. The explicit-key spelling `? <<` is not
-/// recognized here and its line is absorbed into the entry above it.
+/// bounds the entry above it. The `?` indicator spelling `? <<` is judged
+/// nowhere here: a top-level `?` indicator refuses the block's split whole, so
+/// there is no entry for its lines to bound and none to absorb them.
 ///
 /// Past the properties the key is read the way the parser reads it, quotes
 /// included: `!!str "<<"` names the directive as much as `!!str <<` does.
