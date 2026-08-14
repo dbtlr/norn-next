@@ -71,9 +71,9 @@ pub use counters::DerivationCounters;
 pub use error::StoreError;
 pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
-    Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument,
-    StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource,
-    VaultSchemaPin, VectorFacts,
+    IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
+    StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact,
+    TagSource, VaultSchemaPin, VectorFacts,
 };
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
@@ -82,8 +82,8 @@ pub use path::{
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, EmittedPlan, ExplainedStatement, MAX_STORED_DOCUMENT_PAGE, PlanStep, Request,
-    SubjectScope,
+    DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_ENUMERATED_PAGE,
+    MAX_STORED_DOCUMENT_PAGE, PlanStep, Request, SubjectScope,
 };
 #[cfg(feature = "induced-failure")]
 pub use store::induced_failure;
