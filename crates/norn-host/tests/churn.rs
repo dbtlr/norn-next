@@ -1304,15 +1304,18 @@ impl Churned {
     /// it had not started — either makes this the catch-up case wearing another
     /// name, with every claim it makes about concurrency vacuous.
     ///
-    /// **The second reading is what the host did**, and it is the one that
-    /// cannot be arranged by a lucky sample. A walk passes a place once, so a
-    /// row the walk enumerated and found standing is a row only a watcher
-    /// report can take away afterwards — and the store records which of the two
-    /// took each row. Deaths carrying nothing but `heal-prune` are a phase that
-    /// landed wholly ahead of the walk, whatever the entry was publishing at
-    /// the time; a `watcher-removal` among them is the phase having landed
+    /// **The second reading is what the host did**, and together with the
+    /// first it pins the phase's position. A `watcher-removal` death is
+    /// recorded only where a row still stands when the report arrives, and the
+    /// entry runs one job at a time — so an act landing ahead of the walk is
+    /// pruned by the attach leg first and leaves no standing row for a later
+    /// report to kill. Deaths carrying nothing but `heal-prune` are a phase
+    /// that landed wholly ahead of the walk, whatever the entry was publishing
+    /// at the time; a `watcher-removal` among them is the phase having landed
     /// behind the walk's own cursor, which is as close to "inside the walk" as
-    /// anything outside a host can witness.
+    /// anything outside a host can witness. (A settled host produces
+    /// `watcher-removal` too — the reading discriminates only under the first
+    /// reading's mid-heal sample.)
     fn assert_the_workload_overlapped_a_heal(&self) {
         let observed = self
             .overlapped
