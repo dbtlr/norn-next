@@ -5139,33 +5139,33 @@ mod tests {
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
-    /// **A churn workload inside the window, staged rather than raced.**
+    /// **An editor's save inside the window, staged rather than raced.**
     ///
-    /// The churn suite drives ordinary editing at a live host from outside, and
-    /// what it cannot do from there is decide *when* an edit lands relative to
-    /// one heal's enumeration and its opens. That window is reachable here,
-    /// where the walk and the merge are two calls, so the workload the suite
-    /// applies to a tree is applied between them: a document the walk
-    /// enumerated is deleted, and another the walk enumerated has different
-    /// content landed whole over it.
+    /// The churn suite drives editor saves at a live host from outside, and what
+    /// it cannot do from there is decide *when* one lands relative to a heal's
+    /// enumeration and its opens. That window is reachable here, where the walk
+    /// and the merge are two calls, so the same act the suite applies to a tree
+    /// is applied between them: content landed whole over a document the walk
+    /// enumerated.
     ///
-    /// Both converge on the answer a walk begun now holds. The deleted document
-    /// leaves no row, and the replaced one holds the bytes that are there —
-    /// the open reads the file rather than the stat the enumeration carried, so
-    /// content that arrived after the walk is content the merge derives.
+    /// It converges on the answer a walk begun now holds. **The open reads the
+    /// file rather than the stat the enumeration carried**, so the row ends up
+    /// holding the bytes that arrived after the walk rather than the ones it
+    /// saw. The deletion half of this window is
+    /// [`documents_deleted_between_enumeration_and_open_converge_on_their_absence`]
+    /// above.
     ///
     /// The forbidden shape is an environmental refusal, which would leave the
     /// entry untrusted over ordinary editing and wait for a demand to repair it.
     #[test]
-    fn a_churn_workload_between_enumeration_and_open_converges_on_the_tree_it_left() {
-        use norn_testkit::churn::{Act, Applied, Script, Step};
+    fn an_editor_save_between_enumeration_and_open_derives_the_bytes_that_landed() {
+        use norn_testkit::churn::{Act, Script, Step};
 
         /// What the replacement lands, which is what the merge has to derive.
         const AFTER: &[u8] = b"# the bytes after\n";
 
         let f = Fixture::watcherless("heal-open-window-churn");
         fs::write(f.vault().join("steady.md"), "steady").unwrap();
-        fs::write(f.vault().join("vanishing.md"), "here for now").unwrap();
         fs::write(f.vault().join("swapped.md"), "# the bytes before\n").unwrap();
         let mut store = Store::open(f.root.join("window-churn.sqlite3")).unwrap();
         let progress = ProgressReporter::disconnected();
@@ -5179,36 +5179,24 @@ mod tests {
             &progress.healing(),
         )
         .unwrap();
-        assert_eq!(
-            stored_paths(&mut store),
-            ["steady.md", "swapped.md", "vanishing.md"]
-        );
+        assert_eq!(stored_paths(&mut store), ["steady.md", "swapped.md"]);
 
         let walk = walk(f.vault().as_path(), &[]).unwrap();
         let sensitivity = walk.case_sensitivity();
         let enumerated: Vec<_> = walk.collect();
 
         let script = Script::new(
-            "a deletion and an atomic replacement inside the window",
-            vec![
-                Step::new(
-                    "delete a document the walk enumerated",
-                    Act::Remove {
-                        at: "vanishing.md".to_string(),
-                    },
-                ),
-                Step::new(
-                    "land different content whole over a document the walk enumerated",
-                    Act::AtomicReplace {
-                        at: "swapped.md".to_string(),
-                        bytes: AFTER.to_vec(),
-                    },
-                ),
-            ],
+            "an atomic replacement inside the window",
+            vec![Step::new(
+                "land different content whole over a document the walk enumerated",
+                Act::AtomicReplace {
+                    at: "swapped.md".to_string(),
+                    bytes: AFTER.to_vec(),
+                },
+            )],
         );
-        let mut applied = Applied::default();
         script
-            .apply_range(f.vault().as_path(), 0..script.steps().len(), &mut applied)
+            .apply(f.vault().as_path())
             .unwrap_or_else(|problem| panic!("{problem}\n{script}"));
 
         merge_walk(
@@ -5224,11 +5212,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            stored_paths(&mut store),
-            ["steady.md", "swapped.md"],
-            "the workload's deletion kept its row"
-        );
+        assert_eq!(stored_paths(&mut store), ["steady.md", "swapped.md"]);
         assert_eq!(
             store
                 .begin_request()
