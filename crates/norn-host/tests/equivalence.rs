@@ -10,8 +10,10 @@
 //!
 //! **The relative claim is paired with an absolute one.** Two hosts that both
 //! derived nothing would agree, so the case states what the tree really holds:
-//! the population floor comes off the profile, and the pinned vault schema is
-//! read for its bytes. A comparator that stopped projecting a field would pass
+//! the population floor comes off the profile, the pinned vault schema is read
+//! for its bytes, and the one document in the tree that cannot be decoded is
+//! read back on both sides as a finding at a place no document row stands at.
+//! A comparator that stopped projecting a field would pass
 //! the first claim and fail the second only where the second names that field —
 //! which is why the mutation pins in `norn-store`'s own suite are the other half
 //! of this, and this case is the half that says the projection describes a real
@@ -38,7 +40,7 @@ use std::path::Path;
 
 use norn_testkit::equivalence::{Population, StoreProjection, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
-use norn_wire::VaultName;
+use norn_wire::{FindingKind, VaultName};
 
 /// The profile this case derives twice.
 ///
@@ -46,13 +48,39 @@ use norn_wire::VaultName;
 /// it carries ambiguity classes, dangling links, unicode and spaced stems,
 /// clutter that is not a document, and symbolic links a walk refuses to follow.
 /// Every one of those is a place two derivations could disagree.
+///
+/// **None of them leaves a finding row behind.** An ambiguity class and a
+/// dangling link are concluded where a target is resolved, and a heal records
+/// neither: the kinds a heal writes are the ones it reaches by reading a
+/// document — a path or a body it cannot decode, and a frontmatter block that
+/// did not read. A tree of well-formed documents derives no finding at all,
+/// which is why this case writes [`UNDECODABLE_AT`] beside the generated one.
 const PROFILE: &str = "tiny";
+
+/// The one document in the tree the heal cannot decode.
+///
+/// It is written beside the generated tree rather than drawn from it, because
+/// the generator draws documents that derive. A vault with no finding in it
+/// would leave the findings leg of the comparison standing on nothing: two
+/// stores that each derived zero findings agree about findings however broken
+/// the finding pillar is.
+const UNDECODABLE_AT: &str = "undecodable.md";
+
+/// Bytes no UTF-8 decoder accepts, in a file a walk reads as a document.
+///
+/// The heal opens it, refuses to decode the body, and quarantines it: no
+/// document row is written and a finding is recorded at the place instead —
+/// which is the case only an enumeration of the findings table reaches, since
+/// no keyed read starts from a row that is not there.
+const UNDECODABLE: &[u8] = b"# a title\n\nthese bytes are not text: \xff\xfe\n";
 
 #[test]
 fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
     let sandbox =
         Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "equivalence").expect("a sandbox");
     let first = attach::Vault::generate(&sandbox.work_dir().join("attached"), PROFILE);
+    std::fs::write(first.path().join(UNDECODABLE_AT), UNDECODABLE)
+        .expect("writing the document neither derivation can decode");
     let second = first.beside(&sandbox.work_dir().join("second-machine"));
 
     derive(&first, "the first derivation");
@@ -81,7 +109,7 @@ fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
             Population {
                 documents: profile.docs,
                 facts: profile.docs,
-                findings: 0,
+                findings: 1,
                 indexed_terms: profile.docs,
                 vault_schema_pinned: true,
             },
@@ -93,6 +121,29 @@ fn one_vault_derived_twice_from_zero_holds_the_same_derived_facts() {
                 .bytes,
             attach::SCHEMA,
             "{label} pinned bytes the vault does not hold"
+        );
+        // **The finding stands where no document row does.** The quarantine is
+        // what makes it so, and it is the shape the comparison could only reach
+        // by enumerating the findings table: a projection assembled from the
+        // rows the store holds would never ask about this path.
+        let quarantined = projection
+            .findings()
+            .iter()
+            .find(|finding| finding.path == UNDECODABLE_AT)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label} recorded no finding at `{UNDECODABLE_AT}`; it holds {}",
+                    projection.population()
+                )
+            });
+        assert_eq!(
+            quarantined.kind,
+            FindingKind::BodyBytesNotUtf8.as_str(),
+            "{label} recorded another cause at `{UNDECODABLE_AT}`"
+        );
+        assert!(
+            projection.document(UNDECODABLE_AT).is_none(),
+            "{label} derived a document row at `{UNDECODABLE_AT}`, which the heal quarantined"
         );
     }
 
