@@ -16,11 +16,19 @@
 //! is visible in "the request failed", so each is read off the account the
 //! host's own jobs write, off the rows at rest, or off both.
 //!
-//! **Recovery is the other half of each refusal.** A transient environmental
-//! failure is resolved by refusing, so the case that stops there has only shown
-//! the refusal: what says the work was not lost is clearing the condition and
-//! demanding the vault again, and comparing what converges against a derivation
-//! built from zero over the same tree.
+//! **Recovery is the other half of each refusal, and of each tear.** A
+//! transient environmental failure is resolved by refusing, so the case that
+//! stops there has only shown the refusal: what says the work was not lost is
+//! clearing the condition and demanding the vault again, and comparing what
+//! converges against a derivation built from zero over the same tree.
+//!
+//! **Converging is not enough on its own.** A store that was thrown away and
+//! derived again from the same tree converges too, and every recovery bar here
+//! would pass over it — with the work the case was about silently redone rather
+//! than healed. So each recovery attach is read as well as compared: the account
+//! says no rung-3 rebuild ran, and the rows written and changesets committed are
+//! bounded by what the refusal or the tear actually withheld, which a derivation
+//! from zero exceeds. [`assert_healed_only`] is that pair.
 //!
 //! The tears run in a child process. An abort is the only thing that leaves a
 //! database the way a killed process leaves one — no unwinding, no rollback
@@ -38,9 +46,7 @@
 #![allow(clippy::disallowed_methods)] // Acceptance fixture: arranging and judging a vault tree.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
@@ -48,10 +54,12 @@ use norn_host::{
     AttachMode, DemandLease, EvidenceReading, Host, JobEvidence, LifecyclePolicy,
     ProductionEntryOps, ProductionPolicy, RegistryRead,
 };
-use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder, induced_failure};
+use norn_store::induced_failure::{self, ARM_HITS, INCREMENT_SEAM};
+use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid, tombstones};
 use norn_testkit::isolation::{self, Lease};
+use norn_testkit::process::{Run, RunStatus, Sandbox};
 use norn_testkit::wait::Budget;
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
@@ -61,14 +69,17 @@ const CHILD_ROOT: &str = "NORN_HOST_LOCKDOWN_ROOT";
 /// The variable naming which tear the child arms.
 const CHILD_TEAR: &str = "NORN_HOST_LOCKDOWN_TEAR";
 
-/// The variable the store's arms record themselves through.
-const ARM_HITS: &str = "NORN_STORE_ARM_HITS";
-
-/// The seam the store's changeset tears record themselves under.
-const INCREMENT_SEAM: &str = "norn-store/increment";
-
 /// A runaway bound on a state converging, not a bar on how fast it does.
 const WAIT_LIMIT: Duration = Duration::from_secs(120);
+
+/// How long a child may run before the harness ends it and says so.
+///
+/// Above the child's own [`WAIT_LIMIT`], deliberately: a child that cannot
+/// converge reaches its own bound first and reports what it last saw, which is
+/// the better message. This is the backstop under a child that reaches no bound
+/// at all — it is killed and reported as timed out, naming this bound, rather
+/// than left to hang the lane.
+const CHILD_DEADLINE: Duration = Duration::from_secs(180);
 
 /// The signal an abort raises, which is how a torn child reports itself.
 const SIGABRT: i32 = 6;
@@ -126,8 +137,10 @@ fn arming_the_process() -> std::sync::RwLockWriteGuard<'static, ()> {
 /// there, each whole.
 ///
 /// Clearing the condition and demanding the vault again is what says the work
-/// was refused rather than lost: the entry reaches `Ready` and what it holds is
-/// equal to a derivation built from zero over the same tree.
+/// was refused rather than lost: the entry reaches `Ready`, what it holds is
+/// equal to a derivation built from zero over the same tree, and the account of
+/// that attach says it got there by writing the rows the refusal withheld
+/// rather than by deriving the vault over again.
 #[test]
 fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
     let _exclusive = arming_the_process();
@@ -154,6 +167,11 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
         vault.write(&format!("note-{index:03}.md"), &readable(index));
     }
 
+    // The cap is process-wide, so the case that arms one puts it back through a
+    // destructor: a panic between here and the uncap below would otherwise hold
+    // every store this process opens afterwards to a page count it never asked
+    // for.
+    let _disarmed = Disarmed;
     let untrusted = {
         induced_failure::cap_the_pages(held);
         let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
@@ -199,11 +217,15 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
     drop(refused);
 
     // The recovery bar: with room again, an ordinary demand converges on what a
-    // derivation from zero over this tree holds.
+    // derivation from zero over this tree holds — and does it by healing the
+    // work the refusal withheld rather than by starting over. The first attach
+    // covered 4 documents and 36 more were written while the store was
+    // detached, and the refusal committed none of them, so the heal owes 36
+    // rows where a derivation from zero writes all 40.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
-    let lease = attach_and_wait(&serving, vault.name());
-    drop(lease);
+    let healed = heal_and_read(&serving, vault.name());
     drop(serving);
+    assert_healed_only("a full disk that was cleared", healed, 36, 1);
     vault.assert_converged_from_zero("a full disk that was cleared");
 }
 
@@ -291,11 +313,15 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
     drop(refused);
 
     // The recovery bar: with the subtree readable again, an ordinary demand
-    // converges on what a derivation from zero over this tree holds.
+    // converges on what a derivation from zero over this tree holds — and does
+    // it by healing the work the refusal withheld rather than by starting over.
+    // The refused heal changed nothing and no file moved under it, so the work
+    // left over is nothing at all: the recovery writes no row and commits no
+    // changeset, where a derivation from zero writes both documents in one.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
-    let lease = attach_and_wait(&serving, vault.name());
-    drop(lease);
+    let healed = heal_and_read(&serving, vault.name());
     drop(serving);
+    assert_healed_only("a permission that was restored", healed, 0, 0);
     vault.assert_converged_from_zero("a permission that was restored");
 }
 
@@ -328,10 +354,10 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
         vault.write(&format!("note-{index:03}.md"), &readable(index));
     }
 
-    let torn = vault.tear("chunk");
+    let torn = vault.run_child(Some("chunk"));
     assert_eq!(
         torn.status,
-        Some(SIGABRT),
+        RunStatus::Signaled(SIGABRT),
         "the chunk boundary did not end the process it was armed in\n{}",
         torn.stderr
     );
@@ -343,6 +369,8 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
             ("changesets", "1"),
         ],
     );
+    torn.attestation
+        .assert_count("a tear at a chunk boundary", 1);
 
     let mut store = vault.store();
     let rows = every_row(&mut store);
@@ -368,11 +396,15 @@ fn a_tear_at_a_chunk_boundary_leaves_every_committed_chunk_whole() {
     drop(store);
 
     // The coverage is short and the vault is unchanged, so the ordinary attach
-    // heal is what makes up the difference.
+    // heal is what makes up the difference: it writes the 4 documents no row
+    // stands at, 2 to a changeset. A derivation from zero over these 6
+    // documents writes all of them and takes 3 changesets to do it, so the
+    // bound is what tells this heal from a store silently rebuilt and walked
+    // again.
     let serving = vault.serving(ProductionPolicy::new(8, 2).unwrap());
-    let lease = attach_and_wait(&serving, vault.name());
-    drop(lease);
+    let healed = heal_and_read(&serving, vault.name());
     drop(serving);
+    assert_healed_only("a chunk boundary that was torn", healed, 4, 2);
     vault.assert_converged_from_zero("a chunk boundary that was torn");
 }
 
@@ -427,13 +459,19 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
     drop(store);
 
     // The two documents stop reading, each in the way its own signal is about.
+    // Two of the vault's three documents change, and the child heals them under
+    // `ProductionPolicy::new(8, 2)` — a chunk of 2 — so the changed set is
+    // exactly one chunk: the first changeset to commit carries both of them,
+    // which is the changeset `after-commit` tears the findings away from.
+    // `steady.md` never enters the increment, so nothing about the tear depends
+    // on where it would fall in the walk's ordering.
     vault.write_bytes("quarantined.md", UNDECODABLE);
     vault.write("degraded.md", "---\ntitle: : :\n---\n\n# Body\n");
 
-    let torn = vault.tear("after-commit");
+    let torn = vault.run_child(Some("after-commit"));
     assert_eq!(
         torn.status,
-        Some(SIGABRT),
+        RunStatus::Signaled(SIGABRT),
         "the flush was not torn between its increment and its findings\n{}",
         torn.stderr
     );
@@ -445,6 +483,8 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
             ("changesets", "1"),
         ],
     );
+    torn.attestation
+        .assert_count("a tear between a flush's increment and its findings", 1);
 
     // What the tear left: the increment landed, and nothing beside it.
     let mut store = vault.store();
@@ -484,11 +524,14 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
     let hash_before = degraded.content_hash.clone();
     drop(store);
 
-    // The next heal, with no edit to the vault at all.
+    // The next heal, with no edit to the vault at all. The two documents the
+    // tear left bare are the whole of its work, and only the degraded one has a
+    // row to write — the quarantined path yields no facts — where a derivation
+    // from zero over this tree writes that row and `steady.md` beside it.
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
-    let lease = attach_and_wait(&serving, vault.name());
-    drop(lease);
+    let healed = heal_and_read(&serving, vault.name());
     drop(serving);
+    assert_healed_only("a flush torn before its findings", healed, 1, 1);
 
     let mut store = vault.store();
     let refiled = findings_at(&mut store, "quarantined.md");
@@ -536,29 +579,58 @@ const UNDECODABLE: &[u8] = &[0xff, 0xfe, 0x00, 0x9f, 0x92, 0x96];
 /// The tear is armed before the demand, so the heal below is the ordinary
 /// production one: nothing here knows a boundary was armed, and what ends the
 /// process is the store's own check inside the increment the heal ran.
+///
+/// A child started with no tear named arms nothing and runs the same attach to
+/// the end. That is the **control**, and it is what makes every record
+/// assertion beside a tear mean something: same binary, same spawn, same live
+/// record file, and the arm is the only difference between them.
 #[test]
 fn the_child_role_attaches_under_whatever_it_was_armed_at() {
     let Some(root) = std::env::var_os(CHILD_ROOT) else {
-        let _beside = beside_the_arms();
-        // In an ordinary run this is the control that says the child role
-        // attaches at all: with nothing armed, the same code reaches `Ready`
-        // and records nothing.
-        let vault = Vault::new("unarmed-child");
-        vault.write("note.md", &readable(0));
-        attach_under_the_arm(vault.root());
-        let mut store = vault.store();
-        assert_eq!(every_row(&mut store).len(), 1);
-        Attestation::read(&vault.root().join("arm-hits"))
-            .assert_never_reached("an attach with nothing armed", &[(SEAM, INCREMENT_SEAM)]);
+        the_control_attaches_with_nothing_armed();
         return;
     };
-    match std::env::var(CHILD_TEAR).as_deref() {
-        Ok("chunk") => induced_failure::abort_at_the_chunk_boundary(1),
-        Ok("after-commit") => induced_failure::abort_after_committing_changesets(1),
+    let armed = match std::env::var(CHILD_TEAR).as_deref() {
+        Ok("chunk") => {
+            induced_failure::abort_at_the_chunk_boundary(1);
+            true
+        }
+        Ok("after-commit") => {
+            induced_failure::abort_after_committing_changesets(1);
+            true
+        }
+        Err(std::env::VarError::NotPresent) => false,
         other => panic!("the child was given no tear it knows: {other:?}"),
-    }
+    };
     attach_under_the_arm(Path::new(&root));
-    panic!("the armed boundary did not end this process");
+    assert!(!armed, "the armed boundary did not end this process");
+}
+
+/// The control: a child spawned exactly as a torn one is, with nothing armed.
+///
+/// **The record file is live in this run**, pointed at by the same variable the
+/// store's arms read, which is the whole point of running it as a child. An arm
+/// records itself only where a harness named a file to record into, so a control
+/// that left the variable unset would satisfy "nothing was recorded" by having
+/// no sink to record into — and the absence assertion the tears rest on would be
+/// true of a protocol with no arms left in it at all.
+fn the_control_attaches_with_nothing_armed() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("unarmed-child");
+    vault.write("note.md", &readable(0));
+    let ran = vault.run_child(None);
+    assert_eq!(
+        ran.status,
+        RunStatus::Exited(0),
+        "the child role did not reach the end of an attach with nothing armed\n{}",
+        ran.stderr
+    );
+    let mut store = vault.store();
+    assert_eq!(every_row(&mut store).len(), 1);
+    ran.attestation
+        .assert_never_reached("an attach with nothing armed", &[(SEAM, INCREMENT_SEAM)]);
+    ran.attestation
+        .assert_count("an attach with nothing armed", 0);
 }
 
 /// Attach the vault at `root` through a production host and wait for it.
@@ -572,6 +644,63 @@ fn attach_under_the_arm(root: &Path) {
 // ---------------------------------------------------------------------------
 // Waiting
 // ---------------------------------------------------------------------------
+
+/// Attach `name` through `serving` and hand back what that attach spent.
+///
+/// The reading is a difference over one account, taken around the demand, so it
+/// is the recovery attach's own work and not the work of anything before it.
+fn heal_and_read(serving: &Serving, name: &VaultName) -> EvidenceReading {
+    let opening = serving.evidence();
+    let lease = attach_and_wait(serving, name);
+    drop(lease);
+    serving.evidence().since(opening)
+}
+
+/// **What separates a recovery from a silent rebuild from zero.**
+///
+/// Every recovery leg here converges on a derivation built from zero over the
+/// same tree — and so does a store that was discarded and walked again, which is
+/// the outcome each of these cases is stated against. Convergence therefore
+/// cannot be the whole assertion, and this is the other half: the recovery did
+/// the work left over, and no more.
+///
+/// The two assertions divide the ground between them, and neither covers the
+/// other's half:
+///
+/// - `rebuilds_run` is the host's rung-3 leg alone. It counts a job that
+///   discarded derived state and built it again, and it counts nothing the
+///   store's own open does — a database the open discarded for a schema it
+///   could not read is a rebuild this counter never sees.
+/// - The work bound is what closes that door. It is read off the counters that
+///   move with the **changed set** rather than with the vault: an attach heal
+///   opens every document it walks whatever it ends up writing, so `document_opens`
+///   says the same thing after a recovery and after a rebuild — while the rows a
+///   job wrote and the changesets it committed do not. A derivation from zero
+///   writes every document the tree holds; a recovery that healed only what was
+///   withheld writes what was withheld. `upserts` and `changesets` are that
+///   work's shape, so a store that came to its answer by starting over fails
+///   here whichever door it went through.
+#[track_caller]
+fn assert_healed_only(subject: &str, spent: EvidenceReading, upserts: u64, changesets: u64) {
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "{subject}: the recovery ran the host's rung-3 rebuild, which discards derived state \
+         rather than healing it: {spent:?}"
+    );
+    assert!(
+        spent.documents_upserted <= upserts,
+        "{subject}: the recovery wrote {} document rows where the work left over is {upserts}, so \
+         it derived more of the vault than the tear or the refusal withheld: {spent:?}",
+        spent.documents_upserted
+    );
+    assert!(
+        spent.changesets_applied <= changesets,
+        "{subject}: the recovery committed {} changesets where the work left over takes \
+         {changesets}, so it derived more of the vault than the tear or the refusal withheld: \
+         {spent:?}",
+        spent.changesets_applied
+    );
+}
 
 /// Demand `name`, wait for it to reach `Ready`, and hand back the demand.
 fn attach_and_wait(
@@ -675,36 +804,31 @@ fn every_row(store: &mut Store) -> Vec<StoredDocument> {
 // The vault
 // ---------------------------------------------------------------------------
 
-/// Distinguishes two trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
 /// A vault tree, and the machine-local directories a host serves it from.
 struct Vault {
     root: PathBuf,
     name: VaultName,
-    /// Whether this view owns the tree. A child adopts one the parent made and
-    /// must not take it away when its own value drops.
-    owned: bool,
+    /// The sandbox the tree lives in, and what a child this vault runs is
+    /// isolated by. A child adopts a tree its parent made and holds none, so
+    /// nothing it drops takes the tree away.
+    sandbox: Option<Sandbox>,
 }
 
 impl Vault {
     fn new(label: &str) -> Vault {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("a clock past the epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "norn-host-lockdown-{label}-{}-{}-{nonce}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
+        let sandbox = Sandbox::new(
+            Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &format!("norn-host-lockdown-{label}"),
+        )
+        .expect("a sandbox");
+        let root = sandbox.work_dir();
         std::fs::create_dir_all(root.join("vault/.norn")).expect("a vault root");
         std::fs::write(root.join("vault/.norn/schema.yaml"), "version: 1\n")
             .expect("the vault schema");
         Vault {
             root,
             name: VaultName::new(VAULT_NAME).expect("a vault name"),
-            owned: true,
+            sandbox: Some(sandbox),
         }
     }
 
@@ -713,7 +837,7 @@ impl Vault {
         Vault {
             root: root.to_path_buf(),
             name: VaultName::new(VAULT_NAME).expect("a vault name"),
-            owned: false,
+            sandbox: None,
         }
     }
 
@@ -784,24 +908,37 @@ impl Vault {
         }
     }
 
-    /// Run this binary again as a child, armed at `tear`, and report what it
-    /// left behind.
-    fn tear(&self, tear: &str) -> Torn {
+    /// Run this binary again as a child armed at `tear`, and report what it
+    /// left behind. A child given no tear is the control, and arms nothing.
+    ///
+    /// The run goes through the testkit's harness rather than through a bare
+    /// command, so the child gets a cleared environment with the variables this
+    /// case names and the isolation root its parent resolved — a child left to
+    /// derive that root would take every lease uncontended and report nothing
+    /// about having done so — and a deadline, so a child that wedges is killed
+    /// and reported instead of hanging the lane.
+    fn run_child(&self, tear: Option<&str>) -> Ran {
+        let sandbox = self
+            .sandbox
+            .as_ref()
+            .expect("a vault that owns its tree runs the children over it");
         let hits = self.root.join("arm-hits");
-        let output = Command::new(std::env::current_exe().expect("this binary"))
+        let mut run = Run::new(sandbox, std::env::current_exe().expect("this binary"))
             .args([
                 "--exact",
                 "the_child_role_attaches_under_whatever_it_was_armed_at",
                 "--nocapture",
             ])
+            .deadline(CHILD_DEADLINE)
             .env(CHILD_ROOT, &self.root)
-            .env(CHILD_TEAR, tear)
-            .env(ARM_HITS, &hits)
-            .output()
-            .expect("running the lockdown child");
-        Torn {
-            status: signal_of(&output.status),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            .env(ARM_HITS, &hits);
+        if let Some(tear) = tear {
+            run = run.env(CHILD_TEAR, tear);
+        }
+        let outcome = run.wait().expect("running the lockdown child");
+        Ran {
+            status: outcome.status,
+            stderr: outcome.stderr_text(),
             attestation: Attestation::read(&hits),
         }
     }
@@ -817,7 +954,7 @@ impl Vault {
         let beside = Vault {
             root: self.root.join("from-zero"),
             name: self.name.clone(),
-            owned: false,
+            sandbox: None,
         };
         std::fs::create_dir_all(beside.root()).expect("a second machine's directories");
         let entry = Entry::new(
@@ -858,20 +995,22 @@ impl Vault {
     }
 }
 
-impl Drop for Vault {
-    fn drop(&mut self) {
-        if self.owned {
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-}
-
-/// What a torn child left behind.
-struct Torn {
-    /// The signal that ended it, or nothing where it exited on its own.
-    status: Option<i32>,
+/// What a child left behind.
+struct Ran {
+    /// How the run ended: a signal for a child a tear reached, an exit for the
+    /// control, and a timeout for a child the harness had to kill.
+    status: RunStatus,
     stderr: String,
     attestation: Attestation,
+}
+
+/// Everything back to what a store opened in an ordinary process meets.
+struct Disarmed;
+
+impl Drop for Disarmed {
+    fn drop(&mut self) {
+        induced_failure::disarm();
+    }
 }
 
 /// A host, and the real-watcher lease covering the watcher it installs.
@@ -932,10 +1071,4 @@ fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .expect("setting a directory's mode");
-}
-
-/// The signal that ended a child, or nothing where it ended itself.
-fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
 }
