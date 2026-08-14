@@ -12,7 +12,9 @@
 //! The mirror image is here too. The three values the projection deliberately
 //! drops — row identifiers, write generations, timestamps — are changed in one
 //! store and the two stay equal, because a comparator that reported those would
-//! fail every honest pair.
+//! fail every honest pair. The tombstone pillar is pinned the same way round: a
+//! death one store recorded leaves the two equal, and each store answers for
+//! its own deaths through the operational leg instead.
 //!
 //! Most mutations go through the store's own writer, which is what a caller can
 //! really do. Four fields have no writer that reaches them alone — the full-text
@@ -24,7 +26,7 @@
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
-    Divergence, Population, StoreProjection, assert_operationally_valid,
+    Divergence, Population, StoreProjection, assert_operationally_valid, tombstones,
 };
 
 use super::common::{
@@ -386,6 +388,43 @@ fn a_row_identifier_a_generation_and_a_timestamp_leave_two_stores_equal() {
         &right,
         "one vault derived twice, at two sets of identifiers, generations and instants",
     );
+}
+
+/// **The tombstone exclusion, pinned the way a vault produces it.** One store
+/// derived a document and then watched it leave; the other never saw it. The
+/// tree they describe now is the same tree, so they are equivalent — a
+/// comparator that projected deaths would fail the healed-against-rebuilt pair
+/// it exists to judge — and each still answers for its own deaths through the
+/// operational leg, which is the only guarantee the pillar carries.
+#[test]
+fn a_death_one_store_recorded_leaves_the_two_equal() {
+    let mut pair = Pair::new("pin-tombstone-exclusion");
+    {
+        let mut request = pair.right.begin_request();
+        write_document(
+            &mut request,
+            &document("three/gone.md", "hash-3", "a departed body\n"),
+        );
+        record_death(&mut request, &path("three/gone.md"), Provenance::HealPrune);
+    }
+    // The pillar really holds a death on one side and none on the other, so the
+    // equality below is the exclusion holding rather than nothing having
+    // happened.
+    assert_eq!(
+        tombstones(&mut pair.left)
+            .expect("draining the first store's tombstones")
+            .len(),
+        0
+    );
+    assert_eq!(
+        tombstones(&mut pair.right)
+            .expect("draining the second store's tombstones")
+            .len(),
+        1
+    );
+    pair.assert_equivalent();
+    assert_operationally_valid(&mut pair.left, "the store that never saw the document");
+    assert_operationally_valid(&mut pair.right, "the store that watched it leave");
 }
 
 /// **The operational leg, and what it is separate from.** A store answers for

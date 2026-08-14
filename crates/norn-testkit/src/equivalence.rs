@@ -30,6 +30,25 @@
 //!   report, and two derivations of one vault happen at two instants by
 //!   construction.
 //!
+//! # Two pillars are outside the projection, and each for its own reason
+//!
+//! - **Tombstones.** A death is a fact about one store's history rather than
+//!   about the vault as it stands. A store that watched a document leave holds
+//!   a tombstone for it; a store derived from zero over the same tree now
+//!   records no death for a document it never saw, and the two agree about
+//!   every answer either of them can give. Projecting deaths would therefore
+//!   fail exactly the healed-against-rebuilt comparison this module exists to
+//!   make. What holds a store's deaths to account is the per-store leg:
+//!   [`assert_operationally_valid`] drains the pillar, which is where the
+//!   closed vocabulary and the generation ordering each death against a later
+//!   fact about the same path are read.
+//! - **Document vectors.** No derivation writes `document_vectors`. The store
+//!   accepts a vector through its own writer and no host job calls it, so the
+//!   table is empty in every store this comparator reads and projecting it
+//!   would compare one empty table against another. The embedding layer is what
+//!   extends the projection to cover it, at the point where two derivations
+//!   converging on the same vectors becomes a claim.
+//!
 //! # Equality is never vacuous here
 //!
 //! Two empty stores are equal, and reading that as evidence would green a
