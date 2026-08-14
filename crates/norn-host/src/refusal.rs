@@ -75,6 +75,11 @@ impl Demand {
                 format!("no vault is registered under the name `{name}`"),
                 ErrorDetail::unknown_vault(name.as_str()),
             )),
+            Demand::UnsupportedMode(mode) => Err(ErrorEnvelope::new(
+                "this host attaches registered vaults durably and holds no lifecycle for the \
+                 mode this demand named",
+                ErrorDetail::unsupported_attach_mode(mode),
+            )),
         }
     }
 }
@@ -100,7 +105,7 @@ fn answer_state(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
 
 #[cfg(test)]
 mod tests {
-    use norn_wire::{MaintainerIdentity, WarmingPhase, WatcherLossCause};
+    use norn_wire::{AttachMode, MaintainerIdentity, WarmingPhase, WatcherLossCause};
 
     use crate::registry::AliasConflict;
 
@@ -127,6 +132,7 @@ mod tests {
         DuplicateRoot,
         IdentityRefused,
         UnknownVault,
+        UnsupportedMode,
     }
 
     impl Shape {
@@ -139,7 +145,8 @@ mod tests {
                 Shape::MaintainerContended => Some(Shape::DuplicateRoot),
                 Shape::DuplicateRoot => Some(Shape::IdentityRefused),
                 Shape::IdentityRefused => Some(Shape::UnknownVault),
-                Shape::UnknownVault => None,
+                Shape::UnknownVault => Some(Shape::UnsupportedMode),
+                Shape::UnsupportedMode => None,
             }
         }
     }
@@ -169,6 +176,7 @@ mod tests {
             Demand::DuplicateRoot(_) => Shape::DuplicateRoot,
             Demand::IdentityRefused(_) => Shape::IdentityRefused,
             Demand::UnknownVault => Shape::UnknownVault,
+            Demand::UnsupportedMode(_) => Shape::UnsupportedMode,
         }
     }
 
@@ -247,6 +255,10 @@ mod tests {
             (
                 Demand::UnknownVault,
                 Some(ErrorDetail::unknown_vault(asked().as_str())),
+            ),
+            (
+                Demand::UnsupportedMode(AttachMode::Throwaway),
+                Some(ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway)),
             ),
         ]
     }

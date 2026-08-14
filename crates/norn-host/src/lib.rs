@@ -13,7 +13,7 @@ mod registry;
 
 pub use lifecycle::{
     Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
-    ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
+    LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.
