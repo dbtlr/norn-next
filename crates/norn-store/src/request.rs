@@ -114,7 +114,7 @@ const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
 /// selects those ahead of these and tells [`stored_document`] where the row
 /// begins.
-const STORED_DOCUMENT_COLUMNS: &str = "path, suffix_key, content_hash, byte_length, body_offset,
+const STORED_DOCUMENT_COLUMNS: &str = "path, content_hash, byte_length, body_offset,
             frontmatter, frontmatter_diagnostic_count, generation, derived_at";
 
 /// How many finding ids one further-query batches its `IN` list by.
@@ -932,6 +932,42 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page of stored suffix keys, each beside the path whose
+    /// row holds it, in path order.
+    ///
+    /// `documents.suffix_key` is a derived column: the path type writes it and
+    /// the resolution ladder ranges over it, and every read that would notice a
+    /// key drifting from its path goes through the drifted range. So the check
+    /// is a recompute at rest over every row, and this is the page that reaches
+    /// every row to make it — no keyed read asks the question, and carrying the
+    /// column on the document row instead would put a string on every reader of
+    /// a document page for the sake of one verifier.
+    ///
+    /// The pair is what makes a row checkable: the stored key on one side, the
+    /// path that has to produce it on the other. `after` is exclusive, and the
+    /// order is `path`'s own bytewise order, which is total over a column one
+    /// row per path is stored under.
+    pub fn suffix_keys_after(
+        &self,
+        after: Option<&DocumentPath>,
+        limit: usize,
+    ) -> Result<Vec<(DocumentPath, String)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a suffix-key page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        Self::read_all(
+            &self.store.connection,
+            SUFFIX_KEY_PAGE_SQL,
+            params_from_iter(text_page_parameters(after.map(DocumentPath::as_str), limit)),
+            stored_suffix_key,
+            "reading the suffix-key page",
+        )
+    }
+
     /// The next bounded page of the terms the full-text index holds, in term
     /// order.
     ///
@@ -1100,6 +1136,7 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredDocumentPage(scope, order) => document_page_sql(scope, order),
             ExplainedStatement::StoredFindingPage => finding_page_sql(),
             ExplainedStatement::StoredTombstonePage => TOMBSTONE_PAGE_SQL.to_string(),
+            ExplainedStatement::StoredSuffixKeyPage => SUFFIX_KEY_PAGE_SQL.to_string(),
             ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
         };
         let read = |row: &Row<'_>| {
@@ -1152,7 +1189,7 @@ impl<'a> Request<'a> {
                     "explaining an emitted statement",
                 )?
             }
-            // Each of the three enumerations is explained with its cursor
+            // Each of the four enumerations is explained with its cursor
             // bound, for the reason [`explained_page_cursor`] states: the
             // statement text does not branch on the cursor, so the plan is the
             // same either way today, and an edit that ever gave the cursor its
@@ -1167,16 +1204,18 @@ impl<'a> Request<'a> {
                 read,
                 "explaining an emitted statement",
             )?,
-            ExplainedStatement::StoredTombstonePage => Self::read_all(
-                &self.store.connection,
-                &explained,
-                params_from_iter(text_page_parameters(
-                    Some(EXPLAINED_PAGE_CURSOR_LEAF),
-                    MAX_PAGE,
-                )),
-                read,
-                "explaining an emitted statement",
-            )?,
+            ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
+                Self::read_all(
+                    &self.store.connection,
+                    &explained,
+                    params_from_iter(text_page_parameters(
+                        Some(EXPLAINED_PAGE_CURSOR_LEAF),
+                        MAX_PAGE,
+                    )),
+                    read,
+                    "explaining an emitted statement",
+                )?
+            }
             ExplainedStatement::IndexedTermPage => Self::read_all(
                 &self.store.connection,
                 &explained,
@@ -1348,6 +1387,9 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::stored_tombstones_after`], the page a caller drains the whole
     /// tombstones pillar through.
     StoredTombstonePage,
+    /// [`Request::suffix_keys_after`], the page a caller drains every stored
+    /// suffix key through to recompute it against its own path.
+    StoredSuffixKeyPage,
     /// [`Request::indexed_terms_after`], the page a caller drains the full-text
     /// index's own vocabulary through.
     IndexedTermPage,
@@ -1813,6 +1855,21 @@ const TOMBSTONE_PAGE_SQL: &str = "SELECT path, last_content_hash, provenance, ge
              ORDER BY path
              LIMIT ?2";
 
+/// The statement [`Request::suffix_keys_after`] emits.
+///
+/// `documents_path` is unique, so `path` orders the table totally and the index
+/// that holds that order is the one the seek runs through. The cursor is the
+/// coalesced floor for the reason every page here has one: a cursor spelled as
+/// a filter reads the rows already paged before it returns anything. The key
+/// column is read off the row the seek reached rather than off an index of its
+/// own, because `documents_suffix_key` orders by the key and this page orders
+/// by the path.
+const SUFFIX_KEY_PAGE_SQL: &str = "SELECT path, suffix_key
+             FROM documents
+             WHERE path > COALESCE(?1, '')
+             ORDER BY path
+             LIMIT ?2";
+
 /// The statement [`Request::indexed_terms_after`] emits.
 ///
 /// The vocabulary reports its rows in term order, so the page states the order
@@ -1864,17 +1921,15 @@ pub(crate) fn probe_parameters(probe: &SuffixProbe) -> impl Params {
 /// A document row, read from `first` onwards.
 fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
     let path: String = row.get(first)?;
-    let stored_suffix_key: String = row.get(first + 1)?;
-    let content_hash: String = row.get(first + 2)?;
-    let byte_length: u64 = row.get(first + 3)?;
-    let body_offset: u64 = row.get(first + 4)?;
-    let frontmatter: Option<String> = row.get(first + 5)?;
-    let frontmatter_diagnostic_count: u32 = row.get(first + 6)?;
-    let generation: i64 = row.get(first + 7)?;
-    let derived_at: i64 = row.get(first + 8)?;
+    let content_hash: String = row.get(first + 1)?;
+    let byte_length: u64 = row.get(first + 2)?;
+    let body_offset: u64 = row.get(first + 3)?;
+    let frontmatter: Option<String> = row.get(first + 4)?;
+    let frontmatter_diagnostic_count: u32 = row.get(first + 5)?;
+    let generation: i64 = row.get(first + 6)?;
+    let derived_at: i64 = row.get(first + 7)?;
     Ok(DocumentPath::new(&path).map(|path| StoredDocument {
         path,
-        stored_suffix_key,
         content_hash,
         byte_length,
         body_offset,
@@ -1883,6 +1938,13 @@ fn stored_document(row: &Row<'_>, first: usize) -> Reading<StoredDocument> {
         generation,
         derived_at,
     }))
+}
+
+/// One row's path and the suffix key stored beside it.
+fn stored_suffix_key(row: &Row<'_>) -> Reading<(DocumentPath, String)> {
+    let path: String = row.get(0)?;
+    let suffix_key: String = row.get(1)?;
+    Ok(DocumentPath::new(&path).map(|path| (path, suffix_key)))
 }
 
 fn stored_tombstone(row: &Row<'_>) -> Reading<StoredTombstone> {

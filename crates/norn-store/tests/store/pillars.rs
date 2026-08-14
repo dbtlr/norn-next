@@ -605,17 +605,20 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         }
         ExplainedStatement::StoredFindingPage
         | ExplainedStatement::StoredTombstonePage
+        | ExplainedStatement::StoredSuffixKeyPage
         | ExplainedStatement::IndexedTermPage => {
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it"
         }
     }
 }
 
-/// The three statements that drain a whole pillar, named once so the bar and
-/// the cursor-spelling bar judge the same set.
+/// The four statements a caller drains end to end to account for everything one
+/// pillar holds, named once so the bar and the cursor-spelling bar judge the
+/// same set.
 const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::StoredFindingPage,
     ExplainedStatement::StoredTombstonePage,
+    ExplainedStatement::StoredSuffixKeyPage,
     ExplainedStatement::IndexedTermPage,
 ];
 
@@ -849,7 +852,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
 }
 
 /// **A pillar's enumeration is a seek, not a pass over what was already
-/// drained.** Each of these three pages is drained end to end by a caller
+/// drained.** Each of these four pages is drained end to end by a caller
 /// accounting for a whole pillar, so a page that reaches its first row by
 /// stepping over the rows ahead of it makes that drain cost the pillar once per
 /// page of it.
@@ -861,6 +864,8 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
 ///   sorts.
 /// - The tombstone page seeks `tombstones_path`, which is unique, so `path`
 ///   orders the table totally and the page states that order.
+/// - The suffix-key page seeks `documents_path`, unique for the same reason, and
+///   reads the key column off the row that seek reached.
 /// - The vocabulary page hands its bound to the full-text index's own module,
 ///   which is what a virtual table's index selection is. A module given no
 ///   constraint reports the pair `0:` and is a read of everything; this one
@@ -898,7 +903,7 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
         page.assert_no_temp_btree();
     }
 
-    // The two pages over ordinary tables name the index the seek runs through,
+    // The three pages over ordinary tables name the index the seek runs through,
     // which a plan over a virtual table cannot: a module reports which index it
     // chose by number and never by name.
     plan(
@@ -914,6 +919,13 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     );
     tombstones.assert_searches("tombstones");
     tombstones.assert_uses_index("tombstones_path");
+    let suffix_keys = plan(
+        request
+            .emitted_plan(ExplainedStatement::StoredSuffixKeyPage)
+            .expect("a query plan"),
+    );
+    suffix_keys.assert_searches("documents");
+    suffix_keys.assert_uses_index("documents_path");
 }
 
 /// **Every enumeration is complete and drains one page at a time.** A pillar
@@ -986,6 +998,28 @@ fn an_enumeration_drained_a_page_at_a_time_reaches_every_row() {
         terms.push(term.term);
         assert!(terms.len() < 32, "the indexed-term cursor did not advance");
     }
+    let mut keyed: Vec<(String, String)> = Vec::new();
+    let mut keyed_after: Option<norn_store::DocumentPath> = None;
+    while let Some((path, suffix_key)) = request
+        .suffix_keys_after(keyed_after.as_ref(), 1)
+        .expect("a page of stored suffix keys")
+        .into_iter()
+        .next()
+    {
+        keyed.push((path.as_str().to_string(), suffix_key));
+        keyed_after = Some(path);
+        assert!(keyed.len() < 32, "the suffix-key cursor did not advance");
+    }
+    assert_eq!(
+        keyed,
+        vec![
+            ("one/glossary.md".to_string(), "glossary/one/".to_string()),
+            ("two/glossary.md".to_string(), "glossary/two/".to_string()),
+        ],
+        "the enumeration reaches every row's stored key beside the path that has to produce it, \
+         which is the pair no keyed read hands back"
+    );
+
     assert_eq!(terms, vec!["alpha", "beta", "gamma"]);
     let beta = request
         .indexed_terms_after(Some("alpha"), 1)
@@ -1010,6 +1044,7 @@ fn an_enumeration_refuses_a_page_bound_it_does_not_hold() {
     for limit in [0, norn_store::MAX_PAGE + 1] {
         assert!(request.stored_findings_after(None, limit).is_err());
         assert!(request.stored_tombstones_after(None, limit).is_err());
+        assert!(request.suffix_keys_after(None, limit).is_err());
         assert!(request.indexed_terms_after(None, limit).is_err());
     }
 }
@@ -1134,7 +1169,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
             }
         }
     }
-    // The three enumerations bind the same shape over their own column: the
+    // The four enumerations bind the same shape over their own column: the
     // cursor is `COALESCE`'s first argument, and the floor it falls back to is
     // below every key the column holds.
     for statement in ENUMERATIONS {
@@ -1153,7 +1188,7 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
         );
         judged += 1;
     }
-    assert_eq!(judged, 15, "a scope, an order or a pillar went unjudged");
+    assert_eq!(judged, 16, "a scope, an order or a pillar went unjudged");
 }
 
 /// **Findings maintenance is scoped by affected ambiguity class.** A changed path

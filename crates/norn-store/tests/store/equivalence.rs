@@ -26,7 +26,7 @@
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
-    Divergence, Population, StoreProjection, assert_operationally_valid, tombstones,
+    Divergence, PAGE, Population, StoreProjection, assert_operationally_valid, tombstones,
 };
 
 use super::common::{
@@ -406,6 +406,64 @@ fn a_suffix_key_that_drifted_from_its_path_fails_the_operational_leg() {
     induced_failure::execute_out_of_band(&mut store, "UPDATE documents SET suffix_key = 'drift/'")
         .expect("moving the stored suffix key alone");
     assert_operationally_valid(&mut store, "a store whose suffix key drifted from its path");
+}
+
+/// The path of the `ordinal`-th document of a numbered vault, counting from one.
+///
+/// The zero padding is what makes the numbering the byte order: `doc-0002.md`
+/// sorts ahead of `doc-0010.md`, so a case can name the row a page ends on.
+fn numbered(ordinal: usize) -> String {
+    format!("doc-{ordinal:04}.md")
+}
+
+/// A vault of `count` documents at those paths.
+fn many_documents(store: &mut Store, count: usize) {
+    let facts: Vec<_> = (1..=count)
+        .map(|ordinal| document(&numbered(ordinal), "hash-1", "a body\n"))
+        .collect();
+    write_documents(&mut store.begin_request(), &facts);
+}
+
+/// Move one row's stored suffix key off the path that produced it.
+///
+/// `documents.path` is unique, so the predicate names one row. A predicate that
+/// named none would leave the store sound and the case around it would fail for
+/// finding no panic, which is what keeps these cases from passing vacuously.
+fn drift_one_key(store: &mut Store, at: &str) {
+    induced_failure::execute_out_of_band(
+        store,
+        &format!("UPDATE documents SET suffix_key = 'drift/' WHERE path = '{at}'"),
+    )
+    .expect("moving one stored suffix key");
+}
+
+/// **The recompute reaches the row a page ends on.** The keys are drained a
+/// bounded page at a time, and a drain that advanced its cursor over the row it
+/// paged last without checking it would pass a store whose only drifted key sits
+/// exactly there. The vault holds more rows than two pages carry and one row
+/// drifts, through the fenced seam for the reason the pin above states.
+#[test]
+#[should_panic(expected = "holds a suffix key its own path does not produce")]
+fn a_suffix_key_that_drifted_where_a_page_ends_fails_the_operational_leg() {
+    let scratch = Scratch::new("operational-leg-suffix-key-page-end");
+    let mut store = scratch.open();
+    many_documents(&mut store, PAGE * 2 + 1);
+    drift_one_key(&mut store, &numbered(PAGE));
+    assert_operationally_valid(&mut store, "a store whose key drifted where a page ends");
+}
+
+/// **The recompute reaches the row the drain ends on.** A drain that stopped at
+/// the last full page, or that read a short final page and dropped it, would
+/// pass a store whose only drifted key is on that page.
+#[test]
+#[should_panic(expected = "holds a suffix key its own path does not produce")]
+fn a_suffix_key_that_drifted_on_the_last_page_fails_the_operational_leg() {
+    let scratch = Scratch::new("operational-leg-suffix-key-last-page");
+    let mut store = scratch.open();
+    let rows = PAGE * 2 + 1;
+    many_documents(&mut store, rows);
+    drift_one_key(&mut store, &numbered(rows));
+    assert_operationally_valid(&mut store, "a store whose key drifted on the last page");
 }
 
 /// **The tombstone exclusion, pinned the way a vault produces it.** One store

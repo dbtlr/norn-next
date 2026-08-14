@@ -312,13 +312,13 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and nine named statements carry an index bar through it: suffix candidates,
+connection — and ten named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 the page a walk reads its scope's unaccounted finding subjects through, the ordered
-document page a heal merges its walk against, and the three enumerations a caller drains a
-whole pillar through: the findings table, the tombstones, and the vocabulary the full-text
-index holds.
+document page a heal merges its walk against, and the four enumerations a caller drains a
+whole pillar through: the findings table, the tombstones, every row's stored suffix key
+beside the path that has to produce it, and the vocabulary the full-text index holds.
 
 The document page and the finding-subject page are barred in the same terms, because a page
 is judged by what it reads before it returns its first row: the cursor is a bound on an
@@ -332,14 +332,16 @@ stores it narrows that pass to a seek of the scope's own range; a vault that fol
 case bounds the scope under the folding while that index orders bytewise, so the fold reads
 as a filter over the one pass the cursor seeks into.
 
-The three enumerations carry the bar their shapes admit. Each reaches its first row without
+The four enumerations carry the bar their shapes admit. Each reaches its first row without
 a full scan and without a sorter, over a column whose order is total, so a drain of a whole
-pillar is a walk of an index rather than a re-read of the table per page. The two over
+pillar is a walk of an index rather than a re-read of the table per page. The three over
 ordinary tables also name what they seek: the findings page searches `findings` by the row
-key its cursor is, and the tombstone page seeks the unique path index that orders that
-pillar. The vocabulary page reads a virtual table, where a module reports the index it
-chose by number and never by name, so what is barred there is that a bound reached the
-module at all — an unconstrained module reports the pair `0:` and is a read of everything.
+key its cursor is, the tombstone page seeks the unique path index that orders that pillar,
+and the suffix-key page seeks the unique path index over `documents` and reads the key
+column off the row it reached. The vocabulary page reads a virtual table, where a module
+reports the index it chose by number and never by name, so what is barred there is that a
+bound reached the module at all — an unconstrained module reports the pair `0:` and is a
+read of everything.
 
 A plan does not say which of two candidate bounds a seek took — a scope's floor and a
 cursor report the same plan text — so every paged statement carries one further bar, taken

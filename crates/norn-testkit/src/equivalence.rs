@@ -74,7 +74,11 @@ use norn_store::{
 /// vault is read in many bounded pages rather than one wide one: a reader that
 /// asked for the largest page it could would be a working set that grows with
 /// the vault.
-const PAGE: usize = 128;
+///
+/// Public because a case that puts a row exactly where a page ends has to spell
+/// that position, and a case that spelled its own number would stop testing the
+/// boundary the moment this one moved.
+pub const PAGE: usize = 128;
 
 /// Everything one store holds that can change a later answer.
 ///
@@ -526,12 +530,14 @@ impl StoreProjection {
 ///   consumes no version number, so a row here would be a migration nothing
 ///   applied.
 /// - Every stored suffix key is the key its own path produces. The column is a
-///   derived one the resolution ladder ranges over, and no read compares it
-///   with the path beside it, so a row whose key drifted answers a suffix probe
-///   it does not belong to and stands outside the range of the one it does.
-///   This is a claim about one store rather than about two — the key is a pure
-///   function of the path both stores hold — which is why it is asked here and
-///   not in the projection.
+///   derived one the resolution ladder ranges over, and no read that answers a
+///   caller's question compares it with the path beside it, so a row whose key
+///   drifted answers a suffix probe it does not belong to and stands outside
+///   the range of the one it does. The store's suffix-key enumerator is what
+///   hands the two back as a pair, and this leg drains it. The claim is about
+///   one store rather than about two — the key is a pure function of the path
+///   both stores hold — which is why it is asked here and not in the
+///   projection.
 pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
     store.verify_integrity().unwrap_or_else(|problem| {
         panic!("{subject}: the store is not internally consistent: {problem}")
@@ -586,36 +592,37 @@ pub fn assert_operationally_valid(store: &mut Store, subject: &str) {
         );
     }
 
-    for_each_stored_document(store, |document| {
+    for_each_stored_suffix_key(store, |path, stored| {
         assert_eq!(
-            document.stored_suffix_key,
-            document.path.suffix_key(),
+            stored,
+            path.suffix_key(),
             "{subject}: the row at `{}` holds a suffix key its own path does not produce",
-            document.path.as_str()
+            path.as_str()
         );
     })
-    .unwrap_or_else(|problem| panic!("{subject}: draining the document rows: {problem}"));
+    .unwrap_or_else(|problem| panic!("{subject}: draining the stored suffix keys: {problem}"));
 }
 
-/// Hand every stored document row over, a bounded page at a time.
-fn for_each_stored_document(
+/// Hand every row's stored suffix key over beside its path, a bounded page at a
+/// time.
+///
+/// The pair comes off the store's own suffix-key enumerator rather than off a
+/// document page, so the recompute reaches every row without putting the key
+/// column on the readers that page documents for their facts.
+fn for_each_stored_suffix_key(
     store: &mut Store,
-    mut visit: impl FnMut(&norn_store::StoredDocument),
+    mut visit: impl FnMut(&DocumentPath, &str),
 ) -> Result<(), StoreError> {
     let request = store.begin_request();
     let mut after: Option<DocumentPath> = None;
     loop {
-        let page = request.stored_documents_after_ordered(
-            after.as_ref(),
-            PAGE,
-            StoredPathOrder::Sensitive,
-        )?;
-        let Some(last) = page.last() else {
+        let page = request.suffix_keys_after(after.as_ref(), PAGE)?;
+        let Some((last, _)) = page.last() else {
             return Ok(());
         };
-        after = Some(last.path.clone());
-        for document in &page {
-            visit(document);
+        after = Some(last.clone());
+        for (path, stored) in &page {
+            visit(path, stored);
         }
     }
 }
