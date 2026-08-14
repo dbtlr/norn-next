@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded-by: 0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md
 date: 2026-08-13
 ---
 

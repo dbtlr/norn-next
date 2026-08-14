@@ -722,6 +722,59 @@ fn every_named_statement_searches_the_index_its_parameters_are_bounds_for() {
         "the sorter is not the ladder's own order: {:?}",
         sorters[0]
     );
+
+    // **The walked-scope prune's page is one ordered pass over `findings_path`,
+    // and the bar it carries is the findings table's rather than the vault's.**
+    // A page is a cursor into that index — the rows come off it in the order the
+    // page states, so nothing sorts and the distinct subjects are adjacent — and
+    // the anti-join that drops a subject a document row stands at is a seek of
+    // `documents_path` per row rather than a read of the documents table. What
+    // the page does not carry is a seek bound: a scope, a kind and a standing row
+    // are all filters on rows the index order already reached, so a scope holding
+    // no unaccounted subject costs one pass over the findings index. That is the
+    // measured trade — the findings table holds a vault's defective documents
+    // rather than its documents — and a narrower bound is a second index this
+    // table has no reader asking for.
+    let prefix = norn_store::DirectoryPrefix::new("one").expect("a directory");
+    for scope in [
+        norn_store::SubjectScope::Vault,
+        norn_store::SubjectScope::Subtree(&path("one/glossary.md")),
+        norn_store::SubjectScope::Under(&prefix),
+    ] {
+        for order in [
+            norn_store::StoredPathOrder::Sensitive,
+            norn_store::StoredPathOrder::AsciiCaseInsensitive,
+        ] {
+            let subjects = plan(
+                request
+                    .emitted_plan(ExplainedStatement::FindingSubjectsWithoutRows(
+                        scope,
+                        &[
+                            FindingKind::PathNamesNoDocument,
+                            FindingKind::BodyBytesNotUtf8,
+                        ],
+                        order,
+                    ))
+                    .expect("a query plan"),
+            );
+            subjects.assert_no_table_scan();
+            subjects.assert_no_full_scan_of("documents");
+            subjects.assert_searches("documents");
+            subjects.assert_uses_index("findings_path");
+            subjects.assert_uses_index("documents_path");
+            subjects.assert_no_temp_btree();
+            // A scope bounded by paths the vault spells as they are stored is a
+            // seek of that range and not a pass over the index: one range holds
+            // a root and everything under it, which is what keeps the page's
+            // order the index's.
+            if order == norn_store::StoredPathOrder::Sensitive
+                && scope != norn_store::SubjectScope::Vault
+            {
+                subjects.assert_no_full_scan_of("findings");
+                subjects.assert_searches("findings");
+            }
+        }
+    }
 }
 
 /// **Findings maintenance is scoped by affected ambiguity class.** A changed path
@@ -1188,6 +1241,144 @@ fn re_deriving_some_of_a_subjects_kinds_leaves_the_rest_standing() {
         0
     );
     assert_eq!(request.counters().get("findings_discarded"), Some(1));
+}
+
+/// **A walk's scope reaches the subjects it has to account for, and reaches no
+/// others.** The page is the read half of the walked-scope prune: the subjects a
+/// scope holds, of the kinds its caller derives, that no document row stands at.
+/// A row standing at a subject is the walk's own account of that place, so such a
+/// subject never comes back here.
+#[test]
+fn the_walked_scope_page_names_the_subjects_no_document_row_stands_at() {
+    let scratch = Scratch::new("walked-scope-page");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let kinds = &[
+        FindingKind::BodyBytesNotUtf8,
+        FindingKind::PathNamesNoDocument,
+    ];
+    let page = |request: &norn_store::Request<'_>,
+                scope: norn_store::SubjectScope<'_>,
+                kinds: &[FindingKind],
+                after: Option<&norn_store::DocumentPath>| {
+        request
+            .finding_subjects_without_rows_after(
+                scope,
+                kinds,
+                after,
+                16,
+                norn_store::StoredPathOrder::Sensitive,
+            )
+            .expect("reading a page of finding subjects")
+            .iter()
+            .map(|subject| subject.as_str().to_string())
+            .collect::<Vec<String>>()
+    };
+
+    // The rows go in first: a changeset discards the findings in every class its
+    // paths are in, so a row written after a finding about its class takes it.
+    write_documents(
+        &mut request,
+        &[
+            document("standing.md", "hash-1", "a body\n"),
+            document("one/standing.md", "hash-1", "a body\n"),
+        ],
+    );
+    for at in [
+        "standing.md",
+        "one/standing.md",
+        "gone.md",
+        "one",
+        "one.md",
+        "one/gone.md",
+        "one/deep/gone.md",
+    ] {
+        request
+            .record_finding(&violation(at))
+            .expect("recording a finding");
+    }
+    request
+        .record_finding(&ambiguity("one/gone.md", "glossary", "glossary/", &[], 2))
+        .expect("recording a finding");
+
+    // The vault scope holds every subject no row stands at, once however many
+    // findings stand there, in the order a cursor pages forward through.
+    assert_eq!(
+        page(&request, norn_store::SubjectScope::Vault, kinds, None),
+        [
+            "gone.md",
+            "one",
+            "one.md",
+            "one/deep/gone.md",
+            "one/gone.md"
+        ],
+        "the page did not name the subjects a walk of the vault has to account for"
+    );
+
+    // The kinds are the caller's: a subject holding only another producer's
+    // finding is outside the page, exactly as it is outside that caller's
+    // discard.
+    assert_eq!(
+        page(
+            &request,
+            norn_store::SubjectScope::Vault,
+            &[FindingKind::PathNamesNoDocument],
+            None
+        ),
+        ["one/gone.md"]
+    );
+    assert!(
+        page(&request, norn_store::SubjectScope::Vault, &[], None).is_empty(),
+        "a caller deriving no kind read a subject it could not take"
+    );
+
+    // A subtree holds its root's own subject and its segment-aligned
+    // descendants, and a textual neighbour of the root is neither.
+    assert_eq!(
+        page(
+            &request,
+            norn_store::SubjectScope::Subtree(&path("one")),
+            kinds,
+            None
+        ),
+        ["one", "one/deep/gone.md", "one/gone.md"]
+    );
+    // A directory that names no document holds only what is under it.
+    assert_eq!(
+        page(
+            &request,
+            norn_store::SubjectScope::Under(
+                &norn_store::DirectoryPrefix::new("one").expect("a directory")
+            ),
+            kinds,
+            None
+        ),
+        ["one/deep/gone.md", "one/gone.md"]
+    );
+
+    // The cursor is exclusive, so a caller pages forward across its own
+    // discards rather than re-reading what it already took.
+    assert_eq!(
+        page(
+            &request,
+            norn_store::SubjectScope::Subtree(&path("one")),
+            kinds,
+            Some(&path("one/deep/gone.md"))
+        ),
+        ["one/gone.md"]
+    );
+
+    // A page outside the bound is refused rather than answered short.
+    assert!(matches!(
+        request.finding_subjects_without_rows_after(
+            norn_store::SubjectScope::Vault,
+            kinds,
+            None,
+            0,
+            norn_store::StoredPathOrder::Sensitive,
+        ),
+        Err(StoreError::Bound { .. })
+    ));
 }
 
 /// **Class-scoped maintenance runs in both directions, and discard-then-record is
