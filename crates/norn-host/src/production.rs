@@ -2021,10 +2021,11 @@ impl Account {
     /// **A leg registers a scope only where its own reading covered that scope
     /// whole, and absorbs every root that reading passed over.** Three legs
     /// reach it: a merge that enumerated every entry its scope holds and
-    /// withheld each root it did not enter, and the two answers the filesystem
-    /// gives about a dirty path and everything under it at once — the path is
-    /// not there, and the path is a regular file. The last two are the readings
-    /// the row prune beside them acts on.
+    /// withheld each root it did not enter and each name it opened nothing at,
+    /// and the two answers the filesystem gives about a dirty path and
+    /// everything under it at once — the path is not there, and the path is a
+    /// regular file. The last two are the readings the row prune beside them
+    /// acts on.
     ///
     /// A walk that refuses reaches none of them: its error ends the job ahead of
     /// the prune, which is what leaves every finding in its scope standing.
@@ -2032,11 +2033,22 @@ impl Account {
     /// **A leg that registers nothing needs no absorption.** The reading of the
     /// roots this job's deaths vacated and the sweep of a poisoned root both
     /// read the tree and neither registers, so the places they touch are judged
-    /// by the scopes above: a place inside a registered scope is one the merge
-    /// that registered it enumerated — filing at it, or withholding the root
-    /// that hides it — and a place inside no registered scope is one the prune
-    /// never reaches. What those legs do reach is [`Filed`], which they add to
-    /// as they file.
+    /// by the registrations above — and each registering leg answers for its own
+    /// scope on its own terms.
+    ///
+    /// A merge enumerated every entry its scope holds, so a place inside that
+    /// scope is one it read and filed at, one it withheld — the root that hides
+    /// it, or the name it opened nothing at — or one nothing renders onto. The
+    /// two filesystem answers register a scope holding no entry at all: nothing
+    /// is at a path that is not there and so nothing is under it, and a regular
+    /// file holds nothing beneath it. A scope with no entry in it has no
+    /// spelling to read and no root to pass over, which is why those legs
+    /// withhold nothing and still register: a place inside such a scope, whose
+    /// own spellings sit inside it too, is a place nothing renders onto. A place
+    /// whose spellings sit above the scope is one [`Account::concluded`] refuses
+    /// on its unrendered ancestor, and a place inside no registered scope is one
+    /// the prune never reaches. What the non-registering legs do reach is
+    /// [`Filed`], which they add to as they file.
     fn walked(&mut self, scope: HealScope<'_>, order: StoredPathOrder) {
         self.walked.push(Walked {
             scope: scope.owned(),
