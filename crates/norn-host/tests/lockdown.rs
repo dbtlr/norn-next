@@ -170,9 +170,17 @@ fn a_full_disk_refuses_the_heal_and_the_entry_stays_untrusted() {
         );
         untrusted
     };
+    // The reason is the case's own arm attesting: a refusal that named anything
+    // else is a refusal this arrangement did not cause, and the entry would then
+    // be untrusted for a reason no assertion here is stated over.
     assert!(
         untrusted.contains("full"),
         "the entry is untrusted for a reason that does not name the disk: {untrusted}"
+    );
+    assert!(
+        untrusted.contains("EnvironmentalRefusal"),
+        "a full disk was published as something other than a broken environment, which is what \
+         sends an entry to a rung that discards its database: {untrusted}"
     );
 
     induced_failure::uncap_the_pages();
@@ -250,9 +258,17 @@ fn an_unreadable_subtree_refuses_the_heal_rather_than_pruning_it() {
         );
         untrusted
     };
+    // The reason is the case's own arm attesting: it has to name the subtree
+    // whose mode was taken away and the denial that came of it, or the entry is
+    // untrusted for something this arrangement did not cause.
     assert!(
-        !untrusted.is_empty(),
-        "the entry went untrusted with nothing to say"
+        untrusted.contains("locked") && untrusted.contains("Permission denied"),
+        "the entry is untrusted for a reason that is not the revoked subtree: {untrusted}"
+    );
+    assert!(
+        untrusted.contains("EnvironmentalRefusal"),
+        "a revoked permission was published as something other than a broken environment, which \
+         is what sends an entry to a rung that discards its database: {untrusted}"
     );
 
     let mut refused = vault.store();
