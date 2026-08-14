@@ -79,6 +79,11 @@ pub(crate) enum Stage {
     Cleanup,
 }
 
+// The stage vocabulary is what a harness arms and what a record names, so a
+// build that arms nothing constructs none of it. The names still belong to the
+// seam rather than to the suite: they are what the widened half is stated over,
+// and a build that carried a different set would be a different seam.
+#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
 impl Stage {
     /// Every stage, in the order the replacement protocol runs them.
     pub(crate) const ALL: [Stage; 6] = [
@@ -119,6 +124,8 @@ impl Stage {
 /// [`io::ErrorKind`](std::io::ErrorKind) of its own, and which a caller reads
 /// off the refusal as an error number — and another say nothing at all, because
 /// the process it was armed in does not reach a return.
+// Only an armed build constructs an answer, for the same reason.
+#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Answer {
     /// The stage meets this error.
@@ -133,6 +140,7 @@ pub(crate) enum Answer {
     Ends,
 }
 
+#[cfg_attr(not(feature = "induced-failure"), allow(dead_code))]
 impl Answer {
     /// The name a harness arms this answer under.
     pub(crate) const fn name(self) -> &'static str {

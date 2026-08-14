@@ -5611,6 +5611,62 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A replacement store that cannot be created releases the entry rather
+    /// than climbing again.**
+    ///
+    /// Rung 3 is the top of the ladder: its answer to damage is to discard the
+    /// database and write the store schema again. So a creation that itself
+    /// meets a corrupt database is the one state no rung above it resolves, and
+    /// the required behavior is to report damage and give everything back —
+    /// coverage, then the store, then the maintainer lock. The forbidden
+    /// outcomes are the two shapes of hiding it: reporting `Ok` over a store
+    /// that was never created, and keeping the maintainer lock so no later
+    /// attach can take the vault on.
+    ///
+    /// This is the arm the store's creation types damage at:
+    /// `error::sql_at_statement` is what the statement list's failure goes
+    /// through, and a build that stopped typing it as damage reports the
+    /// environmental refusal a lower rung would answer by meeting the same
+    /// condition again.
+    #[test]
+    fn a_rung_three_whose_replacement_store_cannot_be_created_releases_the_entry() {
+        let f = Fixture::new("rebuild-uncreatable");
+        write_a_vault_of_documents(&f, 4);
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let database = attachment.store.path().to_path_buf();
+
+        norn_store::induced_failure::execute_out_of_band(
+            &mut attachment.store,
+            "DROP TRIGGER documents_fts_delete; DELETE FROM documents",
+        )
+        .unwrap();
+        // The database rung 3 is about to write in place of the damaged one.
+        norn_store::induced_failure::corrupt_the_next_store_creation_at(&database);
+
+        let failure = ops
+            .rebuild(&name, attachment, &progress)
+            .err()
+            .expect("a rung 3 whose replacement store cannot be created");
+        assert!(
+            matches!(failure, JobFailure::StoreDamaged(_)),
+            "a store schema that met a corrupt database reported {failure:?}, which sends the \
+             entry back to a rung that meets the same condition"
+        );
+
+        // Released: the maintainer lock is free, so a later attach takes the
+        // vault on rather than finding this run still holding it. That attach
+        // creates the store the failed one could not, which is what says the
+        // arm was one-shot and the refusal was the environment of that moment.
+        let mut attachment = ops
+            .attach(&f.registration(), &progress)
+            .expect("the failed rung 3 released the entry");
+        assert_eq!(attachment.store.path(), database.as_path());
+        assert_eq!(stored_paths(&mut attachment.store).len(), 4);
+        ops.detach(&name, attachment);
+    }
+
     /// Everything one derivation of a vault produced, in the shape two
     /// derivations are compared as.
     ///
