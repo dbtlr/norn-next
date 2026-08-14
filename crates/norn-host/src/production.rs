@@ -262,13 +262,13 @@ impl ProductionEntryOps {
         let exclusions = exclusions(&attachment.registration, &attachment._shadows);
         // Pinning first is what makes this the re-derivation leg of a schema
         // change: every finding the walk below records carries the fingerprint
-        // the pin just installed. What the pin discarded stands again where the
-        // finding is **place-scoped**: such a finding sits only where no
+        // the pin just installed. What the pin discarded stands again on both
+        // sides of the split. A **place-scoped** finding sits only where no
         // document row does, and the walk reads every such path whatever its
-        // bytes say. The rest of the walk is hash-gated, so a **document-scoped**
-        // finding — one standing beside the row it is about — is re-derived by
-        // the walk only where that document's content hash moved, and otherwise
-        // returns when the document next changes.
+        // bytes say. A **document-scoped** finding stands beside the row it is
+        // about, and that row states its own defect — so the walk re-derives the
+        // document whose row asserts a frontmatter nothing read while no finding
+        // stands at it, with no content hash having moved.
         Self::pin_schema(&mut attachment.store, &attachment.registration)?;
         heal_documents(
             &mut attachment.store,
@@ -2016,13 +2016,25 @@ impl Account {
     /// Record that this job read `scope` to its end, so the job's end may prune
     /// the findings that scope no longer accounts for.
     ///
-    /// Two legs reach it, and both read a whole scope: a merge that enumerated
-    /// every entry its scope holds, and a dirty path the filesystem answers is
-    /// not there — an answer about that path and everything under it, which is
-    /// the same answer the row prune beside it acts on.
+    /// **A leg registers a scope only where its own reading covered that scope
+    /// whole, and absorbs every root that reading passed over.** Three legs
+    /// reach it: a merge that enumerated every entry its scope holds and
+    /// withheld each root it did not enter, and the two answers the filesystem
+    /// gives about a dirty path and everything under it at once — the path is
+    /// not there, and the path is a regular file. The last two are the readings
+    /// the row prune beside them acts on.
     ///
-    /// A walk that refuses reaches neither: its error ends the job ahead of the
-    /// prune, which is what leaves every finding in its scope standing.
+    /// A walk that refuses reaches none of them: its error ends the job ahead of
+    /// the prune, which is what leaves every finding in its scope standing.
+    ///
+    /// **A leg that registers nothing needs no absorption.** The reading of the
+    /// roots this job's deaths vacated and the sweep of a poisoned root both
+    /// read the tree and neither registers, so the places they touch are judged
+    /// by the scopes above: a place inside a registered scope is one the merge
+    /// that registered it enumerated — filing at it, or withholding the root
+    /// that hides it — and a place inside no registered scope is one the prune
+    /// never reaches. What those legs do reach is [`Filed`], which they add to
+    /// as they file.
     fn walked(&mut self, scope: HealScope<'_>, order: StoredPathOrder) {
         self.walked.push(Walked {
             scope: scope.owned(),

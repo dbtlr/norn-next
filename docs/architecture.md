@@ -316,8 +316,11 @@ connection — and five named statements carry an index bar through it: suffix c
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 and the page a walk reads its scope's unaccounted finding subjects through, whose bar is the
-weaker one its shape admits: an ordered pass over the findings index, never a read of the
-table, never a sorter, and an indexed seek per row for the document the place may hold.
+weaker one its shape admits: an ordered pass over the findings index per scope a job walked,
+never a read of the table, never a sorter, and an indexed seek per row for the document the
+place may hold. A scope the vault spells as it stores it narrows that pass to a seek; a vault
+that folds ASCII case bounds the scope under the folding and reads the pass, which is what
+the row page beside it already costs per scope, over the larger table and through a sorter.
 None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
 query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
 per PR, and no query shape carries a timing or a memory bar.
