@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use norn_config::VaultName;
 use norn_config::registry::{Entry, Registry};
 use norn_fs::{Identity, Refusal, path_identity};
+use norn_wire::VaultName;
 
 /// Every registry name that resolves to one filesystem root.
 ///

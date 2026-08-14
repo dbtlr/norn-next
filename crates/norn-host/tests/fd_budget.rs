@@ -7,15 +7,15 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
-use norn_config::{ConfigDirs, VaultName};
 use norn_host::{
     AttachMode, DemandLease, Host, LifecyclePolicy, ProductionEntryOps, ProductionPolicy,
     RegistryRead,
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::TrustState;
+use norn_wire::{TrustState, VaultName};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
 const FD_BUDGET: usize = 12;

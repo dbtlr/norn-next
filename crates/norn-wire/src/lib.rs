@@ -14,7 +14,9 @@
 //! finding is filed under, [`FindingKind`], with the [`FindingScope`] its kind
 //! answers and its [`Severity`]. Maintainer
 //! contention carries the diagnostic [`MaintainerIdentity`] reported by the
-//! lock without changing an entry's trust state.
+//! lock without changing an entry's trust state. Requests are spelled here
+//! too: the [`VaultName`] a request names its vault by, and the [`AttachMode`]
+//! a demand asks for its derived state under.
 //!
 //! Nothing crosses the seam that is not a type from here. There is no untyped
 //! JSON value in any signature and no JSON-in-a-string; a payload that cannot
@@ -51,15 +53,19 @@
 //!
 //! **A tagged object or a flat string** is decided by whether the variants
 //! carry data. A closed vocabulary whose members carry nothing is a flat
-//! string, as [`ReasonCode`], [`FindingKind`], [`Severity`],
+//! string, as [`ReasonCode`], [`FindingKind`], [`Severity`], [`AttachMode`],
 //! [`WatcherLossCause`] and [`WarmingPhase`] are; an enum whose variants may
 //! carry a payload is a
 //! tagged object, as [`TrustState`], [`UntrustedReason`] and [`ErrorDetail`]
 //! are. The flat string keeps a code matchable as a value; the tagged object
 //! keeps a payload's arrival from changing what the value is. Two of those
-//! four flat strings are code registries; [`WatcherLossCause`] and
+//! flat strings are code registries; [`WatcherLossCause`] and
 //! [`WarmingPhase`] are not codes but nested bare-string values under `cause`
-//! and `phase`, carrying no namespace.
+//! and `phase`, carrying no namespace, and [`AttachMode`] is a request
+//! parameter a demand carries in rather than anything a refusal is filed
+//! under. [`VaultName`] is a flat string of a third kind: not a vocabulary at
+//! all but a grammar, whose read path is its constructor, so a name that
+//! crossed is a name that parsed.
 //!
 //! **Doc comments on a type, a variant or a field are published.** schemars
 //! lifts them verbatim into the schema `description`s an MCP consumer reads,
@@ -78,9 +84,13 @@
 //! as a literal carries a constructor: [`ErrorEnvelope::new`],
 //! [`TrustState::warming`], [`TrustState::untrusted`],
 //! [`UntrustedReason::watcher_lost`],
-//! [`UntrustedReason::environmental_refusal`], [`ErrorDetail::duplicate_root`],
+//! [`UntrustedReason::environmental_refusal`],
+//! [`UntrustedReason::store_damaged_rebuilding`],
+//! [`UntrustedReason::store_damaged_awaiting_demand`],
+//! [`ErrorDetail::duplicate_root`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
-//! [`ErrorDetail::unknown_vault`], [`MaintainerIdentity::named`] and
+//! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
+//! [`MaintainerIdentity::named`] and
 //! [`MaintainerIdentity::unknown`].
 //!
 //! **What `#[non_exhaustive]` protects is Rust destructuring, not a writer's
@@ -146,10 +156,14 @@
 //! detail's wire tag *is* the code string, and [`ErrorDetail::code`] hands back
 //! the code the detail belongs to.
 
+mod demand;
 mod error;
 mod finding;
+mod name;
 mod trust;
 
+pub use demand::AttachMode;
 pub use error::{ErrorDetail, ErrorEnvelope, MaintainerIdentity, ReasonCode};
 pub use finding::{FindingKind, FindingScope, Severity, UnknownFindingKind, UnknownSeverity};
+pub use name::{IllegalVaultName, VaultName};
 pub use trust::{TrustState, UntrustedReason, WarmingPhase, WatcherLossCause};

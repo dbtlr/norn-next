@@ -9,49 +9,26 @@ use norn_config::machine::tokens::TokenLabel;
 use norn_config::registry::{SchemaSource, VaultRoot};
 use norn_config::{ConfigDirs, ConfigError, VaultName};
 
-/// The grammar is RFC 3986's scheme production: a lowercase letter, then
-/// lowercase letters, digits, `+`, `.` and `-`.
+/// The grammar is `norn-wire`'s — a name crosses the client/host seam as well
+/// as keying this crate's registry table — and what this crate owns is the
+/// reading of a refusal from it. A name a registry file offers that the grammar
+/// does not accept is one of this crate's own refusals by the time a caller
+/// sees it, carrying the string that was offered and what the grammar wanted.
 #[test]
-fn the_names_the_grammar_accepts() {
-    for text in [
-        "a",
-        "notes",
-        "notes2",
-        "norn-vault",
-        "a.b",
-        "a+b",
-        "a-b.c+d",
-        "x1234567890",
-    ] {
-        let name = VaultName::new(text).unwrap_or_else(|e| panic!("`{text}` was refused: {e}"));
-        assert_eq!(name.as_str(), text);
-        assert_eq!(name.to_string(), text);
-    }
-}
-
-/// Each refusal with the reason it carries. The underscore case is the one
-/// that matters most: `norn-text`'s protocol-identifier grammar admits `_`,
-/// this one does not, and the two are deliberately different — a protocol
-/// identifier is read out of a document, a vault name becomes a directory and
-/// a URL component.
-#[test]
-fn the_names_the_grammar_refuses() {
+fn a_name_outside_the_grammar_reads_as_this_crates_refusal() {
     for (text, needle) in [
         ("", "at least one character"),
         ("Notes", "lowercase ASCII letter"),
-        ("1notes", "lowercase ASCII letter"),
-        ("-notes", "lowercase ASCII letter"),
-        (".notes", "lowercase ASCII letter"),
-        ("+notes", "lowercase ASCII letter"),
-        ("_notes", "lowercase ASCII letter"),
         ("notes_1", "lowercase ASCII letters, digits"),
-        ("notesX", "lowercase ASCII letters, digits"),
-        ("note s", "lowercase ASCII letters, digits"),
         ("notes/deep", "lowercase ASCII letters, digits"),
-        ("notés", "lowercase ASCII letters, digits"),
-        ("notes:1", "lowercase ASCII letters, digits"),
+        ("..", "lowercase ASCII letter"),
+        (
+            &format!("a{}", "x".repeat(VaultName::MAXIMUM_BYTES)),
+            "255 bytes",
+        ),
     ] {
-        let error = VaultName::new(text).expect_err(&format!("`{text}` is not a vault name"));
+        let refusal = VaultName::new(text).expect_err(&format!("`{text}` is not a vault name"));
+        let error = ConfigError::from(refusal);
         let ConfigError::IllegalName { name, problem } = error else {
             panic!("`{text}` was refused as something other than an illegal name");
         };
@@ -61,37 +38,6 @@ fn the_names_the_grammar_refuses() {
             "`{text}` was refused with `{problem}`, which does not mention `{needle}`"
         );
     }
-}
-
-/// The grammar's free consequence: the dangerous directory components are
-/// unspellable, because a name opens with a lowercase letter and holds no
-/// separator.
-#[test]
-fn the_grammar_makes_a_traversal_component_unspellable() {
-    for text in [".", "..", "../..", "/", "a/../b"] {
-        assert!(
-            VaultName::new(text).is_err(),
-            "`{text}` was accepted as a vault name"
-        );
-    }
-}
-
-/// A name is a directory component, and a directory component has a length
-/// every filesystem norn runs on agrees about.
-#[test]
-fn a_name_is_bounded_at_the_length_a_directory_component_is() {
-    let longest = format!("a{}", "x".repeat(VaultName::MAXIMUM_BYTES - 1));
-    assert_eq!(longest.len(), VaultName::MAXIMUM_BYTES);
-    assert_eq!(
-        VaultName::new(&longest).expect("the longest name").as_str(),
-        longest
-    );
-
-    let error = VaultName::new(format!("{longest}x")).expect_err("a name past the bound");
-    let ConfigError::IllegalName { problem, .. } = error else {
-        panic!("a long name was refused as something other than an illegal name");
-    };
-    assert!(problem.contains("255 bytes"), "{problem}");
 }
 
 #[test]

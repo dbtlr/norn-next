@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use norn_config::VaultName;
 use norn_config::registry::Entry as Registration;
 use norn_fs::{Batch, Identity, RescanScope, WatchError};
 use norn_wire::{
-    ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, WarmingPhase, WatcherLossCause,
+    AttachMode, ErrorEnvelope, MaintainerIdentity, TrustState, UntrustedReason, VaultName,
+    WarmingPhase, WatcherLossCause,
 };
 
 use crate::registry::{AliasConflict, RegistryRead};
@@ -275,41 +275,12 @@ pub enum Demand {
     UnknownVault,
 }
 
-/// How the derived state a demand asks for is held.
-///
-/// Registration is what gates durability, so the mode is the demand's own
-/// rather than a property read off the entry: a registered vault's derivation
-/// is durable — a database that outlives the process, watcher coverage, warm
-/// trust — and disposable derivation over a throwaway store is the other mode
-/// the same seam carries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AttachMode {
-    /// A durable database, watcher coverage, and trust that warms and stays
-    /// warm: what every registered entry the host serves is attached under.
-    Durable,
-    /// Disposable derivation over a throwaway store, discarded with the work
-    /// that asked for it. The demand seam refuses it: the lifecycle behind this
-    /// mode is not built, and the entry it would run against does not exist.
-    ///
-    /// The layer that consumes this mode is disposable derivation for
-    /// unregistered roots — registration is what gates durability, and a root
-    /// nobody registered is served, when that layer lands, by deriving over a
-    /// throwaway store and throwing it away again. The host holds the other
-    /// half of that seam already: `norn-store` opens a throwaway store today,
-    /// while nothing here establishes an entry over one, which is why the call
-    /// graph reaches this variant only through the refusal.
-    Throwaway,
-}
-
-impl AttachMode {
-    /// Answer for a mode before anything is read or written under it, so a
-    /// demand the host has no lifecycle for changes nothing on its way to the
-    /// refusal.
-    fn admitted(self) -> Result<(), HostError> {
-        match self {
-            Self::Durable => Ok(()),
-            Self::Throwaway => Err(HostError::ThrowawayUnsupported),
-        }
+/// Answer for a mode before anything is read or written under it, so a demand
+/// the host has no lifecycle for changes nothing on its way to the refusal.
+fn admitted(mode: AttachMode) -> Result<(), HostError> {
+    match mode {
+        AttachMode::Durable => Ok(()),
+        _ => Err(HostError::ThrowawayUnsupported),
     }
 }
 
@@ -1808,7 +1779,7 @@ impl<O: EntryOps> Host<O> {
     /// lifecycle for is refused rather than served under another mode, and it
     /// leaves the entry standing exactly where it found it, parks included.
     pub fn demand(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        mode.admitted()?;
+        admitted(mode)?;
         let Some(entry) = self.shared.entries.get(name) else {
             return Ok(DemandLease {
                 outcome: Demand::UnknownVault,
@@ -1898,7 +1869,7 @@ impl<O: EntryOps> Host<O> {
     /// park is retired for the demand that follows it, and that demand asks for
     /// its derived state the same way any other does.
     pub fn retry(&self, name: &VaultName, mode: AttachMode) -> Result<DemandLease<O>, HostError> {
-        mode.admitted()?;
+        admitted(mode)?;
         if let Some(entry) = self.shared.entries.get(name) {
             entry
                 .gate
@@ -2089,7 +2060,9 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         state.claim.drop_marker();
                         state.claim.end_poll(epoch);
                         state.require_rebuild();
-                        state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                        state.trust = TrustState::untrusted(
+                            UntrustedReason::store_damaged_rebuilding(detail),
+                        );
                         state.coverage.park_by(epoch, attachment);
                         schedule = Some(
                             state
@@ -2461,9 +2434,14 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 // damage reaching here is damage that rung could not resolve.
                 // The attach acquired nothing and there is no store to rebuild
                 // against: what stands is the verdict, and a demand answers it
-                // with another attach that opens the file again.
+                // with another attach that opens the file again. That is the
+                // reason the entry publishes — the one that says a client's
+                // demand is what resumes it, rather than the one that says the
+                // entry is already rebuilding.
                 Err(JobFailure::StoreDamaged(detail)) => {
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust = TrustState::untrusted(
+                        UntrustedReason::store_damaged_awaiting_demand(detail),
+                    );
                 }
             }
             None
@@ -2562,7 +2540,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.require_rebuild();
                     state.coverage.park_by(epoch, attachment);
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     next = Some(
                         state
                             .claim
@@ -2814,7 +2793,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -2914,7 +2894,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust = TrustState::untrusted(UntrustedReason::store_damaged(detail));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
                     next = Some(
                         state
                             .claim
@@ -4886,7 +4867,8 @@ mod tests {
             // the entry holds its coverage and owes the rung against it.
             let mut state = entry.gate.lock().unwrap();
             state.require_rebuild();
-            state.trust = TrustState::untrusted(UntrustedReason::store_damaged("malformed"));
+            state.trust =
+                TrustState::untrusted(UntrustedReason::store_damaged_rebuilding("malformed"));
         }
 
         refuse_identity_error(&host.shared, &name, "root unreadable".to_string());
@@ -6399,7 +6381,7 @@ mod tests {
         wait_for_state(
             &host,
             &name,
-            TrustState::untrusted(UntrustedReason::store_damaged(
+            TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
                 "the database disk image is malformed",
             )),
         );
@@ -6408,9 +6390,9 @@ mod tests {
         wait_for_flag("rebuild_started", &ops.rebuild_started);
         assert_eq!(
             host.state(&name),
-            Some(TrustState::untrusted(UntrustedReason::store_damaged(
-                "the database disk image is malformed"
-            ))),
+            Some(TrustState::untrusted(
+                UntrustedReason::store_damaged_rebuilding("the database disk image is malformed")
+            )),
             "the entry retired the damage verdict before the rung resolving it had"
         );
         ops.rebuild_release.store(true, Ordering::SeqCst);

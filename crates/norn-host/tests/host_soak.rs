@@ -57,12 +57,11 @@ mod baselines;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use norn_config::VaultName;
 use norn_fs::ContentHash;
 use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
-use norn_wire::TrustState;
+use norn_wire::{TrustState, VaultName};
 
 /// The variable that puts this binary in harness mode, carrying the root the
 /// generated tree sits under.

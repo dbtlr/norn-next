@@ -14,9 +14,9 @@
 //!    is built here is built through the constructors a consumer has.
 
 use norn_wire::{
-    ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity, ReasonCode,
-    Severity, TrustState, UnknownFindingKind, UnknownSeverity, UntrustedReason, WarmingPhase,
-    WatcherLossCause,
+    AttachMode, ErrorDetail, ErrorEnvelope, FindingKind, FindingScope, MaintainerIdentity,
+    ReasonCode, Severity, TrustState, UnknownFindingKind, UnknownSeverity, UntrustedReason,
+    VaultName, WarmingPhase, WatcherLossCause,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -40,10 +40,18 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
             .map(|cause| UntrustedReason::watcher_lost(cause, "the watch ended")),
     );
     reasons.push(UntrustedReason::environmental_refusal("the disk is full"));
-    reasons.push(UntrustedReason::store_damaged(
+    reasons.push(UntrustedReason::store_damaged_rebuilding(
+        "the database disk image is malformed",
+    ));
+    reasons.push(UntrustedReason::store_damaged_awaiting_demand(
         "the database disk image is malformed",
     ));
     reasons
+}
+
+/// Every mode a demand asks for its derived state under.
+fn attach_modes() -> Vec<AttachMode> {
+    vec![AttachMode::Durable, AttachMode::Throwaway]
 }
 
 /// Every kind a finding is filed under.
@@ -92,6 +100,7 @@ fn reason_codes() -> Vec<ReasonCode> {
         ReasonCode::HostEntryUntrusted,
         ReasonCode::HostMaintainerContended,
         ReasonCode::HostUnknownVault,
+        ReasonCode::HostUnsupportedAttachMode,
     ]
 }
 
@@ -107,7 +116,20 @@ fn error_details() -> Vec<ErrorDetail> {
         ErrorDetail::maintainer_contended(MaintainerIdentity::named(41, "0.1.0", 1_700_000_000)),
         ErrorDetail::unknown_vault("notes"),
     ]);
+    details.extend(
+        attach_modes()
+            .into_iter()
+            .map(ErrorDetail::unsupported_attach_mode),
+    );
     details
+}
+
+/// Every name the grammar accepts, spread across the punctuation it admits.
+fn vault_names() -> Vec<VaultName> {
+    ["a", "notes", "notes2", "a.b", "a+b", "a-b.c+d"]
+        .into_iter()
+        .map(|text| VaultName::new(text).expect("a legal vault name"))
+        .collect()
 }
 
 fn round_trip<T>(value: &T)
@@ -144,6 +166,20 @@ fn every_untrusted_reason_survives_the_round_trip() {
 fn every_reason_code_survives_the_round_trip() {
     for code in reason_codes() {
         round_trip(&code);
+    }
+}
+
+#[test]
+fn every_attach_mode_survives_the_round_trip() {
+    for mode in attach_modes() {
+        round_trip(&mode);
+    }
+}
+
+#[test]
+fn every_vault_name_survives_the_round_trip() {
+    for name in vault_names() {
+        round_trip(&name);
     }
 }
 
@@ -288,6 +324,88 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
     assert_eq!(
         wire(&UntrustedReason::environmental_refusal("the disk is full")),
         r#"{"kind":"environmental_refusal","detail":"the disk is full"}"#
+    );
+}
+
+/// Damaged derived state is two reasons, split by who resumes: an entry
+/// holding the damaged database rebuilds it, and an entry holding none waits
+/// for the demand that opens one. A client reads which of the two it has from
+/// the `kind` tag, never from holdings no seam carries.
+#[test]
+fn the_two_damage_reasons_are_told_apart_by_their_kind() {
+    assert_eq!(
+        wire(&UntrustedReason::store_damaged_rebuilding(
+            "the database disk image is malformed"
+        )),
+        r#"{"kind":"store_damaged_rebuilding","detail":"the database disk image is malformed"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::store_damaged_awaiting_demand(
+            "the database disk image is malformed"
+        )),
+        r#"{"kind":"store_damaged_awaiting_demand","detail":"the database disk image is malformed"}"#
+    );
+}
+
+/// A mode is the bare string it is written as, and a string outside the pair
+/// is refused rather than defaulted: a mode a later version writes stops a
+/// reader of this one instead of arriving as the durable mode and being served
+/// under terms nobody asked for.
+#[test]
+fn an_attach_mode_is_the_bare_string_it_renders_as() {
+    let strings = ["durable", "throwaway"];
+    assert_eq!(attach_modes().len(), strings.len());
+    for (mode, string) in attach_modes().into_iter().zip(strings) {
+        let json = format!("\"{string}\"");
+        assert_eq!(wire(&mode), json);
+        assert_eq!(
+            serde_json::from_str::<AttachMode>(&json).expect("reading a mode back"),
+            mode
+        );
+    }
+    assert!(
+        serde_json::from_str::<AttachMode>(r#""ephemeral""#).is_err(),
+        "a mode nobody wrote was read as one of the two"
+    );
+}
+
+/// A refused mode crosses as the typed mode rather than as prose, so a client
+/// that asks for more than one learns which of them the host refused.
+#[test]
+fn a_refused_mode_crosses_as_the_mode_that_was_named() {
+    assert_eq!(
+        wire(&ErrorEnvelope::new(
+            "the host holds no lifecycle for that mode",
+            ErrorDetail::unsupported_attach_mode(AttachMode::Throwaway),
+        )),
+        concat!(
+            r#"{"code":"host/unsupported-attach-mode","#,
+            r#""message":"the host holds no lifecycle for that mode","#,
+            r#""detail":{"code":"host/unsupported-attach-mode","mode":"throwaway"}}"#
+        )
+    );
+}
+
+/// A name is the string itself, and the read path is the grammar: a string
+/// outside it has no representation on either side of the seam, so a reader
+/// never holds a name that was not parsed.
+#[test]
+fn a_vault_name_is_the_string_it_renders_as_and_is_read_through_its_grammar() {
+    assert_eq!(
+        wire(&VaultName::new("notes").expect("a legal name")),
+        r#""notes""#
+    );
+    for text in ["", "Notes", "1notes", "notes_1", "notes/deep", ".."] {
+        let json = format!("\"{text}\"");
+        assert!(
+            serde_json::from_str::<VaultName>(&json).is_err(),
+            "`{text}` was read as a vault name"
+        );
+    }
+    let too_long = format!("\"a{}\"", "x".repeat(VaultName::MAXIMUM_BYTES));
+    assert!(
+        serde_json::from_str::<VaultName>(&too_long).is_err(),
+        "a name past the bound was read as one"
     );
 }
 

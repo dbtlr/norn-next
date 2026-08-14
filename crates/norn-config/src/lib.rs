@@ -72,7 +72,6 @@
 mod document;
 mod error;
 mod file;
-mod name;
 
 pub mod machine;
 pub mod registry;
@@ -81,7 +80,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub use error::ConfigError;
-pub use name::VaultName;
+/// The name a vault is keyed by. The grammar is `norn-wire`'s, because a name
+/// crosses the client/host seam as well as keying a registry table and naming
+/// a directory; this crate reads and writes names under that one grammar
+/// rather than a second spelling of it.
+pub use norn_wire::VaultName;
 
 /// The vault schema a registry entry falls back to, relative to the vault
 /// root.

@@ -38,8 +38,7 @@
 //! separate acts over separate types, and the test below is the carrier that
 //! fails if they ever answer differently.
 
-use norn_config::VaultName;
-use norn_wire::{ErrorDetail, ErrorEnvelope, TrustState, UntrustedReason};
+use norn_wire::{ErrorDetail, ErrorEnvelope, TrustState, UntrustedReason, VaultName};
 
 use crate::lifecycle::Demand;
 

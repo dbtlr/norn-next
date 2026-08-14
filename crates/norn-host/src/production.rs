@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_config::registry::{Entry as Registration, PollBackend};
-use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH, VaultName};
+use norn_config::{ConfigDirs, IN_VAULT_SCHEMA_PATH};
 use norn_fs::{
     Acquisition, Maintainership, MaintainershipKey, OwnWrites, Placement, RescanScope, ShadowHome,
     Subscription, WatchError, try_acquire, walk, walk_subtree, watch, watch_polling,
@@ -17,7 +17,7 @@ use norn_store::{
     TagSource,
 };
 use norn_text::{BlockRefusal, Document, SourceSpan, Value};
-use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity};
+use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity, VaultName};
 
 use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
 

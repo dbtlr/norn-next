@@ -12,8 +12,8 @@ mod refusal;
 mod registry;
 
 pub use lifecycle::{
-    AttachMode, Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure,
-    LifecyclePolicy, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
+    Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
+    ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.
@@ -22,6 +22,22 @@ pub use lifecycle::{
 /// the type through this crate rather than reaching for the config crate's
 /// spelling of it.
 pub use norn_config::registry::Entry as Registration;
+/// How the derived state a demand asks for is held.
+///
+/// Registration is what gates durability, so the mode is the demand's own
+/// rather than a property read off the entry: a registered vault's derivation
+/// is durable, and disposable derivation over a throwaway store is the other
+/// mode the same seam carries.
+///
+/// **The throwaway mode is a dormant carrier.** The layer that consumes it is
+/// disposable derivation for unregistered roots, which `docs/architecture.md`
+/// names in its topology section: a root nobody registered is served, when that
+/// layer lands, by deriving over a throwaway store and throwing it away with
+/// the work. The store-side half of that seam is built — `norn-store` opens a
+/// throwaway store today — while nothing here establishes an entry over one,
+/// which is why the only path this crate's call graph reaches the mode by is
+/// the refusal at the demand seam.
+pub use norn_wire::AttachMode;
 pub use production::{
     MAX_CHANGESET_SIZE, ProductionEntryOps, ProductionPolicy, ProductionPolicyError,
 };

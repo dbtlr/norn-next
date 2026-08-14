@@ -31,9 +31,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use norn_config::VaultName;
 use norn_config::registry::Entry as Registration;
 use norn_fs::Refusal;
+use norn_wire::VaultName;
 
 use super::{Entry, SnapshotSource};
 use crate::registry::{RootReading, recheck};
