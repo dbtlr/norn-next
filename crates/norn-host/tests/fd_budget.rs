@@ -15,7 +15,7 @@ use norn_host::{
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
 const FD_BUDGET: usize = 12;
@@ -195,19 +195,44 @@ fn detach_and_wait(host: &Host<ProductionEntryOps>, name: &VaultName) {
     wait_for_state(host, name, TrustState::Unattached);
 }
 
+/// Wait for the host to answer one exact trust state.
+///
+/// **The state waited for is one that crosses as a label.** A state a poll does
+/// not walk out of is answered as an envelope carrying its reason, so it never
+/// equals the label this compares against and a caller naming one would spend
+/// the whole budget before saying so. The probe waits for `Ready` and
+/// `Unattached`, which are the two the descriptor readings are taken at.
 fn wait_for_state(host: &Host<ProductionEntryOps>, name: &VaultName, expected: TrustState) {
+    debug_assert!(
+        expected.refusal().is_none(),
+        "{expected:?} crosses as a refusal, so no label ever equals it"
+    );
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let observed = host.state(name);
-        if observed == Ok(expected.clone()) {
+        if observed.as_ref() == Ok(&expected) {
             return;
         }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
         assert!(
             Instant::now() < deadline,
             "timed out waiting for {expected:?}; observed {observed:?}"
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Whether what the host answered is the refusal a name it holds no entry under
+/// is refused with.
+///
+/// A wait polls an entry on its way somewhere. A name no entry stands behind is
+/// a mistake in the probe rather than a state converging, and it converges on
+/// nothing, so it ends the wait where it is found instead of at the deadline.
+fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
+    matches!(observed, Err(envelope) if envelope.code() == &ReasonCode::HostUnknownVault)
 }
 
 fn open_fd_count() -> usize {

@@ -17,7 +17,7 @@ use norn_store::{
 };
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::{TrustState, VaultName};
+use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";
@@ -143,12 +143,26 @@ fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
             break;
         }
         assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
+        assert!(
             Instant::now() < deadline,
             "attach did not converge: {observed:?}"
         );
         thread::sleep(Duration::from_millis(5));
     }
     drop(host);
+}
+
+/// Whether what the host answered is the refusal a name it holds no entry under
+/// is refused with.
+///
+/// A wait polls an entry on its way somewhere. A name no entry stands behind is
+/// a mistake in the case rather than a state converging, and it converges on
+/// nothing, so it ends the wait where it is found instead of at the deadline.
+fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
+    matches!(observed, Err(envelope) if envelope.code() == &ReasonCode::HostUnknownVault)
 }
 
 fn read_rows(database: &Path) -> Vec<norn_store::StoredDocument> {
