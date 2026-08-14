@@ -2019,8 +2019,11 @@ impl Account {
     ///   spellings nothing read, so the places they render onto are outside what
     ///   this walk enumerated.
     fn concluded(&self, walked: &Walked, subject: &DocumentPath) -> bool {
-        reading_reaches(walked.scope.root(), subject.unrendered_ancestor())
-            && !self.withheld.covers(subject)
+        folded_reaches(
+            walked.scope.root(),
+            subject.unrendered_ancestor(),
+            walked.order,
+        ) && !self.withheld.covers(subject, walked.order)
     }
 }
 
@@ -2097,36 +2100,62 @@ struct Withheld {
 }
 
 impl Withheld {
-    fn absorb(&mut self, skipped: &norn_fs::SkipFact) {
-        match skipped
-            .path()
-            .as_path()
+    /// Record a root a walk passed over, under every spelling a place it holds
+    /// is addressed by.
+    ///
+    /// **A root addresses its descendants and its own place under different
+    /// spellings.** The two grammars differ by the leaf: a directory is refused
+    /// only for what poisons every path beneath it, and a document is refused
+    /// for its leaf's stem as well — so `..md` addresses `..md/note.md` as
+    /// written and stands at the place `\u{fffd}..md` itself. Both go in, and a
+    /// spelling the two grammars agree on renders to itself and goes in once.
+    fn absorb(&mut self, path: &Path) {
+        match path
             .to_str()
             .filter(|spelling| DirectoryPrefix::new(spelling).is_ok())
         {
             Some(spelling) => {
                 self.roots.insert(spelling.to_owned());
+                self.roots
+                    .insert(DocumentPath::rendered(path).as_str().to_owned());
             }
             None => self.rendered = true,
         }
     }
 
-    /// Whether a root this job withheld covers `subject`.
+    /// Whether a root this job withheld covers `subject`, read under the
+    /// folding this vault resolves names by.
     ///
     /// A place is covered by its own spelling and by every ancestor of it, which
-    /// is what a root reaching a place means. The ancestors are walked rather
-    /// than the roots, because a path has as many ancestors as segments and the
-    /// set holds one entry per root the walk passed over.
-    fn covers(&self, subject: &DocumentPath) -> bool {
+    /// is what a root reaching a place means.
+    ///
+    /// **The two sides spell one entry independently**: a place keeps the
+    /// spelling it was filed under and a root is named the way the directory is
+    /// spelled now, so a vault that resolves alternate ASCII case to one entry
+    /// is one where the two disagree with no rename at all. The comparison is
+    /// the folding this scope's own page bounded the subjects by, which is what
+    /// keeps the page and the gate addressing one set of places.
+    fn covers(&self, subject: &DocumentPath, order: StoredPathOrder) -> bool {
         if self.rendered && subject.carries_marker() {
             return true;
         }
         let place = subject.as_str();
-        place
-            .match_indices('/')
-            .map(|(at, _)| &place[..at])
-            .chain(std::iter::once(place))
-            .any(|ancestor| self.roots.contains(ancestor))
+        match order {
+            // The ancestors are walked rather than the roots, because a path has
+            // as many ancestors as segments and the set holds one entry per root
+            // the walk passed over.
+            StoredPathOrder::Sensitive => place
+                .match_indices('/')
+                .map(|(at, _)| &place[..at])
+                .chain(std::iter::once(place))
+                .any(|ancestor| self.roots.contains(ancestor)),
+            // A folded lookup is not the set's own order, so the roots are read
+            // rather than sought. One reading answers every ancestor at once.
+            StoredPathOrder::AsciiCaseInsensitive => self
+                .roots
+                .iter()
+                .any(|root| folded_reaches(root, place, order)),
+        }
     }
 }
 
@@ -2162,6 +2191,26 @@ fn reading_reaches(root: &str, inner: &str) -> bool {
         || inner
             .strip_prefix(root)
             .is_some_and(|below| below.starts_with('/'))
+}
+
+/// Whether a reading rooted at `root` yields `inner`, read under the folding
+/// this vault resolves names by.
+///
+/// The same question [`reading_reaches`] answers bytewise. A vault that resolves
+/// alternate ASCII case to one directory entry is one where a root and a stored
+/// path name the same entry in different spellings, so a scope whose rows and
+/// subjects are paged under a folded bound is read against a folded root too.
+fn folded_reaches(root: &str, inner: &str, order: StoredPathOrder) -> bool {
+    match order {
+        StoredPathOrder::Sensitive => reading_reaches(root, inner),
+        StoredPathOrder::AsciiCaseInsensitive => {
+            let (root, inner) = (root.as_bytes(), inner.as_bytes());
+            root.is_empty()
+                || (inner.len() >= root.len()
+                    && inner[..root.len()].eq_ignore_ascii_case(root)
+                    && (inner.len() == root.len() || inner[root.len()] == b'/'))
+        }
+    }
 }
 
 /// Read the roots a job's deaths freed and record what those readings file.
@@ -2467,7 +2516,7 @@ impl<'s> Pending<'s> {
     /// Record that a walk of this scope did not enter `skipped`, so the job's
     /// prune leaves the findings under it standing.
     fn withhold(&mut self, skipped: &norn_fs::SkipFact) {
-        self.account.withheld.absorb(skipped);
+        self.account.withheld.absorb(skipped.path().as_path());
     }
 
     /// Whether the changeset or the findings beside it have reached the bound
@@ -4369,6 +4418,88 @@ mod tests {
             findings_at(&mut attachment.store, "elsewhere/bad.md").len(),
             1,
             "the walk did not read the document at the place it can reach"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A root the walk did not enter covers the place its own spelling stands
+    /// at, which is a rendering wherever the document grammar refuses what the
+    /// directory grammar admits.** `..md` addresses the rows beneath it and
+    /// names no document, so the finding about the path itself stands at
+    /// `\u{fffd}..md` — and a walk that matched the withheld root against that
+    /// place by its literal spelling alone would take it.
+    #[cfg(unix)]
+    #[test]
+    fn a_withheld_root_the_document_grammar_refuses_keeps_its_own_place() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("withheld-rendered-root");
+        fs::write(f.vault().join("..md"), b"body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let place = "\u{fffd}..md";
+        assert_eq!(
+            sorted_kinds(&mut attachment.store, place),
+            ["document/path-names-no-document"]
+        );
+
+        // The same name, now reachable only through a link the walk refuses to
+        // follow: nothing this walk reads renders onto that place.
+        fs::remove_file(f.vault().join("..md")).unwrap();
+        symlink("elsewhere.md", f.vault().join("..md")).unwrap();
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+
+        assert_eq!(
+            findings_at(&mut attachment.store, place).len(),
+            1,
+            "the walk took the finding standing at a root it never entered"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A vault that resolves alternate ASCII case to one directory entry
+    /// withholds one entry however the two sides spell it.** The place a finding
+    /// stands at keeps the spelling it was filed under, and the walk names the
+    /// root the way the directory is spelled now — so a prune matching the two
+    /// bytewise takes a finding under a root it never entered, on the same
+    /// folding its own page bounded the scope by.
+    #[cfg(unix)]
+    #[test]
+    fn a_withheld_root_covers_the_places_the_vault_folds_onto_it() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("withheld-root-case");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        fs::create_dir(f.vault().join("Away")).unwrap();
+        fs::write(f.vault().join("Away/bad.md"), UNDECODABLE).unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(findings_at(&mut attachment.store, "Away/bad.md").len(), 1);
+
+        // The document moves behind a link named in the other case, which this
+        // vault resolves to the entry the finding's place is spelled under.
+        fs::create_dir(f.vault().join("elsewhere")).unwrap();
+        fs::rename(
+            f.vault().join("Away/bad.md"),
+            f.vault().join("elsewhere/bad.md"),
+        )
+        .unwrap();
+        fs::remove_dir(f.vault().join("Away")).unwrap();
+        symlink("elsewhere", f.vault().join("away")).unwrap();
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+
+        assert_eq!(
+            findings_at(&mut attachment.store, "Away/bad.md").len(),
+            1,
+            "the walk took a finding under a root it never entered"
         );
         ops.detach(&name, attachment);
     }
