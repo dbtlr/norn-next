@@ -30,20 +30,28 @@
 //! to exactly one candidate line, the scan and the parser disagree somewhere
 //! and there is no safe per-field split — the mis-located key's bytes would be
 //! absorbed into a neighbour and deleted by an unrelated remove. No field gets
-//! a span; reads are unaffected and every field edit refuses. The same holds
-//! when the value model had to drop an entry: the scanner still sees the line
-//! the parser no longer names.
+//! a span and every field edit refuses. The same holds when the value model
+//! had to drop an entry: the scanner still sees the line the parser no longer
+//! names.
 //!
-//! An entry written in YAML's explicit-key form — `? key` on one line, `: value`
-//! on the next — is that ambiguity by construction, and the block refuses on
-//! the spelling rather than on its consequences. The key is written on a line
-//! carrying no `key:` separator, so the scan attributes no line to it: an
-//! explicit *field* leaves a parsed key nothing names, and an explicit merge
-//! directive — `? <<` — leaves two lines no field owns and none bounds, which
-//! a neighbour's remove would otherwise take with it. A top-level `?` indicator
-//! is what the refusal is keyed on, so the whole class answers alike whatever
-//! key it writes. Indentation places the form inside a value some top-level
-//! entry already owns whole, which is an ordinary absorbed tail.
+//! What a refused block keeps is its value model: it reads whole, every entry
+//! the parser folded included. What it loses is every read built on field
+//! spans — `field_texts`, and the frontmatter tags and wikilinks derived from
+//! it — because those report a field's bytes and a refused block has named
+//! none.
+//!
+//! An entry written in YAML's explicit-key form — the `?` indicator, `? key`
+//! on one line and `: value` on the next — is that ambiguity by construction,
+//! and the block refuses on the spelling rather than on its consequences. The
+//! key is written on a line carrying no `key:` separator, so the scan
+//! attributes no line to it: an explicit *field* leaves a parsed key nothing
+//! names, and an explicit merge directive — `? <<` — leaves two lines no field
+//! owns and none bounds, which a neighbour's remove would otherwise take with
+//! it. A top-level `?` indicator is what the refusal is keyed on, so the whole
+//! class answers alike whatever key it writes. An indented `?` is not that
+//! indicator: it sits either inside a value some top-level entry owns whole,
+//! which is an ordinary absorbed tail, or in a block indented throughout,
+//! which names no top-level line at all and refuses on its unlocatable keys.
 //!
 //! # Blank lines and comments end a field
 //!
@@ -337,16 +345,21 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 }
 
 /// Identify every top-level `key:` line and the scanner's candidate value span
-/// for it, or `None` where the block writes a top-level explicit key and no
+/// for it, or `None` where the block writes a top-level `?` indicator and no
 /// line attribution holds.
 ///
 /// A multi-line value whose continuation can sit at column 0 — an unclosed
 /// flow collection or quoted scalar — is stepped over so its continuation
 /// lines are not misread as new keys; block scalars, folds and block
 /// collections continue on indented lines the scan already skips. Those same
-/// steps are what make the explicit-key answer precise: a `?` indicator is
-/// read only on a line the scan reaches as structure, so one written inside a
-/// quoted scalar or a block scalar is the value's own text.
+/// steps are what decide where a `?` indicator is read: only on a line this
+/// loop reaches as structure. Indentation makes that exact for a block
+/// scalar. The quoted-scalar step-over is best-effort — see
+/// [`absorb_until_line_contains`] — so a scalar carrying its quote character
+/// on an interior line re-exposes the lines below it, and one of those
+/// beginning `? ` refuses a block whose split would have held. Every
+/// imprecision here runs that way: a line the step-over covers is read as no
+/// key either, so the scan under-reports candidates and never invents one.
 fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec<RawKeyLine>> {
     let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
@@ -401,8 +414,8 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec
     Some(fields)
 }
 
-/// Whether `line` opens an explicit key: the `?` indicator, alone on the line
-/// or separated from the key written after it.
+/// Whether `line` opens an entry in YAML's explicit-key form: the `?`
+/// indicator, alone on the line or separated from the key written after it.
 ///
 /// The separator is what makes it an indicator. `?` begins a plain scalar
 /// wherever a space does not follow it, so `?title: v` is a field of that name,
@@ -589,8 +602,8 @@ fn parse_top_level_key(line: &str) -> Option<(String, usize, KeySpelling)> {
 /// with no record that either was written. The line's text is the only place
 /// that spelling survives, so the properties are read past here, and a
 /// directive line written inline — plain, tagged, quoted, or anchored —
-/// bounds the entry above it. The explicit-key spelling `? <<` is judged
-/// nowhere here: a top-level explicit key refuses the block's split whole, so
+/// bounds the entry above it. The `?` indicator spelling `? <<` is judged
+/// nowhere here: a top-level `?` indicator refuses the block's split whole, so
 /// there is no entry for its lines to bound and none to absorb them.
 ///
 /// Past the properties the key is read the way the parser reads it, quotes

@@ -63,8 +63,9 @@ pub enum DiagnosticCode {
     FrontmatterTagStripped,
     /// An integer outside `i64`. It is carried as a float.
     FrontmatterIntegerOutOfRange,
-    /// The block parses, and its field spans cannot be trusted. Reads work;
-    /// field edits refuse.
+    /// The block parses, and its field spans cannot be trusted. The value
+    /// model still reads whole; field texts and what is derived from them are
+    /// not reported, and field edits refuse.
     FrontmatterNotEditable,
 }
 
