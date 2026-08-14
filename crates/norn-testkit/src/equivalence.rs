@@ -38,10 +38,20 @@
 //!   records no death for a document it never saw, and the two agree about
 //!   every answer either of them can give. Projecting deaths would therefore
 //!   fail exactly the healed-against-rebuilt comparison this module exists to
-//!   make. What holds a store's deaths to account is the per-store leg:
-//!   [`assert_operationally_valid`] drains the pillar, which is where the
-//!   closed vocabulary and the generation ordering each death against a later
-//!   fact about the same path are read.
+//!   make.
+//!
+//!   **What stands in its place is two claims, and only the second is about
+//!   which deaths are there.** [`assert_operationally_valid`] is the per-store
+//!   leg, and what it reads is the pillar's *shape*: every row comes back
+//!   through the enumerator, so the closed vocabulary holds over all of them
+//!   rather than over the ones somebody asked about, and each death carries a
+//!   write generation ordering it against a later fact about the same path. It
+//!   says nothing about membership — a store that recorded no deaths at all
+//!   passes it, agreeing with a count of zero. **Membership is the churning
+//!   suite's**, because only a suite that changed the tree knows which places
+//!   stopped deriving: it reads that off its own censuses and asks
+//!   [`tombstones`] for a row at each, which is why that drain is public here
+//!   and outside the projection.
 //! - **Document vectors.** No derivation writes `document_vectors`. The store
 //!   accepts a vector through its own writer and no host job calls it, so the
 //!   table is empty in every store this comparator reads and projecting it
@@ -530,6 +540,9 @@ impl StoreProjection {
 ///   is the vocabulary holding over every row rather than over the ones somebody
 ///   thought to ask about. Each death was recorded at a generation the store
 ///   took, which is what orders it against a late fact about the same path.
+///   **Which deaths stand here is not this leg's question**: a store holding
+///   none passes, and what says the deaths a churn produced were recorded is the
+///   suite that produced them — see this module's own ruling on the pillar.
 /// - The migration ledger is empty, which is what the pre-release build's
 ///   evolution path is: a store schema change is a rebuild from zero and
 ///   consumes no version number, so a row here would be a migration nothing
@@ -633,6 +646,12 @@ fn for_each_stored_suffix_key(
 }
 
 /// Every tombstone the store holds, drained a bounded page at a time.
+///
+/// Public because deaths are outside the projection and a suite that changed a
+/// tree is what knows which of them are owed: it reads the pillar through here
+/// and looks for the places it took documents away from. The drain is the
+/// store's own enumerator, so an empty answer is an empty pillar rather than a
+/// read that asked about nothing.
 pub fn tombstones(store: &mut Store) -> Result<Vec<StoredTombstone>, StoreError> {
     let request = store.begin_request();
     let mut drained = Vec::new();

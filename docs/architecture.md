@@ -152,9 +152,19 @@ the lane where the attach heal rather than a watcher report is what has to conve
 Each settles on a **census** — every markdown place holding the row its bytes
 imply, keyed by identity so a volume that folds case is judged the way it resolves, and the
 vault's schema declaration agreeing with the pin the store holds — and is then compared
-with a second derivation built from zero over the same final tree. The window between one
+with a second derivation built from zero over the same final tree. Two claims stand between
+a phase's acts and its settle, because a phase that changed nothing satisfies every bar
+after it: **a non-empty script whose census reads exactly as the one it opened against
+fails there**, and every place that held a row before the phase and holds none after it is
+a death the store is then required to hold a tombstone for. That second claim is the churn
+suite's alone — deaths are outside the two-store comparator by construction, since a
+derivation from zero records none, so the per-store leg reads the pillar's shape and the
+suite that took the documents away reads its membership. The window between one
 heal's enumeration and its opens is not reachable from outside a host, so the workloads are
-staged through the same seams in `norn-host`'s own suite. Beside the convergence bars are
+staged through the same seams in `norn-host`'s own suite; what the churn suite does reach
+is the coarser overlap, by racing an attachment until it catches a heal already half way
+through its walk and then witnessing the result in the provenance the store recorded its
+deaths under. Beside the convergence bars are
 **cost bars**, read off the account a host's jobs write: each is a bracket, under a ceiling
 stated over the changed set and over the floor stated for no changes at all. A third claim
 is asserted beside every reading in that same lane — that the ceiling the reading passed

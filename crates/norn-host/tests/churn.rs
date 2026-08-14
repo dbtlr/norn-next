@@ -20,7 +20,11 @@
 //!   is one of the places the workload declared derives none. Nothing here sleeps
 //!   for a fixed time and calls that convergence, and the budget is a runaway
 //!   bound rather than a bar — how *long* a settle takes is a clock, and clocks
-//!   belong to the scheduled lane.
+//!   belong to the scheduled lane. **Two claims stand between the acts and the
+//!   wait**, because a phase that changed nothing satisfies every bar after it:
+//!   a non-empty script has to leave a census the phase's opening one does not
+//!   equal, and every place that stopped deriving is a death the store is then
+//!   required to hold a tombstone for.
 //! - **The bar is equivalence with a build from zero.** The vault is derived a
 //!   second time through machine-local directories that hold no row, no lock and
 //!   no shadow of the first, and the two derived stores are compared field by
@@ -234,17 +238,34 @@ fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
 /// the identity to hold the last bytes, states that it does, and takes the
 /// equivalence bar after that heal — and the difference between the two lanes is
 /// a gap this suite found rather than a contract it is transcribing.
+///
+/// **The flip is held to three things a phase that did nothing would fail.**
+/// The directory itself is asked what it renders the name as, which is the only
+/// answer a volume that folds case cannot give twice; the row at the identity
+/// holds bytes the opening phase's row did not; and one row stands there rather
+/// than two. The re-attach below applies no acts at all, which is why this case
+/// states them itself rather than leaning on the phase driver's own claim that a
+/// phase moved the tree.
 #[test]
 fn a_case_flip_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-flip");
     let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
     let workload = churn::case_flip(73, folding);
-    let mut churned = churn_the_vault_in(sandbox, &workload);
+    let opened = attach_and_churn(sandbox, workload.opening(), When::Settled);
+    // Read before the flip: what says the changing phase reached the row is the
+    // identity holding bytes the opening phase did not put there.
+    let before_the_flip = opened
+        .census
+        .rows
+        .get(&identity(churn::FLIPPED_FROM, folding))
+        .expect("the name that is about to flip stands in the tree")
+        .clone();
+    let mut churned = opened.then(workload.changing(), When::Settled);
     assert_eq!(
         folding, churned.folding,
         "two probes of one volume disagree"
     );
-    churned.assert_the_flip_landed();
+    churned.assert_the_flip_landed(&before_the_flip);
 
     if folding == Folding::Folded {
         churned = churned.then(&Script::new("nothing at all", Vec::new()), When::Settled);
@@ -568,17 +589,21 @@ fn an_ambiguity_classs_membership_change_converges_on_a_build_from_zero() {
 #[test]
 fn a_rendering_collision_that_clears_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-collision");
-    // The name is asked for outside the vault first, because a filesystem that
-    // will not hold it makes this case unrunnable rather than failing: the name
-    // is the whole subject, and a workload that could not write it would judge
-    // a tree with no collision in it.
+    // The name is asked for outside the vault first, because the name is this
+    // case's whole subject: a workload that could not write it would judge a
+    // tree with no collision in it. **The platform lane is declared, not
+    // skipped** — the same rule the case flip runs under. A filesystem that
+    // refuses this name fails here, saying so, rather than logging a line and
+    // reporting a pass over nothing.
     let probe = sandbox.work_dir().join("bad\\name.probe");
     if let Err(problem) = std::fs::write(&probe, b"a name") {
-        eprintln!(
-            "skipped: this filesystem does not create `{}`: {problem}",
+        panic!(
+            "this filesystem will not create `{}`: {problem}. A backslash in a name is what this \
+             case is about, so there is no tree to judge here and no lane declared for a volume \
+             that refuses one — declare it, the way the case-flip case declares what its volume \
+             does with case.",
             probe.display()
         );
-        return;
     }
     std::fs::remove_file(&probe).expect("removing the probe");
 
@@ -930,6 +955,15 @@ struct Churned {
     folding: Folding,
     census: Census,
     applied: Applied,
+    /// Every place that held a document row before a phase and holds none
+    /// after it, as its identity and the spelling the tree held it at.
+    ///
+    /// This is what the store owes a death for, read off the tree rather than
+    /// off the store: a place that derived and stopped is a row that went,
+    /// however it went — removed, renamed away, or left holding bytes no
+    /// decoder accepts. A place a later phase puts a document back at is
+    /// dropped again, because a resurrection owes nothing.
+    owed_deaths: BTreeMap<String, String>,
     /// What the entry's trust state was when the last phase's first act landed,
     /// where that phase ran against a heal rather than after one.
     overlapped: Option<TrustState>,
@@ -979,6 +1013,7 @@ fn attach_and_churn(sandbox: Sandbox, script: &Script, when: When) -> Churned {
         folding,
         census,
         applied: Applied::default(),
+        owed_deaths: BTreeMap::new(),
         overlapped: None,
         #[cfg(feature = "induced-failure")]
         maintenance: EvidenceReading::default(),
@@ -994,14 +1029,13 @@ impl Churned {
     /// opening.
     fn then(mut self, script: &Script, when: When) -> Churned {
         let mut applied = Applied::default();
+        let opened = self.census.clone();
         self.overlapped = None;
         if when == When::Before {
             apply(script, self.vault.path(), &mut applied);
             let host = self.vault.host();
             let lease = attach::attach_and_wait(&host, self.vault.name());
-            self.census = census(self.vault.path(), self.folding);
-            self.census
-                .assert_the_script_read_the_tree_the_same_way(script);
+            self.retake_the_census(script, &opened, &applied);
             settle(&self.vault, &host, &self.census, &applied);
             drop(lease);
             self.applied = applied;
@@ -1043,9 +1077,7 @@ impl Churned {
             When::DuringTheHeal => Some(attach::attach_and_wait(&host, self.vault.name())),
             _ => None,
         };
-        self.census = census(self.vault.path(), self.folding);
-        self.census
-            .assert_the_script_read_the_tree_the_same_way(script);
+        self.retake_the_census(script, &opened, &applied);
         settle(&self.vault, &host, &self.census, &applied);
         #[cfg(feature = "induced-failure")]
         {
@@ -1058,6 +1090,83 @@ impl Churned {
         self
     }
 
+    /// **Read the tree again, and hold the phase to what it says.**
+    ///
+    /// Three claims stand between a phase's acts and the settle that follows
+    /// them.
+    ///
+    /// The workload's own declaration of the places that derive no row is
+    /// checked against the bytes on disk, which is [`Census`]'s claim.
+    ///
+    /// **A phase that spelled acts and left the tree reading exactly as it did
+    /// before them asks a host to converge on nothing**, and every bar past
+    /// this point would pass a host that did nothing at all. So a non-empty
+    /// script whose census matches the one the phase opened against fails here,
+    /// where the workload is still on hand to print, rather than being absorbed
+    /// by an equivalence that holds because neither derivation moved. An empty
+    /// script is exempt: a phase applying no acts is a re-attach over a settled
+    /// tree, which is a thing one case does on purpose.
+    ///
+    /// And every place that held a row before the phase and holds none after it
+    /// is a death the store owes, accumulated here for the claims below to
+    /// read.
+    fn retake_the_census(&mut self, script: &Script, opened: &Census, applied: &Applied) {
+        self.census = census(self.vault.path(), self.folding);
+        self.census
+            .assert_the_script_read_the_tree_the_same_way(script);
+        assert!(
+            script.steps().is_empty() || self.census != *opened,
+            "`{}` applied {} steps and the tree reads exactly as it did before them — same \
+             places, same hashes, same schema — so this phase asks the host for nothing and \
+             every claim after it holds over a vault nothing changed\n{applied}",
+            script.name(),
+            applied.steps()
+        );
+        self.owed_deaths
+            .retain(|place, _| !self.census.rows.contains_key(place));
+        for place in opened.rows.keys() {
+            if !self.census.rows.contains_key(place) {
+                self.owed_deaths
+                    .insert(place.clone(), opened.spellings[place].clone());
+            }
+        }
+    }
+
+    /// **Every place that stopped deriving is recorded as a death.**
+    ///
+    /// The account a host's jobs write is a count, and a count still moves for
+    /// a store that dropped the row and wrote no tombstone. This is the state
+    /// beside it: the tombstone pillar is drained and each owed place is looked
+    /// for in it by the spelling the tree held it at.
+    ///
+    /// **It is asked of the churned store alone**, and through the per-store
+    /// enumerator rather than through the comparator. A store built from zero
+    /// over the same final tree never saw these documents and records no death
+    /// for them, which is exactly why deaths are outside the cross-store
+    /// projection — see `norn_testkit::equivalence` for that ruling.
+    fn assert_the_deaths_were_recorded(&self) {
+        if self.owed_deaths.is_empty() {
+            return;
+        }
+        let mut store = self.vault.store();
+        let recorded: BTreeSet<String> = tombstones(&mut store)
+            .expect("draining the tombstone pillar")
+            .into_iter()
+            .map(|death| death.path.as_str().to_string())
+            .collect();
+        let missing: Vec<&String> = self
+            .owed_deaths
+            .values()
+            .filter(|at| !recorded.contains(*at))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these places held a document row before the churn and hold none after it, and the \
+             store records no death at them: {missing:?}\nthe pillar holds {recorded:?}\n{}",
+            self.applied
+        );
+    }
+
     /// **The bar.** The churned store and a store built from zero over the same
     /// final tree hold the same derived facts, each is internally sound, and
     /// both stand on what the workload really left in the tree.
@@ -1065,7 +1174,11 @@ impl Churned {
     /// `degraded` is how many documents kept a row and carry a finding beside
     /// it, which the census cannot count: it reads bytes and paths, and whether
     /// a frontmatter block was read is the text layer's answer.
+    ///
+    /// The deaths the churn owes are asked for first, because that claim is
+    /// about the churned store alone and the comparison below is about the pair.
     fn judge(&mut self, subject: &str, degraded: usize) {
+        self.assert_the_deaths_were_recorded();
         let second = self
             .vault
             .beside(&self.sandbox.work_dir().join("second-machine"));
@@ -1123,14 +1236,35 @@ impl Churned {
         }
     }
 
-    /// **The flip landed at the identity it was made at.** One row stands for
-    /// the flipped place, and it holds the bytes that were last written there.
+    /// **The flip landed at the identity it was made at**, and the tree and the
+    /// store both say so.
     ///
-    /// The row is looked up by identity rather than by spelling, because the
-    /// spelling is what differs between the two volumes and the claim does not:
-    /// on either of them the vault holds one document there, and it holds the
-    /// last thing written to it.
-    fn assert_the_flip_landed(&self) {
+    /// Three claims, because a volume that folds case answers a keyed read at
+    /// either spelling and a store that did nothing would satisfy any one of
+    /// them on its own.
+    ///
+    /// - **The directory renders the flipped spelling.** The name is read out
+    ///   of the directory entry rather than probed for, because `exists` at
+    ///   either spelling is what a folding volume answers whatever the rename
+    ///   did.
+    /// - **One row stands at the identity**, looked up by identity rather than
+    ///   by spelling: the spelling is what differs between the two volumes and
+    ///   this claim does not.
+    /// - **That row holds bytes the opening phase did not put there**, which is
+    ///   what says the changing phase reached the store at all.
+    fn assert_the_flip_landed(&self, before_the_flip: &str) {
+        let flipped = Path::new(churn::FLIPPED_TO)
+            .file_name()
+            .expect("the flipped name")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            dirent_spelling(self.vault.path(), churn::FLIPPED_TO),
+            flipped,
+            "the directory renders the flipped place at another spelling, so the rename this case \
+             is about did not reach the tree"
+        );
+
         let place = identity(churn::FLIPPED_TO, self.folding);
         let expected = self
             .census
@@ -1151,6 +1285,12 @@ impl Churned {
         assert_eq!(
             &held[0].1, expected,
             "the row at `{}` does not hold the bytes last written to the flipped name",
+            held[0].0
+        );
+        assert_ne!(
+            held[0].1, before_the_flip,
+            "the row at `{}` holds the hash the opening phase settled on, so the changing phase's \
+             acts reached neither the tree nor the store",
             held[0].0
         );
     }
@@ -1281,20 +1421,42 @@ impl Churned {
         );
     }
 
-    /// **The phase acted on rows the host was holding.**
+    /// **The phase acted on rows the host was holding**, as many of them as the
+    /// tree says it did.
     ///
     /// A prune is the one thing a workload cannot get by appearing: a place
     /// nothing stood at derives a row and writes no death, so a reading of no
     /// deletions and no tombstones says the whole workload reached the host as
     /// "these files are new" however many removals and renames its script
     /// spells. Every case that states this runs a phase whose script takes a
-    /// document away or moves one, and each of those is a row the phase before
-    /// it settled over.
+    /// document away, moves one, or leaves one holding bytes no decoder
+    /// accepts, and each of those is a row the phase before it settled over.
+    ///
+    /// **The count is the tree's**, read off the two censuses as the places
+    /// that derived before the phase and derive nothing after it. A bare
+    /// "something died" passes a host that recorded one death and dropped the
+    /// other three, which is the same defect at a smaller scale.
+    ///
+    /// The comparison is `>=` rather than `==` in both counters. A directory
+    /// removal reaches a host as the documents beneath it, a rename reaches it
+    /// as two places, and a host is free to spend more deaths reconciling one
+    /// place than the tree spells — what this refuses is spending fewer.
     fn assert_rows_were_taken_away(&self) {
+        let owed = self.owed_deaths.len() as u64;
         assert!(
-            self.maintenance.documents_deleted > 0 && self.maintenance.tombstones_recorded > 0,
-            "this phase removed or moved a document the host held a row for, and the account \
-             records no death: {:?}\n{}",
+            owed > 0,
+            "this case states that rows were taken away, and every place holding a document row \
+             before the churn holds one after it\n{}",
+            self.applied
+        );
+        assert!(
+            self.maintenance.documents_deleted >= owed
+                && self.maintenance.tombstones_recorded >= owed,
+            "{owed} places stopped deriving — {:?} — and the account records {} deletions and {} \
+             tombstones: {:?}\n{}",
+            self.owed_deaths.values().collect::<Vec<&String>>(),
+            self.maintenance.documents_deleted,
+            self.maintenance.tombstones_recorded,
             self.maintenance,
             self.applied
         );
@@ -1421,6 +1583,39 @@ fn past_the_workloads_places(state: &TrustState) -> bool {
     )
 }
 
+/// The spelling the directory holding `at` renders it at.
+///
+/// Read out of the directory entry rather than probed for, because a volume
+/// that folds case answers a keyed read at either spelling: what says a rename
+/// re-spelled a place is the name the directory hands back, and nothing else
+/// on such a volume can.
+fn dirent_spelling(root: &Path, at: &str) -> String {
+    let full = root.join(at);
+    let directory = full.parent().expect("a document sits in a directory");
+    let folded = full
+        .file_name()
+        .expect("a document has a name")
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let mut rendered: Vec<String> = std::fs::read_dir(directory)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", directory.display()))
+        .map(|entry| {
+            entry
+                .expect("a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|held| held.to_ascii_lowercase() == folded)
+        .collect();
+    assert_eq!(
+        rendered.len(),
+        1,
+        "the directory holding `{at}` renders {rendered:?} for that name"
+    );
+    rendered.pop().expect("the one spelling")
+}
+
 fn apply(script: &Script, root: &Path, applied: &mut Applied) {
     script
         .apply_range(root, 0..script.steps().len(), applied)
@@ -1483,8 +1678,14 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ap
 /// both would look to this wait exactly like a store holding the right one. That
 /// is a limit of the signal and not a gap in the suite: the equivalence
 /// comparator reads every row of both projections, and the case that flips a
-/// name's case asks directly how many rows stand at the flipped identity.
-#[derive(Clone, Debug)]
+/// name's case asks directly how many rows stand at the flipped identity — and
+/// asks the directory itself what spelling it renders there.
+///
+/// **Two readings are compared for equality**, which is how a phase that
+/// applied acts and moved nothing is caught: the places, the hashes, the places
+/// that derive none and the vault's schema declaration all take part, because
+/// each of them is something a changing phase may be the only mover of.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Census {
     /// What the volume does with case, which is what makes two spellings one
     /// place or two.
