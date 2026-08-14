@@ -148,7 +148,7 @@ these two rows wait on is the heal-side injection they are stated over.
 
 | Injected failure | Required outcome |
 |---|---|
-| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it until the next heal records one. Each is reached without an edit to the file: no row stands at a quarantined path, so the walk reads it; a degraded row states its own defect, so the walk re-derives it when nothing stands beside it. A tear inside one changeset is injected today; a tear at a chunk boundary is the suite's to reach. |
+| Process killed mid-increment | **Handled at rung 2.** **The changeset is the unit of atomicity**, and an increment is one or more of them: a changeset lands whole or not at all, so a process that dies inside one leaves the store holding no part of it. A heal-scale increment is chunked into separately atomic changesets, so a tear between two of them leaves every chunk that committed and no part of the one in flight — each generation whole, the vault's coverage short. Either way the work the tear lost returns through the attach heal's ordinary content-hash comparison. One flush is a changeset plus the findings recorded after it, each in its own transaction, so a tear between the two leaves the increment landed — a tombstone where a quarantined path had a row, the derived row where a document read without its frontmatter — with no finding beside it. **The state such a tear leaves is the pending maintenance, at rest in the rows themselves**: no pending-work table stands beside the store and none is owed, because what the tear leaves demands its own re-derivation and the next heal that reaches it converges the pair. Two signals in the rows' own state are what demand it, and both are read without an edit to the file: a markdown place inside the vault's membership holding no row is re-derived unconditionally, which is every quarantined path the vault still holds; and a row asserting an absent frontmatter projection beside a nonzero count of frontmatter-scoped diagnostics, with no document-scoped finding standing at it, is re-derived on an unchanged content hash — which is every degraded document a tear left bare. Between the tear and the next heal over that path the finding is absent, so the vault under-reports across that window — bounded by heal cadence, never permanent. The subject-axis prune of [ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md) runs at the job end that follows, and a tear before it leaves exactly the state a heal that never pruned leaves — reached, as every stale finding is, by the next walk whose clean scope covers the place. A tear inside one changeset is injected today; a tear at a chunk boundary and a tear between a flush's increment and its findings are the suite's to reach. |
 | Disk full | **Refused at rung 2.** The increment cannot complete, the entry stays untrusted, and the request refuses saying so. |
 | Permission loss on vault paths | **Refused at rung 2.** An unreadable path is an error, never evidence of deletion: the heal refuses rather than prunes. |
 | A document norn cannot decode | **Quarantined at rung 2.** The document yields no facts, a finding names it and the cause class — withheld while a readable document stands at its rendered spelling — the heal keeps going, and the entry reaches `Ready` serving every other document. |
@@ -176,13 +176,13 @@ that is unlinked or changes kind between the listing that named it and the stat 
 it refuses there.
 
 **Quarantine is per document; refusal is per vault.** See
-[ADR 0019](decisions/0019-quarantine-is-for-nothing-derivable-causes.md), which supersedes
-ADR 0018. A document norn can derive nothing from — path bytes that are not UTF-8, a path
-spelling the document-path grammar refuses, or a body that is not UTF-8 — is a fact about one
-document rather than about the vault, so it never withdraws the vault. The rung-2 heal skips
-its facts, records a finding naming the path and the cause class — withheld while a rendering
-collision stands, as below — and keeps going; the entry reaches `Ready` and serves every
-other document.
+[ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md), which
+supersedes ADR 0019. A document norn can derive nothing from — path bytes that are not
+UTF-8, a path spelling the document-path grammar refuses, or a body that is not UTF-8 — is
+a fact about one document rather than about the vault, so it never withdraws the vault.
+The rung-2 heal skips its facts, records a finding naming the path and the cause class —
+withheld while a rendering collision stands, as below — and keeps going; the entry reaches
+`Ready` and serves every other document.
 Every rung-2 path answers the three cause classes the same way: the full tree heal, a scoped
 subtree heal, and the warm scoped increment. A dirty **directory** whose own spelling the
 grammar refuses splits by what it still addresses, because naming no document and holding no
@@ -929,7 +929,9 @@ no document row stands at — which is every path a **place-scoped** finding sta
 subject the vault still holds — and beyond the schema-keyed rows it re-derives only a
 document that drifted since it was last derived, which any reconcile owed anyway. A
 **document-scoped** finding is reached without a drift, because the row it stands beside states
-its own defect and the walk re-derives such a document when no finding stands at it. A finding
+its own defect and the walk re-derives such a document when no finding stands at it.
+**Exclusion is a membership boundary**: an excluded place holds no rows, and any row
+standing under an excluded root is pruned by the next heal that ranges over it. A finding
 whose path left the vault is outside what the walk files again, and is what the walk's own
 subject-axis prune takes: the place is inside the scope it enumerated, and nothing it read
 renders onto it.
