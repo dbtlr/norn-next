@@ -31,6 +31,14 @@
 //! built by different routes, and one comparator is what keeps them from
 //! drifting into two meanings of "the same derived state".
 //!
+//! [`churn`] is the other half of that judgment's subject. The comparator says
+//! whether two derived stores agree; the churn driver is what puts one of the
+//! two trees through the editing a host has to converge over — scripted, seeded
+//! workloads a suite applies to a live tree, each step saying what it does so a
+//! failing case prints its script. It manipulates trees and describes what it
+//! left behind, and knows nothing of hosts or stores: the suite that attaches,
+//! settles and judges lives with the host it exercises.
+//!
 //! [`invalidation`] is assistance of the same kind, for a judgment two suites
 //! in different crates make about the same reports: whether a watcher's
 //! invalidation root reaches a path. Answering it here is what keeps the two
@@ -70,6 +78,7 @@
 
 pub mod architecture;
 pub mod base64;
+pub mod churn;
 pub mod corpus;
 pub mod counters;
 pub mod equivalence;

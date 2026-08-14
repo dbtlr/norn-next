@@ -5139,6 +5139,93 @@ mod tests {
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
+    /// **An editor's save inside the window, staged rather than raced.**
+    ///
+    /// The churn suite drives editor saves at a live host from outside, and what
+    /// it cannot do from there is decide *when* one lands relative to a heal's
+    /// enumeration and its opens. That window is reachable here, where the walk
+    /// and the merge are two calls, so the same act the suite applies to a tree
+    /// is applied between them: content landed whole over a document the walk
+    /// enumerated.
+    ///
+    /// It converges on the answer a walk begun now holds. **The open reads the
+    /// file rather than the stat the enumeration carried**, so the row ends up
+    /// holding the bytes that arrived after the walk rather than the ones it
+    /// saw. The deletion half of this window is
+    /// [`documents_deleted_between_enumeration_and_open_converge_on_their_absence`]
+    /// above.
+    ///
+    /// The forbidden shape is an environmental refusal, which would leave the
+    /// entry untrusted over ordinary editing and wait for a demand to repair it.
+    #[test]
+    fn an_editor_save_between_enumeration_and_open_derives_the_bytes_that_landed() {
+        use norn_testkit::churn::{Act, Script, Step};
+
+        /// What the replacement lands, which is what the merge has to derive.
+        const AFTER: &[u8] = b"# the bytes after\n";
+
+        let f = Fixture::watcherless("heal-open-window-churn");
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        fs::write(f.vault().join("swapped.md"), "# the bytes before\n").unwrap();
+        let mut store = Store::open(f.root.join("window-churn.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(stored_paths(&mut store), ["steady.md", "swapped.md"]);
+
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+
+        let script = Script::new(
+            "an atomic replacement inside the window",
+            vec![Step::new(
+                "land different content whole over a document the walk enumerated",
+                Act::AtomicReplace {
+                    at: "swapped.md".to_string(),
+                    bytes: AFTER.to_vec(),
+                },
+            )],
+        );
+        script
+            .apply(f.vault().as_path())
+            .unwrap_or_else(|problem| panic!("{problem}\n{script}"));
+
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut Account::default(),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut store), ["steady.md", "swapped.md"]);
+        assert_eq!(
+            store
+                .begin_request()
+                .stored_document(&DocumentPath::new("swapped.md").unwrap())
+                .unwrap()
+                .expect("the replaced document keeps a row")
+                .content_hash,
+            norn_fs::ContentHash::of(AFTER).to_string(),
+            "the merge derived the bytes the enumeration saw rather than the ones the open read"
+        );
+        assert_eq!(finding_total(&mut store), 0);
+    }
+
     /// **The same window on the subject axis: a name that opened nothing is a
     /// place this walk read nothing at.** The row axis converges on the answer a
     /// walk begun now holds, and on the subject axis that walk is one that names

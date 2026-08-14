@@ -37,7 +37,7 @@ use norn_host::{
 };
 #[cfg(feature = "induced-failure")]
 use norn_host::{EvidenceReading, JobEvidence};
-use norn_store::{DocumentPath, Store, StoredPathOrder};
+use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
@@ -380,6 +380,16 @@ pub fn derived_documents(store: &mut Store) -> usize {
 
 /// Every derived path, handed over one at a time, a bounded page behind.
 pub fn for_each_derived_path(store: &mut Store, mut visit: impl FnMut(&DocumentPath)) {
+    for_each_derived_document(store, |document| visit(&document.path));
+}
+
+/// Every derived row, handed over one at a time, a bounded page behind.
+///
+/// The page loop lives here once because reading a whole vault is the shape
+/// every suite in this crate needs and the bound is the point of it: a caller
+/// that asked for the vault in one request would be measuring the store's page
+/// bound rather than what an attachment derived.
+pub fn for_each_derived_document(store: &mut Store, mut visit: impl FnMut(&StoredDocument)) {
     /// How many derived rows are read at a time.
     const PAGE: usize = 64;
 
@@ -394,7 +404,7 @@ pub fn for_each_derived_path(store: &mut Store, mut visit: impl FnMut(&DocumentP
         };
         after = Some(last.path.clone());
         for document in &page {
-            visit(&document.path);
+            visit(document);
         }
     }
 }

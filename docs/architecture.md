@@ -128,15 +128,52 @@ the verdict, because every other route is an entry that holds the store the rung
 against itself is the only thing that meets damage no read fails on, so it runs as bounded
 lifecycle maintenance beside the shadow sweep — off the request path, never per request.
 
-**Every rung is to be reached by a test, across two suites**, and one of the two is built.
-Each suite below says where it stands.
+**Every rung is to be reached by a test, across two suites**, and both are built. The churn
+suite reaches everything it states; the induced-failure suite reaches every row of its table
+but the two named below. Each suite below says where it stands.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
 bound proportional to the changed set. It is the warm path, so it is reached by ordinary
-operation rather than by injected failure. **That suite is not built**, and its absence
-binds here the way an absent mechanism does: rung 1 is reached by no test until
-`norn-testkit`'s churn driver and the host suite that runs it exist.
+operation rather than by injected failure. **That suite is built**, and it is two halves:
+`norn-testkit`'s churn driver holds the workload families as seeded scripts, each step
+saying in words what it does to a tree, and `norn-host`'s churn suite applies them to a
+live vault a production attachment is maintaining. Five families run — ordinary editing
+across nested directories; atomic replacement, movement, and the case flip whose meaning
+the volume decides; burst and coalescing pressure; transitions between readable,
+quarantined and degraded documents under a schema replacement; and what external tools do,
+which is editor saves, a sleep's catch-up batch, and edits landing during an active heal.
+**Every family runs in phases with a settle between them.** A modification is only a
+modification against a row a host already holds, so a workload whose creations and its
+edits land inside one poll window asks a host for nothing but new files; each family
+therefore puts its content in the tree, is settled over, and only then edits, moves and
+removes it. One case lands that changing phase while no host is attached at all, which is
+the lane where the attach heal rather than a watcher report is what has to converge it.
+Each settles on a **census** — every markdown place holding the row its bytes
+imply, keyed by identity so a volume that folds case is judged the way it resolves, and the
+vault's schema declaration agreeing with the pin the store holds — and is then compared
+with a second derivation built from zero over the same final tree. Two claims stand between
+a phase's acts and its settle, because a phase that changed nothing satisfies every bar
+after it: **a non-empty script whose census reads exactly as the one it opened against
+fails there**, and every place that held a row before the phase and holds none after it is
+a death the store is then required to hold a tombstone for. That second claim is the churn
+suite's alone — deaths are outside the two-store comparator by construction, since a
+derivation from zero records none, so the per-store leg reads the pillar's shape and the
+suite that took the documents away reads its membership. The window between one
+heal's enumeration and its opens is not reachable from outside a host, so the workloads are
+staged through the same seams in `norn-host`'s own suite; what the churn suite does reach
+is the coarser overlap, by racing an attachment until it catches a heal already half way
+through its walk and then witnessing the result in the provenance the store recorded its
+deaths under. Beside the convergence bars are
+**cost bars**, read off the account a host's jobs write: each is a bracket, under a ceiling
+stated over the changed set and over the floor stated for no changes at all. A third claim
+is asserted beside every reading in that same lane — that the ceiling the reading passed
+under is below half the vault's documents — so a bound wide enough to admit re-reading the
+vault fails where it is read rather than in an arithmetic identity check that attaches no
+host. What says those counters move at all is a seeded control: one document, settled over,
+edited once, and the account required to show it. What the suite does not state is a
+wall-clock ceiling on settling — its budget grows with the changed set and is a runaway
+bound, and a ceiling tight enough to fail a slow convergence stays the scheduled lane's.
 
 Rungs 2 and 3 are the **induced-failure suite**'s, whose lane runs per PR. The table below
 is its contract — each row an injection and the outcome required of it — and two of its
@@ -428,8 +465,9 @@ changes *when* a hash happens, never *what* concludes.
 
 Fidelity telemetry and hash authority sit in different lanes. Detection-to-convergence is
 the [churn suite](#2-the-heal-ladder)'s bar — convergence-to-equivalence with a
-from-scratch build, which a watcher that under-reports fails — and that bar binds when the
-suite exists, not today. Fidelity telemetry —
+from-scratch build, which a watcher that under-reports fails — and that bar binds today:
+the suite runs the warm path per pull request, and a report a watcher never made is a
+census that never converges. Fidelity telemetry —
 scan-caught misses per run — is a **soak-lane trend** and never fails a pull request. Hash
 authority itself is **review-held**: no lint or suite yet forbids a stat comparison from
 reaching a conclusion, so the invariant holds by review until one binds it, which is exactly
@@ -469,7 +507,7 @@ contract.
 | `norn-client` | **Everything outside the host** — argv → wire params, loopback routing with endpoint discovery and token read via `norn-config`, TTL auto-launch (connect-or-spawn of the same artifact's host entry point, always a separate process), projections of wire reports onto `norn-console` conventions, the stdio-MCP shim (JSON-RPC framing only; the MCP rendering lives in `norn-mcp`), and the machine-local verbs: self-update, service install, `completions`, `manpage`. Leans on `clap` for everything clap can express — derive API, parsing, completions generation, error surfaces. | The always-routed enforcement seam (see boundary invariant 1). |
 | `norn` (bin) | **Composition root only** — wires `norn-serve` and `norn-client` into the single shipped artifact. | Distribution: one artifact for self-update, service install, and TTL auto-launch alike. |
 | `norn-fixtures` (dev) | **The deterministic vault generator** — the same `(profile, seed)` produces the same tree, byte for byte, up to the filesystem's own filename normalization. Six realism knobs: body-length distribution, ambiguity-class size `k`, link density, directory shape (tree depth and fan-out, root placement, placement skew, leaf-name shape), non-Markdown clutter, symbolic links by species (in-vault file, in-vault directory, dangling, outbound); heading density is a field of body shape, and document count is the profile's own scale. A profile asking for symbolic links **refuses to generate** where one cannot be created — asked of the build before the target is touched, and of the filesystem under the output directory before the tree is written — rather than emitting a tree without them. Self-contained leaf; its writer is its own. See [ADR 0002](decisions/0002-fixture-determinism-and-calibration.md). | Shared by tests, per-PR gates, and the soak lane; never ships. Writing temp trees is its job, so (with testkit) it holds use-site allows for the filesystem rule. |
-| `norn-testkit` (dev) | **Assertion helpers and harness scaffolding** — counter, `EXPLAIN`, and size-independence assertions; the two-store equivalence comparator and the operational-validity leg beside it; the churn driver, which is not built; corpus activation gating; regression-registry loading and its dormancy gate; the architecture gate. Suites execute as integration tests in the crates they exercise, and a suite whose subject is workspace-wide data lives with that data in the `norn` bin package: the argv corpus, which additionally needs the built binary cargo only makes reachable there, and the regression registry. | Enforcement machinery lives once: helpers here, suites with the subjects they exercise. |
+| `norn-testkit` (dev) | **Assertion helpers and harness scaffolding** — counter, `EXPLAIN`, and size-independence assertions; the two-store equivalence comparator and the operational-validity leg beside it; the churn driver, whose seeded workload families a host suite applies to a live tree; corpus activation gating; regression-registry loading and its dormancy gate; the architecture gate. Suites execute as integration tests in the crates they exercise, and a suite whose subject is workspace-wide data lives with that data in the `norn` bin package: the argv corpus, which additionally needs the built binary cargo only makes reachable there, and the regression registry. | Enforcement machinery lives once: helpers here, suites with the subjects they exercise. |
 
 Two membership rules deserve emphasis because they are the ones most often eroded by
 convenience:
