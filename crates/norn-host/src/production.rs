@@ -5233,6 +5233,80 @@ mod tests {
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
+    /// **A root the walk passed over whose own spelling the directory grammar
+    /// refuses withholds every rendered place this job would otherwise reach.**
+    /// Such a root addresses no range of stored paths, so nothing here can name
+    /// the places beneath it: every path under it renders onto a place carrying
+    /// the marker, and which of those places it hides is unknowable from outside
+    /// it. The job therefore concludes nothing about any of them, and a finding
+    /// standing at an unrelated marker-carrying place survives the walk.
+    ///
+    /// The hold belongs to roots. A refused single name the walk opened nothing
+    /// at is a file, hides no subtree, and withholds the one place it renders
+    /// onto.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_root_the_walk_passed_over_withholds_every_rendered_place() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::watcherless("heal-withheld-refused-root");
+        if !write_or_report(&f.vault().join("elsewhere\\name.md"), b"body") {
+            return;
+        }
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+        let mut store = Store::open(f.root.join("refused-root.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_kinds(&mut store, "elsewhere\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal did not file the unrelated spelling, so this proves nothing"
+        );
+
+        // The unrelated spelling leaves ahead of the enumeration, so nothing the
+        // walk below reads renders onto the place its finding stands at.
+        fs::remove_file(f.vault().join("elsewhere\\name.md")).unwrap();
+        // A root the walk names and never reads through, spelled the way the
+        // directory grammar refuses: it addresses no range of stored paths, so
+        // naming it reaches none of the places it hides.
+        symlink("away", f.vault().join("hidden\\dir")).unwrap();
+
+        let walk = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walk.case_sensitivity();
+        let enumerated: Vec<_> = walk.collect();
+
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, f.vault().as_path(), &[], policy, &mut account).unwrap();
+
+        assert_eq!(
+            findings_at(&mut store, "elsewhere\u{fffd}name.md").len(),
+            1,
+            "the walk took a rendered place the refused root it passed over hides"
+        );
+        assert_eq!(stored_paths(&mut store), ["steady.md"]);
+    }
+
     /// Bytes no Markdown document can be read from.
     const UNDECODABLE: &[u8] = b"ok \xff\xfe not utf8\n";
 
