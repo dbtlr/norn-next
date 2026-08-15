@@ -149,7 +149,7 @@ pub(crate) fn apply(
     // opened no transaction. A build without the `induced-failure` feature
     // carries no check here.
     #[cfg(feature = "induced-failure")]
-    store::abort_if_the_chunk_boundary_is_torn();
+    crate::faults::abort_if_the_chunk_boundary_is_torn();
 
     // One clock reading for the changeset, as there is one generation. Nothing
     // orders by it; it is what a person reads in a report.
@@ -192,7 +192,7 @@ pub(crate) fn apply(
             // two entries, with the transaction open and nothing committed. A
             // build without the `induced-failure` feature carries no check here.
             #[cfg(feature = "induced-failure")]
-            store::abort_if_the_changeset_is_torn(index as u64 + 1);
+            crate::faults::abort_if_the_changeset_is_torn(index as u64 + 1);
         }
         let discarded =
             discard_affected_classes(&mut statements.discard_class, &tally.affected_classes)?;
@@ -208,7 +208,7 @@ pub(crate) fn apply(
     // stating why, which is the state the rows themselves demand their own
     // re-derivation from.
     #[cfg(feature = "induced-failure")]
-    store::note_the_changeset_committed();
+    crate::faults::note_the_changeset_committed();
 
     // Counters record what happened, so they move after the commit that made it
     // happen.
