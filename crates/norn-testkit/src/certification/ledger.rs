@@ -335,17 +335,9 @@ impl Record {
                 reason: NonQualifying::SuiteChange,
             };
         }
-        // A run nobody checked the machine for, and a run that cannot say which
-        // of the two platform answers the inventory's platform-deciding lanes
-        // require it produced, are the same kind of gap: something about the
-        // host is unknown, so nothing was concluded about the candidate. Both
-        // are read here rather than left to the validator, because a run that
-        // classified itself Qualifying and then failed validation would leave
-        // its record saying one thing and the reader concluding another.
-        if self.preflight.admitted != Some(true)
-            || self.platform.watcher_backend.is_none()
-            || self.platform.volume_folds_case.is_none()
-        {
+        // A run nobody checked the machine for is a gap in the environment,
+        // not in the candidate: nothing was concluded, so nothing qualifies.
+        if self.preflight.admitted != Some(true) {
             return Classification::NonQualifying {
                 reason: NonQualifying::Environment,
             };
@@ -354,6 +346,20 @@ impl Record {
         {
             return Classification::NonQualifying {
                 reason: NonQualifying::ProductFailure,
+            };
+        }
+        // A run that cannot say which of the two platform answers the
+        // inventory's platform-deciding lanes require it produced has
+        // concluded nothing the campaign can count — but it is read after the
+        // outcomes, because a failed case is a fact about the candidate
+        // whatever the record knows about its machine, and `product-failure`
+        // is the one reason that means the candidate is wrong. Read here
+        // rather than left to the validator, because a run that classified
+        // itself Qualifying and then failed validation would leave its record
+        // saying one thing and the reader concluding another.
+        if self.platform.watcher_backend.is_none() || self.platform.volume_folds_case.is_none() {
+            return Classification::NonQualifying {
+                reason: NonQualifying::Environment,
             };
         }
         // Last, because it is the one reason that is about how the run was

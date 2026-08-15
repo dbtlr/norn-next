@@ -170,7 +170,8 @@ runs over one frozen candidate is read off those records, and manual runs never 
 **No run today can qualify, and the machinery says so rather than implying otherwise.** Two
 things are missing and both are the certification campaign's to add. There is no
 environmental preflight: nothing classifies the host, so every record carries a preflight
-that did not run and classifies as `environment`. And the scheduled lane executes zero
+that did not run, and a record whose cases all ran would classify as `environment` for it.
+And the scheduled lane executes zero
 certification cases — it runs the measurement suites, names no outcomes file, and every
 required case is recorded `not-run`, which classifies as a suite change. Qualification
 begins when the campaign adds both: a lane step that runs the certification suites and
