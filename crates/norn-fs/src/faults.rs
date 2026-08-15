@@ -43,6 +43,11 @@
 //!
 //! Nothing outside this crate arms anything without the feature, and a shipped
 //! build has no reader for either variable.
+//!
+//! The watcher carries a seam of its own, widened once at watch establishment,
+//! under the same feature and appending to the same record file under the
+//! `norn-fs/watch` seam name. Each seam answers at its own boundary and at no
+//! other, which is what the `seam` field in a record says.
 
 use std::io;
 

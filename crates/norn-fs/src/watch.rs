@@ -24,6 +24,10 @@ use crate::hash::hashed_from;
 use crate::path::{NormalizedPath, PathError, PathNormalizer};
 use crate::write::{Landed, Moved, Vacated};
 
+mod faults;
+
+use faults::WatchFaults;
+
 /// A trailing quiet period that closes a naturally settled batch.
 pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
 /// The longest a continuous event stream may postpone delivery.
@@ -199,6 +203,7 @@ pub struct Subscription {
     control: Arc<(Mutex<SubscriptionState>, Condvar)>,
     state: Arc<Mutex<State>>,
     wake: Option<mpsc::SyncSender<()>>,
+    faults: WatchFaults,
 }
 
 impl Subscription {
@@ -213,7 +218,12 @@ impl Subscription {
     /// consumer may treat as a complete account of the tree, whether or not
     /// that consumer read the error returned here.
     pub fn synchronize(&self, deadline: Duration) -> Result<(), WatchError> {
-        let outcome = wait_for_synchronization(&self.control, deadline);
+        // An armed barrier withheld the publication this wait is for, so it
+        // ends the wait at once instead of holding the caller's authored
+        // deadline against a boundary that is not coming. Everything below is
+        // reached the way an expiry on a real machine reaches it.
+        let outcome =
+            wait_for_synchronization(&self.control, self.faults.synchronization_wait(deadline));
         if let Err(error) = &outcome {
             self.state
                 .lock()
@@ -453,11 +463,33 @@ pub fn watch_polling(
     watch_with(vault_root, schema_source, true)
 }
 
-#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
 fn watch_with(
     vault_root: &Path,
     schema_source: &Path,
     poll: bool,
+) -> Result<(Subscription, OwnWrites), WatchError> {
+    establish(
+        vault_root,
+        schema_source,
+        poll,
+        // The one place the watcher fault seam is widened, and only under the
+        // `induced-failure` feature: the bars over refused coverage, a stream
+        // that fails or overflows, and a boundary that never arrives are stated
+        // about a process the platform does not cooperate with, so the arm is
+        // read from the environment that process was started with. Every other
+        // caller of `establish` passes the arm it is stating a case over.
+        WatchFaults::entry(),
+    )
+}
+
+/// Establish coverage under `faults`, which say which of the watcher's own
+/// boundaries fail rather than waiting for a platform that fails there.
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
+fn establish(
+    vault_root: &Path,
+    schema_source: &Path,
+    poll: bool,
+    faults: WatchFaults,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
     // macOS FSEvents reports the canonical `/private/var/...` spelling even
     // when a caller registered `/var/...`. Keep registration and callback
@@ -489,7 +521,14 @@ fn watch_with(
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
     let callback_control = control.clone();
+    let mut stream_arm = faults.stream_arm();
     let handler = move |result| {
+        // The stream stage answers here, upstream of ingest and the coalescer,
+        // by standing in place of the message the backend delivered: what a
+        // stream that failed or overflowed is to the rest of the watcher is a
+        // message arriving at this boundary. An unarmed watch hands the
+        // delivery through unchanged.
+        let result = stream_arm.answer(result);
         // A backend failure is control state as well as the subscription's
         // last fact: a caller waiting on the boundary is waiting on this
         // thread, so it learns of the failure here rather than at the
@@ -500,7 +539,7 @@ fn watch_with(
         let _ = callback_wake.try_send(());
     };
     let mut watcher: Box<dyn notify::Watcher + Send> = match poll {
-        false => native_watcher(handler, &control)?,
+        false => native_watcher(handler, &control, &faults)?,
         true => Box::new(
             PollWatcher::new(
                 handler,
@@ -515,7 +554,12 @@ fn watch_with(
         ),
     };
 
-    install(watcher.as_mut(), &plan)?;
+    install(watcher.as_mut(), &plan, &faults)?;
+
+    // Coverage is installed, so the barrier arm — if this watch carries one —
+    // fires here: from now on the `Live` publication below is withheld and the
+    // wait for it ends at its own expiry.
+    faults.fire_barrier();
 
     if registration_is_the_boundary(poll) {
         let established = shared
@@ -524,7 +568,10 @@ fn watch_with(
             .terminal
             .clone()
             .map_or(SubscriptionState::Live, SubscriptionState::Terminal);
-        publish_control(&control, established);
+        match established {
+            SubscriptionState::Live if faults.withholds_live() => {}
+            established => publish_control(&control, established),
+        }
     }
 
     let worker_state = shared.clone();
@@ -542,6 +589,7 @@ fn watch_with(
             control,
             state: shared,
             wake: Some(wake_tx),
+            faults,
         },
         owns,
     ))
@@ -588,13 +636,14 @@ fn registration_is_the_boundary(_poll: bool) -> bool {
 fn native_watcher(
     handler: impl notify::EventHandler,
     control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+    faults: &WatchFaults,
 ) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
     let since = history_boundary(notify::fsevent::current_event_id())?;
     Ok(Box::new(
         notify::fsevent::FsEventWatcher::with_event_history(
             handler,
             since,
-            history_barrier(control),
+            history_barrier(control, faults),
         )
         .map_err(backend)?,
     ))
@@ -602,12 +651,23 @@ fn native_watcher(
 
 /// What the native macOS backend calls when its event-history replay is
 /// complete, and the only thing that publishes `Live` for that backend.
+///
+/// It is also this platform's half of the barrier stage: an armed watch
+/// withholds the publication here, exactly as one whose boundary is
+/// registration withholds it there, so a barrier that never arrives is the same
+/// fact on both platform paths.
 #[cfg(target_os = "macos")]
 fn history_barrier(
     control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+    faults: &WatchFaults,
 ) -> impl Fn() + Send + Sync + 'static {
     let control = control.clone();
-    move || publish_control(&control, SubscriptionState::Live)
+    let faults = faults.clone();
+    move || {
+        if !faults.withholds_live() {
+            publish_control(&control, SubscriptionState::Live);
+        }
+    }
 }
 
 /// The reading a native macOS stream may replay from.
@@ -652,6 +712,7 @@ fn native_kind_refusal(kind: notify::WatcherKind) -> Option<WatchError> {
 fn native_watcher(
     handler: impl notify::EventHandler,
     _control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
+    _faults: &WatchFaults,
 ) -> Result<Box<dyn notify::Watcher + Send>, WatchError> {
     use notify::Watcher as _;
 
@@ -710,7 +771,13 @@ fn coverage_plan(
 fn install(
     watcher: &mut dyn notify::Watcher,
     plan: &[(PathBuf, RecursiveMode)],
+    faults: &WatchFaults,
 ) -> Result<(), WatchError> {
+    // The install stage stands ahead of the registration it simulates, and what
+    // it simulates is the platform call's own typed answer: nothing is staged,
+    // nothing is committed, and the refusal reaches the caller through the same
+    // teardown a refused edge reaches it through.
+    faults.registration()?;
     let mut paths = watcher.paths_mut();
     let refused = plan
         .iter()
@@ -1112,6 +1179,7 @@ fn matches_expected(path: &Path, expected: &Expected) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::faults::{Answer, Stage};
     use super::*;
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, ModifyKind, RemoveKind,
@@ -1368,7 +1436,7 @@ mod tests {
     #[test]
     fn only_the_history_marker_publishes_live_for_the_native_backend() {
         let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
-        let marker = history_barrier(&control);
+        let marker = history_barrier(&control, &WatchFaults::default());
 
         assert_eq!(
             *control.0.lock().unwrap(),
@@ -1383,7 +1451,7 @@ mod tests {
     #[test]
     fn expiry_during_the_history_replay_survives_a_late_marker() {
         let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
-        let marker = history_barrier(&control);
+        let marker = history_barrier(&control, &WatchFaults::default());
 
         assert_eq!(
             wait_for_synchronization(&control, Duration::ZERO),
@@ -1524,6 +1592,222 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // The watcher fault seam, at the boundaries it is widened at
+    // -----------------------------------------------------------------------
+
+    /// A vault, its in-vault schema, and the file a fired arm records itself
+    /// in.
+    ///
+    /// The record file sits in a directory of its own so that writing it is
+    /// never the delivery a stream arm answers: the arm stands in place of the
+    /// first real delivery after establishment, and an arm whose own record
+    /// produced that delivery would be answering itself.
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn armed_tree(label: &str) -> (Scratch, PathBuf, PathBuf, PathBuf) {
+        let scratch = Scratch::new(label);
+        let vault = scratch.path("vault");
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").expect("a schema source");
+        let hits = scratch.directory("records").join("arm-hits");
+        (scratch, vault, schema, hits)
+    }
+
+    /// Everything the arm recorded, in the order it fired.
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
+    fn recorded(hits: &Path) -> String {
+        std::fs::read_to_string(hits).unwrap_or_else(|error| {
+            panic!("the arm recorded nothing in {}: {error}", hits.display())
+        })
+    }
+
+    /// A watcher case's own wait: the poll interval is a quarter second, so
+    /// what a case here waits for is several of them and not a machine-sized
+    /// number.
+    fn watch_budget() -> norn_testkit::wait::Budget {
+        norn_testkit::wait::Budget::new(Duration::from_secs(15), Duration::from_millis(250))
+    }
+
+    /// **An armed install refuses establishment the way a platform refusal
+    /// does.** No subscription is returned, and the refusal is the typed
+    /// backend error a refused registration carries.
+    #[test]
+    fn an_armed_install_refuses_the_watch_and_records_the_boundary() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-install-armed");
+
+        let established = establish(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Install, Answer::Refuses)], hits.clone()),
+        );
+
+        let Err(refusal) = established else {
+            panic!("an armed registration handed back a subscription");
+        };
+        assert!(matches!(refusal, WatchError::Backend(_)), "{refusal:?}");
+        assert_eq!(
+            recorded(&hits),
+            "seam=norn-fs/watch stage=install answer=refuses\n"
+        );
+    }
+
+    /// **An armed barrier is a boundary that never arrives.** The subscription
+    /// stays synchronizing, the wait for it ends in the typed expiry without
+    /// the caller's authored deadline elapsing, and the expiry is the
+    /// subscription's own fact rather than the waiting caller's.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_armed_barrier_expires_without_consuming_the_authored_deadline() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-barrier-armed");
+        let (subscription, _) = establish(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone()),
+        )
+        .expect("coverage installs");
+
+        assert_eq!(
+            subscription.state(),
+            SubscriptionState::Synchronizing,
+            "an armed barrier published the boundary it withholds"
+        );
+        let authored = Duration::from_secs(3600);
+        let began = Instant::now();
+        assert_eq!(
+            subscription.synchronize(authored),
+            Err(WatchError::SynchronizationExpired)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "the wait spent the caller's authored deadline rather than reaching expiry"
+        );
+        assert_eq!(
+            subscription.state(),
+            SubscriptionState::Terminal(WatchError::SynchronizationExpired)
+        );
+
+        norn_testkit::wait::wait_until(
+            "the batch stream to refuse with the recorded expiry",
+            watch_budget(),
+            || match subscription.try_recv() {
+                Err(WatchError::SynchronizationExpired) => norn_testkit::wait::Observed::Met(()),
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            recorded(&hits),
+            "seam=norn-fs/watch stage=barrier answer=expires\n"
+        );
+    }
+
+    /// **An armed stream failure is the last thing the subscription carries.**
+    /// It stands in place of a delivery the backend really made, and what
+    /// follows is what follows a backend that failed on its own: a terminal
+    /// error, control state to match, and nothing that revives it.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_armed_stream_failure_displaces_a_real_delivery_and_ends_the_stream() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-stream-fails");
+        let (subscription, _) = establish(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone()),
+        )
+        .expect("coverage installs");
+        subscription
+            .synchronize(Duration::from_secs(15))
+            .expect("polling registration is the synchronization boundary");
+
+        std::fs::write(vault.join("one.md"), b"one\n").expect("a real change under a real watch");
+
+        let error = norn_testkit::wait::wait_until(
+            "the armed failure to reach the batch stream",
+            watch_budget(),
+            || match subscription.try_recv() {
+                Err(error) => norn_testkit::wait::Observed::Met(error),
+                Ok(batch) => norn_testkit::wait::Observed::Pending(format!("{batch:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(matches!(error, WatchError::Backend(_)), "{error:?}");
+        assert!(matches!(
+            subscription.state(),
+            SubscriptionState::Terminal(WatchError::Backend(_))
+        ));
+
+        // A terminal fact is the last one: a later change reports nothing, and
+        // the stream keeps refusing.
+        std::fs::write(vault.join("two.md"), b"two\n").expect("a change after the failure");
+        assert!(subscription.try_recv().is_err());
+        assert_eq!(
+            recorded(&hits),
+            "seam=norn-fs/watch stage=stream answer=fails\n"
+        );
+    }
+
+    /// **An armed rescan is the report a backend makes when it lost the path
+    /// set.** The batch carrying it names the vault-wide scope, coverage stays
+    /// installed, and the arm is spent: the change after it is reported by
+    /// path.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_armed_stream_rescan_widens_one_batch_and_leaves_coverage_installed() {
+        let (_scratch, vault, schema, hits) = armed_tree("watch-stream-rescans");
+        let (subscription, _) = establish(
+            &vault,
+            &schema,
+            true,
+            WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+        )
+        .expect("coverage installs");
+        subscription
+            .synchronize(Duration::from_secs(15))
+            .expect("polling registration is the synchronization boundary");
+
+        std::fs::write(vault.join("one.md"), b"one\n").expect("a real change under a real watch");
+
+        norn_testkit::wait::wait_until(
+            "a batch carrying the vault-wide rescan scope",
+            watch_budget(),
+            || match subscription.try_recv() {
+                Ok(Some(batch)) if batch.rescans().contains(&RescanScope::Vault) => {
+                    norn_testkit::wait::Observed::Met(())
+                }
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(subscription.state(), SubscriptionState::Live);
+
+        // One armed answer, one firing: the next change is the backend's own
+        // report again, named by path.
+        std::fs::write(vault.join("two.md"), b"two\n").expect("a change after the rescan");
+        norn_testkit::wait::wait_until(
+            "the change after the rescan, reported by path",
+            watch_budget(),
+            || match subscription.try_recv() {
+                Ok(Some(batch))
+                    if batch
+                        .vault_roots()
+                        .iter()
+                        .any(|root| root.as_path() == Path::new("two.md")) =>
+                {
+                    norn_testkit::wait::Observed::Met(())
+                }
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            recorded(&hits),
+            "seam=norn-fs/watch stage=stream answer=rescans\n"
+        );
     }
 
     #[test]
