@@ -1447,6 +1447,28 @@ mod tests {
         assert_eq!(*control.0.lock().unwrap(), SubscriptionState::Live);
     }
 
+    /// **An armed barrier withholds the publication on this platform path
+    /// too.** The native backend publishes `Live` from the event-history
+    /// marker and nowhere else, so a marker that published anyway would leave
+    /// the arm meaning one thing on macOS and another everywhere else.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_armed_barrier_withholds_the_native_history_marker() {
+        let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
+        let marker = history_barrier(
+            &control,
+            &WatchFaults::at(&[(Stage::Barrier, Answer::Expires)]),
+        );
+
+        marker();
+
+        assert_eq!(
+            *control.0.lock().unwrap(),
+            SubscriptionState::Synchronizing,
+            "an armed barrier published the boundary it withholds"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn expiry_during_the_history_replay_survives_a_late_marker() {
