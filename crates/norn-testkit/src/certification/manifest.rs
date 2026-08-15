@@ -10,27 +10,56 @@
 //! # What it closes over
 //!
 //! The lanes ([`MANIFEST_TREES`]), the toolchain and the resolved dependency
-//! graph, the inventory of required cases, the comparator every convergence
-//! verdict is read off, the injected-failure code every rung-2 and rung-3 case
-//! is reached through, and the files that hold the authored bounds. Each entry
-//! in [`MANIFEST_FILES`] says why it is in, because an entry nobody can justify
-//! is one a later edit will drop.
+//! graph, the inventory of required cases, the qualification rules the inventory
+//! is reconciled and a record is judged by, the comparator every convergence
+//! verdict is read off, the instrument a work reading is taken through, the
+//! injected-failure seams every rung-2 and rung-3 case is reached through, every
+//! certification suite's own source, and the recorded baselines a measurement
+//! step is compared against. Each entry in [`MANIFEST_FILES`] says why it is in,
+//! because an entry nobody can justify is one a later edit will drop.
+//!
+//! **The rules are inside the value they decide.** This file and [`ledger`] are
+//! entries like any other, hashed as bytes off the checkout. That is what closes
+//! the self-reference: the digest is a function of file contents rather than of
+//! the constants a build compiled, so a rule loosened moves the value it is the
+//! rule for, and computing it terminates.
+//!
+//! [`ledger`]: super::ledger
 //!
 //! # What it does not close over
 //!
-//! The product's own source. That is what the candidate SHA is for, and folding
-//! it in here would make every commit a new suite and the five-run count
+//! **The product's own source.** That is what the candidate SHA is for, and
+//! folding it in here would make every commit a new suite and the five-run count
 //! unreachable by construction. The two values are recorded side by side in the
 //! ledger and answer different questions: the SHA says what was certified, and
-//! this says what certified it.
+//! this says what certified it. A file that holds both — a fault seam inside a
+//! product module — is a file to split rather than a reason to widen this list.
+//!
+//! **The runner image's own version.** A lane names a runner label, and the
+//! label is in this digest because it is workflow text; the image that label
+//! resolved to on the day is not. Two runs a month apart under `ubuntu-latest`
+//! ran on different images, with different kernels and different filesystem
+//! behaviour, and agree on this value. What carries that is the record rather
+//! than the digest: [`super::ledger::Platform`] holds the runner, the OS, the
+//! architecture, the watcher backend and the volume's case answer, so a campaign
+//! comparing five records sees the machine change even where the suite did not.
+//! **Neither answers for the image's patch level**, and nothing here should be
+//! read as saying two runs met the same kernel.
 //!
 //! # Determinism
 //!
 //! Files are hashed in sorted path order, each path and each content framed
 //! behind its own length, and nothing timestamped or environment-derived takes
-//! part. The value is therefore reproducible from a clean checkout of the same
-//! commit on any machine — which is what makes it a thing two runs can be
-//! compared by.
+//! part. The value is therefore reproducible from a checkout of the same commit
+//! on any machine — which is what makes it a thing two runs can be compared by.
+//!
+//! **It is a reading of the working tree, not of the commit.** Every byte comes
+//! off the files as they sit on disk, so an uncommitted edit to a covered file
+//! moves the digest and a run over a dirty checkout records a value no other
+//! checkout of that commit reproduces. A qualifying run is therefore a run over
+//! a clean checkout of the candidate it names — which is what a workflow's own
+//! `actions/checkout` gives it, and what a local run reproducing a recorded
+//! value has to arrange for itself.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -87,6 +116,24 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               digest, so an edit to the reconciliation beside the table moves the value too",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/certification/manifest.rs",
+        why: "this list and the rule that folds it: what a run is certified against is decided \
+              here, so a value computed by a different rule is a different value's namesake. \
+              Digested as bytes off the checkout like every other entry, which is what makes the \
+              self-reference terminate rather than recur",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/certification/ledger.rs",
+        why: "what makes a record qualifying: the classification a run's contents imply and the \
+              validator a campaign counts through. A run counted under a looser rule is not the \
+              same run",
+    },
+    ManifestFile {
+        path: "crates/norn-testkit/src/regression.rs",
+        why: "the reconciliation engine the inventory is walked by — how cargo is asked what \
+              compiled, and what a reference is held to resolve to",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/equivalence.rs",
         why: "the comparator every convergence verdict and the operational-validity leg are read \
               off",
@@ -97,25 +144,77 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     },
     ManifestFile {
         path: "crates/norn-testkit/src/work.rs",
-        why: "the shape a work bar is stated in",
+        why: "the shape a work bar is stated in, and the row count arithmetic a caller states one \
+              against",
     },
     ManifestFile {
         path: "crates/norn-fs/src/faults.rs",
         why: "the write protocol's fault seam: the stages a publication can be failed at and how",
     },
     ManifestFile {
-        path: "crates/norn-store/src/store.rs",
-        why: "the store's induced-failure module and the arms it fires at — the whole file, \
-              because the seam is a module inside it and a rung's behaviour is the rest of it",
+        path: "crates/norn-store/src/faults.rs",
+        why: "the store's fault seam: the arms a rung-2 or rung-3 case is reached through, and \
+              the points the store's own paths read them at",
     },
+    ManifestFile {
+        path: "crates/norn-store/src/request.rs",
+        why: "the instrument the work bar reads — the step count a drain is judged by and the \
+              plan a statement reports — so a reading taken through a different instrument is a \
+              different reading",
+    },
+    // The certification suites themselves. Every case a qualifying run
+    // executes is authored in one of these files, so an assertion loosened is
+    // a run that certified less: the id and the carrier would not move, and
+    // the reconciliation would not either.
     ManifestFile {
         path: "crates/norn-host/tests/churn.rs",
         why: "the churn suite, whose authored cost bounds and settle budgets are the bars a \
               qualifying run passes under",
     },
     ManifestFile {
+        path: "crates/norn-host/tests/equivalence.rs",
+        why: "the operational leg: one vault derived twice from zero, which is what says the \
+              comparator reports agreement where agreement is what there is",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/lockdown.rs",
+        why: "the host's induced-failure suite — the rung-2 and rung-3 cases a full disk, an \
+              unreadable document, a revoked subtree and a tear are asserted through",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/kill_recovery.rs",
+        why: "the crash-convergence case: what the next attach after a process died mid-increment \
+              is required to converge on",
+    },
+    ManifestFile {
+        path: "crates/norn-fs/tests/lockdown.rs",
+        why: "the write kernel's induced-failure suite — the publication checkpoints a tear is \
+              required to leave one whole document at",
+    },
+    ManifestFile {
+        path: "crates/norn-store/tests/environment.rs",
+        why: "the store's induced-failure suite — what separates a hostile environment from \
+              damaged state, which is what decides whether a rung runs at all",
+    },
+    ManifestFile {
         path: "crates/norn-store/tests/store/pillars.rs",
-        why: "the work bar's authored floor and coefficient",
+        why: "the work bar's authored floor, coefficient and row count",
+    },
+    // The recorded baselines. A measurement lane compares against these rather
+    // than against a history, so a baseline edited is a bar moved.
+    ManifestFile {
+        path: "crates/norn-fixtures/tests/baselines/mod.rs",
+        why: "the fixture generator's recorded readings, which are the bars its lane steps compare \
+              against",
+    },
+    ManifestFile {
+        path: "crates/norn-host/tests/baselines/mod.rs",
+        why: "the host's recorded readings — the attach memory ceilings and ratios a lane step \
+              fails against",
+    },
+    ManifestFile {
+        path: "crates/norn-text/tests/baselines/mod.rs",
+        why: "the parser's recorded readings, which the frontmatter cost step is judged against",
     },
 ];
 

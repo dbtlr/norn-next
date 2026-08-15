@@ -115,27 +115,79 @@ fn the_suite_manifest_digest_is_the_same_read_twice() {
     eprintln!("suite manifest digest {first} over {} files", covered.len());
 }
 
-/// The manifest closes over the churn suite and the lane definitions, which is
-/// the property that makes it a *suite* manifest rather than a file list: a bar
-/// moved or a lane rewritten changes what a run is, and both have to move the
-/// value.
+/// The manifest closes over the lanes, the bars, every certification suite and
+/// the rules a run is judged by — which is the property that makes it a *suite*
+/// manifest rather than a file list: an assertion loosened, a bar moved or a
+/// lane rewritten changes what a run is, and each has to move the value.
+///
+/// The claims are spelled out here rather than read off [`manifest::MANIFEST_FILES`],
+/// because a test that walked the same list the digest walks would pass for any
+/// list at all.
 #[test]
-fn the_manifest_covers_the_lanes_and_the_bars() {
+fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
     let covered = manifest::covered_paths(&workspace_root()).expect("listing the covered paths");
     for required in [
+        // The lanes, the toolchain and the resolved graph.
         ".github/workflows/ci.yml",
         ".github/workflows/soak.yml",
         ".github/scripts/lane-suite.sh",
         "Cargo.lock",
         "rust-toolchain.toml",
-        "crates/norn-host/tests/churn.rs",
+        // The rules: what the layer requires, how that is reconciled, and what
+        // makes a record count.
+        "crates/norn-testkit/src/certification/inventory.rs",
+        "crates/norn-testkit/src/certification/ledger.rs",
+        "crates/norn-testkit/src/certification/manifest.rs",
+        "crates/norn-testkit/src/regression.rs",
+        // The instruments a verdict is read off.
         "crates/norn-testkit/src/equivalence.rs",
+        "crates/norn-testkit/src/churn.rs",
+        "crates/norn-testkit/src/work.rs",
+        "crates/norn-store/src/request.rs",
+        // The seams every rung-2 and rung-3 case is reached through.
         "crates/norn-fs/src/faults.rs",
+        "crates/norn-store/src/faults.rs",
+        // Every suite a case in the inventory is carried by, and the bars in
+        // them.
+        "crates/norn-host/tests/churn.rs",
+        "crates/norn-host/tests/equivalence.rs",
+        "crates/norn-host/tests/lockdown.rs",
+        "crates/norn-host/tests/kill_recovery.rs",
+        "crates/norn-fs/tests/lockdown.rs",
+        "crates/norn-store/tests/environment.rs",
+        "crates/norn-store/tests/store/pillars.rs",
+        // The recorded baselines a measurement step is judged against.
+        "crates/norn-fixtures/tests/baselines/mod.rs",
+        "crates/norn-host/tests/baselines/mod.rs",
+        "crates/norn-text/tests/baselines/mod.rs",
     ] {
         assert!(
             covered.iter().any(|path| path == required),
             "the suite manifest does not cover `{required}`, so an edit to it would leave the \
              digest — and therefore the five-run count — standing"
+        );
+    }
+}
+
+/// **Every claimed certification target's file is in the manifest.**
+///
+/// The inventory claims those targets whole: every test in them is a
+/// certification case. So the file each compiles from is a file whose edit
+/// changes what a qualifying run asserted, and the coverage is derived from the
+/// inventory's own list rather than transcribed — a suite added to
+/// [`inventory::CLAIMED_TARGETS`] and not to the manifest is the drift this
+/// catches.
+#[test]
+fn the_manifest_covers_every_claimed_certification_suite() {
+    let covered = manifest::covered_paths(&workspace_root()).expect("listing the covered paths");
+    for claimed in inventory::CLAIMED_TARGETS {
+        let file = format!("crates/{}/tests/{}.rs", claimed.package, claimed.stem);
+        assert!(
+            covered.contains(&file),
+            "`{} {}` is claimed whole as a certification suite and the manifest does not cover \
+             `{file}`, so an assertion loosened in it would leave the digest standing",
+            claimed.package,
+            claimed.stem
         );
     }
 }
