@@ -207,12 +207,16 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
         suite_manifest_digest: manifest::digest(&root).expect("digesting the suite manifest"),
         case_inventory_digest: inventory::contract_digest(),
         scheduled: true,
+        // The two platform-deciding facts are populated because a qualifying
+        // record is required to carry them: the inventory's volume-folding and
+        // backend-deciding lanes are each covered by a run of each answer, so a
+        // record silent on either covers neither.
         platform: Platform {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             runner: "local".to_string(),
-            watcher_backend: None,
-            volume_folds_case: None,
+            watcher_backend: Some("the platform watcher this build installs".to_string()),
+            volume_folds_case: Some(false),
         },
         preflight: Preflight {
             ran: true,
@@ -229,8 +233,8 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
         result: RunResult::Passed,
         classification: Classification::Qualifying,
     };
-    assert_eq!(sound.problems(), Vec::<String>::new());
-    assert!(sound.qualifies());
+    assert_eq!(sound.problems(&root), Vec::<String>::new());
+    assert!(sound.qualifies(&root));
 
     let rendered = serde_json::to_string_pretty(&sound).expect("rendering the record");
     let read: Record = serde_json::from_str(&rendered).expect("reading the record back");
@@ -239,9 +243,10 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
     let mut doctored = sound.clone();
     doctored.cases[0].outcome = Outcome::Failed;
     assert!(
-        !doctored.problems().is_empty(),
+        !doctored.problems(&root).is_empty(),
         "a record whose case outcomes and stated verdict disagree was accepted"
     );
+    assert!(!doctored.qualifies(&root));
 }
 
 /// **The emitter.** Where a run named a sink, this run's record is assembled
@@ -258,9 +263,11 @@ fn this_runs_record_is_assembled_and_written_where_a_sink_names() {
     let assembled =
         ledger::from_environment(&root).expect("assembling a record from this environment");
     assert_eq!(
-        assembled.problems(),
+        assembled.writer_defects(&root),
         Vec::<String>::new(),
-        "a record assembled from the environment is internally consistent whatever the run did"
+        "a record assembled from the environment is one the writer built right, whatever the run \
+         did. What the run did is carried in the record's classification and its case lines, and \
+         a run that did not reconcile is evidence rather than a defect."
     );
     eprintln!(
         "qualification record: {:?}, suite manifest {}",
