@@ -14,6 +14,7 @@ use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
     class_probe, induced_failure, suffix_probe,
 };
+use norn_testkit::equivalence::assert_operationally_valid;
 use norn_testkit::explain::{PlanRow, QueryPlan};
 use norn_testkit::readings;
 use norn_testkit::work::WorkBar;
@@ -1424,6 +1425,14 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             DRAINED_ROWS
         },
     );
+
+    // The bar is over a store an operation could really have produced. A fixture
+    // that populated the four pillars into a state the operational-validity leg
+    // forbids would be measuring a shape no reader ever drains, and the pillar
+    // this one could get wrong is the findings: a place-scoped finding standing
+    // beside a live document row. The request's borrow of the store ends at its
+    // last use above, which is what lets the leg take the store back.
+    assert_operationally_valid(&mut store, "the store the work bar drains");
 }
 
 /// Drain one reader both ways and judge the pair, recording what each cost.
@@ -1493,6 +1502,13 @@ fn judge_a_drain(
 /// its own ambiguity class, so no finding takes another's place; and the deaths
 /// are recorded at paths no document stands at, so the tombstone pillar is
 /// populated without pruning what was just written.
+///
+/// **The findings stand at places with no document row.** Their kind is
+/// place-scoped — a path addressing no document — and a place-scoped finding
+/// beside a live row is the state the operational-validity leg forbids: it
+/// reports that nothing was derivable somewhere something was. A fixture that
+/// arranged it would be a fixture the invariant refuses, which is why these sit
+/// at `unresolved/` and the documents at `drained/`.
 fn seed_a_drainable_store(request: &mut norn_store::Request<'_>, rows: usize) {
     let documents: Vec<_> = (0..rows)
         .map(|n| {
@@ -1507,7 +1523,7 @@ fn seed_a_drainable_store(request: &mut norn_store::Request<'_>, rows: usize) {
     for n in 0..rows {
         request
             .record_finding(&ambiguity(
-                &format!("drained/{n:04}.md"),
+                &format!("unresolved/{n:04}.md"),
                 &format!("target{n:04}"),
                 &format!("target{n:04}/"),
                 &[],
