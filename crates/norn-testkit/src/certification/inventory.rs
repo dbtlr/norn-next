@@ -16,28 +16,51 @@
 //! # The reconciliation runs in both directions
 //!
 //! Forward: every id resolves to exactly one test cargo compiled into the target
-//! its reference names, under the feature the entry declares. A case that was
-//! deleted, renamed, or left behind a feature the lane does not turn on fails
-//! here — which is the whole point, because each of those leaves a passing run
-//! that certified less than it claimed.
+//! its reference names, under the feature the entry declares, and that test is
+//! one a plain run of the target executes. A case deleted, renamed, left behind
+//! a feature the lane does not turn on, or `#[ignore]`d fails here — each of
+//! those leaves a passing run that certified less than it claimed.
 //!
 //! Backward: every test compiled into a **claimed** target is named by some
-//! entry. A case added to the churn suite and not to the inventory is a case the
-//! layer's own record does not know about, and a later reader counting the
-//! inventory would undercount what the suites hold. The claim is per target and
-//! deliberately partial: [`CLAIMED_TARGETS`] holds the integration suites that
-//! *are* certification suites and nothing else. A crate's library target is
-//! never claimed — it holds every unit test that crate has, and asking the
-//! inventory to name them all would make it a copy of the workspace.
+//! entry, matched on the entry's whole `file::fn` reference rather than on the
+//! function name alone. A case added to the churn suite and not to the inventory
+//! is a case the layer's own record does not know about, and a later reader
+//! counting the inventory would undercount what the suites hold. The claim is
+//! per target and deliberately partial: [`CLAIMED_TARGETS`] holds the
+//! integration suites that *are* certification suites and nothing else. A
+//! crate's library target is never claimed — it holds every unit test that crate
+//! has, and asking the inventory to name them all would make it a copy of the
+//! workspace.
+//!
+//! # What the reconciliation does not catch
+//!
+//! It is a name-level reconciliation over cargo's listing, plus a digest over
+//! the table's own text. Three edits pass it, and a reader should not read a
+//! green reconciliation as ruling them out:
+//!
+//! - **A carrier and its entry renamed in one diff.** The reference still
+//!   resolves, so nothing fails. What surfaces the edit is the contract digest:
+//!   the carrier string is one of the fields [`contract_digest`] absorbs, so the
+//!   value a qualifying run is recorded under moves and the five-run count
+//!   restarts.
+//! - **A carrier gutted.** A test whose body lost its assertions compiles,
+//!   lists, and passes. Nothing here reads a body; what a case asserts is the
+//!   review's question and the [`Case::states`] text is what a review reads it
+//!   against.
+//! - **An id reused for a different obligation.** Ids are never reused by rule
+//!   rather than by mechanism — nothing here holds an id against what an older
+//!   ledger recorded it as, because a record is the campaign's and a build knows
+//!   only its own table. The digest moves, which is what tells a reader to look.
 //!
 //! # The unreached table is data, not a silence
 //!
 //! [`UNREACHED_ARMS`] holds the trust-transition arms the contract names and no
-//! test carries. The reconciliation reports them and does not fail on them,
-//! because what is wrong there is an ownership question rather than a broken
-//! reference — and an obligation nobody wrote down is the one that gets lost.
-//! Each row names the arm and what it awaits, so the ruling that assigns it has
-//! the facts in front of it.
+//! test carries at the production path. The reconciliation does not read this
+//! table at all: what is wrong there is an ownership question rather than a
+//! broken reference, and an obligation nobody wrote down is the one that gets
+//! lost. The certification suite's own unreached-arm case is what prints the
+//! table under a run and holds each row to naming what it awaits, so the ruling
+//! that assigns the work has the facts in front of it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -136,7 +159,8 @@ pub struct ClaimedTarget {
     pub feature: Option<&'static str>,
 }
 
-/// A trust-transition arm the contract names and nothing carries.
+/// A trust-transition arm the contract names and nothing carries at the
+/// production path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnreachedArm {
     pub arm: &'static str,
@@ -534,8 +558,17 @@ pub const REQUIRED_CASES: &[Case] = &[
     },
 ];
 
-/// **The unreached table.** Trust-transition arms the Layer 2 contract names
-/// and no test carries today.
+/// **The unreached table.** Trust-transition arms no test reaches at the
+/// production path.
+///
+/// Two kinds of row, and the distinction is in each row's own words. An arm
+/// nothing carries at all: no test drives the condition anywhere. And an arm
+/// carried only against the fake entry operations a host is generic over, where
+/// the transition is asserted and the condition that triggers it is handed over
+/// by the fake rather than produced by a real watcher. The second kind is listed
+/// beside the first because a fake-carried arm is a real obligation with a real
+/// gap, and a table holding only the first kind would read as "everything else
+/// is met by the production path".
 ///
 /// This is the committed record the ownership ruling reads. Nothing here fails
 /// the reconciliation: what is missing is a decision about who writes the case
@@ -545,14 +578,16 @@ pub const REQUIRED_CASES: &[Case] = &[
 pub const UNREACHED_ARMS: &[UnreachedArm] = &[
     UnreachedArm {
         arm: "synchronization expiry makes that subscription terminal",
-        awaits: "nothing in `norn-host` ever produces `WatcherLossCause::SynchronizationExpired`. \
-                 The expiry itself is carried at the `norn-fs` seam, where a terminal boundary is \
-                 proven un-revivable, and at the wire seam, where the cause round-trips — but the \
-                 trust transition it drives is asserted for `Backend` and `CoverageLost` only. \
-                 The cheapest carrier is a third row in the fake-ops cause table; a case at the \
-                 production entry operations additionally needs either an injectable \
-                 synchronization deadline or a way to stall the backend past the pinned one, and \
-                 neither exists.",
+        awaits: "`lifecycle.rs`'s `watcher_lost` maps `WatchError::SynchronizationExpired` to \
+                 `WatcherLossCause::SynchronizationExpired`, and no test drives the entry \
+                 operations into returning that error, so nothing exercises the transition the \
+                 mapping feeds. The expiry itself is carried at the `norn-fs` seam, where a \
+                 terminal boundary is proven un-revivable, and at the wire seam, where the cause \
+                 round-trips — but the trust transition it drives is asserted for `Backend` and \
+                 `CoverageLost` only. The cheapest carrier is a third row in the fake-ops cause \
+                 table; a case at the production entry operations additionally needs either an \
+                 injectable synchronization deadline or a way to stall the backend past the pinned \
+                 one, and neither exists.",
     },
     UnreachedArm {
         arm: "a backend failure met by the production watcher rather than by a fake",
@@ -561,6 +596,24 @@ pub const UNREACHED_ARMS: &[UnreachedArm] = &[
                  watcher stage in `norn-fs`'s fault seam, which today widens the write protocol \
                  alone. The one production-level door that exists is the revoked subtree, and \
                  which of two refusals it takes is the backend's rather than the case's.",
+    },
+    UnreachedArm {
+        arm: "a vault-wide overflow met by the production watcher rather than by a fake",
+        awaits: "`a_polled_rescan_publishes_the_overflow_and_schedules_its_reconcile` drives the \
+                 arm through `FakeOps`, whose poll hands back a batch carrying a vault-wide \
+                 rescan. A production backend reports one when its own queue overflows, which no \
+                 case can arrange: `norn-fs`'s fault seam widens the write protocol alone and \
+                 carries no watcher stage, and flooding a real backend until it overflows is a \
+                 volume of events with no bound a suite could assert under.",
+    },
+    UnreachedArm {
+        arm: "a published watcher cause outliving production ticks rather than fake ones",
+        awaits: "`a_published_watcher_cause_outlives_the_ticks_that_follow_it` publishes the cause \
+                 by handing `FakeOps` a terminal poll error and then ticks the same fake. Reaching \
+                 it through a production attachment needs a real backend driven into a terminal \
+                 failure — the same missing watcher stage the two arms above name — and then a \
+                 second condition on top of it: ticks that keep arriving after coverage ended, \
+                 which is the dispatcher's own schedule rather than anything a case hands it.",
     },
     UnreachedArm {
         arm: "root coverage loss met end to end through a production attachment",
@@ -711,7 +764,17 @@ fn audit_carriers(indices: &BTreeMap<Option<&'static str>, TestIndex>, problems:
                  no run executes, whatever the suite's own result line says.",
                 case.id
             )),
-            Ok(_) => {
+            Ok(ignored) => {
+                if ignored {
+                    problems.push(format!(
+                        "`{}` names `{test}`, which cargo compiled as ignored. A plain run of the \
+                         suite skips it, so the case is one the inventory counts and no \
+                         certification run executes. A certification carrier is never `#[ignore]`d: \
+                         the lanes that adopt ignored cases wholesale are the counter, memory and \
+                         soak measurement lanes, and none of them certifies this layer.",
+                        case.id
+                    ));
+                }
                 if let Ok(listing) = index.compiled(&target) {
                     let matched = listing
                         .all
@@ -733,17 +796,24 @@ fn audit_carriers(indices: &BTreeMap<Option<&'static str>, TestIndex>, problems:
 }
 
 /// Backward: every test in a claimed target is named by an entry.
+///
+/// The names are gathered per claimed target, from the entries whose carrier
+/// sits in that target's own file. A bare function name matched workspace-wide
+/// would let a test in one certification suite be covered by an entry naming a
+/// same-named test in another — which is a name collision reading as coverage.
 fn audit_claimed_targets(
     indices: &BTreeMap<Option<&'static str>, TestIndex>,
     problems: &mut Vec<String>,
 ) {
-    let named: BTreeSet<&str> = REQUIRED_CASES
-        .iter()
-        .filter_map(|case| case.carrier.rsplit_once("::").map(|(_, function)| function))
-        .collect();
-
     for claimed in CLAIMED_TARGETS {
         let target = claimed.target();
+        let file = claimed.file();
+        let named: BTreeSet<&str> = REQUIRED_CASES
+            .iter()
+            .filter_map(|case| case.carrier.rsplit_once("::"))
+            .filter(|(carried_in, _)| *carried_in == file)
+            .map(|(_, function)| function)
+            .collect();
         let Some(index) = indices.get(&claimed.feature) else {
             problems.push(format!(
                 "`{} {}` is claimed under the feature {:?} and no listing was collected under it",
@@ -783,6 +853,12 @@ fn audit_claimed_targets(
 }
 
 impl ClaimedTarget {
+    /// The workspace-relative file this target compiles from, spelled the way a
+    /// carrier reference spells it.
+    fn file(&self) -> String {
+        format!("crates/{}/tests/{}.rs", self.package, self.stem)
+    }
+
     fn target(&self) -> TargetRef {
         TargetRef {
             package: self.package.to_string(),
