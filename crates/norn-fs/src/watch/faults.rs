@@ -181,6 +181,15 @@ pub(crate) enum Answer {
 }
 
 impl Answer {
+    /// Every answer, in the order the stages that carry them are reached.
+    #[cfg(any(test, feature = "induced-failure"))]
+    pub(crate) const ALL: [Answer; 4] = [
+        Answer::Refuses,
+        Answer::Fails,
+        Answer::Rescans,
+        Answer::Expires,
+    ];
+
     /// The name a harness arms this answer under.
     #[cfg(any(test, feature = "induced-failure"))]
     pub(crate) const fn name(self) -> &'static str {
@@ -195,14 +204,7 @@ impl Answer {
     /// The answer `name` spells, or nothing where it spells none.
     #[cfg(any(test, feature = "induced-failure"))]
     fn named(name: &str) -> Option<Answer> {
-        [
-            Answer::Refuses,
-            Answer::Fails,
-            Answer::Rescans,
-            Answer::Expires,
-        ]
-        .into_iter()
-        .find(|answer| answer.name() == name)
+        Answer::ALL.into_iter().find(|answer| answer.name() == name)
     }
 }
 
@@ -494,19 +496,13 @@ mod tests {
         let stages: std::collections::BTreeSet<&str> =
             Stage::ALL.iter().map(|stage| stage.name()).collect();
         assert_eq!(stages.len(), Stage::ALL.len());
-        let answers = [
-            Answer::Refuses,
-            Answer::Fails,
-            Answer::Rescans,
-            Answer::Expires,
-        ];
         let names: std::collections::BTreeSet<&str> =
-            answers.iter().map(|answer| answer.name()).collect();
-        assert_eq!(names.len(), answers.len());
+            Answer::ALL.iter().map(|answer| answer.name()).collect();
+        assert_eq!(names.len(), Answer::ALL.len());
         for stage in Stage::ALL {
             assert_eq!(Stage::named(stage.name()), Some(stage));
         }
-        for answer in answers {
+        for answer in Answer::ALL {
             assert_eq!(Answer::named(answer.name()), Some(answer));
         }
         assert_eq!(Stage::named("registration"), None);
@@ -519,15 +515,10 @@ mod tests {
     #[test]
     fn each_stage_answers_only_its_own_vocabulary() {
         for stage in Stage::ALL {
-            let carried: Vec<Answer> = [
-                Answer::Refuses,
-                Answer::Fails,
-                Answer::Rescans,
-                Answer::Expires,
-            ]
-            .into_iter()
-            .filter(|answer| stage.answers(*answer))
-            .collect();
+            let carried: Vec<Answer> = Answer::ALL
+                .into_iter()
+                .filter(|answer| stage.answers(*answer))
+                .collect();
             assert!(!carried.is_empty(), "{} answers nothing", stage.name());
         }
         assert!(!Stage::Install.answers(Answer::Expires));
