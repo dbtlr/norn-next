@@ -180,8 +180,10 @@ pub enum NonQualifying {
     ManualDispatch,
     /// The run was cancelled. It never happened.
     Cancellation,
-    /// The host refused the run — the preflight declined it, or the environment
-    /// broke underneath it. A broken environment is not a broken candidate.
+    /// The host refused the run, the environment broke underneath it, or the
+    /// run cannot say which machine it was: no preflight verdict, or no answer
+    /// for one of the two platform facts the inventory's platform-deciding lanes
+    /// turn on. A broken or unknown environment is not a broken candidate.
     Environment,
 }
 
@@ -333,7 +335,17 @@ impl Record {
                 reason: NonQualifying::SuiteChange,
             };
         }
-        if self.preflight.admitted != Some(true) {
+        // A run nobody checked the machine for, and a run that cannot say which
+        // of the two platform answers the inventory's platform-deciding lanes
+        // require it produced, are the same kind of gap: something about the
+        // host is unknown, so nothing was concluded about the candidate. Both
+        // are read here rather than left to the validator, because a run that
+        // classified itself Qualifying and then failed validation would leave
+        // its record saying one thing and the reader concluding another.
+        if self.preflight.admitted != Some(true)
+            || self.platform.watcher_backend.is_none()
+            || self.platform.volume_folds_case.is_none()
+        {
             return Classification::NonQualifying {
                 reason: NonQualifying::Environment,
             };
@@ -1128,6 +1140,11 @@ mod tests {
     /// The two platform facts the inventory's platform-deciding lanes turn on
     /// are required of a qualifying record: a run that does not say which answer
     /// it produced covers neither of the two a lane needs.
+    ///
+    /// A record missing one classifies as environmental — something about the
+    /// host is unknown — and is written rather than refused. A record that
+    /// *states* Qualifying without them is caught by the validator, which is the
+    /// hand-edited case.
     #[test]
     fn a_qualifying_record_says_which_platform_answers_it_produced() {
         let root = workspace_root();
@@ -1138,12 +1155,26 @@ mod tests {
             } else {
                 record.platform.volume_folds_case = None;
             }
+            assert_eq!(
+                record.implied_classification(),
+                Classification::NonQualifying {
+                    reason: NonQualifying::Environment
+                }
+            );
+
+            record.classification = Classification::Qualifying;
             let problems = record.problems(&root);
             assert!(
                 problems.iter().any(|problem| problem.contains(wanted)),
                 "{problems:?}"
             );
             assert!(!record.qualifies(&root));
+
+            // And the record the writer would actually assemble is one it
+            // emits: an unknown machine is a fact about the run, so it is
+            // recorded with its reason rather than refused.
+            record.classification = record.implied_classification();
+            assert_eq!(record.writer_defects(&root), Vec::<String>::new());
         }
     }
 

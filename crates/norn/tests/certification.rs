@@ -57,15 +57,18 @@ fn the_inventory_reconciles_with_the_suites() {
 
 /// **The unreached arms are reported, and reported without failing.**
 ///
-/// What is missing there is an ownership ruling rather than a broken reference,
-/// and a gate that failed on it would push the ruling into whoever next touched
-/// the file. So the table is printed under the run — the arm and what it awaits
-/// — and the claim asserted is only that it is a table somebody wrote rather
-/// than a silence.
+/// This is the surface that reports them: the reconciliation never reads the
+/// table. What is missing there is an ownership ruling rather than a broken
+/// reference, and a gate that failed on it would push the ruling into whoever
+/// next touched the file. So the table is printed under the run — the arm and
+/// what it awaits — and the claim asserted is only that it is a table somebody
+/// wrote rather than a silence.
 #[test]
 fn the_unreached_trust_transition_arms_are_named() {
-    let mut rendered =
-        String::from("trust-transition arms the Layer 2 contract names and no test carries:\n");
+    let mut rendered = String::from(
+        "trust-transition arms the Layer 2 contract names and no test reaches at the production \
+         path:\n",
+    );
     for arm in UNREACHED_ARMS {
         rendered.push_str(&format!("\n  {}\n    awaits: {}\n", arm.arm, arm.awaits));
     }
