@@ -137,26 +137,45 @@ certification module is that record, and the suite in the `norn` bin package is 
 it true. The **case inventory** names every case this layer requires — an id, the suite it
 belongs to, the capability lane a run has to schedule it in, the obligation it discharges,
 the test that carries it and the feature that test compiles behind — and is reconciled in
-both directions against cargo's own list of what compiled: a case deleted, renamed, or left
-behind a feature nothing turns on fails, and so does a case a certification suite holds and
-the inventory does not name. Two lanes in it are the reason one machine cannot certify the
-layer: a case whose required answer is the volume's own about case, and a case whose
-required refusal is the watcher backend's, are each covered only by a run of each. Beside
-the inventory is the committed table of **trust-transition arms nothing yet reaches**, each
-naming what it awaits; the reconciliation reports them and does not fail on them, because an
-arm with no carrier is an ownership ruling owed rather than a broken reference. The
+both directions against cargo's own list of what compiled: a case deleted, renamed, left
+behind a feature nothing turns on, or `#[ignore]`d fails, and so does a case a certification
+suite holds and the inventory does not name. Two lanes in it are the reason one machine
+cannot certify the layer: a case whose required answer is the volume's own about case, and a
+case whose required refusal is the watcher backend's, are each covered only by a run of
+each. Beside the inventory is the committed table of **trust-transition arms nothing reaches
+at the production path**, each naming what it awaits — arms nothing carries at all, and arms
+carried only against the fake entry operations a host is generic over. The reconciliation
+does not read that table: the certification suite's own unreached-arm case prints it under
+the run and holds each row to naming its obstacle, and nothing fails on it, because an arm
+with no carrier is an ownership ruling owed rather than a broken reference. The
 **suite-manifest digest** is one value over everything that decides what a run *is* — the
 lane definitions, the toolchain, the resolved dependency graph, the inventory, the
-comparator, the injected-failure seams and the authored bounds — and deliberately not over
-the product's own source, which is what the candidate SHA answers for. The **qualification
-ledger** is what one run leaves behind: the candidate, both digests, the platform, the
-environmental preflight's verdict, an outcome per required case, and a classification whose
-non-qualifying reasons are a closed vocabulary — suite change, product failure, harness
-failure, timeout, cancellation, environment. **A run is qualifying when it ran the required
-suite, passed it, and a preflight admitted the host**; anything else is non-qualifying with
-one typed reason. The scheduled lane writes a record every run and uploads it. Counting five
-consecutive qualifying scheduled runs over one frozen candidate is read off those records,
-and manual runs never advance it.
+qualification rules themselves, the comparator, the instrument a work reading is taken
+through, the injected-failure seams, every certification suite's own source and the recorded
+baselines — and deliberately not over the product's own source, which is what the candidate
+SHA answers for. It is a reading of the working tree, so a qualifying run is one over a
+clean checkout; neither it nor the record answers for the image a runner label resolved to
+on the day. The **qualification ledger** is what one run leaves behind: the candidate, both
+digests, the platform, the environmental preflight's verdict, an outcome per required case,
+and a classification whose non-qualifying reasons are a closed vocabulary — suite change,
+product failure, harness failure, timeout, manual dispatch, cancellation, environment. **A
+run is qualifying when it ran the required suite, passed it, a preflight admitted the host,
+and it came off the schedule**; anything else is non-qualifying with one typed reason, and
+the check that a record's stated verdict is the one its contents imply is what a campaign
+counts through. The scheduled lane writes a record every run and uploads it — except after a
+`timeout-minutes` kill, which stops the step that writes one, so a scheduled run with no
+record is how the campaign reads a timeout. Counting five consecutive qualifying scheduled
+runs over one frozen candidate is read off those records, and manual runs never advance it.
+
+**No run today can qualify, and the machinery says so rather than implying otherwise.** Two
+things are missing and both are the certification campaign's to add. There is no
+environmental preflight: nothing classifies the host, so every record carries a preflight
+that did not run and classifies as `environment`. And the scheduled lane executes zero
+certification cases — it runs the measurement suites, names no outcomes file, and every
+required case is recorded `not-run`, which classifies as a suite change. Qualification
+begins when the campaign adds both: a lane step that runs the certification suites and
+writes their outcomes, and a preflight whose verdict the record already carries a slot for.
+What is built is everything that makes a run's claim checkable when it arrives.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
@@ -791,7 +810,7 @@ membership rule binds.
 | `norn-embed` | *Reserved.* The opt-in weight fetch and load, which is not built; the crate reaches no filesystem today |
 | `norn-host` | Its suites' scaffolding, which is the whole of the crate's contact today: generated trees, subprocess probes, and fixtures impersonating external editors and retargets. *Reserved* beside it: the one-shot legacy-cache janitor, which is not built |
 | `norn-client` | *Reserved.* Machine-local effects only: self-update binary replacement and service-unit install |
-| `norn-fixtures`, `norn-testkit` (dev) | Temp trees and harness scaffolding: generated and scratch trees, the sandbox a process case runs in and the artifact installed into it, this crate's own cross-process lease file, the run's output files and the job-summary file a workflow names, and the workspace's own files a gate is the reader of — `clippy.toml`, this document, the regression registry and the corpus data, and the lane, toolchain and lockfile bytes the suite-manifest digest closes over |
+| `norn-fixtures`, `norn-testkit` (dev) | Temp trees and harness scaffolding: generated and scratch trees, the sandbox a process case runs in and the artifact installed into it, this crate's own cross-process lease file, the run's output files and the job-summary file a workflow names, and the workspace's own files a gate is the reader of — `clippy.toml`, this document, the regression registry and the corpus data, and the workspace's own files the suite-manifest digest closes over — the lane, toolchain and lockfile bytes, the certification suites, the recorded baselines and the qualification rules — plus the case probe a qualification record's platform facts are read from |
 
 Two notes on that table:
 
@@ -1127,7 +1146,8 @@ Two contracts inside that flow carry weight:
   job comments are the in-repo marker for which gate is filled and which is still a
   placeholder. The soak lane also emits the qualification record each run leaves behind.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
-  inventory of required cases and the trust-transition arms nothing yet reaches, the
-  suite-manifest digest, and the type of a qualification record. What makes a run
-  qualifying is stated there in code; the suite that holds the inventory to the built
-  suites is `crates/norn/tests/certification.rs`.
+  inventory of required cases and the trust-transition arms nothing reaches at the production
+  path, the suite-manifest digest, and the qualification record with the validator a campaign
+  counts through. What makes a run qualifying is stated there in code; the suite that holds
+  the inventory to the built suites, prints the unreached arms, and pins what the digest
+  covers is `crates/norn/tests/certification.rs`.
