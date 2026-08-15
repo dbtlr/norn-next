@@ -240,6 +240,29 @@ impl Comparison {
     pub fn is_equal(&self) -> bool {
         self.divergence.is_none()
     }
+
+    /// **The equivalence assertion, over a comparison already taken.**
+    ///
+    /// A caller that records a verdict before asserting on it holds the
+    /// comparison, and taking a second one to assert against would drain both
+    /// projections again and — worse — assert on a verdict other than the one it
+    /// recorded. The two readings would agree, because a projection is a value;
+    /// what would not be visible is that they are two readings at all.
+    ///
+    /// The population is printed on success as well as on failure, because a
+    /// comparison of two empty projections passes and says nothing.
+    pub fn assert_equal(&self, subject: &str) {
+        assert!(
+            self.is_equal(),
+            "{subject}: the two stores are not equivalent. {}\nthe first holds {}\nthe second \
+             holds {}",
+            self.divergence
+                .as_ref()
+                .expect("an unequal comparison names a divergence"),
+            self.left,
+            self.right
+        );
+    }
 }
 
 impl StoreProjection {
@@ -371,20 +394,11 @@ impl StoreProjection {
 
     /// **The equivalence assertion.** Two stores hold the same derived facts.
     ///
-    /// The population is printed on success as well as on failure, because a
-    /// comparison of two empty projections passes and says nothing.
+    /// A caller that also records the verdict takes the comparison itself and
+    /// asserts through [`Comparison::assert_equal`], so what it recorded and
+    /// what it asserted on are one value.
     pub fn assert_equivalent(&self, other: &StoreProjection, subject: &str) {
-        let comparison = self.compare(other);
-        assert!(
-            comparison.is_equal(),
-            "{subject}: the two stores are not equivalent. {}\nthe first holds {}\nthe second \
-             holds {}",
-            comparison
-                .divergence
-                .expect("an unequal comparison names a divergence"),
-            comparison.left,
-            comparison.right
-        );
+        self.compare(other).assert_equal(subject);
     }
 
     /// **The absolute assertion.** This projection holds a document at each of

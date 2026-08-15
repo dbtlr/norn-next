@@ -1205,11 +1205,15 @@ impl Churned {
         ] {
             projection.assert_population_at_least(&format!("{subject}: {label}"), floor);
         }
-        // The verdict is recorded before it is asserted on, so a run holds a
-        // reading for the case that failed as well as for the ones that passed —
-        // which is the half of a trend a passing-only record cannot carry.
-        fidelity::record(subject, &left.compare(&right));
-        left.assert_equivalent(&right, &format!("{subject}\n{}", self.applied));
+        // One comparison, recorded and then asserted on. The verdict is recorded
+        // first, so a run holds a reading for the case that failed as well as
+        // for the ones that passed — which is the half of a trend a
+        // passing-only record cannot carry — and it is the recorded verdict
+        // itself that the assertion reads, rather than a second comparison
+        // taken beside it.
+        let verdict = left.compare(&right);
+        fidelity::record(subject, &verdict);
+        verdict.assert_equal(&format!("{subject}\n{}", self.applied));
         // Kept, because the class and finding claims a case makes after this
         // one are asked of both derivations.
         self.second = Some(second);

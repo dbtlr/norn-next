@@ -1396,15 +1396,29 @@ impl<'a> Request<'a> {
             .query_map(parameters, read)
             .map_err(|error| error::sql(operation, error))?;
         let mut found = Vec::new();
+        let mut refused = None;
         for row in rows {
-            found.push(row.map_err(|error| error::sql(operation, error))??);
+            match row
+                .map_err(|error| error::sql(operation, error))
+                .and_then(|reading| reading)
+            {
+                Ok(value) => found.push(value),
+                Err(problem) => {
+                    refused = Some(problem);
+                    break;
+                }
+            }
         }
-        // Read after the rows are drained and while the handle is still alive:
-        // the count is the statement's own, and it is final once the statement
-        // has run to the end.
+        // Read while the handle is still alive, and before a refusal is
+        // returned: a statement that failed part way still stepped the engine,
+        // and dropping that count would let a reader that refuses on every page
+        // cost nothing a bar could see.
         let stepped = statement.get_status(StatementStatus::VmStep);
         steps.set(steps.get().saturating_add(stepped.max(0) as u64));
-        Ok(found)
+        match refused {
+            Some(problem) => Err(problem),
+            None => Ok(found),
+        }
     }
 }
 

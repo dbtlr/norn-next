@@ -62,25 +62,25 @@ jobs:
         run: cargo build --locked --workspace
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # The lint above never sees norn-fs's library with the feature off. That
-      # crate is its own dev-dependency with `induced-failure` on, so
+      # The lint above never sees norn-fs's or norn-store's library with the
+      # feature off. Each is its own dev-dependency with `induced-failure` on, so
       # `--all-targets` pulls the dev graph in and cargo unifies the feature to
       # on for every target in the run — including the library. The shipped
-      # build is the feature-off one, and the items the fault seam leaves behind
+      # build is the feature-off one, and the items each fault seam leaves behind
       # there are held clean by `cfg_attr` allows that nothing else checks. This
-      # step is the lane that checks them: the library alone, no dev targets, no
-      # feature.
-      - name: Lint the shipped norn-fs
-        run: cargo clippy --locked -p norn-fs --lib -- -D warnings
+      # step is the lane that checks them: the libraries alone, no dev targets,
+      # no feature.
+      - name: Lint the shipped libraries
+        run: cargo clippy --locked -p norn-fs -p norn-store --lib -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
-      # Two crates declare an `induced-failure` feature, and the workspace test
-      # above reaches only one of them. norn-fs turns its own on through a self
-      # dev-dependency, so that crate's lockdown suite runs above already.
-      # norn-host's is a feature a caller asks for, and nothing above asks: its
-      # crash-convergence proof (kill_recovery.rs) and its lockdown suite are
-      # whole files behind it and compile to zero tests there. This step is
-      # scoped to that crate for that reason.
+      # Three crates declare an `induced-failure` feature, and the workspace test
+      # above reaches two of them. norn-fs and norn-store each turn their own on
+      # through a self dev-dependency, so those crates' lockdown and environment
+      # suites run above already. norn-host's is a feature a caller asks for, and
+      # nothing above asks: its crash-convergence proof (kill_recovery.rs) and
+      # its lockdown suite are whole files behind it and compile to zero tests
+      # there. This step is scoped to that crate for that reason.
       - name: Induced-failure recovery
         run: cargo test --locked -p norn-host --features induced-failure
 
