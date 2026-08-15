@@ -118,3 +118,52 @@ jobs:
         run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
         env:
           NORN_SOAK_DURATION_SECS: "3600"
+      # What a run's result is worth depends on which suite produced it, so the
+      # digest over the lanes, the toolchain, the lockfile, the inventory, the
+      # qualification rules, the comparator, the fault seams, the certification
+      # suites and the authored bounds is computed here and printed. It is the
+      # value five consecutive qualifying runs have to agree on, and it moves for
+      # a lane edit and not for a product commit.
+      #
+      # **A run killed by `timeout-minutes` writes no record.** `always()` does
+      # not run after a timeout kill, so this step never executes and the run
+      # leaves nothing behind. That is the campaign's timeout signal and it is
+      # deliberate: a scheduled run with no artifact, read beside the run
+      # metadata that says the job was cancelled for time. A campaign that
+      # counted only the records it found would count five qualifying runs
+      # across a gap, so a missing record breaks a run of five exactly as a
+      # non-qualifying one does.
+      #
+      # The watcher backend is the workflow's to state rather than the process's:
+      # this job runs on the Linux runner, whose one real platform watcher is
+      # inotify. It is a required field of a qualifying record because the
+      # inventory's backend-deciding lane is covered by a run on each backend.
+      # The volume's answer about case is not set here — the record probes the
+      # directory the fixtures write trees into, which is the volume that decides
+      # it.
+      - name: Suite manifest digest and qualification record
+        if: always()
+        run: cargo test --locked -p norn --test certification -- --nocapture
+        env:
+          NORN_QUALIFICATION_LEDGER: qualification-record.json
+          NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
+          NORN_QUALIFICATION_RUNNER: ubuntu-latest
+          NORN_QUALIFICATION_WATCHER_BACKEND: inotify
+      # The record is the artifact a campaign counts, so it is uploaded whether
+      # or not the run passed: a non-qualifying record with a typed reason is
+      # exactly what breaks a run of five, and a run that left no record at all
+      # is one nothing can say that about.
+      #
+      # **This lane's records are non-qualifying by construction today.** It runs
+      # the measurement suites and none of the certification cases, so it names
+      # no outcomes file and every case is recorded `not-run` — which classifies
+      # as a suite change. Making a scheduled run qualifying is the campaign's
+      # work: it runs the certification suites, writes an outcomes file, and adds
+      # the environmental preflight this record already carries a slot for.
+      - name: Upload the qualification record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-record
+          path: qualification-record.json
+          if-no-files-found: warn

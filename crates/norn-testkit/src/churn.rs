@@ -381,7 +381,7 @@ impl Applied {
     /// Every distinct place where document content changed.
     ///
     /// This is the named input a spread-out workload's bound is stated over,
-    /// and it counts documents rather than directories — see [`document_places`]
+    /// and it counts documents rather than directories — see `document_places`
     /// for what each act contributes and why a directory contributes its
     /// contents rather than its name.
     pub fn places(&self) -> &BTreeSet<String> {

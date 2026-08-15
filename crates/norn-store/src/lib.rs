@@ -61,6 +61,8 @@ pub mod ddl;
 mod counters;
 mod error;
 mod facts;
+#[cfg(feature = "induced-failure")]
+mod faults;
 mod increment;
 mod json;
 mod path;
@@ -75,6 +77,8 @@ pub use facts::{
     StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact,
     TagSource, VaultSchemaPin, VectorFacts,
 };
+#[cfg(feature = "induced-failure")]
+pub use faults::induced_failure;
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use path::{
@@ -85,8 +89,6 @@ pub use request::{
     DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_PAGE, PlanStep, Request,
     SubjectScope,
 };
-#[cfg(feature = "induced-failure")]
-pub use store::induced_failure;
 pub use store::{
     OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,
 };

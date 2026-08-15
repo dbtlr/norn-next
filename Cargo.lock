@@ -292,6 +292,7 @@ name = "norn"
 version = "0.0.0"
 dependencies = [
  "norn-testkit",
+ "serde_json",
 ]
 
 [[package]]

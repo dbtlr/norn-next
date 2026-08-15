@@ -17,7 +17,9 @@ publish.workspace = true
 # edges are declared here. The `norn-store` edge carries the equivalence
 # comparator, which reads two stores through that crate's own API; the `EXPLAIN`
 # and counter assertions take their input the same way. Nothing here opens a
-# connection. Nothing imports `norn-wire` yet.
+# connection. The `norn-wire` edge carries the finding-kind vocabulary: the
+# operational-validity leg reads a stored finding's scope to say which side of a
+# document row it may stand on, and that scope is defined there.
 [dependencies]
 libc = { workspace = true }
 norn-fixtures = { path = "../norn-fixtures" }

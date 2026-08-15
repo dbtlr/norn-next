@@ -15,6 +15,13 @@
 //! judgment made in review. That mapping is the authoritative one, and it is
 //! code so that it is checked rather than read.
 //!
+//! [`certification`] is enforcement of a third kind, over the suites rather
+//! than over the code: it holds the inventory of cases Layer 2 requires and
+//! reconciles it against what cargo compiled, digests everything that decides
+//! what a certification run is, and types the record one run leaves behind. What
+//! makes a soak run *qualifying* is stated there, in code, because a run counted
+//! against a list nobody checked is a count of nothing.
+//!
 //! [`lanes`] is the third: it walks a crate's `tests/` directory and holds
 //! every `#[ignore]` in it to the lane that adopts it. The walk lives here and
 //! the tables live with the crates they describe, so a crate joining the lanes
@@ -30,6 +37,13 @@
 //! its own. It lives here because two crates ask that question of stores they
 //! built by different routes, and one comparator is what keeps them from
 //! drifting into two meanings of "the same derived state".
+//!
+//! [`fidelity`] is the seam that judgment is recorded through. A comparison
+//! that only passes or fails answers one case and leaves no history, so every
+//! comparison a suite makes can be written out as one record — the populations
+//! it stood on and the first field it named. Nothing reads those records yet;
+//! the seam exists so the drift scans and the post-lockdown comparison attach to
+//! one vocabulary rather than inventing one apiece.
 //!
 //! [`churn`] is the other half of that judgment's subject. The comparator says
 //! whether two derived stores agree; the churn driver is what puts one of the
@@ -53,7 +67,9 @@
 //! from drifting into two meanings of one name.
 //!
 //! The measurement machinery is the same shape: [`counters`] compares counter
-//! readings, [`explain`] states plan assertions over emitted SQL, [`scale`]
+//! readings, [`explain`] states plan assertions over emitted SQL, [`work`]
+//! holds a drain's engine-step count under a line in the rows it drained,
+//! [`scale`]
 //! expresses the size-independence pair, [`process`] spawns a child under
 //! isolation and measures what it cost, and [`readings`] renders what a
 //! measurement found and records it under the run. Each is helpers only — the
@@ -87,11 +103,13 @@
 pub mod architecture;
 pub mod attestation;
 pub mod base64;
+pub mod certification;
 pub mod churn;
 pub mod corpus;
 pub mod counters;
 pub mod equivalence;
 pub mod explain;
+pub mod fidelity;
 pub mod generated;
 pub mod invalidation;
 pub mod invariants;
@@ -105,3 +123,4 @@ pub mod readings;
 pub mod regression;
 pub mod scale;
 pub mod wait;
+pub mod work;
