@@ -11,16 +11,30 @@
 //! whose cursor has been demoted to a filter — the shape a novel spelling of the
 //! same predicate can reintroduce without changing the reported plan's index
 //! name — re-reads the rows ahead of its own position and costs a multiple of
-//! `n²`. Any line in `n` separates the two once `n` is large enough, which is
-//! what makes this bar hold a spelling nobody anticipated.
+//! `n²`.
+//!
+//! **The row count is half the bar.** A line separates the two shapes only for
+//! `n` large enough, and "large enough" is arithmetic rather than a feeling: a
+//! quadratic drain of `c` steps per row squared is refused exactly when
+//! `c × n² > floor + per_row × n`, so the smallest coefficient a bar can see is
+//! `(floor + per_row × n) / n²` — which falls roughly as `1/n`. A caller that
+//! doubles its row count halves the coefficient its bar catches. This matters
+//! because the shape to worry about is rarely a full re-read: a reader that
+//! revisits a *fraction* of the rows ahead of it is quadratic too, with a
+//! coefficient that fraction times smaller, and it is admitted by any `n` chosen
+//! only against the full re-read. So a caller states its row count against the
+//! revisit it means to catch — the marginal cost of one revisited row, times the
+//! fraction revisited — and not against what a control happens to cost.
 //!
 //! **Why the numbers are not specified.** A step count is engine-version
 //! sensitive: the same statement over the same rows steps a different number of
 //! times under a different SQLite build. So a bar states a coefficient measured
 //! against the build in the lockfile plus an absorber wide enough to survive an
-//! engine bump, and its authority comes from the negative control beside it
-//! rather than from the number's tightness. A bar with no failing control is a
-//! bar that says nothing.
+//! engine bump, and its authority comes from the negative control beside it and
+//! the row count it was taken at rather than from the number's tightness. A bar
+//! with no failing control is a bar that says nothing, and a control that fails
+//! only because it re-read everything says nothing about a reader that re-read
+//! some of it.
 
 /// A line in the row count: what a drain of `n` rows may cost.
 ///
@@ -111,8 +125,8 @@ mod tests {
     }
 
     /// The line is what separates the two shapes, and it does so at a row count
-    /// a suite can afford: at 200 rows a quadratic drain costs an order of
-    /// magnitude more than this bar admits.
+    /// a suite can afford: at 200 rows a drain that re-reads its whole prefix
+    /// costs two orders of magnitude more than this bar admits.
     #[test]
     fn a_quadratic_drain_is_outside_the_line_a_linear_one_sits_under() {
         let rows = 200u64;
@@ -120,5 +134,17 @@ mod tests {
         let quadratic = 8 * rows * rows / 2;
         BAR.assert_within("a reader that seeks", rows, linear);
         BAR.assert_exceeded("a reader that re-reads", rows, quadratic);
+    }
+
+    /// **Which quadratics a bar catches is the row count's answer, not the
+    /// bar's.** One shape — `n² / 50` steps, the cost of revisiting a small
+    /// fraction of the rows ahead of each position — sits under this bar at 200
+    /// rows and over it at 800. A caller picking a row count against the full
+    /// re-read alone would admit it and call the bar passed.
+    #[test]
+    fn the_row_count_decides_which_quadratics_the_line_catches() {
+        let partial_re_read = |rows: u64| rows * rows / 50;
+        BAR.assert_within("a partial re-read at 200 rows", 200, partial_re_read(200));
+        BAR.assert_exceeded("the same shape at 800 rows", 800, partial_re_read(800));
     }
 }

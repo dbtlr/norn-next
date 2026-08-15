@@ -1195,34 +1195,50 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
 
 /// How many rows the work bar drains.
 ///
-/// Large enough that the two shapes are an order of magnitude apart — a drain
-/// that re-reads costs about `rows / 2` times what one that seeks costs — and
-/// small enough that six subjects drained a row at a time cost the suite
-/// milliseconds.
-const DRAINED_ROWS: usize = 200;
+/// **The row count is what the bar's separating power is made of**, not a
+/// convenience. A quadratic drain of `c` steps per row squared is refused when
+/// `c · rows² > floor + per_row · rows`, so the smallest coefficient the bar
+/// sees is `(floor + per_row · rows) / rows²` — 0.81 at 200 rows and 0.40 at
+/// 400. Doubling the count halves the coefficient, and therefore halves the
+/// fraction of a re-read a drain can hide.
+///
+/// That is what 400 buys, measured on the narrowest reader here. A revisited row
+/// costs about 6 engine steps in the suffix-key pillar, so a drain that re-reads
+/// its whole prefix every fifth page — a cursor that seeks four pages out of
+/// five and restarts on the fifth — pays about `0.65 · rows²`: **28,401 steps at
+/// 200 rows against a ceiling of 32,500, and 104,801 at 400 against 64,500**.
+/// The shape the bar exists to exclude is admitted at 200 and refused at 400,
+/// and a row count chosen against the full-prefix control alone would never have
+/// shown it.
+///
+/// 400 is where the gain stops being worth its cost. Six subjects drained a row
+/// at a time, each with a full-prefix control beside it, take the suite about a
+/// second at 400 rows against a third of a second at 200 — the controls are
+/// quadratic, so the price of the next doubling is four times that again.
+const DRAINED_ROWS: usize = 400;
 
 /// **The work bar**, measured against the SQLite build this workspace's
 /// lockfile pins.
 ///
 /// A page of one row through a seeking cursor steps the engine a small constant
 /// number of times: open the cursor at the coalesced floor, step to the first
-/// row, read its columns, stop. Drained a row at a time over 200 rows, the
-/// measured cost per row is 20 for stored suffix keys, 23 for tombstones, 26 for
-/// the heal page in path order, 28 for indexed terms, 37 for the heal page in
-/// folded order,
-/// and 51 for the findings page — the widest, because a findings page issues two
-/// further chunked statements per page to collect each finding's candidates and
-/// its classes.
+/// row, read its columns, stop. Drained a row at a time over [`DRAINED_ROWS`]
+/// rows, the measured cost per row is 20 for stored suffix keys, 23 for
+/// tombstones, 26 for the heal page in path order, 28 for indexed terms, 37 for
+/// the heal page in folded order, and 51 for the findings page — the widest,
+/// because a findings page issues two further chunked statements per page to
+/// collect each finding's candidates and its classes.
 ///
 /// `per_row` is about three times that widest reading, and `floor` absorbs the
 /// empty page every advancing drain ends on. **The absorber is deliberately
 /// wide** because a step count is engine-version sensitive: the same statement
 /// over the same rows steps a different number of times under a different SQLite
-/// build. What this bar separates is a line from a parabola, and the controls
-/// beside it come in at 618 to 3753 steps per row — three to twenty times this
-/// ceiling — so a coefficient loose enough to survive an engine bump still fails
-/// the shape the bar exists to exclude. What gives a passing reading its
-/// authority is the control, not the tightness of this number.
+/// build. What this bar separates is a line from a parabola, and the full-prefix
+/// controls beside it come in at 1200 to 7500 steps per row against a ceiling of
+/// 162 — seven to forty-six times it — so a coefficient loose enough to survive
+/// an engine bump still fails the shape the bar exists to exclude. What gives a
+/// passing reading its authority is the control and the row count it is taken
+/// at, not the tightness of this number.
 const READER_WORK: WorkBar = WorkBar {
     floor: 500,
     per_row: 160,
@@ -1450,7 +1466,13 @@ fn judge_a_drain(
                 "steps per row, re-reading",
                 readings::multiple(readings::per_mille(re_reading_steps, rows)),
             ),
-            ("ceiling", READER_WORK.ceiling(rows).to_string()),
+            // Per row like the two readings above it: a ceiling in total steps
+            // printed beside two per-row costs is a column a reader compares
+            // down and gets a wrong answer from.
+            (
+                "steps per row, ceiling",
+                readings::multiple(readings::per_mille(READER_WORK.ceiling(rows), rows)),
+            ),
         ],
     );
 
