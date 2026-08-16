@@ -234,18 +234,18 @@ fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
 /// Where they are one place, the flip re-spells that place, and it holds
 /// straight through as well. The increment a watcher report drives **converges
 /// the spelling along with the bytes**: a settled batch names each dirty
-/// identity at the last spelling its events carried, so the derivation runs at
-/// the name the directory now renders and the standing row moves to it. Both
-/// lanes therefore take the equivalence bar off the watcher-driven settle
-/// alone, with no attach heal between the flip and the judgement.
+/// identity at the spelling the tree renders, so the derivation runs at the
+/// name the directory now holds and the standing row moves to it. Both lanes
+/// therefore take the equivalence bar off the watcher-driven settle alone, with
+/// no attach heal between the flip and the judgement.
 ///
-/// **The flip is held to three things a phase that did nothing would fail.**
+/// **The flip is held to four things a phase that did nothing would fail.**
 /// The directory itself is asked what it renders the name as, which is the only
-/// answer a volume that folds case cannot give twice; the row at the identity
-/// holds bytes the opening phase's row did not; and one row stands there rather
-/// than two. The equivalence bar below compares two derivations and so would
-/// hold over a pair that both missed the flip; these three read the tree and the
-/// churned store directly, and do not.
+/// answer a volume that folds case cannot give twice; one row stands at the
+/// identity rather than two; that row is stored at the flipped spelling; and it
+/// holds bytes the opening phase's row did not. The equivalence bar below
+/// compares two derivations and so would hold over a pair that both missed the
+/// flip; these four read the tree and the churned store directly, and do not.
 #[test]
 fn a_case_flip_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-flip");
@@ -1254,6 +1254,10 @@ impl Churned {
     /// - **One row stands at the identity**, looked up by identity rather than
     ///   by spelling: the spelling is what differs between the two volumes and
     ///   this claim does not.
+    /// - **That row is stored at the flipped spelling.** The lookup above folds
+    ///   case where the volume does, so it alone would be answered by a row the
+    ///   directory cannot render; this is the claim the case exists for, and it
+    ///   is read off the row's own path text.
     /// - **That row holds bytes the opening phase did not put there**, which is
     ///   what says the changing phase reached the store at all.
     fn assert_the_flip_landed(&self, before_the_flip: &str) {
@@ -1285,6 +1289,11 @@ impl Churned {
             1,
             "the flipped place holds {} rows: {held:?}",
             held.len()
+        );
+        assert_eq!(
+            held[0].0,
+            churn::FLIPPED_TO,
+            "the store holds the flipped place at a spelling the directory does not render"
         );
         assert_eq!(
             &held[0].1, expected,

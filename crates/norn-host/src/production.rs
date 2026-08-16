@@ -333,6 +333,18 @@ impl ProductionEntryOps {
     /// not a property that expires: coverage proven synchronized when it was
     /// installed is still the coverage this heal runs under. What is re-read is
     /// the vault, and that is the point.
+    ///
+    /// **The heal batch is everything the watcher reported up to the moment the
+    /// window closed**, and not only what the window itself collected. A batch
+    /// the coalescer settled before the window opened is still sitting in the
+    /// subscription's delivery slot, and [`ProductionEntryOps::poll`] reports
+    /// the heal batch ahead of that slot — so a fold of the two in poll order
+    /// would put the older facts last. That inversion is not academic where the
+    /// two name one identity at two spellings: the earlier batch's spelling
+    /// would displace the later one's, and the increment would derive at a name
+    /// the tree no longer renders. The slot is therefore emptied into the heal
+    /// batch here, in front of the window's own facts, which leaves the slot
+    /// holding only what settles after the window.
     fn heal_under_coverage(
         &self,
         attachment: &mut ProductionAttachment,
@@ -344,6 +356,12 @@ impl ProductionEntryOps {
             .ok_or_else(|| environmental("watcher coverage is not installed"))?
             .begin_heal();
         let result = self.heal(attachment, progress);
+        let (settled_before_the_window, drain_failure) = attachment
+            .subscription
+            .as_ref()
+            .map(drain_settled)
+            .unwrap_or_default();
+        attachment.heal_observed.merge(settled_before_the_window);
         let observed = attachment
             .subscription
             .as_ref()
@@ -351,6 +369,13 @@ impl ProductionEntryOps {
             .finish_heal()
             .map_err(watcher)?;
         attachment.heal_observed.merge(observed);
+        // The window is closed either way before the drain's own failure is
+        // reported: a heal that left it open would park the coalescer over a
+        // subscription nothing is going to poll again.
+        if let Some(failure) = drain_failure {
+            attachment.subscription.take();
+            return Err(watcher(failure));
+        }
         result
     }
 
@@ -743,6 +768,31 @@ fn poll_subscription(
             Err(watcher(error))
         }
     }
+}
+
+/// How many settled batches one drain of the delivery slot takes.
+///
+/// The slot holds one batch and the coalescer needs a quiet window to settle
+/// the next, so a drain that finds this many in a row is reading a tree
+/// changing faster than the drain is worth spending time on. Stopping leaves
+/// the rest where they are, for the polling that follows.
+const HEAL_RESIDUE_LIMIT: usize = 8;
+
+/// Every batch already settled at the subscription, taken without waiting.
+///
+/// The failure comes back beside the facts rather than in place of them: a
+/// terminal watch error ends the stream, and the batches taken before it are
+/// still what the vault did. The caller decides where each of the two lands.
+fn drain_settled(subscription: &norn_fs::Subscription) -> (norn_fs::Batch, Option<WatchError>) {
+    let mut settled = norn_fs::Batch::default();
+    for _ in 0..HEAL_RESIDUE_LIMIT {
+        match subscription.try_recv() {
+            Ok(Some(batch)) => settled.merge(batch),
+            Ok(None) => return (settled, None),
+            Err(error) => return (settled, Some(error)),
+        }
+    }
+    (settled, None)
 }
 
 fn heal_documents(
@@ -8122,6 +8172,50 @@ mod tests {
         // heal observation of this setup write is not this assertion's subject.
         attachment.heal_observed = norn_fs::Batch::default();
         assert!(matches!(ops.poll(&name, &mut attachment), Ok(None)));
+    }
+
+    /// **A heal leaves nothing older than its own batch behind it.** A poll
+    /// reports the heal batch ahead of the subscription's delivery slot, so
+    /// anything still in that slot when the heal window closes would reach the
+    /// consumer after facts that are newer than it — and where the two name one
+    /// identity at two spellings, the older spelling would displace the live
+    /// one. The heal therefore empties the slot into its own batch.
+    ///
+    /// The forbidden shape is the second assertion reporting facts. Coverage is
+    /// installed by the attach, the write settles into the slot well inside the
+    /// second this case waits, and a heal that took only its own window would
+    /// hand that batch back after the window's.
+    #[test]
+    fn a_heal_takes_the_batch_that_settled_before_its_window() {
+        let f = Fixture::new("heal-window-residue");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.heal_observed = norn_fs::Batch::default();
+
+        fs::write(f.vault().join("settled-before.md"), "body").unwrap();
+        // The coalescer settles on a quiet window two orders of magnitude
+        // shorter than this wait, so the batch is in the delivery slot before
+        // the heal below opens its window.
+        std::thread::sleep(Duration::from_secs(1));
+
+        ops.heal_under_coverage(&mut attachment, &progress).unwrap();
+
+        assert!(
+            attachment
+                .heal_observed
+                .vault_roots()
+                .iter()
+                .any(|root| root.as_path() == Path::new("settled-before.md")),
+            "{:?}",
+            attachment.heal_observed
+        );
+        assert!(
+            matches!(poll_subscription(&mut attachment), Ok(None)),
+            "a batch older than the heal's own was left in the delivery slot"
+        );
+        // And the heal batch is still the one a poll of the entry reports.
+        assert!(ops.poll(&name, &mut attachment).unwrap().is_some());
     }
 
     /// A poll drains whatever the heal batch holds before it ever consults the
