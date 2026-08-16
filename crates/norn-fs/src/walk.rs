@@ -17,6 +17,16 @@
 //! vault or one subtree of it. Paths, exclusion membership and link containment
 //! are therefore vault-relative in both, and a subtree walk of `notes` reads the
 //! same files the vault walk reads under `notes`.
+//!
+//! **Every window in the walk converges on absence.** Listing a directory,
+//! stating the names it listed, and opening a file it yielded are separate
+//! observations of a tree other writers are editing, and an entry can be
+//! unlinked — or unlinked and replaced — between any two of them. One doctrine
+//! answers all of them: the entry is dropped, because a walk begun now holds
+//! nothing at that name either. A machine that will not answer is the other
+//! thing entirely, and still refuses.
+
+mod faults;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -30,6 +40,7 @@ use std::time::SystemTime;
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, open, openat, readlinkat, statat};
 
+use self::faults::{Paged, WalkFaults};
 use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
@@ -157,6 +168,7 @@ fn open_vault(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
         exclusions,
         stack: Vec::new(),
         skipped: None,
+        faults: WalkFaults::entry(),
     })
 }
 
@@ -171,6 +183,10 @@ pub struct Walk {
     exclusions: Exclusions,
     stack: Vec<DirectoryFrontier>,
     skipped: Option<SkipFact>,
+    /// Which of this walk's paging observations a foreign writer's edit stands
+    /// in place of. Empty in every process that armed nothing, which is every
+    /// process outside the induced-failure suites.
+    faults: WalkFaults,
 }
 
 impl Iterator for Walk {
@@ -182,18 +198,22 @@ impl Iterator for Walk {
         }
         loop {
             let frontier = self.stack.last_mut()?;
-            let pending =
-                match frontier.next_pending(&self.root_fd, &self.normalizer, &self.exclusions) {
-                    Ok(Some(pending)) => pending,
-                    Ok(None) => {
-                        self.stack.pop();
-                        continue;
-                    }
-                    Err(error) => {
-                        self.stack.clear();
-                        return Some(Err(error));
-                    }
-                };
+            let pending = match frontier.next_pending(
+                &self.root_fd,
+                &self.normalizer,
+                &self.exclusions,
+                &self.faults,
+            ) {
+                Ok(Some(pending)) => pending,
+                Ok(None) => {
+                    self.stack.pop();
+                    continue;
+                }
+                Err(error) => {
+                    self.stack.clear();
+                    return Some(Err(error));
+                }
+            };
 
             if let Some(reason) = pending.skip {
                 return Some(Ok(WalkFact::Skipped(SkipFact {
@@ -514,7 +534,6 @@ struct Pending {
     kind: EntryKind,
     stat: FileStat,
     skip: Option<SkipReason>,
-    sort_key: Vec<u8>,
 }
 
 struct Candidate {
@@ -549,43 +568,87 @@ impl DirectoryFrontier {
         }
     }
 
+    /// The next entry this directory holds, paging the directory again where the
+    /// page in hand is spent.
+    ///
+    /// **A page can come back holding fewer entries than it covered, and an
+    /// exhausted page is not an exhausted directory.** Entries that vanish
+    /// between the listing and their stat are dropped, so a page whose every
+    /// entry went away is empty while the directory still has entries past it —
+    /// and reading that as the end would take the whole tail of the directory
+    /// with it. The loop asks for the next page instead, and the cursor each page
+    /// leaves is the run of names it covered rather than the last one it kept, so
+    /// a page that dropped everything still advances.
     fn next_pending(
         &mut self,
         root_fd: &Arc<OwnedFd>,
         normalizer: &PathNormalizer,
         exclusions: &Exclusions,
+        faults: &WalkFaults,
     ) -> Result<Option<Pending>, WalkError> {
-        if let Some(item) = self.page.next() {
-            return Ok(Some(item));
-        }
-        if self.done {
-            return Ok(None);
-        }
-        let (items, more) = match directory_page(
-            root_fd,
-            &self.fd,
-            &self.relative,
-            self.cursor.as_deref(),
-            normalizer,
-            exclusions,
-        ) {
-            Ok(page) => page,
-            Err(error) => {
-                self.done = true;
-                return Err(error);
+        loop {
+            if let Some(item) = self.page.next() {
+                return Ok(Some(item));
             }
-        };
-        self.done = !more;
-        #[cfg(test)]
-        {
-            self.max_page = self.max_page.max(items.len());
+            if self.done {
+                return Ok(None);
+            }
+            let page = match directory_page(
+                root_fd,
+                &self.fd,
+                &self.relative,
+                self.cursor.as_deref(),
+                normalizer,
+                exclusions,
+                faults,
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    self.done = true;
+                    return Err(error);
+                }
+            };
+            self.done = !page.more;
+            #[cfg(test)]
+            {
+                self.max_page = self.max_page.max(page.pending.len());
+            }
+            if let Some(covered) = page.covered {
+                self.cursor = Some(covered);
+            }
+            self.page = page.pending.into_iter();
         }
-        self.cursor = items.last().map(|item| item.sort_key.clone());
-        self.page = items.into_iter();
-        Ok(self.page.next())
     }
 }
 
+/// One bounded page of a directory's entries.
+struct Page {
+    /// The entries the page kept, in order.
+    pending: Vec<Pending>,
+    /// Whether the directory holds names past the ones this page covered.
+    more: bool,
+    /// The highest sort key this page covered, which is where the next page of
+    /// the same directory starts. It is the run of names the page took in, so it
+    /// stands whether or not the entry holding it survived to be yielded.
+    covered: Option<Vec<u8>>,
+}
+
+/// One page of `directory`, listed and then stat'd.
+///
+/// **The listing and the stats are two observations, and the page converges on
+/// what the second one holds.** A name the listing returned can be unlinked
+/// before its stat runs, and it can be unlinked and taken by an entry of another
+/// kind; both are one edit to a tree other writers share, and both are answered
+/// by dropping the entry from the page. That is the answer a walk begun now
+/// gives — it lists no such entry — so a heal reading this page converges on the
+/// same state either way, and the successor an edit left behind is carried by
+/// the watcher events that edit raised.
+///
+/// **A machine that will not answer still refuses.** A denied stat, an exhausted
+/// descriptor table and a failing device say nothing about whether an entry is
+/// there, and reading one as absence would let a transient fault prune derived
+/// state. Absence is the one error number that converges; every other one ends
+/// the walk.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
 fn directory_page(
     root_fd: &Arc<OwnedFd>,
@@ -594,7 +657,8 @@ fn directory_page(
     cursor: Option<&[u8]>,
     normalizer: &PathNormalizer,
     exclusions: &Exclusions,
-) -> Result<(Vec<Pending>, bool), WalkError> {
+    faults: &WalkFaults,
+) -> Result<Page, WalkError> {
     let display = relative;
     let entries = Dir::read_from(directory)
         .map_err(|source| environment_errno("reading directory", display, source))?;
@@ -615,11 +679,18 @@ fn directory_page(
                 path: relative_path.clone(),
                 source,
             })?;
+        // A filesystem whose listing carries no entry type is stat'd to learn
+        // one, which opens the same window one call earlier: a name gone by the
+        // time this runs is an entry the page never takes in. It is the same
+        // doctrine through the same reading, so the two windows cannot answer a
+        // deleted name differently.
         let kind = if entry.file_type() == FileType::Unknown {
-            crate::reads::count_stat();
-            let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|source| environment_errno("stating", &relative_path, source))?;
-            classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
+            match stat_listed(directory, &name, &relative_path, Paged::default())? {
+                Some(metadata) => {
+                    classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
+                }
+                None => continue,
+            }
         } else {
             classify_file_type(entry.file_type())
         };
@@ -644,6 +715,7 @@ fn directory_page(
     candidates.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
     let more = candidates.len() > FRONTIER_PAGE;
     candidates.truncate(FRONTIER_PAGE);
+    let covered = candidates.last().map(|last| last.sort_key.clone());
 
     let mut pending = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -651,22 +723,23 @@ fn directory_page(
             name,
             path,
             kind,
-            sort_key,
+            sort_key: _,
         } = candidate;
         let relative_path = relative.join(&name);
-        crate::reads::count_stat();
-        let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|source| environment_errno("stating", &relative_path, source))?;
-        let observed_kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
+        let armed = faults.paging(kind);
+        let Some(metadata) = stat_listed(directory, &name, &relative_path, armed)? else {
+            continue;
+        };
+        let observed_kind = armed
+            .observes
+            .unwrap_or_else(|| classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)));
+        // The name the listing named was taken away and given to something else
+        // inside this window. What stands there is not the entry that was
+        // listed, so the page drops it exactly as it drops a name that is simply
+        // gone — and the successor arrives as the change it is, through the
+        // watcher events that edit raised.
         if observed_kind != kind {
-            return Err(environment(
-                "paging directory entry",
-                &relative_path,
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "the entry changed kind during directory enumeration",
-                ),
-            ));
+            continue;
         }
         let skip = if let Some(reason) = exclusions.reason(&path) {
             Some(reason.into())
@@ -692,10 +765,40 @@ fn directory_page(
             kind,
             stat: stat_raw(&metadata),
             skip,
-            sort_key,
         });
     }
-    Ok((pending, more))
+    Ok(Page {
+        pending,
+        more,
+        covered,
+    })
+}
+
+/// One stat of a name a listing named, taken inside the window that listing
+/// opened.
+///
+/// **Absence is an answer here, never a refusal**, and `armed` is what lets a
+/// case reach that answer: the seam hands back the error number the stat meets
+/// in place of running, and the reading below is the production one either way.
+/// Every other error number is the machine failing to answer, which ends the
+/// walk.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
+fn stat_listed(
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    access: &Path,
+    armed: Paged,
+) -> Result<Option<rustix::fs::Stat>, WalkError> {
+    crate::reads::count_stat();
+    let observed = match armed.meets {
+        Some(errno) => Err(errno),
+        None => statat(directory, name, AtFlags::SYMLINK_NOFOLLOW),
+    };
+    match observed {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(source) => Err(environment_errno("stating", access, source)),
+    }
 }
 
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault links and stat.
@@ -846,9 +949,19 @@ fn environment(operation: &'static str, path: &Path, source: io::Error) -> WalkE
 
 #[cfg(test)]
 mod tests {
+    use super::faults::{Answer, Stage};
     use super::*;
     use crate::scratch::Scratch;
     use std::io::{Cursor, Read};
+
+    /// A walk of `root` whose paging window holds the foreign edit `armed`
+    /// names. The arm is read while a page is stat'd, which is after
+    /// construction, so a walk armed here meets it at its first page.
+    fn walk_armed(root: &Path, armed: &'static [(Stage, Answer)]) -> Walk {
+        let mut walk = walk(root, &[]).expect("walk");
+        walk.faults = WalkFaults::at(armed);
+        walk
+    }
 
     fn paths(walk: Walk) -> Vec<(PathBuf, Option<SkipReason>)> {
         walk.map(|fact| match fact.expect("walk fact") {
@@ -1154,6 +1267,95 @@ mod tests {
         );
     }
 
+    /// **The paging window converges on absence.** A name the listing returned
+    /// and a deletion that lands before its stat are two observations of a tree
+    /// other writers are editing, and the second one is the current truth: there
+    /// is no entry there. The page drops it and keeps going.
+    ///
+    /// The forbidden shape is a refusal, which reports one foreign deletion as a
+    /// broken environment and takes the whole enumeration — every sibling
+    /// included — down with it.
+    #[test]
+    fn an_entry_deleted_between_the_listing_and_its_stat_leaves_the_page() {
+        let scratch = Scratch::new("walk-page-vanishes");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Vanishes)],
+        ));
+        assert_eq!(
+            facts,
+            vec![(PathBuf::from("b.md"), None), (PathBuf::from("c.md"), None)]
+        );
+    }
+
+    /// **A kind change in the same window is the same vanishing.** The name the
+    /// listing named was unlinked and something else took it, so what stands
+    /// there is not the entry that was listed — and the page drops it exactly as
+    /// it drops a name that is simply gone.
+    #[test]
+    fn an_entry_whose_kind_changed_in_the_window_leaves_the_page_too() {
+        let scratch = Scratch::new("walk-page-replaced");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Replaced)],
+        ));
+        assert_eq!(
+            facts,
+            vec![(PathBuf::from("b.md"), None), (PathBuf::from("c.md"), None)]
+        );
+    }
+
+    /// **A machine that will not answer still refuses, at this window too.** A
+    /// denied stat says nothing about whether an entry is there, and converging
+    /// on absence would let a revoked permission prune every row under the
+    /// directory. Only absence converges; every other error number ends the
+    /// walk.
+    #[test]
+    fn an_entry_the_machine_will_not_stat_refuses_the_walk() {
+        let scratch = Scratch::new("walk-page-denied");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let mut facts = walk_armed(&scratch.at(""), &[(Stage::Page, Answer::Denied)]);
+        let error = facts
+            .next()
+            .expect("the page's position")
+            .expect_err("a stat the machine refused");
+        assert!(error.to_string().contains("a.md"), "{error}");
+        assert!(facts.next().is_none(), "a walk error must be terminal");
+    }
+
+    /// **A page that dropped an entry still covers the run of names it took
+    /// in.** The next page of the same directory starts after the last name this
+    /// one listed, not after the last one it kept — so an entry that vanishes
+    /// neither hides the names between it and the page boundary nor yields the
+    /// page's own tail twice.
+    #[test]
+    fn a_page_that_dropped_an_entry_pages_the_rest_of_the_directory_once() {
+        let scratch = Scratch::new("walk-page-vanishes-wide");
+        for index in 0..(FRONTIER_PAGE + 1) {
+            scratch.place(&format!("{index:04}.md"), b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Vanishes)],
+        ));
+        let expected: Vec<(PathBuf, Option<SkipReason>)> = (1..(FRONTIER_PAGE + 1))
+            .map(|index| (PathBuf::from(format!("{index:04}.md")), None))
+            .collect();
+        assert_eq!(facts, expected);
+    }
+
     #[test]
     fn retained_file_facts_share_one_root_descriptor() {
         let scratch = Scratch::new("walk-fact-descriptors");
@@ -1189,7 +1391,7 @@ mod tests {
         let mut frontier = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
         let mut count = 0;
         while frontier
-            .next_pending(&root_fd, &normalizer, &exclusions)
+            .next_pending(&root_fd, &normalizer, &exclusions, &WalkFaults::default())
             .expect("page")
             .is_some()
         {

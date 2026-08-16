@@ -605,32 +605,14 @@ impl StreamArm {
 
 /// Append one record saying which boundary fired and how it answered.
 ///
-/// A harness that named no record file wants none. A harness that named one
-/// wants every firing in it, so a file that cannot be written ends the process
-/// rather than leaving a parent to read the silence as a boundary the watcher
-/// never reached. That is the one place this seam parts from the write
-/// protocol's, whose arms fire in a process that is already dying.
-///
-/// **Deliberately an abort rather than a panic.** One of the three boundaries
-/// answers on the backend's own delivery thread, where an unwind ends that
-/// thread and leaves the subscription standing — which is the same silence,
-/// reached a different way. Nothing here is recoverable in any case: the
-/// harness named a file this process cannot write, and every later arm would
-/// meet it too. The reason goes to standard error first, because an abort says
-/// nothing on its own.
+/// A file this process named and cannot write ends the process rather than
+/// leaving a parent to read the silence as a boundary the watcher never reached.
+/// That reading is [`crate::faults::record_or_abort`], shared with the walk's
+/// seam, and it is the one place both part from the write protocol's, whose arms
+/// fire in a process that is already dying.
 #[cfg(any(test, feature = "induced-failure"))]
 fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
-    let Some(hits) = hits else {
-        return;
-    };
-    if let Err(error) = crate::faults::append_record(hits, SEAM, stage.name(), answer.name()) {
-        eprintln!(
-            "norn-fs: the {} arm could not record itself in {}: {error}",
-            stage.name(),
-            hits.display()
-        );
-        std::process::abort();
-    }
+    crate::faults::record_or_abort(hits, SEAM, stage.name(), answer.name());
 }
 
 /// The arm this process was started under.

@@ -44,12 +44,13 @@
 //! Nothing outside this crate arms anything without the feature, and a shipped
 //! build has no reader for either variable.
 //!
-//! The watcher carries a seam of its own, widened once at watch establishment,
-//! under the same feature and appending to the same record file under the
-//! `norn-fs/watch` seam name. Each seam answers at its own boundary and at no
-//! other, which is what the `seam` field in a record says. Both write their
-//! records through [`append_record`] here, so the one discipline the two share
-//! cannot drift into two.
+//! Two sibling seams carry the effect surfaces this one does not: the watcher's,
+//! widened once at watch establishment, and the walk's, widened once at a walk's
+//! construction. Both stand under the same feature and append to the same record
+//! file, under the `norn-fs/watch` and `norn-fs/walk` seam names. Each seam
+//! answers at its own boundary and at no other, which is what the `seam` field in
+//! a record says. All three write their records through [`append_record`] here,
+//! so the one discipline they share cannot drift into three.
 
 use std::io;
 
@@ -67,17 +68,18 @@ const SEAM: &str = "norn-fs/write";
 
 /// Append one record of a fired arm to the file `hits`.
 ///
-/// Both fault seams write through here, because the discipline is one and a
+/// All three fault seams write through here, because the discipline is one and a
 /// second copy of it is a copy that drifts: one line per firing, and no
 /// buffering — a record still in this process's memory when the process ends is
 /// a record the harness never reads — so it opens, writes, syncs and closes
 /// each time.
 ///
-/// **What a failure means is the caller's, and the two callers differ.** The
+/// **What a failure means is the caller's, and the callers differ.** The
 /// write protocol's arm often fires in a process that is about to abort, where
-/// best effort is the only kind of effort there is; the watcher's fires in a
-/// process that lives to be asked, where a named file that cannot be written
-/// would leave a parent reading silence as a boundary that was never reached.
+/// best effort is the only kind of effort there is; the watcher's and the walk's
+/// fire in a process that lives to be asked, where a named file that cannot be
+/// written would leave a parent reading silence as a boundary that was never
+/// reached. [`record_or_abort`] is that second reading.
 #[cfg(any(test, feature = "induced-failure"))]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, outside the vault.
 pub(crate) fn append_record(
@@ -95,6 +97,39 @@ pub(crate) fn append_record(
         .open(hits)?;
     file.write_all(record.as_bytes())?;
     file.sync_all()
+}
+
+/// Append one record of a fired arm, or end the process saying it could not.
+///
+/// The reading the seams that outlive their arms share. A harness that named no
+/// record file wants none. A harness that named one wants every firing in it, so
+/// a file that cannot be written ends the process rather than leaving a parent
+/// to read the silence as a boundary the code never reached.
+///
+/// **Deliberately an abort rather than a panic.** One of the boundaries this
+/// carries answers on a backend's own delivery thread, where an unwind ends that
+/// thread and leaves the subscription standing — which is the same silence,
+/// reached a different way. Nothing here is recoverable in any case: the harness
+/// named a file this process cannot write, and every later arm would meet it
+/// too. The reason goes to standard error first, because an abort says nothing
+/// on its own.
+#[cfg(any(test, feature = "induced-failure"))]
+pub(crate) fn record_or_abort(
+    hits: Option<&std::path::Path>,
+    seam: &str,
+    stage: &str,
+    answer: &str,
+) {
+    let Some(hits) = hits else {
+        return;
+    };
+    if let Err(error) = append_record(hits, seam, stage, answer) {
+        eprintln!(
+            "norn-fs: the {stage} arm could not record itself in {}: {error}",
+            hits.display()
+        );
+        std::process::abort();
+    }
 }
 
 /// A point in the write protocol that can be made to fail.
