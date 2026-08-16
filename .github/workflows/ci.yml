@@ -72,6 +72,14 @@ jobs:
       # no feature.
       - name: Lint the shipped libraries
         run: cargo clippy --locked -p norn-fs -p norn-store --lib -- -D warnings
+      # The workspace lint above builds norn-host's targets with its
+      # `induced-failure` feature off, and that crate's lockdown and
+      # crash-convergence suites are whole files behind the feature: with it off
+      # they compile to nothing, so no lint ever reads them. This step is the
+      # lane that does — the same reason the test job below names the feature
+      # for that crate.
+      - name: Lint the induced-failure targets
+        run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
       - name: Test
         run: cargo test --locked --workspace
       # Three crates declare an `induced-failure` feature, and the workspace test
