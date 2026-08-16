@@ -102,9 +102,14 @@ use crate::value::{KeyIndex, StripReport, Value};
 /// than fall into a default arm.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SplitRefusal {
-    /// The value model dropped entries the scan still sees, so a line the
-    /// parser no longer names would be absorbed into a neighbouring field and
-    /// deleted with it.
+    /// The value model dropped entries the parser read, anywhere in the block
+    /// and at any depth, so the key set the split is checked against is no
+    /// longer the one the block writes.
+    ///
+    /// `dropped_entries` is how many went. Where each one sits is not here: a
+    /// `frontmatter-non-string-key` note is filed as it is dropped and that
+    /// note carries the path, so repeating it would be one location stated
+    /// twice and drifting.
     UncleanStrip { dropped_entries: usize },
     /// A parsed key that no candidate key line locates uniquely: `candidates`
     /// is how many lines the scan read as spelling this name, and any count
@@ -125,10 +130,10 @@ impl SplitRefusal {
     pub fn problem(&self) -> String {
         match self {
             SplitRefusal::UncleanStrip { dropped_entries: 1 } => {
-                "the value model dropped an entry the scan still sees".to_string()
+                "the value model dropped an entry the parser read".to_string()
             }
             SplitRefusal::UncleanStrip { dropped_entries } => {
-                format!("the value model dropped {dropped_entries} entries the scan still sees")
+                format!("the value model dropped {dropped_entries} entries the parser read")
             }
             SplitRefusal::KeyNotLocated { key, candidates: 0 } => {
                 format!("the parsed key {key:?} is on no candidate key line")

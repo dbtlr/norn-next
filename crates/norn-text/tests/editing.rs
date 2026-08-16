@@ -552,17 +552,32 @@ fn refusal_and_detail(source: &str) -> (SplitRefusal, String) {
 fn an_unclean_strip_reports_the_entries_the_value_model_dropped() {
     let (cause, detail) = refusal_and_detail("---\n1: x\ntitle: t\n---\nbody\n");
     assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
-    assert_eq!(
-        detail,
-        "the value model dropped an entry the scan still sees"
-    );
+    assert_eq!(detail, "the value model dropped an entry the parser read");
 
     let (cause, detail) = refusal_and_detail("---\n1: x\n2: y\ntitle: t\n---\nbody\n");
     assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 2 });
-    assert_eq!(
-        detail,
-        "the value model dropped 2 entries the scan still sees"
-    );
+    assert_eq!(detail, "the value model dropped 2 entries the parser read");
+}
+
+/// A drop below the top level costs the split too, and the cause says only
+/// what is true of it: an entry went. Where it sits is the note filed as it
+/// was dropped, which carries the path — the cause claims no top-level line
+/// the dropped entry never occupied.
+#[test]
+fn a_drop_below_the_top_level_reports_the_same_cause_and_claims_no_line() {
+    let source = "---\ntitle: t\nlist:\n  - 1: x\n---\nbody\n";
+    let (cause, detail) = refusal_and_detail(source);
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
+    assert_eq!(detail, "the value model dropped an entry the parser read");
+
+    // The note beside it is what places the entry, and it places this one
+    // inside the sequence rather than at the top level.
+    let placed = Document::parse(source)
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterNonStringKey)
+        .and_then(|diagnostic| diagnostic.detail.clone());
+    assert_eq!(placed.as_deref(), Some("at `list[0]`"));
 }
 
 /// A key the scan cannot locate is fixed by rewriting that key, so the refusal
