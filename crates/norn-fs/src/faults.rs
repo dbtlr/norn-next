@@ -47,7 +47,9 @@
 //! The watcher carries a seam of its own, widened once at watch establishment,
 //! under the same feature and appending to the same record file under the
 //! `norn-fs/watch` seam name. Each seam answers at its own boundary and at no
-//! other, which is what the `seam` field in a record says.
+//! other, which is what the `seam` field in a record says. Both write their
+//! records through [`append_record`] here, so the one discipline the two share
+//! cannot drift into two.
 
 use std::io;
 
@@ -58,6 +60,42 @@ pub(crate) const ARMED_STAGES: &str = "NORN_FS_ARMED_STAGES";
 /// The environment variable naming the file fired arms record themselves in.
 #[cfg(feature = "induced-failure")]
 pub(crate) const ARM_HITS: &str = "NORN_FS_ARM_HITS";
+
+/// The seam a record written by the write protocol names itself under.
+#[cfg(feature = "induced-failure")]
+const SEAM: &str = "norn-fs/write";
+
+/// Append one record of a fired arm to the file `hits`.
+///
+/// Both fault seams write through here, because the discipline is one and a
+/// second copy of it is a copy that drifts: one line per firing, and no
+/// buffering — a record still in this process's memory when the process ends is
+/// a record the harness never reads — so it opens, writes, syncs and closes
+/// each time.
+///
+/// **What a failure means is the caller's, and the two callers differ.** The
+/// write protocol's arm often fires in a process that is about to abort, where
+/// best effort is the only kind of effort there is; the watcher's fires in a
+/// process that lives to be asked, where a named file that cannot be written
+/// would leave a parent reading silence as a boundary that was never reached.
+#[cfg(any(test, feature = "induced-failure"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, outside the vault.
+pub(crate) fn append_record(
+    hits: &std::path::Path,
+    seam: &str,
+    stage: &str,
+    answer: &str,
+) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let record = format!("seam={seam} stage={stage} answer={answer}\n");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(hits)?;
+    file.write_all(record.as_bytes())?;
+    file.sync_all()
+}
 
 /// A point in the write protocol that can be made to fail.
 ///
@@ -283,7 +321,6 @@ impl Faults {
 /// per stage would make the feature's cost a function of how much is written.
 #[cfg(feature = "induced-failure")]
 mod armed {
-    use std::io::Write as _;
     use std::sync::OnceLock;
 
     use super::{ARM_HITS, ARMED_STAGES, Answer, Stage};
@@ -325,11 +362,9 @@ mod armed {
     /// Append one record saying which checkpoint fired and how it answered.
     ///
     /// Best effort by construction: the process this runs in is often about to
-    /// end, and a harness that armed no record file wants none. What it must not
-    /// do is buffer — a record still in this process's memory when the abort
-    /// lands is a record the parent never reads — so it opens, writes, syncs and
-    /// closes each time.
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, outside the vault.
+    /// end, and a harness that armed no record file wants none. A record that
+    /// could not be written is dropped rather than raised, because raising it
+    /// would replace the death this arm exists to cause with a different one.
     pub(super) fn record(stage: Stage, answer: Answer) {
         static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
         let Some(path) = HITS
@@ -338,19 +373,7 @@ mod armed {
         else {
             return;
         };
-        let record = format!(
-            "seam=norn-fs/write stage={} answer={}\n",
-            stage.name(),
-            answer.name()
-        );
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = file.write_all(record.as_bytes());
-            let _ = file.sync_all();
-        }
+        let _ = super::append_record(path, super::SEAM, stage.name(), answer.name());
     }
 }
 

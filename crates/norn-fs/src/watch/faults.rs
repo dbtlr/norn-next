@@ -28,13 +28,18 @@
 //!   [`backend`] conversion and the same teardown a platform's own refusal
 //!   travels, so no subscription reaches a caller.
 //! - [`Stage::Stream`] answers at the handler boundary, upstream of ingest and
-//!   the coalescer, by standing in place of the message the backend delivered.
-//!   It therefore fires on the **next real delivery after establishment** and
-//!   exactly once — one armed answer, one firing, one record.
+//!   the coalescer, by standing in place of an event the backend delivered. It
+//!   is eligible only once the subscription's synchronization boundary has been
+//!   **reached** — a backend establishing itself delivers too, and macOS
+//!   FSEvents replays event history there, so an arm that answered before the
+//!   boundary would be stating a case about establishment while claiming one
+//!   about a live subscription. After that it fires on the next delivered
+//!   event, exactly once.
 //! - [`Stage::Barrier`] answers at establishment. From there the subscription
-//!   withholds its `Live` publication on every platform path and its
-//!   synchronization wait reaches its own expiry, so the caller's authored
-//!   deadline is never the thing that has to elapse.
+//!   withholds its `Live` publication on every platform path, and the first
+//!   wait for that boundary ends at once — so the caller's authored deadline is
+//!   never the thing that has to elapse, and the record of the arm attests that
+//!   a caller really reached the boundary it withheld.
 //!
 //! # Reaching it from outside
 //!
@@ -45,28 +50,49 @@
 //!
 //! - `NORN_FS_WATCH_ARMED_STAGES` — the arm, as comma-separated `stage=answer`
 //!   pairs, spelled `install`, `stream`, `barrier` and `refuses`, `fails`,
-//!   `rescans`, `expires`. A pair this module cannot read — an unknown name, or
-//!   an answer the stage does not carry — is a mistake in the harness rather
-//!   than a stage nothing is armed at, so it panics.
-//! - `NORN_FS_ARM_HITS` — the write seam's record file, and the same one here.
-//!   A fired arm appends `seam=norn-fs/watch stage=<name>
-//!   answer=<name>` to it before it answers, so a harness reads which boundary
-//!   the watcher actually reached rather than inferring it from a subscription
-//!   that failed for some other reason. The `seam` field is what tells a record
-//!   written here apart from one the write protocol wrote.
+//!   `rescans`, `expires`. A pair this module cannot read — an unknown name, an
+//!   answer the stage does not carry, or one stage armed twice — is a mistake in
+//!   the harness rather than a stage nothing is armed at, so it panics.
+//! - `NORN_FS_ARM_HITS` — the write seam's record file, and the same one here. A
+//!   fired arm appends `seam=norn-fs/watch stage=<name> answer=<name>` to it
+//!   before it answers, so a harness reads which boundary the watcher actually
+//!   reached rather than inferring it from a subscription that failed for some
+//!   other reason. The `seam` field is what tells a record written here apart
+//!   from one the write protocol wrote. A file this process named and cannot
+//!   write ends the process saying so: a parent cannot tell a record that was
+//!   never written from a boundary that was never reached.
+//!
+//! **The record file must sit outside every watched tree.** It is written while
+//! coverage is live — by this seam, and by the write protocol's seam in the same
+//! run — so a file inside the vault, or directly inside the vault's parent, is a
+//! filesystem change the backend reports: it becomes an event in a batch under
+//! assertion, and it can be the very delivery a stream arm answers. A harness
+//! puts it in a directory of its own beside the tree.
+//!
+//! **The arm is read once per process and applies to every watch that process
+//! establishes.** Each establishment reads the same pairs and gets its own
+//! one-shot: two watches in one armed process refuse twice, withhold two
+//! boundaries, or displace one delivery each — and write one record per firing.
+//! A harness asserting exact record content therefore establishes exactly one
+//! watch per process.
 //!
 //! Nothing outside this crate arms anything without the feature, and a shipped
 //! build has no reader for either variable.
 //!
 //! # What consumes it
 //!
-//! The lockdown and certification suites over watcher failure, which arm one
-//! stage per case through the environment a process is started with. They are
-//! the only thing that arms it: an ordinary process reads an empty arm and every
-//! stage passes through.
+//! `norn-host`'s lockdown and certification suites over watcher failure, which
+//! arm one stage per case in the process a case's watch is established in.
+//! **Those lanes do not exist yet**: what reaches this seam today is this
+//! crate's own suites — the in-crate cases over a real backend, and the
+//! environment round trip in `tests/watch_lockdown.rs` — and they are the reason
+//! every stage here is already carried by a case. An ordinary process reads an
+//! empty arm and every boundary passes through.
 
 #[cfg(any(test, feature = "induced-failure"))]
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify::Event;
@@ -94,7 +120,8 @@ const SEAM: &str = "norn-fs/watch";
 pub(crate) enum Stage {
     /// Registering the coverage plan with the platform backend.
     Install,
-    /// The backend's event stream, under coverage that is already installed.
+    /// The backend's event stream, under coverage that is already installed and
+    /// past its synchronization boundary.
     Stream,
     /// The synchronization boundary that proves coverage is live.
     Barrier,
@@ -129,12 +156,13 @@ impl Stage {
 
     /// Whether this stage answers the way `answer` says.
     ///
-    /// Answers are not interchangeable across stages here: registration returns
-    /// an error and delivers nothing, the stream delivers a message and returns
-    /// nothing, and the barrier does neither. A pair naming a stage together
-    /// with an answer it does not carry is therefore unreadable rather than
-    /// approximately right, and is refused where it is spelled.
-    #[cfg(any(test, feature = "induced-failure"))]
+    /// Answers are not interchangeable across these boundaries: registration
+    /// returns an error and delivers nothing, the stream delivers a message and
+    /// returns nothing, and the barrier does neither. A pair naming a stage
+    /// together with an answer it does not carry is therefore unreadable rather
+    /// than approximately right, and it is refused where it is spelled — which
+    /// is what lets the boundaries themselves answer without a case for an
+    /// answer that cannot reach them.
     const fn answers(self, answer: Answer) -> bool {
         matches!(
             (self, answer),
@@ -170,10 +198,9 @@ pub(crate) enum Answer {
     /// must-scan-subdirectories flag both arrive as exactly this message.
     ///
     /// It is the *backend's* overflow and not this crate's. A dirty set that
-    /// outgrows [`DIRTY_ROOT_CAP`](super::DIRTY_ROOT_CAP) widens to the same
-    /// vault rescan from inside the coalescer, reachable by a burst a test can
-    /// write, and is a candidate this vocabulary could be supplemented with
-    /// rather than a case anything here requires.
+    /// outgrows [`DIRTY_ROOT_CAP`](super::DIRTY_ROOT_CAP) widens to a vault
+    /// rescan from inside the coalescer instead, and is reached by a burst a
+    /// test can write rather than by an arm.
     Rescans,
     /// The synchronization boundary is never reached, so the wait for it takes
     /// its expiry branch.
@@ -208,6 +235,52 @@ impl Answer {
     }
 }
 
+/// Refuse an arm that names something this seam cannot answer.
+///
+/// Two spellings are unreadable rather than approximately right: a stage
+/// together with an answer it does not carry, and one stage armed twice. The
+/// second would otherwise be the one mistake that passes silently — the seam
+/// reads a stage's first answer, so the second pair a harness spelled would
+/// simply not happen, and the case would report on a condition it never met.
+#[cfg(any(test, feature = "induced-failure"))]
+fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
+    for (index, (stage, answer)) in armed.iter().enumerate() {
+        assert!(
+            stage.answers(*answer),
+            "the {} stage in {source} answers no `{}`",
+            stage.name(),
+            answer.name()
+        );
+        assert!(
+            !armed[..index].iter().any(|(earlier, _)| earlier == stage),
+            "the {} stage is armed twice in {source}",
+            stage.name()
+        );
+    }
+}
+
+/// Whether a subscription has reached its synchronization boundary.
+///
+/// The watcher crosses that boundary in one of two places depending on the
+/// platform and the backend — returning from bulk registration, or the native
+/// macOS event-history marker — and both say so here. It is *reached* rather
+/// than published: an armed barrier withholds the publication and the boundary
+/// is still the point past which the backend is reporting current facts, which
+/// is the only thing the stream stage is stated over.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Boundary(Arc<AtomicBool>);
+
+impl Boundary {
+    /// Say the subscription has crossed it.
+    pub(crate) fn reached(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn was_reached(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// Which boundaries of a watch fail, and how.
 ///
 /// A list rather than one entry, for the same reason the write seam holds one:
@@ -223,21 +296,22 @@ pub(crate) struct WatchFaults {
     /// The file a fired arm records itself in, where anything named one.
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<PathBuf>,
+    /// Whether the barrier arm has already recorded itself. Shared across the
+    /// clones one establishment makes, so a subscription waited on twice
+    /// records one firing.
+    #[cfg(any(test, feature = "induced-failure"))]
+    barrier_recorded: Arc<AtomicBool>,
 }
 
 impl WatchFaults {
     /// A watch that answers each named stage the named way, recording nothing.
     #[cfg(test)]
     pub(crate) fn at(armed: &'static [(Stage, Answer)]) -> WatchFaults {
-        for (stage, answer) in armed {
-            assert!(
-                stage.answers(*answer),
-                "the {} stage answers no `{}`",
-                stage.name(),
-                answer.name()
-            );
+        refuse_an_unreadable_arm(armed, "this arm");
+        WatchFaults {
+            armed,
+            ..WatchFaults::default()
         }
-        WatchFaults { armed, hits: None }
     }
 
     /// The same arm, recording each fired stage in `hits`.
@@ -256,15 +330,16 @@ impl WatchFaults {
     /// What watch establishment passes.
     ///
     /// Without the `induced-failure` feature this is an empty arm and each
-    /// boundary asks one comparison against an empty list. With it, the
-    /// answer is whatever this process was started armed with — read once, and
-    /// empty in every process that armed nothing.
+    /// boundary asks one comparison against an empty list. With it, the answer
+    /// is whatever this process was started armed with — read once, and empty in
+    /// every process that armed nothing.
     pub(crate) fn entry() -> WatchFaults {
         #[cfg(feature = "induced-failure")]
         {
             WatchFaults {
                 armed: armed::stages(),
                 hits: armed::hits().cloned(),
+                barrier_recorded: Arc::default(),
             }
         }
         #[cfg(not(feature = "induced-failure"))]
@@ -300,53 +375,56 @@ impl WatchFaults {
         )))
     }
 
-    /// Fire the barrier arm, if this watch carries one.
-    ///
-    /// The barrier answers at establishment rather than at some later delivery,
-    /// so this is where its record is written — once, before anything it
-    /// answers. What it answers from here on is [`Self::withholds_live`] and
-    /// [`Self::synchronization_wait`].
-    // The answer a fired arm names is what its record carries, so a build with
-    // no record in it reads the answer nowhere.
-    #[cfg_attr(not(any(test, feature = "induced-failure")), allow(unused_variables))]
-    pub(crate) fn fire_barrier(&self) {
-        let Some(answer) = self.answer(Stage::Barrier) else {
-            return;
-        };
-        #[cfg(any(test, feature = "induced-failure"))]
-        self.record(Stage::Barrier, answer);
-    }
-
     /// Whether the `Live` publication is withheld.
     ///
     /// Every platform path asks: the publication that follows registration
     /// where registration is the boundary, and the native macOS event-history
     /// marker where it is not. A withheld publication leaves the subscription
     /// synchronizing, which is the state a boundary that never arrives leaves
-    /// it in.
+    /// it in. The boundary is still *reached* either way, so a stream arm on
+    /// the same watch stays statable.
     pub(crate) fn withholds_live(&self) -> bool {
         self.answer(Stage::Barrier).is_some()
     }
 
     /// How long the wait for the synchronization boundary lasts.
     ///
-    /// An armed barrier makes it nothing: the boundary it withheld is not going
-    /// to arrive, and a case about expiry should not spend the caller's authored
+    /// An armed barrier makes it nothing: the publication it withheld is not
+    /// coming, and a case about expiry should not spend the caller's authored
     /// deadline proving it. Everything the expiry does afterwards — the typed
     /// terminal error, the record into the subscription's state, the wake that
     /// carries it to the stream — is the production path, reached because the
     /// wait genuinely ended with the subscription still synchronizing.
+    ///
+    /// **This is where the barrier arm records itself**, once per
+    /// establishment. What a record attests is a boundary the watcher reached,
+    /// and the boundary this arm is about is reached by a caller waiting on one
+    /// that was withheld — so a harness that reads the record knows a wait
+    /// happened, rather than knowing only that a watch was armed.
+    // The answer a fired arm names is what its record carries, so a build with
+    // no record in it reads the answer nowhere.
+    #[cfg_attr(not(any(test, feature = "induced-failure")), allow(unused_variables))]
     pub(crate) fn synchronization_wait(&self, authored: Duration) -> Duration {
-        match self.answer(Stage::Barrier) {
-            Some(_) => Duration::ZERO,
-            None => authored,
+        let Some(answer) = self.answer(Stage::Barrier) else {
+            return authored;
+        };
+        #[cfg(any(test, feature = "induced-failure"))]
+        if !self.barrier_recorded.swap(true, Ordering::AcqRel) {
+            self.record(Stage::Barrier, answer);
         }
+        Duration::ZERO
     }
 
-    /// The stream arm this watch owes its next real delivery.
-    pub(crate) fn stream_arm(&self) -> StreamArm {
+    /// The stream arm this watch owes the first delivery past `boundary`.
+    pub(crate) fn stream_arm(&self, boundary: Boundary) -> StreamArm {
         StreamArm {
-            owed: self.answer(Stage::Stream),
+            // Only the answers this stage carries are held, which is what makes
+            // the delivery boundary below total: an arm cannot reach it owing
+            // something it has no message for.
+            owed: self
+                .answer(Stage::Stream)
+                .filter(|answer| Stage::Stream.answers(*answer)),
+            boundary,
             #[cfg(any(test, feature = "induced-failure"))]
             hits: self.hits.clone(),
         }
@@ -358,16 +436,18 @@ impl WatchFaults {
     }
 }
 
-/// One armed stream answer, held until a real delivery displaces it.
+/// One armed stream answer, held until a delivery past the boundary displaces
+/// it.
 ///
 /// The arm stands at the handler boundary, upstream of ingest and the
 /// coalescer, because what a stream failure or an overflow *is* to the rest of
-/// the watcher is a message arriving there. It waits for a delivery rather than
-/// firing at establishment so that it stands in place of an event the platform
-/// really produced, and it is taken when it fires: one armed answer, one
-/// firing, one record.
+/// the watcher is a message arriving there. It waits — for the synchronization
+/// boundary, and then for a delivery — so that it stands in place of an event a
+/// live subscription really received, and it is taken when it fires: one armed
+/// answer, one firing, one record, per establishment.
 pub(crate) struct StreamArm {
     owed: Option<Answer>,
+    boundary: Boundary,
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<PathBuf>,
 }
@@ -375,52 +455,56 @@ pub(crate) struct StreamArm {
 impl StreamArm {
     /// What the watcher ingests in place of `delivered`.
     pub(crate) fn answer(&mut self, delivered: notify::Result<Event>) -> notify::Result<Event> {
-        let Some(answer) = self.owed.take() else {
+        if !self.boundary.was_reached() {
             return delivered;
+        }
+        let event = match delivered {
+            Ok(event) => event,
+            // A failure the backend reported is already the subscription's last
+            // fact, and it is not this arm's to replace: the arm stands in place
+            // of an event and never in place of a failure, so it stays owed and
+            // the real cause is the one the subscription carries.
+            delivered @ Err(_) => return delivered,
+        };
+        let Some(answer) = self.owed.take() else {
+            return Ok(event);
         };
         #[cfg(any(test, feature = "induced-failure"))]
         record(self.hits.as_deref(), Stage::Stream, answer);
         match answer {
-            Answer::Fails => Err(notify::Error::generic(
-                "an armed watcher fault ended this event stream",
-            )),
             // The exact message both platform backends emit when they dropped
             // events: inotify on a queue overflow, FSEvents on
             // must-scan-subdirectories. Nothing in it names a path, because a
             // path set that was lost is what it reports.
             Answer::Rescans => Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)),
-            other => panic!("the stream stage answers no {other:?}"),
+            // `fails`, and nothing else: an arm only ever holds an answer the
+            // stream stage carries.
+            _ => Err(notify::Error::generic(
+                "an armed watcher fault ended this event stream",
+            )),
         }
     }
 }
 
 /// Append one record saying which boundary fired and how it answered.
 ///
-/// Best effort by construction: a harness that named no record file wants none.
-/// What it must not do is buffer — a record still in this process's memory when
-/// the process ends is a record the harness never reads — so it opens, writes,
-/// syncs and closes each time.
+/// A harness that named no record file wants none. A harness that named one
+/// wants every firing in it, so a file that cannot be written ends the process
+/// rather than leaving a parent to read the silence as a boundary the watcher
+/// never reached. That is the one place this seam parts from the write
+/// protocol's, whose arms fire in a process that is already dying.
 #[cfg(any(test, feature = "induced-failure"))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The arm's own record file, outside the vault.
 fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
-    use std::io::Write as _;
-
-    let Some(path) = hits else {
+    let Some(hits) = hits else {
         return;
     };
-    let record = format!(
-        "seam={SEAM} stage={} answer={}\n",
-        stage.name(),
-        answer.name()
-    );
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = file.write_all(record.as_bytes());
-        let _ = file.sync_all();
-    }
+    crate::faults::append_record(hits, SEAM, stage.name(), answer.name()).unwrap_or_else(|error| {
+        panic!(
+            "the {} arm could not record itself in {}: {error}",
+            stage.name(),
+            hits.display()
+        )
+    });
 }
 
 /// The arm this process was started under.
@@ -433,7 +517,7 @@ fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
 mod armed {
     use std::sync::OnceLock;
 
-    use super::{ARMED_STAGES, Answer, Stage};
+    use super::{ARMED_STAGES, Answer, Stage, refuse_an_unreadable_arm};
     use crate::faults::ARM_HITS;
 
     /// The stages this process is armed at, in the order they were named.
@@ -456,12 +540,12 @@ mod armed {
             .as_ref()
     }
 
-    /// Read `stage=answer` pairs, and refuse a spelling that names neither.
+    /// Read `stage=answer` pairs, and refuse a spelling this seam cannot answer.
     ///
     /// A misspelled arm that quietly armed nothing would pass every bar it was
     /// supposed to carry, so an unreadable pair ends the process saying so.
     pub(super) fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
-        spelling
+        let armed: Vec<(Stage, Answer)> = spelling
             .split(',')
             .filter(|pair| !pair.is_empty())
             .map(|pair| {
@@ -472,21 +556,25 @@ mod armed {
                     .unwrap_or_else(|| panic!("`{stage}` in {ARMED_STAGES} names no stage"));
                 let answer = Answer::named(answer)
                     .unwrap_or_else(|| panic!("`{answer}` in {ARMED_STAGES} names no answer"));
-                assert!(
-                    stage.answers(answer),
-                    "the {} stage in {ARMED_STAGES} answers no `{}`",
-                    stage.name(),
-                    answer.name()
-                );
                 (stage, answer)
             })
-            .collect()
+            .collect();
+        refuse_an_unreadable_arm(&armed, ARMED_STAGES);
+        armed
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A boundary the subscription has already crossed, which is what every
+    /// case about the stream stage stands past.
+    fn crossed() -> Boundary {
+        let boundary = Boundary::default();
+        boundary.reached();
+        boundary
+    }
 
     /// Every stage and every answer a harness arms round-trips through the name
     /// it is armed under, so a widened seam and the suite arming it cannot drift
@@ -527,26 +615,25 @@ mod tests {
     }
 
     /// Nothing is armed, so every boundary passes through: registration
-    /// proceeds, the boundary publishes, the caller's own deadline is the wait,
-    /// and a delivery reaches ingest as the backend produced it.
+    /// proceeds, the caller's own deadline is the wait, and a delivery reaches
+    /// ingest as the backend produced it.
     #[test]
     fn an_unarmed_watch_answers_at_no_boundary() {
         let faults = WatchFaults::default();
 
         assert_eq!(faults.registration(), Ok(()));
-        faults.fire_barrier();
         assert!(!faults.withholds_live());
         assert_eq!(
             faults.synchronization_wait(Duration::from_secs(7)),
             Duration::from_secs(7)
         );
-        let mut arm = faults.stream_arm();
+        let mut arm = faults.stream_arm(crossed());
         let delivered = arm.answer(Ok(
             Event::new(EventKind::Other).add_path("/vault/one.md".into())
         ));
         assert_eq!(
             delivered.expect("the delivery the backend made").paths,
-            [std::path::PathBuf::from("/vault/one.md")]
+            [PathBuf::from("/vault/one.md")]
         );
         for stage in Stage::ALL {
             assert_eq!(faults.answer(stage), None);
@@ -560,7 +647,7 @@ mod tests {
         let faults = WatchFaults::at(&[(Stage::Barrier, Answer::Expires)]);
 
         assert_eq!(faults.registration(), Ok(()));
-        assert!(faults.stream_arm().owed.is_none());
+        assert!(faults.stream_arm(crossed()).owed.is_none());
         assert!(faults.withholds_live());
         assert_eq!(
             faults.synchronization_wait(Duration::from_secs(3600)),
@@ -576,11 +663,35 @@ mod tests {
         assert!(matches!(faults.registration(), Err(WatchError::Backend(_))));
     }
 
+    /// **A stream arm answers nothing before the boundary is reached.** A
+    /// backend establishing itself delivers — macOS replays event history
+    /// there — and an arm that answered one of those deliveries would put the
+    /// failure it stands for before the coverage it is stated over.
+    #[test]
+    fn a_stream_arm_waits_for_the_synchronization_boundary() {
+        let boundary = Boundary::default();
+        let mut arm =
+            WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(boundary.clone());
+
+        for _ in 0..3 {
+            assert!(
+                arm.answer(Ok(
+                    Event::new(EventKind::Other).add_path("/vault/replayed.md".into())
+                ))
+                .is_ok(),
+                "an arm answered a delivery from before the boundary"
+            );
+        }
+
+        boundary.reached();
+        assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_err());
+    }
+
     /// The stream answers stand in place of the delivery, and the arm is taken
     /// when it fires: a second delivery is the backend's own again.
     #[test]
     fn a_stream_arm_displaces_one_delivery_and_no_more() {
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Rescans)]).stream_arm();
+        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Rescans)]).stream_arm(crossed());
         let answered = arm
             .answer(Ok(
                 Event::new(EventKind::Other).add_path("/vault/one.md".into())
@@ -594,12 +705,31 @@ mod tests {
         ));
         assert_eq!(
             after.expect("the delivery the backend made").paths,
-            [std::path::PathBuf::from("/vault/two.md")]
+            [PathBuf::from("/vault/two.md")]
         );
 
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm();
+        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed());
         assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_err());
         assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_ok());
+    }
+
+    /// **A failure the backend really reported is never displaced.** The arm
+    /// stands in place of an event; a delivered failure is already the
+    /// subscription's last fact, and standing in front of it would report a
+    /// live-and-overflowing stream over a stream that had stopped.
+    #[test]
+    fn a_delivered_failure_passes_through_and_leaves_the_arm_owed() {
+        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Rescans)]).stream_arm(crossed());
+
+        let passed = arm.answer(Err(notify::Error::generic("the backend's own failure")));
+
+        let error = passed.expect_err("the backend's failure reaches ingest");
+        assert!(error.to_string().contains("the backend's own failure"));
+        assert!(
+            arm.answer(Ok(Event::new(EventKind::Other)))
+                .expect("the arm is still owed")
+                .need_rescan()
+        );
     }
 
     /// A fired arm records the boundary it answered at, under this seam's name,
@@ -614,9 +744,9 @@ mod tests {
             .registration()
             .expect_err("the armed registration");
         WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone())
-            .fire_barrier();
+            .synchronization_wait(Duration::from_secs(3600));
         WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone())
-            .stream_arm()
+            .stream_arm(crossed())
             .answer(Ok(Event::new(EventKind::Other)))
             .expect_err("the armed stream");
 
@@ -628,6 +758,34 @@ mod tests {
         );
     }
 
+    /// **The barrier records the wait, not the arming.** A watch nobody waits
+    /// on reached no boundary, and one waited on twice reached it once.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
+    fn the_barrier_records_once_when_a_caller_reaches_the_withheld_boundary() {
+        let scratch = crate::scratch::Scratch::new("watch-barrier-records");
+        let hits = scratch.path("arm-hits");
+        let faults = WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone());
+
+        assert!(faults.withholds_live());
+        assert!(
+            !scratch.exists(&hits),
+            "a watch nobody waited on recorded a boundary it never reached"
+        );
+
+        for _ in 0..3 {
+            assert_eq!(
+                faults.synchronization_wait(Duration::from_secs(3600)),
+                Duration::ZERO
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&hits).expect("the record file"),
+            "seam=norn-fs/watch stage=barrier answer=expires\n"
+        );
+    }
+
     /// An arm that named no record file records nothing and answers the same.
     #[test]
     fn an_arm_with_no_record_file_still_answers() {
@@ -635,6 +793,25 @@ mod tests {
             WatchFaults::at(&[(Stage::Install, Answer::Refuses)])
                 .registration()
                 .is_err()
+        );
+    }
+
+    /// **A record file that cannot be written ends the run.** A harness that
+    /// named one wants every firing in it, and a firing that recorded nothing
+    /// reads to a parent exactly like a boundary the watcher never reached.
+    #[test]
+    fn a_record_file_that_cannot_be_written_refuses_rather_than_answering_quietly() {
+        let scratch = crate::scratch::Scratch::new("watch-arm-unwritable");
+        let hits = scratch.path("no-such-directory/arm-hits");
+
+        let refused = std::panic::catch_unwind(|| {
+            WatchFaults::recording_at(&[(Stage::Install, Answer::Refuses)], hits.clone())
+                .registration()
+        });
+
+        assert!(
+            refused.is_err(),
+            "an arm answered without the record its harness asked for"
         );
     }
 
@@ -649,10 +826,32 @@ mod tests {
             "install=full-disk",
             "install=expires",
             "stream=refuses",
+            // One stage armed twice: the seam answers a stage once, so the
+            // second pair is a spelling that would silently do nothing.
+            "stream=rescans,stream=fails",
+            "barrier=expires,install=refuses,barrier=expires",
         ] {
             assert!(
                 std::panic::catch_unwind(|| armed::parse(spelling)).is_err(),
                 "`{spelling}` was read as an arm"
+            );
+        }
+    }
+
+    /// The same refusals bind an arm a case spells in code, which is the other
+    /// door onto the same vocabulary.
+    #[test]
+    fn an_arm_spelled_in_code_meets_the_same_refusals() {
+        for armed in [
+            &[(Stage::Stream, Answer::Expires)][..],
+            &[
+                (Stage::Stream, Answer::Fails),
+                (Stage::Stream, Answer::Rescans),
+            ][..],
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| refuse_an_unreadable_arm(armed, "this arm")).is_err(),
+                "{armed:?} was read as an arm"
             );
         }
     }
