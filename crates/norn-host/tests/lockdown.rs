@@ -47,6 +47,30 @@
 //! point in it at all leaves a converged store that satisfies every outcome
 //! assertion by not having failed.
 //!
+//! **Three more conditions are the watcher's, and they run in a child for a
+//! different reason.** A registration the platform refuses, a backend stream
+//! that ends, and a backend that says it lost the path set are conditions
+//! nothing can arrange over a temporary directory, so each is armed at
+//! `norn-fs`'s watcher seam through the environment a process is started with —
+//! read once, and applied to every watch that process establishes. The child
+//! attaches a real host over a real backend, so what answers the arm is the
+//! production path from the registration call through to the trust state a
+//! client reads, and the three required outcomes are three different ones: an
+//! attach that acquires nothing and waits for a new demand, trust withdrawn
+//! under the cause the failure carried and resumed only by a recovery demand,
+//! and an overflow that widens work to a full-tree reconcile while the coverage
+//! it was reported on stays installed. The child asserts the outcome, the parent
+//! asserts the seam's record of the boundary that produced it, and neither half
+//! is enough alone: a seam whose check was removed leaves the child's
+//! expectations unmet *and* the record missing.
+//!
+//! **The record file sits outside every watched edge.** Coverage over a vault is
+//! the tree and the tree's own parent, and both fault seams append to the record
+//! while that coverage is live — so the file lives in a directory of the
+//! sandbox's own, which neither edge reaches. A record written under the vault's
+//! parent is a filesystem change the backend reports, and it can be the very
+//! delivery a stream arm is stated over.
+//!
 //! This binary is its own because its arrangements are process-wide, and
 //! because half its cases spawn processes.
 
@@ -54,6 +78,7 @@
 #![allow(clippy::disallowed_methods)] // Acceptance fixture: arranging and judging a vault tree.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use norn_config::ConfigDirs;
@@ -79,6 +104,28 @@ const CHILD_ROOT: &str = "NORN_HOST_LOCKDOWN_ROOT";
 
 /// The variable naming which tear the child arms.
 const CHILD_TEAR: &str = "NORN_HOST_LOCKDOWN_TEAR";
+
+/// The variable naming which watcher condition the child meets.
+const CHILD_WATCH: &str = "NORN_HOST_LOCKDOWN_WATCH";
+
+/// The variable a harness arms `norn-fs`'s watcher seam through.
+///
+/// It is spelled here rather than imported because the seam it reaches is
+/// fenced inside `norn-fs`: a harness arms it the way anything outside that
+/// crate does, by putting the pair in the environment a process is started
+/// with.
+const WATCH_ARMED_STAGES: &str = "NORN_FS_WATCH_ARMED_STAGES";
+
+/// The variable naming the file a fired `norn-fs` arm records itself in, which
+/// is the filesystem crate's own spelling of [`ARM_HITS`].
+///
+/// A case points both at one file. The two seams write records that name
+/// themselves, so which of them fired is read off a record rather than off
+/// which file it landed in.
+const FS_ARM_HITS: &str = "NORN_FS_ARM_HITS";
+
+/// The seam a fired watcher arm records itself under.
+const WATCH_SEAM: &str = "norn-fs/watch";
 
 /// A runaway bound on a state converging, not a bar on how fast it does.
 const WAIT_LIMIT: Duration = Duration::from_secs(120);
@@ -734,6 +781,240 @@ fn a_tear_between_a_flush_and_its_findings_is_healed_by_the_rows_themselves() {
 const UNDECODABLE: &[u8] = &[0xff, 0xfe, 0x00, 0x9f, 0x92, 0x96];
 
 // ---------------------------------------------------------------------------
+// Trust transition: coverage that cannot be installed
+// ---------------------------------------------------------------------------
+
+/// **An attach whose registration refuses acquires nothing, schedules no
+/// recovery, and waits for a demand that has not been made yet.**
+///
+/// The condition is the platform's own answer at the registration call: the
+/// child is started armed at the watcher seam's install stage, so the watch
+/// establishment inside its attach meets the typed refusal an operating system
+/// that will not let this process observe a path produces. Everything after that
+/// is production — the refusal travels the same conversion and the same teardown
+/// a platform's own refusal travels, and the entry publishes it as coverage that
+/// was lost to the backend.
+///
+/// **The forbidden outcomes are the ones a failed request would hide.** An
+/// attach that refused at coverage never reached the store, so a derived
+/// database standing afterwards would mean the entry acquired something the
+/// refusal says it did not. And nothing may put coverage back on its own: the
+/// child holds its demand lease across the whole failure, because dropping it
+/// takes the demand out of the entry and with it the thing this rules out.
+///
+/// **Resumption is a second child, because the arm is process-wide.** Every
+/// establishment in the armed process refuses, so clearing the condition means
+/// leaving that process: the same vault is demanded again by a child spawned the
+/// same way with nothing armed, and it reaches `Ready` and converges on a
+/// derivation built from zero over the same tree.
+///
+/// That second child is also **this suite's watcher control**. It runs the same
+/// binary through the same spawn with the same live record file, installs a live
+/// subscription, reports a change of its own through it, and writes no watcher
+/// record at all — which is what makes the record the armed child left mean
+/// something rather than being free.
+#[test]
+fn an_attach_that_cannot_install_coverage_acquires_nothing() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("watch-install-refused");
+    for index in 0..4 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    let refused = vault.run_watch_child("refused-attach", Some("install=refuses"));
+    assert_eq!(
+        refused.status,
+        RunStatus::Exited(0),
+        "the child did not answer a refused registration the way the entry is required to\n{}",
+        refused.stderr
+    );
+    refused.attestation.assert_reached(
+        "an attach whose registration refuses",
+        &[
+            (SEAM, WATCH_SEAM),
+            ("stage", "install"),
+            ("answer", "refuses"),
+        ],
+    );
+    // One record and no more: a second is a second establishment, which is the
+    // entry putting coverage back under a failure nothing addressed.
+    refused
+        .attestation
+        .assert_count("an attach whose registration refuses", 1);
+    assert!(
+        !vault.database().exists(),
+        "the refused attach left a derived store behind, so it acquired past the coverage it \
+         could not install"
+    );
+
+    let resumed = vault.run_watch_child("resumed", None);
+    assert_eq!(
+        resumed.status,
+        RunStatus::Exited(0),
+        "the demand that followed the refusal was not served\n{}",
+        resumed.stderr
+    );
+    resumed
+        .attestation
+        .assert_never_reached("a demand issued with nothing armed", &[(SEAM, WATCH_SEAM)]);
+    resumed
+        .attestation
+        .assert_count("a demand issued with nothing armed", 0);
+
+    let mut store = vault.store();
+    assert_eq!(
+        every_row(&mut store).len(),
+        5,
+        "the resumed attach did not derive the vault and the change the control made in it"
+    );
+    assert_operationally_valid(&mut store, "the store the resumed attach derived");
+    drop(store);
+    vault.assert_converged_from_zero("coverage installed by the demand that followed a refusal");
+}
+
+// ---------------------------------------------------------------------------
+// Trust transition: a stream that ends under live coverage
+// ---------------------------------------------------------------------------
+
+/// **A backend failure after readiness withdraws trust under the cause it
+/// carried, and the entry resumes only through a recovery demand.**
+///
+/// The child attaches, waits for `Ready`, and makes one change of its own. The
+/// arm stands in place of the delivery that reports it: what reaches ingest is
+/// the terminal error a backend that stopped for good produces, so the poll that
+/// drained the subscription reports a watcher failure and the entry publishes
+/// [`WatcherLossCause::Backend`] carrying the failure's own account of itself.
+///
+/// **The forbidden outcome is coverage coming back by itself.** The child holds
+/// the demand it attached under across the failure and watches the entry stand
+/// still on it; what installs coverage again is a recovery demand, and the
+/// recovery rung the host's own account records is how the child knows the entry
+/// came back that way rather than by an attach or a rebuild.
+///
+/// **One change, and one only.** The arm is per establishment: the recovery
+/// installs a second subscription, and that subscription gets a one-shot arm of
+/// its own which fires on the first delivery past its boundary. A second change
+/// after the recovery would spend it, so the child makes none — and the parent
+/// asserts exactly one record, because a second record is a delivery this case
+/// leaked into a subscription it states nothing about.
+#[test]
+fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("watch-stream-failed");
+    for index in 0..4 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    let failed = vault.run_watch_child("terminal-stream", Some("stream=fails"));
+    assert_eq!(
+        failed.status,
+        RunStatus::Exited(0),
+        "the child did not answer a stream that ended the way the entry is required to\n{}",
+        failed.stderr
+    );
+    failed.attestation.assert_reached(
+        "a backend stream that ended under live coverage",
+        &[(SEAM, WATCH_SEAM), ("stage", "stream"), ("answer", "fails")],
+    );
+    failed
+        .attestation
+        .assert_count("a backend stream that ended under live coverage", 1);
+
+    // The change the lost delivery would have reported is in the store: the
+    // recovery re-heals the vault, so nothing the failure swallowed is lost.
+    let mut store = vault.store();
+    assert_eq!(
+        every_row(&mut store).len(),
+        5,
+        "the recovery did not heal the change whose delivery the failure stood in place of"
+    );
+    assert_operationally_valid(&mut store, "the store a recovered attachment left");
+    drop(store);
+    vault.assert_converged_from_zero("coverage re-installed by a recovery demand");
+}
+
+// ---------------------------------------------------------------------------
+// Trust transition: a backend that lost the path set
+// ---------------------------------------------------------------------------
+
+/// **A vault-wide overflow publishes the overflow, widens the work to a
+/// full-tree reconcile, and keeps the coverage it was reported on.**
+///
+/// The child attaches, waits for `Ready`, and makes one change of its own. The
+/// arm stands in place of the delivery that reports it with the message both
+/// platform backends emit when they dropped events and the path set is no longer
+/// known — inotify's queue overflow, FSEvents' must-scan-subdirectories flag —
+/// which the watcher widens to a rescan of the vault and of the schema. Coverage
+/// was never lost, so this is not a trust loss: the entry publishes
+/// [`UntrustedReason::WatcherOverflow`] because what it knows about the vault is
+/// unreliable until something rereads it, and the reconcile that rereads it is
+/// scheduled in the same breath.
+///
+/// **The forbidden outcome is a recovery.** A recovery would tear coverage down
+/// and install it again over a subscription that never stopped reporting, and
+/// the entry would come back by a rung it does not owe. The child reads the
+/// host's own account instead: no recovery ran, no rebuild ran, and the leg that
+/// returned the entry to `Ready` opened every document in the vault rather than
+/// the one that changed, which is the shape of a full-tree heal and not of the
+/// scoped increment one dirty path earns.
+///
+/// **The overflow is read while it stands, from a second thread.** The entry
+/// publishes it for the length of the reconcile that clears it, so the reading
+/// is a sample of a live state rather than a state at rest: the observer runs
+/// from before the change until the reconcile has landed, and the vault is
+/// wide enough that the full-tree heal is real work.
+///
+/// **Live coverage is proven by using it.** The arm is spent and nothing
+/// re-established the watch, so a second change reaches the store through the
+/// same subscription the overflow was reported on — and the parent's single
+/// record is what says no second arm stood in place of it.
+#[test]
+fn a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("watch-stream-rescans");
+    for index in 0..OVERFLOWED_DOCUMENTS {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    let overflowed = vault.run_watch_child("overflow", Some("stream=rescans"));
+    assert_eq!(
+        overflowed.status,
+        RunStatus::Exited(0),
+        "the child did not answer a lost path set the way the entry is required to\n{}",
+        overflowed.stderr
+    );
+    overflowed.attestation.assert_reached(
+        "a backend that reported its path set lost",
+        &[
+            (SEAM, WATCH_SEAM),
+            ("stage", "stream"),
+            ("answer", "rescans"),
+        ],
+    );
+    overflowed
+        .attestation
+        .assert_count("a backend that reported its path set lost", 1);
+
+    let mut store = vault.store();
+    assert_eq!(
+        every_row(&mut store).len(),
+        OVERFLOWED_DOCUMENTS + 2,
+        "the reconcile and the coverage that outlived it did not derive both changes"
+    );
+    assert_operationally_valid(&mut store, "the store an overflow was reconciled in");
+    drop(store);
+    vault.assert_converged_from_zero("an overflow reconciled under live coverage");
+}
+
+/// How many documents the overflow case's vault holds.
+///
+/// Wide enough that the full-tree reconcile the overflow schedules is work
+/// rather than an instant, which is what the sampled reading of the state it
+/// publishes stands on. Every other case here states nothing about how long a
+/// leg takes and holds four.
+const OVERFLOWED_DOCUMENTS: usize = 200;
+
+// ---------------------------------------------------------------------------
 // The child role
 // ---------------------------------------------------------------------------
 
@@ -753,6 +1034,14 @@ fn the_child_role_attaches_under_whatever_it_was_armed_at() {
         the_control_attaches_with_nothing_armed();
         return;
     };
+    if let Some(condition) = std::env::var_os(CHILD_WATCH) {
+        let condition = condition
+            .to_str()
+            .expect("the watcher condition a child is given is UTF-8")
+            .to_owned();
+        watch_under_the_arm(Path::new(&root), &condition);
+        return;
+    }
     let armed = match std::env::var(CHILD_TEAR).as_deref() {
         Ok("chunk") => {
             induced_failure::abort_at_the_chunk_boundary(1);
@@ -803,6 +1092,267 @@ fn attach_under_the_arm(root: &Path) {
     let lease = attach_and_wait(&serving, vault.name());
     drop(lease);
 }
+
+// ---------------------------------------------------------------------------
+// The watcher conditions, met inside the child
+// ---------------------------------------------------------------------------
+
+/// Meet `condition` over the vault at `root`, and assert what the entry owes.
+///
+/// The arm is already in this process's environment, so every call below is the
+/// ordinary production one: nothing here knows a boundary was armed, and what
+/// the case reads is the trust state a client would read. Every expectation is
+/// an assertion, so a child that saw something else ends nonzero and the parent
+/// reports it beside the record the seam left.
+fn watch_under_the_arm(root: &Path, condition: &str) {
+    let vault = Vault::adopt(root);
+    match condition {
+        "refused-attach" => a_refused_registration_acquires_nothing(&vault),
+        "resumed" => a_new_demand_is_served_and_reports_a_change(&vault),
+        "terminal-stream" => a_stream_that_ended_resumes_through_a_recovery(&vault),
+        "overflow" => an_overflow_reconciles_under_live_coverage(&vault),
+        other => panic!("the child was given no watcher condition it knows: {other:?}"),
+    }
+}
+
+/// The armed attach: the registration refuses, so the entry acquires nothing
+/// and nothing puts coverage back while the demand that asked for it stands.
+fn a_refused_registration_acquires_nothing(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let opening = serving.evidence();
+    // Held across all of it: a demand withdrawn before the entry settles takes
+    // the standing ask out of the entry, and with it what this rules out.
+    let lease = serving
+        .demand(vault.name(), AttachMode::Durable)
+        .expect("request the attachment");
+
+    let untrusted = wait_for_untrusted(&serving, vault.name());
+    assert_backend_loss(&untrusted, "refused this registration");
+    assert_stands_on(
+        &serving,
+        vault.name(),
+        &untrusted,
+        "an attach whose registration refused",
+    );
+
+    let spent = serving.evidence().since(opening);
+    assert_eq!(
+        spent.recoveries_run, 0,
+        "the refused attach ran a recovery, which re-installs coverage over an attachment that \
+         still holds its resources — and this attach acquired none: {spent:?}"
+    );
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "the refused attach reached rung 3, which discards derived state to answer coverage that \
+         could not be installed: {spent:?}"
+    );
+    assert_eq!(
+        spent.changesets_applied, 0,
+        "the refused attach committed derived state past the coverage it never installed: \
+         {spent:?}"
+    );
+    assert!(
+        !vault.database().exists(),
+        "the refused attach opened a derived store, which stands past the registration it never \
+         got"
+    );
+    drop(lease);
+}
+
+/// The control, and the resumption: a child with nothing armed reaches `Ready`
+/// and the live subscription it installed reports a change of its own.
+///
+/// **The record file is live in this run**, so "no watcher record" is a fact
+/// about a seam nothing armed rather than about a harness with no sink. And the
+/// change is reported rather than healed: the wait below is on the account
+/// moving after the entry was already serving, which is work only a delivery
+/// schedules.
+fn a_new_demand_is_served_and_reports_a_change(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let lease = attach_and_wait(&serving, vault.name());
+
+    let serving_from = serving.evidence();
+    vault.write("reported.md", &readable(REPORTED));
+    wait_for_derived(
+        &serving,
+        vault.name(),
+        serving_from,
+        "a change under live coverage with nothing armed",
+    );
+    drop(lease);
+}
+
+/// The armed stream: the delivery that reports one change is a terminal backend
+/// failure instead, and only a recovery demand brings the entry back.
+fn a_stream_that_ended_resumes_through_a_recovery(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let lease = attach_and_wait(&serving, vault.name());
+
+    // One change, and no other for the rest of this process: the recovery below
+    // establishes a second watch, and that watch is armed too.
+    vault.write("edited.md", &readable(EDITED));
+    let untrusted = wait_for_withdrawn_trust(&serving, vault.name());
+    assert_backend_loss(&untrusted, "ended this event stream");
+    assert_stands_on(
+        &serving,
+        vault.name(),
+        &untrusted,
+        "a stream that ended under a standing demand",
+    );
+
+    let lost_at = serving.evidence();
+    let recovery = serving
+        .demand(vault.name(), AttachMode::Durable)
+        .expect("demand the recovery");
+    wait_for_ready(&serving, vault.name());
+    let spent = serving.evidence().since(lost_at);
+    assert_eq!(
+        spent.recoveries_run, 1,
+        "the entry came back by something other than the recovery a demand asks for: {spent:?}"
+    );
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "a backend that stopped reporting sent the entry to the rung that discards derived state: \
+         {spent:?}"
+    );
+    drop((recovery, lease));
+}
+
+/// The armed stream, the other answer: the delivery reports a lost path set, so
+/// the entry publishes the overflow and rereads the vault under the coverage it
+/// still holds.
+fn an_overflow_reconciles_under_live_coverage(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let lease = attach_and_wait(&serving, vault.name());
+
+    let ready_at = serving.evidence();
+    let observing = AtomicBool::new(true);
+    let published = std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            let mut published = false;
+            while observing.load(Ordering::Relaxed) {
+                published |= matches!(
+                    untrusted_reason(&serving.state(vault.name())),
+                    Some(UntrustedReason::WatcherOverflow)
+                );
+                std::thread::sleep(OVERFLOW_SAMPLE);
+            }
+            published
+        });
+        vault.write("overflowed.md", &readable(OVERFLOWED));
+        wait_for_derived(
+            &serving,
+            vault.name(),
+            ready_at,
+            "the reconcile an overflow schedules",
+        );
+        observing.store(false, Ordering::Relaxed);
+        observer.join().expect("the thread reading the entry")
+    });
+    assert!(
+        published,
+        "the entry served the vault through an overflow, so a client read facts nothing had \
+         reread"
+    );
+
+    let spent = serving.evidence().since(ready_at);
+    assert_eq!(
+        spent.recoveries_run, 0,
+        "the entry came back by a recovery, which tears down coverage the overflow never lost: \
+         {spent:?}"
+    );
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "an overflow sent the entry to the rung that discards derived state: {spent:?}"
+    );
+    assert!(
+        spent.document_opens >= OVERFLOWED_DOCUMENTS as u64,
+        "the leg that cleared the overflow opened {} documents of {OVERFLOWED_DOCUMENTS}, so it \
+         reread the path that changed rather than the vault whose path set was lost: {spent:?}",
+        spent.document_opens
+    );
+
+    // Coverage was never lost, so the subscription that reported the overflow is
+    // still the one covering the vault: a second change reaches the store
+    // through it, and no arm is left to stand in place of the delivery.
+    let reconciled_at = serving.evidence();
+    vault.write("reported.md", &readable(REPORTED));
+    wait_for_derived(
+        &serving,
+        vault.name(),
+        reconciled_at,
+        "a change reported under the coverage an overflow was reported on",
+    );
+    drop(lease);
+}
+
+/// The document a child writes to have one delivery a stream arm can stand in
+/// place of.
+const OVERFLOWED: usize = 900;
+
+/// The document a child writes to prove a subscription is live.
+const REPORTED: usize = 901;
+
+/// The document whose delivery a terminal stream failure swallowed.
+const EDITED: usize = 902;
+
+/// How often the thread reading an entry looks at it while an overflow stands.
+const OVERFLOW_SAMPLE: Duration = Duration::from_micros(100);
+
+/// Fail unless the entry is untrusted because its watcher backend failed,
+/// naming the armed fault that produced it.
+///
+/// **The arm is what attests.** A watcher loss under any other cause, or under
+/// any other detail, is a loss this arrangement did not cause — and the case
+/// would then be stated over a transition something else produced. The variant
+/// is matched rather than rendered and searched, so a backend failure published
+/// as a lost root, an expired boundary or an environmental refusal fails here.
+#[track_caller]
+fn assert_backend_loss(untrusted: &UntrustedReason, names: &str) {
+    let UntrustedReason::WatcherLost {
+        cause: WatcherLossCause::Backend,
+        detail,
+        ..
+    } = untrusted
+    else {
+        panic!("a backend failure was published as something else: {untrusted:?}")
+    };
+    assert!(
+        detail.contains("armed watcher fault") && detail.contains(names),
+        "coverage was lost for something other than the armed fault: {detail}"
+    );
+}
+
+/// Fail where the entry moves off `published` while nothing has addressed it.
+///
+/// The look is repeated rather than taken once, because what is ruled out is an
+/// entry that puts coverage back on its own: a re-acquisition takes a job, and a
+/// single read after the failure would be taken before that job could run.
+#[track_caller]
+fn assert_stands_on(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    published: &UntrustedReason,
+    subject: &str,
+) {
+    for _ in 0..SETTLE_LOOKS {
+        std::thread::sleep(SETTLE_LOOK);
+        let observed = host.state(name);
+        let standing = untrusted_reason(&observed).unwrap_or_else(|| {
+            panic!("{subject}: the entry moved off the failure nothing addressed: {observed:?}")
+        });
+        assert_eq!(
+            &standing, published,
+            "{subject}: the entry published a second reason over the first"
+        );
+    }
+}
+
+/// How many times a settle looks at an entry that is required to stand still.
+const SETTLE_LOOKS: u32 = 40;
+
+/// How long a settle waits between two looks.
+const SETTLE_LOOK: Duration = Duration::from_millis(25);
 
 // ---------------------------------------------------------------------------
 // Waiting
@@ -873,11 +1423,22 @@ fn attach_and_wait(
     let lease = host
         .demand(name, AttachMode::Durable)
         .expect("request the attachment");
+    wait_for_ready(host, name);
+    lease
+}
+
+/// Wait until the entry serves the vault.
+///
+/// Separate from the demand that asks for it, because the demand a recovery is
+/// asked for by is raised over an entry that is already attached: what is waited
+/// on there is the same convergence, reached from a state a fresh demand never
+/// stands in.
+fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName) {
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let observed = host.state(name);
         if observed == Ok(TrustState::Ready) {
-            return lease;
+            return;
         }
         assert!(
             !names_no_vault(&observed),
@@ -886,6 +1447,36 @@ fn attach_and_wait(
         assert!(
             Instant::now() < deadline,
             "the attach did not converge inside {WAIT_LIMIT:?}; observed {observed:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait until the work that followed `opening` wrote a derived row and the
+/// entry is serving again.
+///
+/// **This is how a case says a change was taken up rather than that time
+/// passed.** A trust state read after an edit says nothing on its own: an entry
+/// that never heard about the change is `Ready` too. The account is what
+/// separates them — a job that upserted a row is a job that read the change —
+/// and it is cumulative, so the reading is taken against one from before the
+/// edit rather than sampled.
+fn wait_for_derived(serving: &Serving, name: &VaultName, opening: EvidenceReading, subject: &str) {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let spent = serving.evidence().since(opening);
+        let observed = serving.state(name);
+        if spent.documents_upserted > 0 && observed == Ok(TrustState::Ready) {
+            return;
+        }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "{subject}: nothing derived it inside {WAIT_LIMIT:?}; observed {observed:?} having \
+             spent {spent:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -910,22 +1501,13 @@ fn wait_for_untrusted(host: &Host<ProductionEntryOps>, name: &VaultName) -> Untr
     let deadline = Instant::now() + WAIT_LIMIT;
     loop {
         let observed = host.state(name);
-        match &observed {
-            Ok(TrustState::Untrusted { reason, .. }) => return reason.clone(),
-            Err(envelope) if envelope.code() == &ReasonCode::HostEntryUntrusted => {
-                let ErrorDetail::EntryUntrusted { reason, .. } = envelope.detail() else {
-                    panic!(
-                        "the refusal is coded `host/entry-untrusted` and carries another \
-                         detail: {envelope:?}"
-                    )
-                };
-                return reason.clone();
-            }
-            Ok(TrustState::Ready) => {
-                panic!("the entry reached `Ready` under a condition it was required to refuse")
-            }
-            _ => {}
+        if let Some(reason) = untrusted_reason(&observed) {
+            return reason;
         }
+        assert!(
+            observed != Ok(TrustState::Ready),
+            "the entry reached `Ready` under a condition it was required to refuse"
+        );
         assert!(
             !names_no_vault(&observed),
             "the host serves no vault under `{name}`: {observed:?}"
@@ -933,6 +1515,57 @@ fn wait_for_untrusted(host: &Host<ProductionEntryOps>, name: &VaultName) -> Untr
         assert!(
             Instant::now() < deadline,
             "the entry did not refuse inside {WAIT_LIMIT:?}; observed {observed:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The reason an observation says the entry is untrusted for, or nothing where
+/// it says something else.
+///
+/// **The two spellings are one fact.** An untrusted entry does not answer a
+/// status read with its state — it refuses the read, under the code that says
+/// the derived state cannot be trusted, carrying the reason as the refusal's
+/// detail — and which of the two a caller meets depends on where the read came
+/// from rather than on what the entry published.
+fn untrusted_reason(observed: &Result<TrustState, ErrorEnvelope>) -> Option<UntrustedReason> {
+    match observed {
+        Ok(TrustState::Untrusted { reason, .. }) => Some(reason.clone()),
+        Err(envelope) if envelope.code() == &ReasonCode::HostEntryUntrusted => {
+            let ErrorDetail::EntryUntrusted { reason, .. } = envelope.detail() else {
+                panic!(
+                    "the refusal is coded `host/entry-untrusted` and carries another detail: \
+                     {envelope:?}"
+                )
+            };
+            Some(reason.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Wait until trust is withdrawn from an entry that is already serving, and
+/// hand back the reason it names.
+///
+/// **`Ready` is where this wait starts rather than a failure**, which is what
+/// separates it from [`wait_for_untrusted`]: the condition is met by a delivery
+/// under live coverage, so the entry serves the vault until the poll that drains
+/// the subscription reports it. What says a condition never arrived is the bound
+/// alone, and the failure it raises names the state the entry was last seen in.
+fn wait_for_withdrawn_trust(host: &Host<ProductionEntryOps>, name: &VaultName) -> UntrustedReason {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let observed = host.state(name);
+        if let Some(reason) = untrusted_reason(&observed) {
+            return reason;
+        }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "trust was not withdrawn inside {WAIT_LIMIT:?}; observed {observed:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1000,6 +1633,7 @@ impl Vault {
         std::fs::create_dir_all(root.join("vault/.norn")).expect("a vault root");
         std::fs::write(root.join("vault/.norn/schema.yaml"), "version: 1\n")
             .expect("the vault schema");
+        std::fs::create_dir_all(sandbox.root().join("records")).expect("a record directory");
         Vault {
             root,
             name: VaultName::new(VAULT_NAME).expect("a vault name"),
@@ -1083,8 +1717,53 @@ impl Vault {
         }
     }
 
+    /// Where the arms of a child this vault runs record themselves.
+    ///
+    /// **Outside every watched edge.** Coverage over a vault is the tree and the
+    /// tree's own parent, and the tree here is a directory of the run's working
+    /// directory — so a record file beside the tree is a filesystem change the
+    /// backend reports back into the batches a case is judging, and it can be
+    /// the very delivery a stream arm stands in place of. Both seams write while
+    /// coverage is live, so both records go in a directory of the sandbox's own,
+    /// which neither edge reaches.
+    fn records(&self) -> PathBuf {
+        self.sandbox
+            .as_ref()
+            .expect("a vault that owns its tree runs the children over it")
+            .root()
+            .join("records")
+    }
+
     /// Run this binary again as a child armed at `tear`, and report what it
     /// left behind. A child given no tear is the control, and arms nothing.
+    fn run_child(&self, tear: Option<&str>) -> Ran {
+        let hits = self.records().join("arm-hits");
+        match tear {
+            Some(tear) => self.spawn(&hits, &[(CHILD_TEAR, tear)]),
+            None => self.spawn(&hits, &[]),
+        }
+    }
+
+    /// Run this binary again as a child meeting the watcher `condition`, armed
+    /// at `stages`, and report what it left behind.
+    ///
+    /// **Each condition gets a record file of its own**, so what a case reads is
+    /// what one child wrote: a count over a file two children appended to would
+    /// say nothing about which of them fired an arm.
+    ///
+    /// The arm is the process's, so a child meets the condition at every watch
+    /// it establishes. Each of these establishes one.
+    fn run_watch_child(&self, condition: &str, stages: Option<&str>) -> Ran {
+        let hits = self.records().join(format!("{condition}-arm-hits"));
+        let mut arm = vec![(CHILD_WATCH, condition)];
+        if let Some(stages) = stages {
+            arm.push((WATCH_ARMED_STAGES, stages));
+        }
+        self.spawn(&hits, &arm)
+    }
+
+    /// Run this binary again as a child, recording into `hits`, with `arm` in
+    /// its environment beside the variables every child gets.
     ///
     /// The run goes through the testkit's harness rather than through a bare
     /// command, so the child gets a cleared environment with the variables this
@@ -1092,12 +1771,16 @@ impl Vault {
     /// derive that root would take every lease uncontended and report nothing
     /// about having done so — and a deadline, so a child that wedges is killed
     /// and reported instead of hanging the lane.
-    fn run_child(&self, tear: Option<&str>) -> Ran {
+    ///
+    /// **Both seams are pointed at one file.** A record names the seam that
+    /// wrote it, so which of them fired is read off the record rather than off
+    /// which file it landed in — and a case that asserts a count over one file
+    /// asserts it over both seams at once.
+    fn spawn(&self, hits: &Path, arm: &[(&str, &str)]) -> Ran {
         let sandbox = self
             .sandbox
             .as_ref()
             .expect("a vault that owns its tree runs the children over it");
-        let hits = self.root.join("arm-hits");
         let mut run = Run::new(sandbox, std::env::current_exe().expect("this binary"))
             .args([
                 "--exact",
@@ -1106,15 +1789,16 @@ impl Vault {
             ])
             .deadline(CHILD_DEADLINE)
             .env(CHILD_ROOT, &self.root)
-            .env(ARM_HITS, &hits);
-        if let Some(tear) = tear {
-            run = run.env(CHILD_TEAR, tear);
+            .env(ARM_HITS, hits)
+            .env(FS_ARM_HITS, hits);
+        for (name, value) in arm {
+            run = run.env(*name, value);
         }
         let outcome = run.wait().expect("running the lockdown child");
         Ran {
             status: outcome.status,
             stderr: outcome.stderr_text(),
-            attestation: Attestation::read(&hits),
+            attestation: Attestation::read(hits),
         }
     }
 

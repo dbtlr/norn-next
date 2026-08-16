@@ -252,11 +252,17 @@ from the environment a process is started with. So process death at each named s
 compare-and-swap publication has a bar over what is at rest afterwards, and refused watch
 registration, a backend stream that fails or reports its path set lost, and a
 synchronization boundary that never arrives each have a bar over what the subscription
-reports. **The watcher's bars are not rows of the table below**: they are stated in
-`norn-fs`'s own suites — the in-crate cases over a real backend, and the environment round
-trip that spawns a child armed through the variable — the way the write kernel's full-disk
-row states where its own filesystem half is reached. What is a row here is what a host does
-with the entry afterwards. Both seams append to one record file, told apart by the `seam`
+reports. **The watcher's bars are not rows of the table below**: what the *subscription*
+reports is stated in `norn-fs`'s own suites — the in-crate cases over a real backend, and the
+environment round trip that spawns a child armed through the variable — the way the write
+kernel's full-disk row states where its own filesystem half is reached. What a host does with
+the entry afterwards is the trust-transition suite's, and three of its arms are met at the
+production path rather than against a fake: `norn-host`'s lockdown suite starts a child armed
+at the watcher seam and attaches a real host over a real backend, so a refused registration
+leaves an attach that acquired nothing and waits for a new demand, a stream that ends
+withdraws trust naming the backend and resumes only through a recovery demand, and a backend
+reporting its path set lost publishes the overflow and rereads the whole vault under coverage
+that stays installed. Both seams append to one record file, told apart by the `seam`
 field a record carries, and **that file sits outside every watched tree**: it is written
 while coverage is live, so a record file inside a vault or in a vault's own parent is a
 filesystem change the watcher reports back into the batches a case is judging.

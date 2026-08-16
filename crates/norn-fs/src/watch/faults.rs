@@ -82,13 +82,19 @@
 //!
 //! # What consumes it
 //!
-//! `norn-host`'s lockdown and certification suites over watcher failure, which
-//! arm one stage per case in the process a case's watch is established in.
-//! **Those lanes do not exist yet**: what reaches this seam today is this
-//! crate's own suites — the in-crate cases over a real backend, and the
-//! environment round trip in `tests/watch_lockdown.rs` — and they are the reason
-//! every stage here is already carried by a case. An ordinary process reads an
-//! empty arm and every boundary passes through.
+//! `norn-host`'s lockdown suite arms one stage per case in the child process
+//! that case's watch is established in, and it reaches the install and stream
+//! stages: a registration that refuses, a stream that ends and a stream that
+//! reports its path set lost are how the trust transitions a host owes for each
+//! of those are stated at the production path, over a real backend and a real
+//! attachment. That crate's own `induced-failure` feature forwards to this one,
+//! so a lane arming a host has this reader compiled in.
+//!
+//! This crate's own suites are what carry every stage, including the ones no
+//! other crate arms: the in-crate cases over a real backend, and the environment
+//! round trip in `tests/watch_lockdown.rs`, which walks the route from a
+//! variable to an answered boundary for each of the four pairs. An ordinary
+//! process reads an empty arm and every boundary passes through.
 
 #[cfg(any(test, feature = "induced-failure"))]
 use std::path::{Path, PathBuf};
