@@ -329,7 +329,7 @@ machine's own failures — a denied directory, an exhausted descriptor table, a 
 
 **The walk's own paging of a directory is the same window one call earlier, and it converges
 on the same answer.** Listing a directory and stating the names it listed are two
-observations too, and one doctrine answers every window in the walk: an entry unlinked
+observations too, and one doctrine answers both windows: an entry unlinked
 between them is dropped from the page, because a walk begun now lists no such entry either.
 An entry whose *kind* changed there is dropped for the same reason — the name the listing
 named was taken away and given to something else inside that window, so what stands there is

@@ -18,13 +18,13 @@
 //! are therefore vault-relative in both, and a subtree walk of `notes` reads the
 //! same files the vault walk reads under `notes`.
 //!
-//! **Every window in the walk converges on absence.** Listing a directory,
-//! stating the names it listed, and opening a file it yielded are separate
-//! observations of a tree other writers are editing, and an entry can be
-//! unlinked — or unlinked and replaced — between any two of them. One doctrine
-//! answers all of them: the entry is dropped, because a walk begun now holds
-//! nothing at that name either. A machine that will not answer is the other
-//! thing entirely, and still refuses.
+//! **The windows between the walk's own observations converge on absence.**
+//! Listing a directory and stating the names it listed are two observations of a
+//! tree other writers are editing; so are yielding a file fact and opening it.
+//! An entry can be unlinked — or unlinked and replaced — inside either pair, and
+//! one doctrine answers both: the entry is dropped, because a walk begun now
+//! holds nothing at that name either. A machine that will not answer is the
+//! other thing entirely, and still refuses.
 
 mod faults;
 
@@ -719,11 +719,10 @@ fn directory_page(
 
     let mut pending = Vec::with_capacity(candidates.len());
     for candidate in candidates {
+        // The sort key is spent: the page's own run of names is what the cursor
+        // carries, so nothing past this point reads one entry's key.
         let Candidate {
-            name,
-            path,
-            kind,
-            sort_key: _,
+            name, path, kind, ..
         } = candidate;
         let relative_path = relative.join(&name);
         let armed = faults.paging(kind);
