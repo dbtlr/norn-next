@@ -63,8 +63,12 @@
 //!
 //! The bytewise tie-break is load-bearing rather than decorative. `documents_path`
 //! is unique under `BINARY`, so `A.md` and `a.md` can both hold rows even on a
-//! vault that folds them together — the stale row a case rename leaves, which
-//! the heal reaches by paging over exactly this order.
+//! vault that folds them together. A watcher-driven increment re-spells the row
+//! under a dirty root reported at the renamed path itself, so the pair stands
+//! where nothing reported the rename that way: a tree renamed while nothing was
+//! attached, a coverage loss that widened to a rescan, or a descendant reported
+//! dirty under the pre-rename spelling of a directory the same batch renamed.
+//! The heal reaches every one of them by paging over exactly this order.
 //!
 //! # The rest of the row
 //!

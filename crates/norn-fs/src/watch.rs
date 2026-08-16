@@ -15,7 +15,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::event::{CreateKind, EventKind, ModifyKind};
+use notify::event::{CreateKind, EventKind, ModifyKind, RenameMode};
 use notify::{Config, Event, PollWatcher, RecursiveMode};
 
 use crate::PostState;
@@ -68,6 +68,20 @@ pub enum RescanScope {
     Schema,
 }
 
+/// What a report says about the path it spells.
+///
+/// On a folding volume one identity has several spellings, and the batch keeps
+/// one of them for a consumer to derive at. This is the standing that decides
+/// which: only a name the tree still renders is worth deriving at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Spelling {
+    /// The path stands, so the directory renders this spelling.
+    Rendered,
+    /// The path is gone — removed, or the name a rename moved away from — so
+    /// the directory renders this spelling no longer.
+    Retired,
+}
+
 /// One settled, backend-independent set of filesystem facts.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Batch {
@@ -118,6 +132,17 @@ impl Batch {
         }
     }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
+    ///
+    /// A root stands at one identity, and on a folding volume several spellings
+    /// share one. The spelling a root carries is the last one reported for that
+    /// identity by a report naming a path that stands — so a rename that only
+    /// flips case leaves the root spelled the way the directory now renders it,
+    /// and the disappearance of the pre-rename spelling does not put it back.
+    ///
+    /// The spelling is a root's own, and a root does not re-spell the ancestors
+    /// of another. A directory case rename reports the directory and not its
+    /// descendants, so a descendant that is separately dirty in the same batch
+    /// keeps whatever spelling of the renamed ancestor its own report carried.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
     }
@@ -130,9 +155,48 @@ impl Batch {
         &self.rescans
     }
 
+    /// Record one dirty root at the spelling the reporting event carried.
+    ///
+    /// A [`NormalizedPath`] compares on its fold identity alone, so a plain set
+    /// insert of a fold-equal root is a no-op and the set keeps whichever
+    /// spelling arrived first. A rename that only flips case reports one
+    /// identity at two spellings, and a consumer deriving from the wrong one
+    /// carries a name no directory entry holds — so which of the two the set
+    /// keeps is the spelling the *tree* renders, not the one that arrived last.
+    ///
+    /// [`Spelling::Rendered`] displaces whatever stood before it, because a
+    /// report of a path that stands is later evidence about a live name.
+    /// [`Spelling::Retired`] only fills an identity nothing has spelled yet: a
+    /// report that a path is gone says which name died, never which one lives.
+    /// Backends split a case flip both ways round — a native stream reports the
+    /// two spellings in the order the renames happened, and the poll backend
+    /// diffs its own scan and so reports the new spelling's arrival before the
+    /// old one's disappearance — and this rule reads both to the live name.
+    ///
+    /// The identity is recorded exactly once either way: a re-spelling is not a
+    /// second place to walk.
+    fn note_vault_root(&mut self, root: NormalizedPath, spelling: Spelling) {
+        match spelling {
+            Spelling::Rendered => {
+                self.vault_roots.replace(root);
+            }
+            Spelling::Retired => {
+                self.vault_roots.insert(root);
+            }
+        }
+    }
+
     /// Merge another settled batch without losing any uncertainty.
+    ///
+    /// Where the two name one identity, `other`'s spelling wins: a caller folds
+    /// batches in the order the vault produced them, so `other` carries the
+    /// later evidence. Retirement does not survive settling — a batch keeps one
+    /// spelling per identity and not the reports behind it — so a spelling that
+    /// this fold takes from `other` is as live as the batch could establish.
     pub fn merge(&mut self, other: Batch) {
-        self.vault_roots.extend(other.vault_roots);
+        for root in other.vault_roots {
+            self.note_vault_root(root, Spelling::Rendered);
+        }
         self.schema_dirty |= other.schema_dirty;
         self.rescans.extend(other.rescans);
         if self.vault_roots.len() > DIRTY_ROOT_CAP {
@@ -1177,6 +1241,22 @@ fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
     effect
 }
 
+/// Whether the path an event spells is one the tree still renders.
+///
+/// A removal, and the from-side of a rename a backend reports as two halves,
+/// both name a path that is gone. Every other kind names one that stands —
+/// including `RenameMode::Any`, which is what a backend reports when it cannot
+/// say which half of a rename a path was, and which therefore has to be read as
+/// the live side or a case flip would settle at the name that died.
+fn reported_spelling(kind: EventKind) -> Spelling {
+    match kind {
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            Spelling::Retired
+        }
+        _ => Spelling::Rendered,
+    }
+}
+
 /// Fold one delivered path's effect into the batch this watcher is building.
 fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     let PathEffect {
@@ -1205,7 +1285,7 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     };
     let batch = state.batch();
     if !batch.rescans.contains(&RescanScope::Vault) {
-        batch.vault_roots.insert(normalized);
+        batch.note_vault_root(normalized, reported_spelling(kind));
         if batch.vault_roots.len() >= DIRTY_ROOT_CAP {
             batch.vault_roots.clear();
             batch.rescans.insert(RescanScope::Vault);
@@ -1339,6 +1419,7 @@ mod tests {
     use super::*;
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, ModifyKind, RemoveKind,
+        RenameMode,
     };
 
     use crate::ContentHash;
@@ -2368,6 +2449,93 @@ mod tests {
         }
     }
 
+    /// **A settled batch names a case flip at the spelling the tree renders**,
+    /// over whichever backend reported it.
+    ///
+    /// The forbidden shape is a batch naming the pre-rename spelling on a
+    /// folding volume. A consumer derives at the spelling a root carries, and
+    /// the directory renders only the post-rename one, so a batch that hands
+    /// back the dead spelling sends the derivation to a name no directory entry
+    /// holds.
+    ///
+    /// The two backends order the reports differently and this case is stated
+    /// over both: a native stream reports a rename as the two spellings in the
+    /// order they happened, and the poll backend diffs its own scan, so it
+    /// reports the arrival of the new spelling before the disappearance of the
+    /// old one. Neither order is the contract; the rendered spelling is.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn a_settled_batch_names_a_case_flip_at_the_spelling_the_tree_renders() {
+        for (label, poll) in BACKENDS {
+            let (_scratch, vault, schema, _hits) = armed_tree(&format!("watch-case-flip-{label}"));
+            std::fs::write(vault.join("flipping.md"), b"before\n").expect("the file to flip");
+            let (subscription, _lease) =
+                established_past_the_boundary(&vault, &schema, poll, WatchFaults::default());
+            taken_up_by_a_heal(&subscription);
+            let folding = subscription
+                .state
+                .lock()
+                .unwrap()
+                .normalizer
+                .case_sensitivity()
+                == CaseSensitivity::Insensitive;
+
+            std::fs::rename(vault.join("flipping.md"), vault.join("FLIPPING.md"))
+                .expect("a rename that only flips case");
+
+            // The host folds the batches it drains in arrival order, so the
+            // case reads what that fold produces rather than any one delivery.
+            let mut settled = Batch::default();
+            norn_testkit::wait::wait_until(
+                "a settled batch naming the flipped file",
+                watch_budget(),
+                || {
+                    while let Ok(Some(batch)) = subscription.try_recv() {
+                        settled.merge(batch);
+                    }
+                    if names_the_flip(&settled) {
+                        norn_testkit::wait::Observed::Met(())
+                    } else {
+                        norn_testkit::wait::Observed::Pending(format!("{settled:?}"))
+                    }
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+            // A backend that splits the rename across batches has the rest of
+            // it delivered by now, and the fold takes those too.
+            std::thread::sleep(DELIVERED_BY_NOW);
+            while let Ok(Some(batch)) = subscription.try_recv() {
+                settled.merge(batch);
+            }
+
+            let named: Vec<_> = settled
+                .vault_roots()
+                .iter()
+                .map(|root| root.as_path())
+                .filter(|path| path.to_string_lossy().to_ascii_lowercase() == "flipping.md")
+                .collect();
+            if folding {
+                // One identity, and it stands at the rendered spelling.
+                assert_eq!(named, [Path::new("FLIPPING.md")], "{label}");
+            } else {
+                // Two identities on a case-sensitive volume, and the one the
+                // tree still renders is among them.
+                assert!(
+                    named.contains(&Path::new("FLIPPING.md")),
+                    "{label}: {named:?}"
+                );
+            }
+        }
+    }
+
+    /// Whether a folded batch names either spelling of the flipped file.
+    fn names_the_flip(batch: &Batch) -> bool {
+        batch
+            .vault_roots()
+            .iter()
+            .any(|root| root.as_path().to_string_lossy().to_ascii_lowercase() == "flipping.md")
+    }
+
     #[test]
     fn host_side_merge_unions_every_kind_of_uncertainty() {
         let normalizer = normalizer();
@@ -2442,6 +2610,141 @@ mod tests {
             ]
         );
         assert!(batch.schema_dirty);
+    }
+
+    /// **A fold-equal re-ingest keeps the spelling the tree renders.**
+    ///
+    /// On a folding vault a rename that only flips case names one identity
+    /// twice, and the dirty set compares identities. The spelling is what a
+    /// consumer derives at, so the set has to hand back the one the directory
+    /// renders after the rename rather than the one it rendered before — and
+    /// that holds wherever the flipped component sits, because the identity a
+    /// dirty root carries covers the whole path and not just its last name.
+    ///
+    /// **The rows are the report orders the backends actually produce**, and
+    /// the answer is the same across all of them: arrival order is not the
+    /// contract. A native stream reports the two halves of a rename in the
+    /// order they happened; the poll backend diffs its own scan and reports the
+    /// new spelling's arrival before the old one's disappearance; and a backend
+    /// that distinguishes the halves labels them rather than ordering them. The
+    /// rule that reads all three is that a retired name never displaces a live
+    /// one.
+    ///
+    /// One root stands per identity in every row: a re-spelling is not a second
+    /// place to walk.
+    #[test]
+    fn a_fold_equal_re_ingest_keeps_the_spelling_the_tree_renders() {
+        let flipped = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+        let renamed_to = EventKind::Modify(ModifyKind::Name(RenameMode::To));
+        let renamed_from = EventKind::Modify(ModifyKind::Name(RenameMode::From));
+        let created = EventKind::Create(CreateKind::File);
+        let removed = EventKind::Remove(RemoveKind::File);
+        for (label, reports, kept) in [
+            (
+                "a file's own name, in the order the rename happened",
+                vec![
+                    (flipped, "/vault/notes/flipping.md"),
+                    (flipped, "/vault/notes/FLIPPING.md"),
+                ],
+                "notes/FLIPPING.md",
+            ),
+            (
+                "a directory above the file",
+                vec![
+                    (flipped, "/vault/notes/one.md"),
+                    (flipped, "/vault/NOTES/one.md"),
+                ],
+                "NOTES/one.md",
+            ),
+            (
+                "a directory's own name",
+                vec![(flipped, "/vault/notes"), (flipped, "/vault/NOTES")],
+                "NOTES",
+            ),
+            (
+                "a scan diff, which reports the arrival before the disappearance",
+                vec![
+                    (created, "/vault/notes/FLIPPING.md"),
+                    (removed, "/vault/notes/flipping.md"),
+                ],
+                "notes/FLIPPING.md",
+            ),
+            (
+                "the two halves of a rename, labelled rather than ordered",
+                vec![
+                    (renamed_to, "/vault/notes/FLIPPING.md"),
+                    (renamed_from, "/vault/notes/flipping.md"),
+                ],
+                "notes/FLIPPING.md",
+            ),
+            (
+                "a delete and a differently-cased create in its place",
+                vec![
+                    (removed, "/vault/notes/flipping.md"),
+                    (created, "/vault/notes/FLIPPING.md"),
+                ],
+                "notes/FLIPPING.md",
+            ),
+            (
+                "a removal alone, which is the only name reported",
+                vec![(removed, "/vault/notes/flipping.md")],
+                "notes/flipping.md",
+            ),
+        ] {
+            let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+            for (kind, path) in reports {
+                ingest(&state, Ok(Event::new(kind).add_path(path.into())));
+            }
+            let mut locked = state.lock().unwrap();
+            let batch = &locked.pending.as_mut().unwrap().batch;
+            let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(paths, [Path::new(kept)], "{label}");
+        }
+    }
+
+    /// **Two spellings are two roots where the volume says they are two
+    /// places.** The fold that makes a re-spelling one identity is the vault's
+    /// own case behavior, so on a case-sensitive volume the same pair of
+    /// reports names two dirty roots and neither displaces the other.
+    #[test]
+    fn a_case_sensitive_vault_reports_both_spellings_as_their_own_roots() {
+        let state = state_with_in_vault_schema(CaseSensitivity::Sensitive, "schema.yml");
+        for path in ["/vault/notes/flipping.md", "/vault/notes/FLIPPING.md"] {
+            ingest(
+                &state,
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+                        .add_path(path.into()),
+                ),
+            );
+        }
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(
+            paths,
+            [
+                Path::new("notes/FLIPPING.md"),
+                Path::new("notes/flipping.md")
+            ]
+        );
+    }
+
+    /// **A merge takes the later batch's spelling.** A settled batch keeps one
+    /// spelling per identity and not the reports behind it, so the fold has
+    /// nothing finer to read than which batch came later — and a host folds
+    /// batches in the order the vault produced them.
+    #[test]
+    fn a_host_side_merge_keeps_the_later_batch_spelling() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let mut pending =
+            Batch::vault_change(normalizer.normalize(Path::new("flipping.md")).unwrap());
+        pending.merge(Batch::vault_change(
+            normalizer.normalize(Path::new("FLIPPING.md")).unwrap(),
+        ));
+
+        let paths: Vec<_> = pending.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("FLIPPING.md")]);
     }
 
     /// **An event above a nested in-vault schema reaches it.** A schema below
