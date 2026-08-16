@@ -34,7 +34,10 @@
 //!   FSEvents replays event history there, so an arm that answered before the
 //!   boundary would be stating a case about establishment while claiming one
 //!   about a live subscription. After that it fires on the next delivered
-//!   event, exactly once.
+//!   event this watcher reports something about, exactly once: an access is a
+//!   delivery on inotify and not on FSEvents, and it reaches no batch on
+//!   either, so an arm spent on one would fire on a caller's own reads on one
+//!   platform and on a change to the vault on the other.
 //! - [`Stage::Barrier`] answers at establishment. From there the subscription
 //!   withholds its `Live` publication on every platform path, and the first
 //!   wait for that boundary ends at once — so the caller's authored deadline is
@@ -476,6 +479,14 @@ impl StreamArm {
             // the real cause is the one the subscription carries.
             delivered @ Err(_) => return delivered,
         };
+        // A delivery the watcher reports nothing about is not one this arm
+        // stands in place of. inotify asks for `IN_OPEN`, so under live coverage
+        // every document a heal reads arrives here; an arm spent on one would
+        // fire on a caller's own reads on that backend and on a change to the
+        // vault on a backend that reports no such thing.
+        if super::reports_nothing(&event) {
+            return Ok(event);
+        }
         let Some(answer) = self.owed.take() else {
             return Ok(event);
         };
@@ -730,6 +741,32 @@ mod tests {
         let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed());
         assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_err());
         assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_ok());
+    }
+
+    /// **A delivery this watcher reports nothing about never spends the arm.**
+    /// inotify asks for `IN_OPEN`, so a heal reading documents under live
+    /// coverage delivers an access per open — and an arm spent on one would
+    /// stand in place of a caller's own read rather than of a change to the
+    /// vault, on that backend and on no other.
+    #[test]
+    fn an_access_passes_through_and_leaves_the_arm_owed() {
+        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed());
+
+        for _ in 0..3 {
+            let passed = arm.answer(Ok(Event::new(EventKind::Access(
+                notify::event::AccessKind::Open(notify::event::AccessMode::Read),
+            ))
+            .add_path("/vault/read.md".into())));
+            assert_eq!(
+                passed.expect("an access is not a failure").paths,
+                [PathBuf::from("/vault/read.md")]
+            );
+        }
+
+        assert!(
+            arm.answer(Ok(Event::new(EventKind::Other))).is_err(),
+            "the arm was spent on a delivery the watcher reports nothing about"
+        );
     }
 
     /// **A failure the backend really reported is never displaced.** The arm

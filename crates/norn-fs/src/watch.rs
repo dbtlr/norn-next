@@ -926,6 +926,22 @@ impl State {
     }
 }
 
+/// Whether a delivered event is one this watcher reports nothing about.
+///
+/// **Reading a covered path is a delivery on some backends.** inotify asks for
+/// `IN_OPEN`, so every document the heal opens under live coverage arrives here
+/// as an access; FSEvents reports no such thing. An access says nothing about
+/// what any path holds, so no batch carries one — and the difference between
+/// the backends is invisible above this crate for exactly that reason.
+///
+/// [`faults::StreamArm`] reads the same rule, which is why it is a predicate
+/// rather than a match arm: an arm standing in place of a delivery this watcher
+/// discards would fire on a heal's own reads on one platform and on a change to
+/// the vault on another.
+pub(crate) fn reports_nothing(event: &Event) -> bool {
+    matches!(event.kind, EventKind::Access(_))
+}
+
 /// Fold one backend delivery into shared state, reporting the terminal failure
 /// the subscription now carries.
 ///
@@ -938,7 +954,7 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
         Err(error) => {
             state.terminal.get_or_insert_with(|| backend(error));
         }
-        Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
+        Ok(event) if reports_nothing(&event) => {}
         Ok(event) => {
             // A backend saying the path set is incomplete is the one report
             // that widens work to a rescan: an explicit rescan flag over

@@ -635,13 +635,14 @@ pub const UNREACHED_ARMS: &[UnreachedArm] = &[
     UnreachedArm {
         arm: "a published watcher cause outliving production ticks rather than fake ones",
         awaits: "`a_published_watcher_cause_outlives_the_ticks_that_follow_it` publishes the cause \
-                 by handing `FakeOps` a terminal poll error and then ticks the same fake. The \
-                 first half of it is reached at the production path — \
+                 by handing `FakeOps` a terminal poll error and then ticks the same fake over two \
+                 kinds of tick: one that reports nothing, and one that reports a vault-wide \
+                 rescan. The first kind is reached at the production path — \
                  `a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand` drives \
-                 a real backend into a terminal failure through the watcher seam's stream stage — \
-                 and what is missing is the second condition on top of it: ticks that keep \
-                 arriving after coverage ended, which is the dispatcher's own schedule rather than \
-                 anything a case hands it, and a bound on how many a case may wait for.",
+                 a real backend terminal through the watcher seam's stream stage and then holds \
+                 the entry still across the polls that follow. The second is not: a rescan \
+                 delivered after coverage ended needs a second stream answer on one \
+                 establishment, and the seam holds one answer per establishment by construction.",
     },
     UnreachedArm {
         arm: "root coverage loss met end to end through a production attachment",
