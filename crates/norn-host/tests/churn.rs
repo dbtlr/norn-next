@@ -1243,7 +1243,7 @@ impl Churned {
     /// **The flip landed at the identity it was made at**, and the tree and the
     /// store both say so.
     ///
-    /// Three claims, because a volume that folds case answers a keyed read at
+    /// Four claims, because a volume that folds case answers a keyed read at
     /// either spelling and a store that did nothing would satisfy any one of
     /// them on its own.
     ///
