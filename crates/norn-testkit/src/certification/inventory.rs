@@ -634,15 +634,18 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "trust-production-watcher-cause-outlives-ticks",
         suite: Suite::TrustTransition,
         lane: Lane::RealWatcher,
-        states: "a cause published for coverage a real backend ended stands unchanged across \
-                 hundreds of the dispatcher's own watcher ticks, and nothing is scheduled against \
-                 the coverage it says is gone: the loss leaves a vault-wide rescan standing in \
-                 the entry's pending facts, and across that stretch no document is reread, no row \
-                 written, no changeset committed and no recovery run. The change whose delivery \
-                 the failure displaced stays underived, which is the state at rest that says \
-                 nothing put coverage back. The tick half of the fake row is what this carries; \
-                 the rescan half stays there, because the seam holds one stream answer per \
-                 establishment",
+        states: "a cause published for coverage a real backend ended stands unchanged across the \
+                 dispatcher's own watcher ticks — hundreds of them, read off the host's account \
+                 of the polls it took rather than inferred from how long the case waited — and \
+                 nothing is scheduled against the coverage it says is gone: across that stretch \
+                 no document is reread, no row written, no changeset committed and no recovery \
+                 run. What makes those counters worth reading is the rescan the loss leaves \
+                 standing in the entry's pending facts, which an entry that acted on it would \
+                 reread the whole vault for, against a subscription it no longer holds. The \
+                 change whose delivery the failure displaced stays underived, which is the state \
+                 at rest that says nothing put coverage back. The tick half of the fake row is \
+                 what this carries; the rescan half stays there, because the seam holds one \
+                 stream answer per establishment",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   a_published_watcher_cause_outlives_the_production_ticks_after_it",
         feature: Some(INDUCED_FAILURE),
@@ -672,7 +675,10 @@ pub const REQUIRED_CASES: &[Case] = &[
                  stands on that cause rather than putting coverage back on its own. The vault is \
                  never read as emptied: every row the attach derived stands at rest with no \
                  tombstone beside it, where a host treating the removal as ordinary editing would \
-                 prune all of them. The arm-free half of the transition is what this carries — \
+                 prune all of them. The way back is stated too: the tree is put back and demanded \
+                 again, and the entry reaches ready over the recreated root and converges on what \
+                 a derivation built from zero over that tree holds, including a document the lost \
+                 attachment never saw. The arm-free half of the transition is what this carries — \
                  the alias reclassification stays with the fake row, because the duplicate-root \
                  park it raises stands in front of the trust state this case reads",
         carrier: "crates/norn-host/tests/coverage.rs::\
@@ -710,16 +716,19 @@ pub const REQUIRED_CASES: &[Case] = &[
 /// and an entry joining [`REQUIRED_CASES`], or by a ruling that withdraws the
 /// obligation.
 ///
-/// **It stands empty, and every row left the first way.** Each of the arms this
-/// table held is now carried at the production path by an entry in
-/// [`REQUIRED_CASES`] under [`Suite::TrustTransition`]: a refused registration,
-/// a stream that ends, a lost path set, a synchronization boundary that never
-/// arrives, a published cause across the ticks after it, and a vault root that
-/// stops being covered. Two of those production rows carry part of what a
-/// fake-carried row states rather than all of it — a rescan delivered after
-/// coverage ended, and the alias reclassification a lost root raises — and each
-/// pair of rows says in its own words which half sits where, which is where that
-/// reading lives rather than here.
+/// **It stands empty, and every row left by a carrier arriving rather than by a
+/// ruling.** Each of the arms this table held is now carried at the production
+/// path by an entry in [`REQUIRED_CASES`] under [`Suite::TrustTransition`]: a
+/// refused registration, a stream that ends, a lost path set, a synchronization
+/// boundary that never arrives, a published cause across the ticks after it, and
+/// a vault root that stops being covered.
+///
+/// **Two of them re-scoped a half on the way out**, which is a third way a row
+/// can leave and is worth reading as one: the arm is met at the production path,
+/// and a part of what the fake-carried row states is not. A rescan delivered
+/// after coverage ended, and the alias reclassification a lost root raises,
+/// stay with the fake rows — each pair of rows says in its own words which half
+/// sits where, which is where that reading lives rather than here.
 ///
 /// **The table stays.** It is the shape the next such arm arrives in: the
 /// contract naming a transition no production case reaches is a fact that gets

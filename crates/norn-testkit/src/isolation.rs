@@ -117,18 +117,22 @@ pub const REAL_WATCHER: &str = "real-watcher";
 
 /// The real-watcher holders that can be queued ahead of one case.
 ///
-/// **A census, written as its two factors.** Four dozen cases across the
-/// workspace hold [`REAL_WATCHER`] — forty in the host's production suite,
-/// four in the filesystem crate's watcher target, and a handful more in the
-/// host's measurement lanes — and the runner starts up to four binaries of them
-/// at once, so the depth is `48 * 4`. Both factors are here rather than in the
+/// **A census, written as its two factors.** Cases across the workspace hold
+/// [`REAL_WATCHER`] by the dozen — the host's in-crate production suite holds
+/// most of them, with the host's lockdown, coverage, crash-recovery,
+/// descriptor-budget and measurement targets and the filesystem crate's watcher
+/// cases beside it — and the runner starts up to four binaries of them at once,
+/// so the depth is written `48 * 4`. Both factors are here rather than the
 /// product alone, because a suite that gains cases moves one of them and a
 /// runner configured differently moves the other.
 ///
-/// The number is a queue depth and not a measurement: queueing behind holders
-/// that are working is what the lease is for. It sizes the wall in
-/// [`acquisition_budget`], and what actually diagnoses a stuck holder is
-/// [`HOLDER_PATIENCE`].
+/// **The first factor is a round figure for that census rather than a headcount
+/// of it**, and it can be: the number is a queue depth and not a measurement —
+/// queueing behind holders that are working is what the lease is for — and the
+/// product it forms with the hold windows the cases here take is capped by
+/// [`ACQUISITION_WALL`] well before the last holder in it, so a case arriving or
+/// leaving does not move the bound. It sizes the wall in [`acquisition_budget`],
+/// and what actually diagnoses a stuck holder is [`HOLDER_PATIENCE`].
 pub const QUEUED_HOLDERS: u32 = 48 * 4;
 
 /// How long the lease may stay in one holder's hands before a waiter names it.

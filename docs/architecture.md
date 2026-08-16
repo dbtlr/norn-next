@@ -265,12 +265,15 @@ reports is stated in `norn-fs`'s own suites — the in-crate cases over a real b
 environment round trip that spawns a child armed through the variable — the way the write
 kernel's full-disk row states where its own filesystem half is reached. What a host does with
 the entry afterwards is the trust-transition suite's, and **every arm of it is now met at the
-production path rather than against a fake**. Four are met through the seam: `norn-host`'s
-lockdown suite starts a child armed at the watcher seam and attaches a real host over a real
-backend, so a refused registration leaves an attach that acquired nothing and waits for a new
-demand, a stream that ends withdraws trust naming the backend and resumes only through a
-recovery demand, that same published cause stands unchanged across hundreds of the
-dispatcher's own ticks with nothing scheduled against the coverage it says is gone, a backend
+production path rather than against a fake, with two halves still resting on fake carriers**
+— named at the end of this paragraph, and named again by the inventory rows that split them.
+Four arms are met through the seam: `norn-host`'s lockdown suite starts a child armed at the
+watcher seam and attaches a real host over a real backend, so a refused registration leaves an
+attach that acquired nothing and waits for a new demand, a stream that ends withdraws trust
+naming the backend and resumes only through a recovery demand, that same published cause
+stands unchanged across hundreds of the dispatcher's own ticks — counted, from the host's own
+account of the polls it took, rather than inferred from how long the case waited — with
+nothing scheduled against the coverage it says is gone, a backend
 reporting its path set lost publishes the overflow and rereads the whole vault under coverage
 that stays installed, and a synchronization boundary that never arrives leaves the attach
 untrusted under an expired synchronization holding a store it opened and derived nothing
@@ -280,8 +283,14 @@ a case. **The fifth needs no arm at all**, so it is behind no feature and runs w
 crate's suites run: `norn-host`'s coverage suite removes a live vault's root directory, and
 the real backend reports the root's own name vanishing, which withdraws trust naming that
 root and prunes nothing — every derived row stands at rest with no tombstone beside it, where
-a host reading the removal as ordinary editing would prune all of them. Both seams append to
-one record file, told apart by the `seam` field a record carries, and **that file sits
+a host reading the removal as ordinary editing would prune all of them; the tree is then put
+back and demanded again, and the entry reaches ready over the recreated root and converges on
+a derivation built from zero over it. **The two halves the fake rows keep** are a rescan
+delivered after coverage ended — the production seam holds one stream answer per
+establishment, so a second answer on one establishment is unreachable there — and the alias
+reclassification a lost root raises, whose duplicate-root park stands in front of the trust
+state the production case reads. Both seams append to one record file, told apart by the
+`seam` field a record carries, and **that file sits
 outside every watched tree**: it is written while coverage is live, so a record file inside a
 vault or in a vault's own parent is a filesystem change the watcher reports back into the
 batches a case is judging.
