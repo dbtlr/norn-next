@@ -78,7 +78,6 @@
 #![allow(clippy::disallowed_methods)] // Acceptance fixture: arranging and judging a vault tree.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use norn_config::ConfigDirs;
@@ -809,10 +808,13 @@ const UNDECODABLE: &[u8] = &[0xff, 0xfe, 0x00, 0x9f, 0x92, 0x96];
 /// derivation built from zero over the same tree.
 ///
 /// That second child is also **this suite's watcher control**. It runs the same
-/// binary through the same spawn with the same live record file, installs a live
-/// subscription, reports a change of its own through it, and writes no watcher
-/// record at all — which is what makes the record the armed child left mean
-/// something rather than being free.
+/// binary through the same spawn, pointed at a record file of its own that the
+/// spawn creates before it starts; it installs a live subscription, reports a
+/// change of its own through it, and writes no record into that file at all —
+/// which is what makes the record the armed child left mean something rather
+/// than being free. A file per condition is what keeps the two counts apart,
+/// and the empty file the spawn leaves is what makes this one a count of
+/// firings rather than of a sink that was never there.
 #[test]
 fn an_attach_that_cannot_install_coverage_acquires_nothing() {
     let _beside = beside_the_arms();
@@ -887,9 +889,11 @@ fn an_attach_that_cannot_install_coverage_acquires_nothing() {
 ///
 /// **The forbidden outcome is coverage coming back by itself.** The child holds
 /// the demand it attached under across the failure and watches the entry stand
-/// still on it; what installs coverage again is a recovery demand, and the
-/// recovery rung the host's own account records is how the child knows the entry
-/// came back that way rather than by an attach or a rebuild.
+/// still on it — and reads the host's account across that same stretch, because
+/// standing still is what a re-acquisition that met the arm again would look
+/// like from outside. What installs coverage again is a recovery demand, and the
+/// recovery rung the account records is how the child knows the entry came back
+/// that way rather than by an attach or a rebuild.
 ///
 /// **One change, and one only.** The arm is per establishment: the recovery
 /// installs a second subscription, and that subscription gets a one-shot arm of
@@ -958,16 +962,20 @@ fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
 /// the one that changed, which is the shape of a full-tree heal and not of the
 /// scoped increment one dirty path earns.
 ///
-/// **The overflow is read while it stands, from a second thread.** The entry
-/// publishes it for the length of the reconcile that clears it, so the reading
-/// is a sample of a live state rather than a state at rest: the observer runs
-/// from before the change until the reconcile has landed, and the vault is
-/// wide enough that the full-tree heal is real work.
+/// **The overflow is read off the account rather than sampled.** The entry
+/// publishes it only for the length of the reconcile that clears it, which is a
+/// window a reader can be scheduled straight past — so what the child asserts is
+/// the host's own cumulative count of the reports it took up, which stands after
+/// the state carrying them is gone. The counted report and the published reason
+/// are one fact: an entry holding coverage and owing no rung publishes the
+/// overflow for exactly the facts that carry a rescan, and the two assertions
+/// below that no rung ran are what say this entry was such an entry.
 ///
 /// **Live coverage is proven by using it.** The arm is spent and nothing
 /// re-established the watch, so a second change reaches the store through the
-/// same subscription the overflow was reported on — and the parent's single
-/// record is what says no second arm stood in place of it.
+/// same subscription the overflow was reported on — reported by path, taking up
+/// no second report of a lost path set — and the parent's single record is what
+/// says no second arm stood in place of it.
 #[test]
 fn a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed() {
     let _beside = beside_the_arms();
@@ -1008,10 +1016,11 @@ fn a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed() {
 
 /// How many documents the overflow case's vault holds.
 ///
-/// Wide enough that the full-tree reconcile the overflow schedules is work
-/// rather than an instant, which is what the sampled reading of the state it
-/// publishes stands on. Every other case here states nothing about how long a
-/// leg takes and holds four.
+/// Wide enough that what the reconcile opened separates a reread of the vault
+/// from a reread of the one path that changed by two orders of magnitude: the
+/// count is the case's evidence that the overflow widened the work, and over a
+/// four-document vault the two legs are a few opens apart. Every other case
+/// here reads nothing off the size of the tree and holds four.
 const OVERFLOWED_DOCUMENTS: usize = 200;
 
 // ---------------------------------------------------------------------------
@@ -1032,8 +1041,9 @@ const OVERFLOWED_DOCUMENTS: usize = 200;
 ///
 /// A child started with no tear and no condition named arms nothing and runs the
 /// same attach to the end. That is the **control**, and it is what makes every
-/// record assertion beside a tear mean something: same binary, same spawn, same
-/// live record file, and the arm is the only difference between them.
+/// record assertion beside a tear mean something: same binary, same spawn, a
+/// record file the spawn creates empty and reads back, and the arm is the only
+/// difference between them.
 #[test]
 fn the_child_role_attaches_under_whatever_it_was_armed_at() {
     let Some(root) = std::env::var_os(CHILD_ROOT) else {
@@ -1067,11 +1077,12 @@ fn the_child_role_attaches_under_whatever_it_was_armed_at() {
 /// The control: a child spawned exactly as a torn one is, with nothing armed.
 ///
 /// **The record file is live in this run**, pointed at by the same variable the
-/// store's arms read, which is the whole point of running it as a child. An arm
-/// records itself only where a harness named a file to record into, so a control
-/// that left the variable unset would satisfy "nothing was recorded" by having
-/// no sink to record into — and the absence assertion the tears rest on would be
-/// true of a protocol with no arms left in it at all.
+/// store's arms read and standing empty before the run begins, which is the
+/// whole point of running it as a child. An arm records itself only where a
+/// harness named a file to record into, so a control that left the variable
+/// unset would satisfy "nothing was recorded" by having no sink to record into —
+/// and the absence assertion the tears rest on would be true of a protocol with
+/// no arms left in it at all.
 fn the_control_attaches_with_nothing_armed() {
     let _beside = beside_the_arms();
     let vault = Vault::new("unarmed-child");
@@ -1168,11 +1179,11 @@ fn a_refused_registration_acquires_nothing(vault: &Vault) {
 /// The control, and the resumption: a child with nothing armed reaches `Ready`
 /// and the live subscription it installed reports a change of its own.
 ///
-/// **The record file is live in this run**, so "no watcher record" is a fact
-/// about a seam nothing armed rather than about a harness with no sink. And the
-/// change is reported rather than healed: the wait below is on the account
-/// moving after the entry was already serving, which is work only a delivery
-/// schedules.
+/// **The record file is live in this run** — created empty by the spawn and
+/// still there when the parent reads it — so "no watcher record" is a fact about
+/// a seam nothing armed rather than about a harness with no sink. And the change
+/// is reported rather than healed: the wait below is on the account moving after
+/// the entry was already serving, which is work only a delivery schedules.
 fn a_new_demand_is_served_and_reports_a_change(vault: &Vault) {
     let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
     let lease = attach_and_wait(&serving, vault.name());
@@ -1199,11 +1210,23 @@ fn a_stream_that_ended_resumes_through_a_recovery(vault: &Vault) {
     vault.write("edited.md", &readable(EDITED));
     let untrusted = wait_for_withdrawn_trust(&serving, vault.name());
     assert_backend_loss(&untrusted, "ended this event stream");
+    let withdrawn_at = serving.evidence();
     assert_stands_on(
         &serving,
         vault.name(),
         &untrusted,
         "a stream that ended under a standing demand",
+    );
+    // The settle above reads the state repeatedly and this reads across it. The
+    // two answer different questions: an entry that ran a recovery on its own
+    // and met the same armed stream again is untrusted under the same reason at
+    // every look, so standing still is exactly what a spontaneous
+    // re-acquisition looks like from outside. The account is where it shows.
+    let settled = serving.evidence().since(withdrawn_at);
+    assert_eq!(
+        settled.recoveries_run, 0,
+        "the entry re-installed coverage while nothing had asked it to, so what stood still \
+         across the settle was a second failure rather than the first: {settled:?}"
     );
 
     let lost_at = serving.evidence();
@@ -1232,36 +1255,25 @@ fn an_overflow_reconciles_under_live_coverage(vault: &Vault) {
     let lease = attach_and_wait(&serving, vault.name());
 
     let ready_at = serving.evidence();
-    let observing = AtomicBool::new(true);
-    let published = std::thread::scope(|scope| {
-        let observer = scope.spawn(|| {
-            let mut published = false;
-            while observing.load(Ordering::Relaxed) {
-                published |= matches!(
-                    untrusted_reason(&serving.state(vault.name())),
-                    Some(UntrustedReason::WatcherOverflow)
-                );
-                std::thread::sleep(OVERFLOW_SAMPLE);
-            }
-            published
-        });
-        vault.write("overflowed.md", &readable(OVERFLOWED));
-        wait_for_derived(
-            &serving,
-            vault.name(),
-            ready_at,
-            "the reconcile an overflow schedules",
-        );
-        observing.store(false, Ordering::Relaxed);
-        observer.join().expect("the thread reading the entry")
-    });
-    assert!(
-        published,
-        "the entry served the vault through an overflow, so a client read facts nothing had \
-         reread"
+    vault.write("overflowed.md", &readable(OVERFLOWED));
+    wait_for_derived(
+        &serving,
+        vault.name(),
+        ready_at,
+        "the reconcile an overflow schedules",
     );
-
     let spent = serving.evidence().since(ready_at);
+
+    // The work the overflow owes is read first, because it is what a failure
+    // here should name: an entry that came back without rereading the vault is
+    // the defect, and an entry that came back by the wrong rung is the other
+    // one. What it published is asked after both.
+    assert!(
+        spent.document_opens >= OVERFLOWED_DOCUMENTS as u64,
+        "the leg that cleared the overflow opened {} documents of {OVERFLOWED_DOCUMENTS}, so it \
+         reread the path that changed rather than the vault whose path set was lost: {spent:?}",
+        spent.document_opens
+    );
     assert_eq!(
         spent.recoveries_run, 0,
         "the entry came back by a recovery, which tears down coverage the overflow never lost: \
@@ -1271,16 +1283,15 @@ fn an_overflow_reconciles_under_live_coverage(vault: &Vault) {
         spent.rebuilds_run, 0,
         "an overflow sent the entry to the rung that discards derived state: {spent:?}"
     );
-    assert!(
-        spent.document_opens >= OVERFLOWED_DOCUMENTS as u64,
-        "the leg that cleared the overflow opened {} documents of {OVERFLOWED_DOCUMENTS}, so it \
-         reread the path that changed rather than the vault whose path set was lost: {spent:?}",
-        spent.document_opens
+    assert_eq!(
+        spent.watcher_rescans_reported, 1,
+        "the entry took up something other than one report of a lost path set, so what it \
+         published while the reread ran was not the overflow this case armed: {spent:?}"
     );
 
     // Coverage was never lost, so the subscription that reported the overflow is
     // still the one covering the vault: a second change reaches the store
-    // through it, and no arm is left to stand in place of the delivery.
+    // through it, reported by path rather than as a second lost path set.
     let reconciled_at = serving.evidence();
     vault.write("reported.md", &readable(REPORTED));
     wait_for_derived(
@@ -1288,6 +1299,13 @@ fn an_overflow_reconciles_under_live_coverage(vault: &Vault) {
         vault.name(),
         reconciled_at,
         "a change reported under the coverage an overflow was reported on",
+    );
+    let after = serving.evidence().since(reconciled_at);
+    assert_eq!(
+        (after.watcher_rescans_reported, after.recoveries_run),
+        (0, 0),
+        "the change after the overflow arrived as another lost path set, so coverage was \
+         established again and a second arm stood in place of the delivery: {after:?}"
     );
     drop(lease);
 }
@@ -1301,9 +1319,6 @@ const REPORTED: usize = 901;
 
 /// The document whose delivery a terminal stream failure swallowed.
 const EDITED: usize = 902;
-
-/// How often the thread reading an entry looks at it while an overflow stands.
-const OVERFLOW_SAMPLE: Duration = Duration::from_micros(100);
 
 /// Fail unless the entry is untrusted because its watcher backend failed,
 /// naming the armed fault that produced it.
@@ -1782,7 +1797,15 @@ impl Vault {
     /// wrote it, so which of them fired is read off the record rather than off
     /// which file it landed in — and a case that asserts a count over one file
     /// asserts it over both seams at once.
+    ///
+    /// **The file is made here, empty, before the child starts.** An arm
+    /// appends, and [`Attestation::read`] answers the same for a file nothing
+    /// wrote and a file that is not there — so a case that asserts nothing was
+    /// recorded would otherwise be asserting it over a path no arm could have
+    /// used. The file exists before the run and is checked to exist after it,
+    /// which is what makes the absence a fact about the seam.
     fn spawn(&self, hits: &Path, arm: &[(&str, &str)]) -> Ran {
+        std::fs::write(hits, b"").expect("the record file the child appends to");
         let sandbox = self
             .sandbox
             .as_ref()
@@ -1801,6 +1824,12 @@ impl Vault {
             run = run.env(*name, value);
         }
         let outcome = run.wait().expect("running the lockdown child");
+        assert!(
+            hits.exists(),
+            "the record file this child was pointed at is gone, so what is read below is the \
+             absence of a sink rather than the absence of a firing: {}",
+            hits.display()
+        );
         Ran {
             status: outcome.status,
             stderr: outcome.stderr_text(),

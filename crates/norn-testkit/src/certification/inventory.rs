@@ -381,9 +381,11 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-host-arm-attestation",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "the child a torn host case spawns attaches under whatever it was armed at, and \
-                 the control spawned with nothing armed records nothing — which is what makes \
-                 every arm assertion beside a tear mean something",
+        states: "one child role serves both kinds of arm a host case gives it — the tear a torn \
+                 case arms before its demand, and the watcher condition a watcher case arms \
+                 outside the process — and the control spawned with nothing armed records \
+                 nothing, which is what makes every arm assertion beside either kind mean \
+                 something",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   the_child_role_attaches_under_whatever_it_was_armed_at",
         feature: Some(INDUCED_FAILURE),
@@ -572,7 +574,9 @@ pub const REQUIRED_CASES: &[Case] = &[
         lane: Lane::RealWatcher,
         states: "an attach whose registration a real backend refuses acquires nothing — no store \
                  opened, no changeset committed — and nothing re-acquires coverage while the \
-                 demand that asked for it stands: a second demand is what serves the vault again",
+                 demand that asked for it stands: a second demand is what serves the vault again, \
+                 and that second child is the suite's unarmed watcher control, which installs a \
+                 live subscription, reports a change through it, and records nothing",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   an_attach_that_cannot_install_coverage_acquires_nothing",
         feature: Some(INDUCED_FAILURE),
@@ -628,9 +632,13 @@ pub const UNREACHED_ARMS: &[UnreachedArm] = &[
                  terminal boundary is proven un-revivable, and at the wire seam, where the cause \
                  round-trips — but the trust transition it drives is asserted for `Backend` and \
                  `CoverageLost` only. The cheapest carrier is a third row in the fake-ops cause \
-                 table; a case at the production entry operations additionally needs either an \
-                 injectable synchronization deadline or a way to stall the backend past the pinned \
-                 one, and neither exists.",
+                 table. The door onto the production path is already open: the watcher fault \
+                 seam's barrier stage, armed `barrier=expires`, withholds the `Live` publication \
+                 and ends the wait at once, so a child spawned with that pair meets the expiry \
+                 through a real backend without an authored deadline having to elapse. What the \
+                 carrier still owes is the case itself — a lockdown child that arms the barrier, \
+                 asserts the entry goes untrusted under `SynchronizationExpired`, and states what \
+                 an attach that never proved its coverage may leave behind.",
     },
     UnreachedArm {
         arm: "a published watcher cause outliving production ticks rather than fake ones",

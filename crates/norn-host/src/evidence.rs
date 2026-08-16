@@ -66,6 +66,7 @@ pub struct JobEvidence {
     findings_discarded: AtomicU64,
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
+    watcher_rescans_reported: AtomicU64,
 }
 
 /// One reading of a host's account.
@@ -97,6 +98,16 @@ pub struct EvidenceReading {
     /// Rung-3 rebuilds run: how many times a job discarded damaged derived state
     /// and built it from the vault again.
     pub rebuilds_run: u64,
+    /// Polls that drained facts carrying a backend rescan.
+    ///
+    /// A watcher reports a lost path set as a rescan naming no path, and an
+    /// entry holding coverage and owing no rung publishes
+    /// [`WatcherOverflow`](norn_wire::UntrustedReason::WatcherOverflow) for
+    /// exactly those facts. So this counts the times an attachment was told its
+    /// account of the vault is unreliable until something rereads it — the
+    /// overflow itself, which is otherwise readable only as a trust state that
+    /// stands for the length of the reconcile clearing it.
+    pub watcher_rescans_reported: u64,
 }
 
 #[cfg(any(feature = "induced-failure", test))]
@@ -134,6 +145,9 @@ impl EvidenceReading {
                 .saturating_sub(earlier.findings_discarded),
             recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
             rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
+            watcher_rescans_reported: self
+                .watcher_rescans_reported
+                .saturating_sub(earlier.watcher_rescans_reported),
         }
     }
 }
@@ -154,6 +168,7 @@ impl JobEvidence {
             findings_discarded: get(&self.findings_discarded),
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
+            watcher_rescans_reported: get(&self.watcher_rescans_reported),
         }
     }
 
@@ -163,6 +178,11 @@ impl JobEvidence {
 
     pub(crate) fn count_rebuild(&self) {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_watcher_rescan(&self) {
+        self.watcher_rescans_reported
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Add what one job's window reported, and what that job's changesets did,
@@ -331,7 +351,15 @@ mod tests {
         evidence.count_recovery();
         evidence.count_rebuild();
         evidence.count_rebuild();
+        evidence.count_watcher_rescan();
         let read = evidence.read();
-        assert_eq!((read.recoveries_run, read.rebuilds_run), (1, 2));
+        assert_eq!(
+            (
+                read.recoveries_run,
+                read.rebuilds_run,
+                read.watcher_rescans_reported
+            ),
+            (1, 2, 1)
+        );
     }
 }
