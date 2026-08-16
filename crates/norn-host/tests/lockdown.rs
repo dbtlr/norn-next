@@ -887,6 +887,12 @@ fn an_attach_that_cannot_install_coverage_acquires_nothing() {
 /// drained the subscription reports a watcher failure and the entry publishes
 /// [`WatcherLossCause::Backend`] carrying the failure's own account of itself.
 ///
+/// **Waiting for `Ready` is what makes it that delivery.** The arm is owed to
+/// the first change a consumer meets over live coverage, and the attach's own
+/// heal window has closed by the time the entry serves the vault — so what the
+/// arm stands in place of is the edit below and not something the establishment
+/// or the heal reported.
+///
 /// **The forbidden outcome is coverage coming back by itself.** The child holds
 /// the demand it attached under across the failure and watches the entry stand
 /// still on it — and reads the host's account across that same stretch, because
@@ -897,10 +903,11 @@ fn an_attach_that_cannot_install_coverage_acquires_nothing() {
 ///
 /// **One change, and one only.** The arm is per establishment: the recovery
 /// installs a second subscription, and that subscription gets a one-shot arm of
-/// its own which fires on the first delivery past its boundary. A second change
-/// after the recovery would spend it, so the child makes none — and the parent
-/// asserts exactly one record, because a second record is a delivery this case
-/// leaked into a subscription it states nothing about.
+/// its own which fires on the first change a consumer meets over it — past its
+/// boundary, past the heal the recovery runs, and folded into a batch. A second
+/// change after the recovery would spend it, so the child makes none — and the
+/// parent asserts exactly one record, because a second record is a delivery this
+/// case leaked into a subscription it states nothing about.
 #[test]
 fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
     let _beside = beside_the_arms();
@@ -953,6 +960,12 @@ fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
 /// [`UntrustedReason::WatcherOverflow`] because what it knows about the vault is
 /// unreliable until something rereads it, and the reconcile that rereads it is
 /// scheduled in the same breath.
+///
+/// **Waiting for `Ready` is what makes it that delivery.** The arm is owed to
+/// the first change a consumer meets over live coverage, and the attach's own
+/// heal window has closed by the time the entry serves the vault — so what the
+/// arm stands in place of is the edit below and not something the establishment
+/// or the heal reported.
 ///
 /// **The forbidden outcome is a recovery.** A recovery would tear coverage down
 /// and install it again over a subscription that never stopped reporting, and

@@ -143,6 +143,16 @@ fn watch_under_whatever_is_armed(root: &Path) {
     }
     assert_eq!(subscription.state(), SubscriptionState::Live);
 
+    // Coverage taken up the way a consumer takes it up: a heal window opened
+    // over it and closed again. Everything the backend reported while the watch
+    // established itself belongs to that window, so the first delivery this
+    // caller meets as a change of its own is the one after it — and that is the
+    // delivery a stream arm stands in place of.
+    subscription.begin_heal();
+    subscription
+        .finish_heal()
+        .expect("the heal window closes over live coverage");
+
     // A change of the child's own, so that a stream arm has a delivery to stand
     // in place of. What comes back says which: the rescan a lost path set is
     // reported as, or the path itself.

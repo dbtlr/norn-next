@@ -307,9 +307,17 @@ impl Latch {
 /// The watcher crosses that boundary in one of two places depending on the
 /// platform and the backend — returning from bulk registration, or the native
 /// macOS event-history marker — and both say so here. It is *reached* rather
-/// than published: an armed barrier withholds the publication and the boundary
-/// is still the point past which the backend is reporting current facts, which
-/// is the only thing the stream stage is stated over.
+/// than published: an armed barrier withholds the publication, and what the
+/// boundary says is true either way, which is that the complete coverage plan
+/// is installed and whatever the backend replays for its own establishment has
+/// been replayed.
+///
+/// **It is not the point past which every earlier change has been delivered.**
+/// On macOS it cannot be: fseventsd numbers an event when it processes the
+/// kernel's notification rather than when the syscall returned, so a change made
+/// before the watch existed can fall outside the replayed backlog and arrive
+/// after the marker. That is why the stream stage waits for [`HealWindow`] as
+/// well — the watcher's own docs for the native barrier carry the full reading.
 ///
 /// **It is not the point past which every earlier change has been delivered.**
 /// On macOS it cannot be — see [`crate::watch::history_barrier`] — which is why
