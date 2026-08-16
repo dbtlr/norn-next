@@ -327,19 +327,37 @@ is there, so the row standing at it is pruned and nothing is derived for it. Onl
 machine's own failures — a denied directory, an exhausted descriptor table, a failing device
 — still refuse at that window, which is what keeps the permission-loss row above true.
 
-**The walk's own paging of a directory is the same window one call earlier, and it converges
-on the same answer.** Listing a directory and stating the names it listed are two
-observations too, and one doctrine answers both windows: an entry unlinked
-between them is dropped from the page, because a walk begun now lists no such entry either.
-An entry whose *kind* changed there is dropped for the same reason — the name the listing
-named was taken away and given to something else inside that window, so what stands there is
-not what was listed, and the successor arrives as the change it is through the watcher events
-that edit raised. A page that dropped an entry still covers the run of names it listed, so
-the rest of the directory is paged exactly once and no name between the dropped one and the
-page boundary is hidden by it. The refusal that stands at this window is the machine's alone:
-a stat the machine will not answer says nothing about whether an entry is there, and reading
-it as one that left would let a revoked permission prune every row the page covers. That pair
-is pinned at the production path from a third fault seam, described with the other two below.
+**The walk's own windows converge on the same answer, and there is more than one of them.**
+A walk observes a name several times before it is done with it: the listing that names it,
+the stat of the name that listing returned, and the open or the link read that follows that
+stat. Another writer can act inside any of those pairs, and one doctrine answers all of them
+— this walk read nothing at that name, which is what a walk begun now holds there too. An
+entry unlinked between a listing and its stat reaches it, an entry whose *kind* changed there
+reaches it, a directory removed or replaced between the page that listed it and the descent
+that would enter it reaches it, and so does a link that stopped being one before it was read.
+The descent is the widest of them: a page is stat'd whole and hands its entries out one at a
+time, so a directory late in a page is opened only after every earlier entry — whole subtrees
+included — has been read.
+
+**A name reached that way is stated, never passed over in silence.** The walk yields it as a
+root it read nothing under, the same notation it yields for a root it deliberately does not
+enter, and the heal holds that root the way it holds every other one. The two axes part
+there: the rows stored beneath it converge on what a walk begun now holds — no document is
+at that name, so they are pruned — while the findings under it stay **withheld**, because
+nothing in this job read a place under a name it never entered, and a job that took them
+would be claiming an enumeration it never made. What stands at the name now, where an edit
+replaced it rather than removing it, is a change of the vault's own and nothing here
+describes it. A page holding a vanished name still covers the run of names it listed, so the
+rest of the directory is paged exactly once and no name between that one and the page
+boundary is hidden by it.
+
+**The refusal that stands at these windows is the machine's alone**: a stat or an open the
+machine will not answer says nothing about whether an entry is there, and reading it as one
+that left would let a revoked permission prune every row the page covers. The one observation
+with no earlier one behind it — the open of the vault root itself — refuses too, because a
+root that is not there is the vault gone rather than one name inside it changing. The pair at
+the paging stat is pinned at the production path from a third fault seam, described with the
+other two below.
 
 **Quarantine is per document; refusal is per vault.** See
 [ADR 0020](decisions/0020-a-walk-prunes-what-its-scope-no-longer-accounts-for.md), which

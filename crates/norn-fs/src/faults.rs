@@ -49,8 +49,14 @@
 //! construction. Both stand under the same feature and append to the same record
 //! file, under the `norn-fs/watch` and `norn-fs/walk` seam names. Each seam
 //! answers at its own boundary and at no other, which is what the `seam` field in
-//! a record says. All three write their records through [`append_record`] here,
-//! so the one discipline they share cannot drift into three.
+//! a record says.
+//!
+//! **What the three share, they share from here.** Which stages a seam holds and
+//! what each answer does are its own; the grammar an arm is spelled in, the
+//! refusal of a spelling that cannot be read, the record file and the writing of
+//! a record are one discipline across all three, and a second copy of any of them
+//! is a copy that drifts. [`read_armed_pairs`], [`refuse_a_stage_armed_twice`],
+//! [`armed_hits`] and [`append_record`] are that discipline.
 
 use std::io;
 
@@ -130,6 +136,74 @@ pub(crate) fn record_or_abort(
         );
         std::process::abort();
     }
+}
+
+/// The file fired arms record themselves in, where this process named one.
+///
+/// One reading for all three seams, held after the first: every seam appends to
+/// the same file under its own name, so three readings of one variable would be
+/// three chances for them to disagree about whether a harness named it.
+#[cfg(feature = "induced-failure")]
+pub(crate) fn armed_hits() -> Option<&'static std::path::PathBuf> {
+    static HITS: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    HITS.get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
+        .as_ref()
+}
+
+/// Refuse an arm that names one stage twice.
+///
+/// **The one mistake in an arm that would otherwise pass silently.** Every seam
+/// here reads a stage's first answer, so a second pair a harness spelled would
+/// simply not happen and the case would report on a condition it never met. The
+/// grammar is one across the seams, so the refusal is too: a spelling that ends
+/// one process saying so cannot quietly arm half of itself in another.
+#[cfg(any(test, feature = "induced-failure"))]
+pub(crate) fn refuse_a_stage_armed_twice<S: PartialEq, A>(
+    armed: &[(S, A)],
+    name: impl Fn(&S) -> &'static str,
+    source: &str,
+) {
+    for (index, (stage, _)) in armed.iter().enumerate() {
+        assert!(
+            !armed[..index].iter().any(|(earlier, _)| earlier == stage),
+            "the {} stage is armed twice in {source}",
+            name(stage)
+        );
+    }
+}
+
+/// Read one arm's `stage=answer` pairs, and refuse a spelling the seam reading
+/// it cannot answer.
+///
+/// The grammar all three seams are armed under, in one place: comma-separated
+/// pairs, each naming a stage of that seam and an answer it carries. A
+/// misspelled arm that quietly armed nothing would pass every bar it was
+/// supposed to carry, so an unreadable pair ends the process saying so. What
+/// each name spells is the seam's own, which is what the two lookups carry.
+#[cfg(any(test, feature = "induced-failure"))]
+pub(crate) fn read_armed_pairs<S: PartialEq, A>(
+    spelling: &str,
+    source: &str,
+    stage_named: impl Fn(&str) -> Option<S>,
+    answer_named: impl Fn(&str) -> Option<A>,
+    stage_name: impl Fn(&S) -> &'static str,
+) -> Vec<(S, A)> {
+    let armed: Vec<(S, A)> = spelling
+        .split(',')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (stage, answer) = pair
+                .split_once('=')
+                .unwrap_or_else(|| panic!("`{pair}` in {source} is not `stage=answer`"));
+            let stage = stage_named(stage)
+                .unwrap_or_else(|| panic!("`{stage}` in {source} names no stage"));
+            let answer = answer_named(answer)
+                .unwrap_or_else(|| panic!("`{answer}` in {source} names no answer"));
+            (stage, answer)
+        })
+        .collect();
+    refuse_a_stage_armed_twice(&armed, stage_name, source);
+    armed
 }
 
 /// A point in the write protocol that can be made to fail.
@@ -358,7 +432,7 @@ impl Faults {
 mod armed {
     use std::sync::OnceLock;
 
-    use super::{ARM_HITS, ARMED_STAGES, Answer, Stage};
+    use super::{ARMED_STAGES, Answer, Stage};
 
     /// The stages this process is armed at, in the order they were named.
     pub(super) fn stages() -> &'static [(Stage, Answer)] {
@@ -373,25 +447,15 @@ mod armed {
         })
     }
 
-    /// Read `stage=answer` pairs, and refuse a spelling that names neither.
-    ///
-    /// A misspelled arm that quietly armed nothing would pass every bar it was
-    /// supposed to carry, so an unreadable pair ends the process saying so.
-    fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
-        spelling
-            .split(',')
-            .filter(|pair| !pair.is_empty())
-            .map(|pair| {
-                let (stage, answer) = pair
-                    .split_once('=')
-                    .unwrap_or_else(|| panic!("`{pair}` in {ARMED_STAGES} is not `stage=answer`"));
-                let stage = Stage::named(stage)
-                    .unwrap_or_else(|| panic!("`{stage}` in {ARMED_STAGES} names no stage"));
-                let answer = Answer::named(answer)
-                    .unwrap_or_else(|| panic!("`{answer}` in {ARMED_STAGES} names no answer"));
-                (stage, answer)
-            })
-            .collect()
+    /// Read `stage=answer` pairs, through the grammar all three seams share.
+    pub(super) fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
+        super::read_armed_pairs(
+            spelling,
+            ARMED_STAGES,
+            Stage::named,
+            Answer::named,
+            |stage| stage.name(),
+        )
     }
 
     /// Append one record saying which checkpoint fired and how it answered.
@@ -401,11 +465,7 @@ mod armed {
     /// could not be written is dropped rather than raised, because raising it
     /// would replace the death this arm exists to cause with a different one.
     pub(super) fn record(stage: Stage, answer: Answer) {
-        static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-        let Some(path) = HITS
-            .get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
-            .as_ref()
-        else {
+        let Some(path) = super::armed_hits() else {
             return;
         };
         let _ = super::append_record(path, super::SEAM, stage.name(), answer.name());
@@ -446,6 +506,36 @@ mod tests {
         let faults = Faults::at(&[(Stage::Write, Answer::MeetsAFullDisk)]);
         let error = faults.check(Stage::Write).expect_err("the injected stage");
         assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
+    }
+
+    /// **A spelling this seam cannot read ends the process saying so**, and one
+    /// stage armed twice is among them. This seam answers a stage's first pair,
+    /// so a second one would silently not happen and the case would report on a
+    /// condition it never met — which is why the refusal is the shared one every
+    /// seam here reads its arm through rather than a rule one of them keeps.
+    #[cfg(feature = "induced-failure")]
+    #[test]
+    fn an_unreadable_pair_refuses_rather_than_arming_half_of_itself() {
+        for spelling in [
+            "swap",
+            "swop=fails",
+            "swap=melts",
+            // One stage armed twice: the second pair is a spelling that would
+            // otherwise arm nothing.
+            "swap=fails,swap=ends",
+        ] {
+            assert!(
+                std::panic::catch_unwind(|| armed::parse(spelling)).is_err(),
+                "`{spelling}` was read as an arm"
+            );
+        }
+        assert_eq!(
+            armed::parse("swap=ends,cleanup=full-disk"),
+            vec![
+                (Stage::Swap, Answer::Ends),
+                (Stage::Cleanup, Answer::MeetsAFullDisk)
+            ]
+        );
     }
 
     /// Every stage and every answer a harness arms round-trips through the name

@@ -2367,17 +2367,27 @@ impl Vault {
     /// A host whose dispatcher drains no delivery inside the life of the child
     /// that takes it.
     ///
-    /// **What a paging case reads is the attach heal's own answer.** A delivery
-    /// drained beside it schedules a scoped heal, and a scoped heal walks again
-    /// with the process's one arm already spent — deriving the very entry the
-    /// case is stated over, late enough to read as a page that never dropped it.
-    /// macOS can deliver a change made before the watch existed after the
-    /// boundary that proves coverage, so that ordering is a real one over a tree
-    /// its parent wrote a moment before the spawn, rather than a hypothetical.
+    /// **What a paging case reads is the attach heal's own answer.** The interval
+    /// is the dispatcher's whole tick, so one longer than the child's life turns
+    /// off all three things that tick does, and two of them are what would
+    /// otherwise answer for the heal the case is stated over:
     ///
-    /// The interval is longer than the child, so no drain comes. Nothing else
-    /// moves: coverage is installed and synchronized the way every other case
-    /// installs it, and the heal that answers the arm is the production one.
+    /// - *Draining a delivery*, which schedules a scoped heal, and a scoped heal
+    ///   walks again with the process's one arm already spent — deriving the very
+    ///   entry the case is stated over, late enough to read as a page that never
+    ///   dropped it. macOS can deliver a change made before the watch existed
+    ///   after the boundary that proves coverage, so that ordering is a real one
+    ///   over a tree its parent wrote a moment before the spawn, rather than a
+    ///   hypothetical.
+    /// - *Retrying a pending dispatch*, which is the refusing case's determinism
+    ///   condition: the arm is spent by the heal that refused, so a retry would
+    ///   run unarmed, succeed, and carry the entry from untrusted to `Ready`
+    ///   underneath a wait that is reading for the untrusted state.
+    /// - *Reaping idle shared attachments*, which no paging case turns on.
+    ///
+    /// Nothing else moves: coverage is installed and synchronized the way every
+    /// other case installs it, and the heal that answers the arm is the
+    /// production one.
     fn serving_undrained(&self, policy: ProductionPolicy) -> Serving {
         self.serving_polling_every(policy, Duration::from_secs(3600))
     }

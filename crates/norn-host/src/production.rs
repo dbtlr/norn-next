@@ -5502,6 +5502,112 @@ mod tests {
         assert_eq!(stored_paths(&mut store), ["steady.md"]);
     }
 
+    /// **A root that went away inside one of the walk's own windows withholds
+    /// the places under it, and the heal completes.**
+    ///
+    /// The two halves are the doctrine. The **row** axis converges: no directory
+    /// is at that name now, so no document is under it, and the rows stored
+    /// beneath it go the way they go for a name the walk never yielded. The
+    /// **finding** axis does not: nothing here read a single place under that
+    /// root, so nothing here can re-file what stands at one, and taking the
+    /// findings would be the job claiming an enumeration it never made.
+    ///
+    /// The window is the walk's widest. A page is stat'd whole and hands its
+    /// entries out one at a time, so a directory it listed is opened only after
+    /// every earlier entry has been read — which is what this arranges, with no
+    /// fault seam: the walk yields the file before the directory, the directory
+    /// goes, and the walk states the root it read nothing under.
+    ///
+    /// The forbidden shape is either half alone: a refusal, which turns one
+    /// removed folder into a vault nobody is serving, or a silent drop, which
+    /// discards every finding under a root this heal never entered.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_left_inside_the_walk_s_own_window_withholds_the_places_under_it() {
+        let f = Fixture::watcherless("heal-descent-window-root");
+        fs::create_dir_all(f.vault().join("notes/sub")).unwrap();
+        // A place-scoped finding under the root that leaves, and one outside it:
+        // the hold is over what the walk read nothing under and no more.
+        let created = write_or_report(&f.vault().join("notes/sub/bad\\name.md"), b"body")
+            && write_or_report(&f.vault().join("outside\\name.md"), b"body");
+        if !created {
+            return;
+        }
+        fs::write(f.vault().join("notes/a.md"), "a").unwrap();
+        fs::write(f.vault().join("notes/sub/kept.md"), "kept").unwrap();
+        fs::write(f.vault().join("steady.md"), "steady").unwrap();
+
+        let mut store = Store::open(f.root.join("descent-window.sqlite3")).unwrap();
+        let progress = ProgressReporter::disconnected();
+        let policy = ProductionPolicy::new(8, 2).unwrap();
+        ProductionEntryOps::pin_schema(&mut store, &f.registration()).unwrap();
+        heal_documents(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            policy,
+            &progress.healing(),
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_kinds(&mut store, "notes/sub/bad\u{fffd}name.md"),
+            ["document/path-names-no-document"],
+            "the heal filed nothing under the root that leaves, so this proves nothing"
+        );
+        assert_eq!(
+            stored_paths(&mut store),
+            ["notes/a.md", "notes/sub/kept.md", "steady.md"]
+        );
+
+        // The walk yields the file that sorts ahead of the directory, and the
+        // directory goes before the walk opens it.
+        let mut walking = walk(f.vault().as_path(), &[]).unwrap();
+        let sensitivity = walking.case_sensitivity();
+        let mut enumerated = Vec::new();
+        let mut reached = false;
+        for fact in walking.by_ref() {
+            reached = fact.as_ref().unwrap().path().as_path() == Path::new("notes/a.md");
+            enumerated.push(fact);
+            if reached {
+                break;
+            }
+        }
+        assert!(reached, "the walk never yielded the file ahead of the root");
+        fs::remove_dir_all(f.vault().join("notes/sub")).unwrap();
+        enumerated.extend(walking);
+
+        let mut account = Account::default();
+        merge_walk(
+            &mut store,
+            f.vault().as_path(),
+            &[],
+            enumerated.into_iter(),
+            sensitivity,
+            HealScope::Vault,
+            policy,
+            &progress.healing(),
+            &mut account,
+        )
+        .unwrap();
+        close_job(&mut store, f.vault().as_path(), &[], policy, &mut account).unwrap();
+
+        assert_eq!(
+            stored_paths(&mut store),
+            ["notes/a.md", "steady.md"],
+            "the row axis did not converge on the vault a walk begun now holds"
+        );
+        assert_eq!(
+            findings_at(&mut store, "notes/sub/bad\u{fffd}name.md").len(),
+            1,
+            "the job took a finding at a place under a root it never entered"
+        );
+        assert_eq!(
+            findings_at(&mut store, "outside\u{fffd}name.md").len(),
+            1,
+            "the job took a finding at a place the walk did read, so the hold proves nothing"
+        );
+    }
+
     /// Bytes no Markdown document can be read from.
     const UNDECODABLE: &[u8] = b"ok \xff\xfe not utf8\n";
 

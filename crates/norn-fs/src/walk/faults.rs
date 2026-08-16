@@ -27,16 +27,17 @@
 //! answers are the three conditions that window holds, and two required
 //! outcomes across them:
 //!
-//! - [`Answer::Vanishes`] — the stat meets `ENOENT`. **The page drops the
-//!   entry.** A walk begun now yields no entry at that name either, so dropping
-//!   it is the answer the walk converges on, and it is the same answer the
-//!   window between a yielded fact and its open has given since that window
-//!   converged.
+//! - [`Answer::Vanishes`] — the stat meets `ENOENT`. **The page states the name
+//!   as one it read nothing at.** A walk begun now yields no entry at that name
+//!   either, so that is the answer the walk converges on, and it is the same
+//!   answer the window between a yielded fact and its open has given since that
+//!   window converged.
 //! - [`Answer::Replaced`] — the stat observes a kind the listing did not name.
-//!   **The page drops the entry too**: the name the listing named was unlinked
-//!   and something else took it inside the same window, so what stands there is
-//!   not the entry that was listed. The successor is a change of the vault's
-//!   own, and the watcher events that change raised are what carry it.
+//!   **The page states the same vanishing**: the name the listing named was
+//!   unlinked and something else took it inside the same window, so what stands
+//!   there is not the entry that was listed and nothing here read it. What
+//!   stands there now is a change of the vault's own, and the page claims
+//!   nothing about it.
 //! - [`Answer::Denied`] — the stat meets `EACCES`. **The walk refuses**, and the
 //!   refusal is terminal the way every environmental one is. A machine that will
 //!   not answer says nothing about whether an entry is there, and reading it as
@@ -45,13 +46,14 @@
 //!
 //! # Which entry an arm stands over
 //!
-//! **The first entry a page stats that the listing named a regular file**, once
-//! in the process that armed it. Two things decide that:
+//! **The first entry a page stats of the class the arm reaches**, once in the
+//! process that armed it. Two things decide that:
 //!
-//! - *A regular file*, because the entry class is what makes the outcome
-//!   readable. A file leaving a page is one document; a directory leaving one
-//!   takes a whole subtree with it, and a case stated over that could not say
-//!   whether the entries beside it were reached.
+//! - *One class*, [`Reach`], because the entry class is what the outcome is read
+//!   off. A file leaving a page is one document; a directory leaving one is a
+//!   whole subtree the walk never enters, and the two owe different halves of
+//!   the same doctrine. An arm that stood over whichever entry came first could
+//!   state neither.
 //! - *Once*, because the condition is one foreign edit landing in one window. An
 //!   arm that answered every stat would state a vault every writer is emptying,
 //!   which is a different claim and not one this seam is for — and a second walk
@@ -71,7 +73,9 @@
 //!   pairs, spelled `page` and `vanishes`, `replaced`, `denied`. A pair this
 //!   module cannot read — an unknown name, or one stage armed twice — is a
 //!   mistake in the harness rather than a stage nothing is armed at, so it
-//!   panics.
+//!   panics. An arm spelled through the environment stands over a regular file:
+//!   the other reach is a shape this crate's own suite reads a page off, not one
+//!   a host case states.
 //! - `NORN_FS_ARM_HITS` — the record file the other two seams write, and the
 //!   same one here. A fired arm appends `seam=norn-fs/walk stage=page
 //!   answer=<name>` to it before it answers, so a harness reads which window the
@@ -194,19 +198,35 @@ impl Answer {
     }
 }
 
-/// Refuse an arm that names one stage twice.
+/// The class of entry an arm stands over.
 ///
-/// It is the one mistake that would otherwise pass silently: the seam reads a
-/// stage's first answer, so a second pair a harness spelled would simply not
-/// happen, and the case would report on a condition it never met.
-#[cfg(any(test, feature = "induced-failure"))]
-fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
-    for (index, (stage, _)) in armed.iter().enumerate() {
-        assert!(
-            !armed[..index].iter().any(|(earlier, _)| earlier == stage),
-            "the {} stage is armed twice in {source}",
-            stage.name()
-        );
+/// One arm reaches one class, because the two classes are the two halves of what
+/// the convergence owes and a case reads exactly one of them. A file that leaves
+/// a page is one document: the entries beside it derive and the heal completes.
+/// A directory that leaves one is a root the walk never enters: nothing under it
+/// is read, so what is stored beneath it converges while the findings there stay
+/// withheld.
+// The reach a harness spells is the file one, so the other is constructed by
+// this crate's own cases alone. Both belong to the seam even so: the class an
+// arm stands over is what a case is stated about, and a build carrying one of
+// them would answer a different question.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Reach {
+    /// A regular file. What an arm spelled through the environment stands over.
+    #[default]
+    File,
+    /// A directory, and with it the subtree the walk would have entered.
+    Directory,
+}
+
+impl Reach {
+    /// The listed kind this reach stands over.
+    fn kind(self) -> EntryKind {
+        match self {
+            Reach::File => EntryKind::File,
+            Reach::Directory => EntryKind::Directory,
+        }
     }
 }
 
@@ -241,6 +261,8 @@ pub(crate) struct Paged {
 pub(crate) struct WalkFaults {
     /// The stages this walk is armed at, in the order they were named.
     armed: &'static [(Stage, Answer)],
+    /// The class of entry the arm stands over.
+    reach: Reach,
     /// The file a fired arm records itself in, where anything named one.
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<std::path::PathBuf>,
@@ -252,13 +274,23 @@ pub(crate) struct WalkFaults {
 
 impl WalkFaults {
     /// A walk that answers each named stage the named way, recording nothing.
+    ///
+    /// An arm spelled in code is held to the same reading as one spelled through
+    /// the environment: every stage of this seam answers every answer of it, so
+    /// a stage named twice is the whole of what an arm here can be given wrong.
     #[cfg(test)]
     pub(crate) fn at(armed: &'static [(Stage, Answer)]) -> WalkFaults {
-        refuse_an_unreadable_arm(armed, "this arm");
+        crate::faults::refuse_a_stage_armed_twice(armed, |stage| stage.name(), "this arm");
         WalkFaults {
             armed,
             ..WalkFaults::default()
         }
+    }
+
+    /// The same arm, standing over `reach` rather than over a regular file.
+    #[cfg(test)]
+    pub(crate) fn over(self, reach: Reach) -> WalkFaults {
+        WalkFaults { reach, ..self }
     }
 
     /// The same arm, recording each fired stage in `hits`.
@@ -289,8 +321,9 @@ impl WalkFaults {
         {
             WalkFaults {
                 armed: armed::stages(),
-                hits: armed::hits().cloned(),
+                hits: crate::faults::armed_hits().cloned(),
                 spent: armed::spent(),
+                ..WalkFaults::default()
             }
         }
         #[cfg(not(feature = "induced-failure"))]
@@ -309,7 +342,7 @@ impl WalkFaults {
     /// What stands in place of the paging stat of an entry the listing named a
     /// `listed`.
     ///
-    /// The arm is spent here, on the first regular file it is offered, and every
+    /// The arm is spent here, on the first entry of its reach's class, and every
     /// stat after it is the machine's own again. An unarmed walk pays one
     /// comparison against an empty list and nothing else, which is what keeps
     /// the feature's cost off a heal-scale enumeration.
@@ -317,7 +350,7 @@ impl WalkFaults {
         let Some(answer) = self.answer(Stage::Page) else {
             return Paged::default();
         };
-        if listed != EntryKind::File || self.spent.swap(true, Ordering::AcqRel) {
+        if listed != self.reach.kind() || self.spent.swap(true, Ordering::AcqRel) {
             return Paged::default();
         }
         #[cfg(any(test, feature = "induced-failure"))]
@@ -336,11 +369,16 @@ impl WalkFaults {
                 meets: Some(Errno::ACCESS),
                 ..Paged::default()
             },
-            // A directory standing where the listing named a file: the coarsest
-            // kind change there is, and the one whose successor a walk begun now
-            // descends into rather than yields.
+            // The coarsest kind change there is, in whichever direction the
+            // reach leaves open: a directory standing where the listing named a
+            // file, or a file standing where it named a directory. A walk begun
+            // now reads the successor the other way round from the entry that
+            // was listed, which is what makes the listed entry one nothing read.
             Answer::Replaced => Paged {
-                observes: Some(EntryKind::Directory),
+                observes: Some(match self.reach {
+                    Reach::File => EntryKind::Directory,
+                    Reach::Directory => EntryKind::File,
+                }),
                 ..Paged::default()
             },
         }
@@ -358,8 +396,7 @@ mod armed {
     use std::sync::OnceLock;
     use std::sync::atomic::AtomicBool;
 
-    use super::{ARMED_STAGES, Answer, Stage, refuse_an_unreadable_arm};
-    use crate::faults::ARM_HITS;
+    use super::{ARMED_STAGES, Answer, Stage};
 
     /// The stages this process is armed at, in the order they were named.
     pub(super) fn stages() -> &'static [(Stage, Answer)] {
@@ -374,40 +411,21 @@ mod armed {
         })
     }
 
-    /// The file fired arms record themselves in, where this process named one.
-    pub(super) fn hits() -> Option<&'static std::path::PathBuf> {
-        static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-        HITS.get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
-            .as_ref()
-    }
-
     /// The one firing this process has, held across every walk it runs.
     pub(super) fn spent() -> Arc<AtomicBool> {
         static SPENT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
         SPENT.get_or_init(Arc::default).clone()
     }
 
-    /// Read `stage=answer` pairs, and refuse a spelling this seam cannot answer.
-    ///
-    /// A misspelled arm that quietly armed nothing would pass every bar it was
-    /// supposed to carry, so an unreadable pair ends the process saying so.
+    /// Read `stage=answer` pairs, through the grammar all three seams share.
     pub(super) fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
-        let armed: Vec<(Stage, Answer)> = spelling
-            .split(',')
-            .filter(|pair| !pair.is_empty())
-            .map(|pair| {
-                let (stage, answer) = pair
-                    .split_once('=')
-                    .unwrap_or_else(|| panic!("`{pair}` in {ARMED_STAGES} is not `stage=answer`"));
-                let stage = Stage::named(stage)
-                    .unwrap_or_else(|| panic!("`{stage}` in {ARMED_STAGES} names no stage"));
-                let answer = Answer::named(answer)
-                    .unwrap_or_else(|| panic!("`{answer}` in {ARMED_STAGES} names no answer"));
-                (stage, answer)
-            })
-            .collect();
-        refuse_an_unreadable_arm(&armed, ARMED_STAGES);
-        armed
+        crate::faults::read_armed_pairs(
+            spelling,
+            ARMED_STAGES,
+            Stage::named,
+            Answer::named,
+            |stage| stage.name(),
+        )
     }
 }
 
@@ -498,6 +516,34 @@ mod tests {
                 "the arm answered a second entry"
             );
         }
+    }
+
+    /// **A reach names one class and the arm waits for it.** The two classes are
+    /// the two halves of what the convergence owes — one document, or a root and
+    /// the subtree under it — and an arm answering whichever entry came first
+    /// could state neither.
+    #[test]
+    fn a_reach_decides_which_class_of_entry_the_arm_waits_for() {
+        let over_directories =
+            WalkFaults::at(&[(Stage::Page, Answer::Vanishes)]).over(Reach::Directory);
+        assert!(
+            over_directories.paging(EntryKind::File).meets.is_none(),
+            "an arm reaching directories was spent on a file"
+        );
+        assert_eq!(
+            over_directories.paging(EntryKind::Directory).meets,
+            Some(Errno::NOENT)
+        );
+
+        // A replacement is a kind the listing did not name, which is the other
+        // kind whichever way round the reach runs.
+        assert_eq!(
+            WalkFaults::at(&[(Stage::Page, Answer::Replaced)])
+                .over(Reach::Directory)
+                .paging(EntryKind::Directory)
+                .observes,
+            Some(EntryKind::File)
+        );
     }
 
     /// A fired arm records the window it answered at, under this seam's name,
