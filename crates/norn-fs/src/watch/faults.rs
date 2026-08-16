@@ -318,10 +318,6 @@ impl Latch {
 /// before the watch existed can fall outside the replayed backlog and arrive
 /// after the marker. That is why the stream stage waits for [`HealWindow`] as
 /// well — the watcher's own docs for the native barrier carry the full reading.
-///
-/// **It is not the point past which every earlier change has been delivered.**
-/// On macOS it cannot be — see [`crate::watch::history_barrier`] — which is why
-/// the stream stage waits for [`HealWindow`] as well.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Boundary(Latch);
 

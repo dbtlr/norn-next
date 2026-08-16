@@ -258,9 +258,12 @@ impl Subscription {
     /// next one. That is what the fault seam's stream stage stands in place of,
     /// and closing the first window is what makes its arm eligible.
     pub fn finish_heal(&self) -> Result<Batch, WatchError> {
-        self.first_heal.closed();
         let work = {
             let mut state = self.state.lock().expect("watch state poisoned");
+            // Closed under the state lock: a delivery cannot pass the arm's
+            // gate and land in the batch this call is about to take, so an
+            // arm's answer is always a live report, never the heal's own.
+            self.first_heal.closed();
             state.healing = false;
             if let Some(error) = state.terminal.take() {
                 state.pending.take();
@@ -698,7 +701,8 @@ fn native_watcher(
 /// seam's stream stage is the one such caller. That is why its arm waits for a
 /// consumer's first heal window to close as well
 /// ([`faults::HealWindow`]): the tail belongs to the establishment a heal takes
-/// up, and past the heal there is nothing left to arrive from before the watch.
+/// up, and past the heal, a delivery from before the watch carries nothing the
+/// heal has not already taken up.
 #[cfg(target_os = "macos")]
 fn history_barrier(
     control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
