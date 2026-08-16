@@ -182,6 +182,11 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               unreadable document, a revoked subtree and a tear are asserted through",
     },
     ManifestFile {
+        path: "crates/norn-host/tests/coverage.rs",
+        why: "the one trust transition met at the production path with no seam: what a host does \
+              with an entry whose vault root a real backend stopped covering",
+    },
+    ManifestFile {
         path: "crates/norn-host/tests/kill_recovery.rs",
         why: "the crash-convergence case: what the next attach after a process died mid-increment \
               is required to converge on",

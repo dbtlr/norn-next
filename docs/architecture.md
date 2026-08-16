@@ -147,7 +147,15 @@ at the production path**, each naming what it awaits — arms nothing carries at
 carried only against the fake entry operations a host is generic over. The reconciliation
 does not read that table: the certification suite's own unreached-arm case prints it under
 the run and holds each row to naming its obstacle, and nothing fails on it, because an arm
-with no carrier is an ownership ruling owed rather than a broken reference. The
+with no carrier is an ownership ruling owed rather than a broken reference. **The table
+stands empty**: every arm it held is now carried by a production-path row of the inventory,
+and it is kept as the shape the next such arm arrives in rather than retired. An empty table
+is itself a claim — that every arm the contract names is met over a real backend — so the
+case that prints it asserts the two facts together, and an empty table beside a
+trust-transition suite with no real-watcher case fails there. Where a production row carries
+part of what a fake-carried row states — a rescan delivered after coverage ended, the alias
+reclassification a lost root raises — each row of the pair says in its own words which half
+sits where. The
 **suite-manifest digest** is one value over everything that decides what a run *is* — the
 lane definitions, the toolchain, the resolved dependency graph, the inventory, the
 qualification rules themselves, the comparator, the instrument a work reading is taken
@@ -256,16 +264,27 @@ reports. **The watcher's bars are not rows of the table below**: what the *subsc
 reports is stated in `norn-fs`'s own suites — the in-crate cases over a real backend, and the
 environment round trip that spawns a child armed through the variable — the way the write
 kernel's full-disk row states where its own filesystem half is reached. What a host does with
-the entry afterwards is the trust-transition suite's, and three of its arms are met at the
-production path rather than against a fake: `norn-host`'s lockdown suite starts a child armed
-at the watcher seam and attaches a real host over a real backend, so a refused registration
-leaves an attach that acquired nothing and waits for a new demand, a stream that ends
-withdraws trust naming the backend and resumes only through a recovery demand, and a backend
+the entry afterwards is the trust-transition suite's, and **every arm of it is now met at the
+production path rather than against a fake**. Four are met through the seam: `norn-host`'s
+lockdown suite starts a child armed at the watcher seam and attaches a real host over a real
+backend, so a refused registration leaves an attach that acquired nothing and waits for a new
+demand, a stream that ends withdraws trust naming the backend and resumes only through a
+recovery demand, that same published cause stands unchanged across hundreds of the
+dispatcher's own ticks with nothing scheduled against the coverage it says is gone, a backend
 reporting its path set lost publishes the overflow and rereads the whole vault under coverage
-that stays installed. Both seams append to one record file, told apart by the `seam`
-field a record carries, and **that file sits outside every watched tree**: it is written
-while coverage is live, so a record file inside a vault or in a vault's own parent is a
-filesystem change the watcher reports back into the batches a case is judging.
+that stays installed, and a synchronization boundary that never arrives leaves the attach
+untrusted under an expired synchronization holding a store it opened and derived nothing
+into. A stream that ends carries two of those rows because one condition owes two different
+outcomes — the way back, and the way the entry stays — and an arm is a condition rather than
+a case. **The fifth needs no arm at all**, so it is behind no feature and runs wherever this
+crate's suites run: `norn-host`'s coverage suite removes a live vault's root directory, and
+the real backend reports the root's own name vanishing, which withdraws trust naming that
+root and prunes nothing — every derived row stands at rest with no tombstone beside it, where
+a host reading the removal as ordinary editing would prune all of them. Both seams append to
+one record file, told apart by the `seam` field a record carries, and **that file sits
+outside every watched tree**: it is written while coverage is live, so a record file inside a
+vault or in a vault's own parent is a filesystem change the watcher reports back into the
+batches a case is judging.
 
 | Injected failure | Required outcome |
 |---|---|
@@ -1165,8 +1184,9 @@ Two contracts inside that flow carry weight:
   job comments are the in-repo marker for which gate is filled and which is still a
   placeholder. The soak lane also emits the qualification record each run leaves behind.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
-  inventory of required cases and the trust-transition arms nothing reaches at the production
-  path, the suite-manifest digest, and the qualification record with the validator a campaign
-  counts through. What makes a run qualifying is stated there in code; the suite that holds
+  inventory of required cases and the table of trust-transition arms nothing reaches at the
+  production path — empty as it stands, and kept as the shape the next one arrives in — the
+  suite-manifest digest, and the qualification record with the validator a campaign counts
+  through. What makes a run qualifying is stated there in code; the suite that holds
   the inventory to the built suites, prints the unreached arms, and pins what the digest
   covers is `crates/norn/tests/certification.rs`.

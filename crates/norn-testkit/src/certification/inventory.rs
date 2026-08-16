@@ -61,6 +61,12 @@
 //! lost. The certification suite's own unreached-arm case is what prints the
 //! table under a run and holds each row to naming what it awaits, so the ruling
 //! that assigns the work has the facts in front of it.
+//!
+//! **It stands empty.** Every arm it held is carried by an entry above, and the
+//! table is kept as the shape the next one arrives in rather than retired. What
+//! makes an empty table honest is not the table: it is that the trust-transition
+//! suite carries the production path, which is the pair of facts the
+//! certification suite's case asserts together.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -176,9 +182,13 @@ const INDUCED_FAILURE: &str = "induced-failure";
 ///
 /// `norn-fs`'s lockdown suite and `norn-store`'s environment suite name no
 /// feature: each crate is its own dev-dependency with the fault seam on, so the
-/// suites compile with it whether or not a caller asks. `norn-host`'s do name
-/// it: nothing turns it on for that crate but a lane that says so, and without
-/// it both files compile to zero tests.
+/// suites compile with it whether or not a caller asks. `norn-host`'s armed
+/// suites do name it: nothing turns it on for that crate but a lane that says
+/// so, and without it those files compile to zero tests. `norn-host`'s churn,
+/// equivalence and coverage suites name none, because none of them arms
+/// anything — the last of those meets its condition with a directory removal
+/// rather than through a seam, so gating it would leave a case a lane could
+/// skip while certifying the layer.
 pub const CLAIMED_TARGETS: &[ClaimedTarget] = &[
     ClaimedTarget {
         package: "norn-host",
@@ -199,6 +209,11 @@ pub const CLAIMED_TARGETS: &[ClaimedTarget] = &[
         package: "norn-host",
         stem: "kill_recovery",
         feature: Some(INDUCED_FAILURE),
+    },
+    ClaimedTarget {
+        package: "norn-host",
+        stem: "coverage",
+        feature: None,
     },
     ClaimedTarget {
         package: "norn-fs",
@@ -503,7 +518,7 @@ pub const REQUIRED_CASES: &[Case] = &[
     },
     // ---- the trust-transition arms ----
     //
-    // Two doors reach these, and each row's carrier says which it took.
+    // Three doors reach these, and each row's carrier says which it took.
     //
     // The rows carried in `norn-host`'s library drive the transition through the
     // entry operations a host is generic over: the condition is handed to the
@@ -513,11 +528,24 @@ pub const REQUIRED_CASES: &[Case] = &[
     // the crate has.
     //
     // The rows carried in the lockdown suite meet the condition at the
-    // production path. A child process is started armed at `norn-fs`'s watcher
-    // seam and attaches a real host over a real backend, so what answers the arm
-    // is the registration call, the event the backend delivered and the trust
-    // state a client reads — and the seam's own record of the boundary that
-    // fired is what says the case met the condition it names.
+    // production path through an arm. A child process is started armed at
+    // `norn-fs`'s watcher seam and attaches a real host over a real backend, so
+    // what answers the arm is the registration call, the event the backend
+    // delivered and the trust state a client reads — and the seam's own record
+    // of the boundary that fired is what says the case met the condition it
+    // names.
+    //
+    // The row carried in the coverage suite meets its condition at the
+    // production path with no arm at all: a directory removal is a condition a
+    // test can arrange, so the case is behind no feature and runs wherever this
+    // crate's suites run.
+    //
+    // **A fake-carried row and a production row over the same transition state
+    // different things, and the pair is deliberate.** The fake row is where a
+    // cause table or a tick sequence is driven exhaustively and cheaply; the
+    // production row is where the same transition is reached through a real
+    // backend, and it carries only what that path can honestly show. Each row's
+    // own words say which half it holds.
     Case {
         id: "trust-vault-wide-overflow-reconcile",
         suite: Suite::TrustTransition,
@@ -542,8 +570,12 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "trust-post-ready-backend-failure",
         suite: Suite::TrustTransition,
         lane: Lane::Any,
-        states: "a backend failure after readiness withdraws trust publishing the cause it \
-                 carried, and resumes only through a recovery demand",
+        states: "a terminal watch failure after readiness withdraws trust publishing the cause it \
+                 carried, over every cause the loss mapping names — a backend that stopped, a \
+                 root that left coverage, and a synchronization boundary that never arrived — \
+                 with the error's own account of itself as the detail. Resuming only through a \
+                 recovery demand is `trust-production-watcher-stream-failure`'s claim, which \
+                 states it over a real backend",
         carrier: "crates/norn-host/src/lifecycle.rs::\
                   a_terminal_watcher_failure_publishes_the_cause_it_carried",
         feature: None,
@@ -553,7 +585,10 @@ pub const REQUIRED_CASES: &[Case] = &[
         suite: Suite::TrustTransition,
         lane: Lane::Any,
         states: "coverage lost at the vault root withdraws trust and reclassifies the root at \
-                 every alias of it, rather than treating it as a change inside the vault",
+                 every alias of it, rather than treating it as a change inside the vault. The \
+                 alias half is this row's alone: the duplicate-root park a reclassification \
+                 raises is what a status read then answers with, so the production row over the \
+                 same signal reads the published cause and this one reads the park",
         carrier: "crates/norn-host/src/lifecycle.rs::\
                   coverage_lost_at_the_root_reclassifies_every_alias_of_it",
         feature: None,
@@ -563,7 +598,10 @@ pub const REQUIRED_CASES: &[Case] = &[
         suite: Suite::TrustTransition,
         lane: Lane::Any,
         states: "a published watcher cause outlives the ticks that follow it: a later rescan never \
-                 replaces the cause that ended coverage, and the subscription never revives",
+                 replaces the cause that ended coverage, and the subscription never revives. The \
+                 rescan half is this row's alone — a lost path set reported after coverage ended \
+                 takes a second stream answer on one establishment, and the production seam holds \
+                 one answer per establishment by construction",
         carrier: "crates/norn-host/src/lifecycle.rs::\
                   a_published_watcher_cause_outlives_the_ticks_that_follow_it",
         feature: None,
@@ -591,6 +629,55 @@ pub const REQUIRED_CASES: &[Case] = &[
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand",
         feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "trust-production-watcher-cause-outlives-ticks",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "a cause published for coverage a real backend ended stands unchanged across \
+                 hundreds of the dispatcher's own watcher ticks, and nothing is scheduled against \
+                 the coverage it says is gone: the loss leaves a vault-wide rescan standing in \
+                 the entry's pending facts, and across that stretch no document is reread, no row \
+                 written, no changeset committed and no recovery run. The change whose delivery \
+                 the failure displaced stays underived, which is the state at rest that says \
+                 nothing put coverage back. The tick half of the fake row is what this carries; \
+                 the rescan half stays there, because the seam holds one stream answer per \
+                 establishment",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_published_watcher_cause_outlives_the_production_ticks_after_it",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "trust-production-watcher-synchronization-expiry",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "an attach whose subscription never publishes the boundary that proves coverage \
+                 live ends its wait in the expiry branch and withdraws trust under an expired \
+                 synchronization — the one cause of the loss mapping no production case reached. \
+                 What such an attach leaves behind is stated rather than assumed: the store it \
+                 opened before it waited stands with no derived row in it, no document was read, \
+                 and nothing re-installs coverage while the demand that asked for it stands. A \
+                 second, unarmed child is what serves the vault again, and it converges on a \
+                 derivation built from zero over the same tree",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  an_attach_whose_boundary_never_arrives_acquires_nothing",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "trust-production-watcher-root-coverage-loss",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "a vault root removed under a live production attachment withdraws trust under \
+                 coverage lost, naming the canonical root the real backend covered, and the entry \
+                 stands on that cause rather than putting coverage back on its own. The vault is \
+                 never read as emptied: every row the attach derived stands at rest with no \
+                 tombstone beside it, where a host treating the removal as ordinary editing would \
+                 prune all of them. The arm-free half of the transition is what this carries — \
+                 the alias reclassification stays with the fake row, because the duplicate-root \
+                 park it raises stands in front of the trust state this case reads",
+        carrier: "crates/norn-host/tests/coverage.rs::\
+                  a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing",
+        feature: None,
     },
     Case {
         id: "trust-production-watcher-overflow",
@@ -622,46 +709,24 @@ pub const REQUIRED_CASES: &[Case] = &[
 /// and what it needs, not a broken reference. A row leaves by a test arriving
 /// and an entry joining [`REQUIRED_CASES`], or by a ruling that withdraws the
 /// obligation.
-pub const UNREACHED_ARMS: &[UnreachedArm] = &[
-    UnreachedArm {
-        arm: "synchronization expiry makes that subscription terminal",
-        awaits: "`lifecycle.rs`'s `watcher_lost` maps `WatchError::SynchronizationExpired` to \
-                 `WatcherLossCause::SynchronizationExpired`, and no test drives the entry \
-                 operations into returning that error, so nothing exercises the transition the \
-                 mapping feeds. The expiry itself is carried at the `norn-fs` seam, where a \
-                 terminal boundary is proven un-revivable, and at the wire seam, where the cause \
-                 round-trips — but the trust transition it drives is asserted for `Backend` and \
-                 `CoverageLost` only. The cheapest carrier is a third row in the fake-ops cause \
-                 table. The door onto the production path is already open: the watcher fault \
-                 seam's barrier stage, armed `barrier=expires`, withholds the `Live` publication \
-                 and ends the wait at once, so a child spawned with that pair meets the expiry \
-                 through a real backend without an authored deadline having to elapse. What the \
-                 carrier still owes is the case itself — a lockdown child that arms the barrier, \
-                 asserts the entry goes untrusted under `SynchronizationExpired`, and states what \
-                 an attach that never proved its coverage may leave behind.",
-    },
-    UnreachedArm {
-        arm: "a published watcher cause outliving production ticks rather than fake ones",
-        awaits: "`a_published_watcher_cause_outlives_the_ticks_that_follow_it` publishes the cause \
-                 by handing `FakeOps` a terminal poll error and then ticks the same fake over two \
-                 kinds of tick: one that reports nothing, and one that reports a vault-wide \
-                 rescan. The first kind is reached at the production path — \
-                 `a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand` drives \
-                 a real backend terminal through the watcher seam's stream stage and then holds \
-                 the entry still across the polls that follow. The second is not: a rescan \
-                 delivered after coverage ended needs a second stream answer on one \
-                 establishment, and the seam holds one answer per establishment by construction.",
-    },
-    UnreachedArm {
-        arm: "root coverage loss met end to end through a production attachment",
-        awaits: "the two halves are each carried and never joined: `norn-fs`'s watcher suite \
-                 proves a removed vault root reports `CoverageLost` off a real backend, and \
-                 `norn-host` proves that cause reclassifies the root — against fake operations. A \
-                 case that removes a root under a live production attachment needs the real \
-                 watcher lease and a settle bound over a condition the backend reports on its own \
-                 schedule.",
-    },
-];
+///
+/// **It stands empty, and every row left the first way.** Each of the arms this
+/// table held is now carried at the production path by an entry in
+/// [`REQUIRED_CASES`] under [`Suite::TrustTransition`]: a refused registration,
+/// a stream that ends, a lost path set, a synchronization boundary that never
+/// arrives, a published cause across the ticks after it, and a vault root that
+/// stops being covered. Two of those production rows carry part of what a
+/// fake-carried row states rather than all of it — a rescan delivered after
+/// coverage ended, and the alias reclassification a lost root raises — and each
+/// pair of rows says in its own words which half sits where, which is where that
+/// reading lives rather than here.
+///
+/// **The table stays.** It is the shape the next such arm arrives in: the
+/// contract naming a transition no production case reaches is a fact that gets
+/// lost if there is nowhere to write it down, and an empty table is a claim
+/// somebody can read rather than a silence. The certification suite's own case
+/// prints it either way.
+pub const UNREACHED_ARMS: &[UnreachedArm] = &[];
 
 /// One value over the whole inventory.
 ///
@@ -1029,12 +1094,14 @@ mod tests {
         assert_eq!(contract_digest().len(), 64);
     }
 
-    /// The unreached table is not empty and every row says what it awaits. An
-    /// empty table would read as "every arm is carried", which is the claim the
-    /// sweep found to be false.
+    /// Every row of the unreached table says what it awaits.
+    ///
+    /// The table is empty as it stands, so this holds vacuously and is kept for
+    /// the row that returns: a row naming an arm and no obstacle is a note
+    /// rather than something a ruling can act on, and the shape is what says so.
+    /// What makes the *empty* table honest is the claim beside this one.
     #[test]
     fn every_unreached_arm_says_what_it_awaits() {
-        assert!(!UNREACHED_ARMS.is_empty());
         for arm in UNREACHED_ARMS {
             assert!(!arm.arm.trim().is_empty());
             assert!(
@@ -1044,5 +1111,29 @@ mod tests {
                 arm.awaits
             );
         }
+    }
+
+    /// **An empty unreached table means the production path carries the arms.**
+    ///
+    /// The table's rows leave by a carrier arriving, so a table that emptied is
+    /// a table whose obligations moved into [`REQUIRED_CASES`] — met over a real
+    /// backend rather than over the fake entry operations a host is generic
+    /// over. Rows deleted without their carriers arriving would empty it too,
+    /// and read as "every arm is carried" while nothing had changed. So the two
+    /// facts are asserted together: the table is empty only while the
+    /// trust-transition suite holds cases in a real-watcher lane.
+    #[test]
+    fn an_empty_unreached_table_stands_on_production_carriers() {
+        if !UNREACHED_ARMS.is_empty() {
+            return;
+        }
+        assert!(
+            REQUIRED_CASES.iter().any(|case| case.suite
+                == Suite::TrustTransition
+                && !matches!(case.lane, Lane::Any)),
+            "the unreached table is empty and no trust-transition case runs in a lane that needs \
+             a real watcher, so the table reads as `every arm is carried` with nothing carrying \
+             one at the production path"
+        );
     }
 }

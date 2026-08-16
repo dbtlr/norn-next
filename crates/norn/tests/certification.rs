@@ -63,22 +63,41 @@ fn the_inventory_reconciles_with_the_suites() {
 /// next touched the file. So the table is printed under the run — the arm and
 /// what it awaits — and the claim asserted is only that it is a table somebody
 /// wrote rather than a silence.
+///
+/// **The table stands empty, and that is a claim rather than an absence.** Its
+/// rows leave by a carrier arriving, so an empty table says every arm the
+/// contract names is met at the production path. Rows deleted without their
+/// carriers arriving would empty it the same way and say the same thing
+/// falsely, so what is asserted here is the pair: the table is empty only while
+/// the trust-transition suite carries cases in a lane that needs a real
+/// watcher.
 #[test]
 fn the_unreached_trust_transition_arms_are_named() {
     let mut rendered = String::from(
         "trust-transition arms the Layer 2 contract names and no test reaches at the production \
          path:\n",
     );
+    if UNREACHED_ARMS.is_empty() {
+        rendered.push_str(
+            "\n  none — every arm the contract names is carried at the production path, and the \
+             cases that carry them are the trust-transition rows of the inventory\n",
+        );
+    }
     for arm in UNREACHED_ARMS {
         rendered.push_str(&format!("\n  {}\n    awaits: {}\n", arm.arm, arm.awaits));
     }
     eprintln!("{rendered}");
 
+    let carried_at_the_production_path: Vec<&str> = REQUIRED_CASES
+        .iter()
+        .filter(|case| case.suite == Suite::TrustTransition && !matches!(case.lane, Lane::Any))
+        .map(|case| case.id)
+        .collect();
     assert!(
-        !UNREACHED_ARMS.is_empty(),
-        "the unreached table is empty. That reads as `every arm is carried`, which is a claim the \
-         inventory's covered rows would have to make instead — so an empty table means the rows \
-         moved and this file did not."
+        !UNREACHED_ARMS.is_empty() || !carried_at_the_production_path.is_empty(),
+        "the unreached table is empty and no trust-transition case runs in a lane that needs a \
+         real watcher. That reads as `every arm is carried` while nothing carries one over a real \
+         backend — so an empty table means the rows moved out and their carriers did not arrive."
     );
     for arm in UNREACHED_ARMS {
         assert!(
@@ -87,6 +106,10 @@ fn the_unreached_trust_transition_arms_are_named() {
             arm.arm
         );
     }
+    eprintln!(
+        "trust-transition arms met at the production path: {}",
+        carried_at_the_production_path.join(", ")
+    );
 }
 
 /// **The suite-manifest digest is a value, not an observation.**
