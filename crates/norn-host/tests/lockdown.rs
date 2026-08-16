@@ -102,7 +102,7 @@ use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
 use norn_host::{
     AttachMode, DemandLease, EvidenceReading, Host, JobEvidence, LifecyclePolicy,
-    ProductionEntryOps, ProductionPolicy, RegistryRead,
+    ProductionEntryOps, ProductionPolicy, RegistryRead, WATCH_SYNCHRONIZATION_DEADLINE,
 };
 use norn_store::induced_failure::{self, ARM_HITS, INCREMENT_SEAM};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
@@ -115,7 +115,9 @@ use norn_wire::{
     ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName, WatcherLossCause,
 };
 
-use attach::{untrusted_reason, wait_for_withdrawn_trust as withdrawn_trust_inside};
+use attach::{
+    assert_stands_across, untrusted_reason, wait_for_withdrawn_trust as withdrawn_trust_inside,
+};
 
 /// The variable that puts a run in the child role, naming the tree it serves.
 const CHILD_ROOT: &str = "NORN_HOST_LOCKDOWN_ROOT";
@@ -983,12 +985,15 @@ fn a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand() {
 /// entry stays: the loss is never demanded away, and what is required is that a
 /// long stretch of the dispatcher's own ticks changes nothing about it.
 ///
-/// **The stretch is ticks rather than time.** The child holds the entry across
-/// hundreds of watcher poll intervals and reads the published reason at each
-/// look, so what a failure here reports is an entry that moved rather than a
-/// deadline that passed. Two things are ruled out over that stretch, and a poll
-/// cadence is what makes each of them reachable: a second reason minted on top
-/// of the first, and work scheduled against coverage that is gone. The loss left
+/// **The stretch is ticks rather than time, and the ticks are counted.** The
+/// child holds the entry across hundreds of watcher poll intervals and reads the
+/// published reason at each look, so what a failure here reports is an entry
+/// that moved rather than a deadline that passed — and the host's own account of
+/// the polls it took is read across the same stretch, because every other
+/// assertion here is one a dispatcher that stopped scanning would satisfy by
+/// doing nothing. Two things are ruled out over that stretch, and a poll cadence
+/// is what makes each of them reachable: a second reason minted on top of the
+/// first, and work scheduled against coverage that is gone. The loss left
 /// a vault-wide rescan standing in the entry's pending facts — an entry that
 /// reconciled it would reread the whole vault against a subscription it no
 /// longer holds — so the account across the stretch is required to show no
@@ -1057,11 +1062,14 @@ fn a_published_watcher_cause_outlives_the_production_ticks_after_it() {
 /// [`WatchError::SynchronizationExpired`] travels the attach's own failure route
 /// to the trust state a client reads.
 ///
-/// **The authored deadline is not what elapses.** An armed barrier makes the
-/// wait nothing, so the case reaches the expiry branch in the time a syscall
-/// takes rather than in the fifteen seconds the production attach authors. What
-/// says a caller really reached the withheld boundary is the seam's record,
-/// which the barrier writes at the wait rather than at the arming.
+/// **The authored deadline is not what elapses, and the child measures that.**
+/// An armed barrier makes the wait nothing, so the case reaches the expiry
+/// branch in the time a syscall takes rather than in the deadline the production
+/// attach authors — and the time from the demand to the published withdrawal is
+/// held to a fraction of that deadline, so an arm that stopped shortening the
+/// wait fails here instead of passing slowly. What says a caller really reached
+/// the withheld boundary is the seam's record, which the barrier writes at the
+/// wait rather than at the arming.
 ///
 /// **What such an attach leaves behind is stated rather than assumed.** Coverage
 /// is installed before the store is opened and the boundary is waited on after
@@ -1496,6 +1504,19 @@ fn a_published_cause_stands_across_the_ticks_after_it(vault: &Vault) {
     );
     let held = serving.evidence().since(withdrawn_at);
 
+    // The positive fact the zeroes below are read against. Every one of them is
+    // satisfied by a dispatcher that stopped taking watcher passes at the
+    // moment coverage ended — nothing is opened, written or recovered by a scan
+    // that never runs — so the stretch is required to be ticks rather than
+    // wall-clock: the account says the entry was polled across it.
+    assert!(
+        held.watcher_polls > HELD_POLLS_FLOOR,
+        "the entry was polled {} times across the stretch it is required to stand still through, \
+         so what the zeroes below record is a dispatcher that stopped rather than a cause that \
+         outlived its ticks: {held:?}",
+        held.watcher_polls
+    );
+
     // The rescan the loss left standing is the thing a reconcile would act on,
     // so the opens are read first: an entry that reread the vault against
     // coverage it no longer holds is the defect this case is stated against,
@@ -1535,11 +1556,26 @@ fn a_withheld_boundary_expires_and_acquires_nothing(vault: &Vault) {
     let opening = serving.evidence();
     // Held across all of it: a demand withdrawn before the entry settles takes
     // the standing ask out of the entry, and with it what this rules out.
+    let demanded_at = Instant::now();
     let lease = serving
         .demand(vault.name(), AttachMode::Durable)
         .expect("request the attachment");
 
     let untrusted = wait_for_untrusted(&serving, vault.name());
+    // **What the arm withholds is the boundary, not the deadline.** The attach
+    // authors [`WATCH_SYNCHRONIZATION_DEADLINE`] for a boundary that may still
+    // arrive, and an arm that made the wait spend it would state the same
+    // outcome over an entry that sat unserved for the whole of it. So the
+    // withdrawal is required to be prompt as well as correct: a third of the
+    // authored deadline is far past the syscall a zero-length wait costs and
+    // far under the deadline itself, so the bound separates the expiry branch
+    // an armed barrier reaches at once from the one a real timeout reaches.
+    let elapsed = demanded_at.elapsed();
+    assert!(
+        elapsed < WATCH_SYNCHRONIZATION_DEADLINE / 3,
+        "the withdrawal took {elapsed:?}, which is the authored deadline \
+         ({WATCH_SYNCHRONIZATION_DEADLINE:?}) rather than the wait an armed barrier ends at once"
+    );
     let UntrustedReason::WatcherLost {
         cause: WatcherLossCause::SynchronizationExpired,
         detail,
@@ -1687,11 +1723,13 @@ fn assert_backend_loss(untrusted: &UntrustedReason, names: &str) {
     );
 }
 
-/// Fail where the entry moves off `published` while nothing has addressed it.
+/// Fail where the entry moves off `published` while nothing has addressed it,
+/// over this suite's ordinary settle.
 ///
-/// The look is repeated rather than taken once, because what is ruled out is an
-/// entry that puts coverage back on its own: a re-acquisition takes a job, and a
-/// single read after the failure would be taken before that job could run.
+/// The settle itself is the shared one, so a case here reads a standing failure
+/// the same way every other suite over a production attachment reads it. What
+/// this names is the length: [`SETTLE_LOOKS`] is what rules out a re-acquisition
+/// that was already on its way, and a case about a longer stretch names its own.
 #[track_caller]
 fn assert_stands_on(
     host: &Host<ProductionEntryOps>,
@@ -1702,47 +1740,28 @@ fn assert_stands_on(
     assert_stands_across(host, name, published, SETTLE_LOOKS, subject);
 }
 
-/// The same, over a stated number of looks.
-///
-/// A case that is *about* the stretch says how long it holds the entry rather
-/// than inheriting the settle every other case takes: [`SETTLE_LOOKS`] is wide
-/// enough to catch a re-acquisition that was already on its way, and a case
-/// stating that a published cause outlives the ticks after it needs a stretch
-/// that is many dispatch intervals rather than a few.
-#[track_caller]
-fn assert_stands_across(
-    host: &Host<ProductionEntryOps>,
-    name: &VaultName,
-    published: &UntrustedReason,
-    looks: u32,
-    subject: &str,
-) {
-    for _ in 0..looks {
-        std::thread::sleep(SETTLE_LOOK);
-        let observed = host.state(name);
-        let standing = untrusted_reason(&observed).unwrap_or_else(|| {
-            panic!("{subject}: the entry moved off the failure nothing addressed: {observed:?}")
-        });
-        assert_eq!(
-            &standing, published,
-            "{subject}: the entry published a second reason over the first"
-        );
-    }
-}
-
 /// How many times a settle looks at an entry that is required to stand still.
 const SETTLE_LOOKS: u32 = 40;
 
 /// How many looks the case about a cause outliving the ticks after it takes.
 ///
-/// The children here dispatch a watcher poll every 20ms, so 240 looks a
-/// quarter-tick apart hold the entry across roughly three hundred of them —
-/// far past the one or two a re-acquisition or a scheduled reconcile would need
-/// to appear in, and past the settle every other case here takes.
+/// The children here dispatch a watcher poll every 20ms and a look is 25ms, so
+/// 240 looks a tick and a quarter apart hold the entry across roughly three
+/// hundred of them — far past the one or two a re-acquisition or a scheduled
+/// reconcile would need to appear in, and past the settle every other case here
+/// takes. **How many ticks actually ran is read rather than derived from this
+/// arithmetic**: the case asserts the polls the host's own account recorded
+/// across the stretch, because a dispatcher that stopped would leave the entry
+/// standing still for exactly the reason this case exists to rule out.
 const HELD_LOOKS: u32 = 240;
 
-/// How long a settle waits between two looks.
-const SETTLE_LOOK: Duration = Duration::from_millis(25);
+/// The floor on the watcher polls a held stretch is required to have taken.
+///
+/// The arithmetic above puts a healthy run near three hundred. This is far
+/// under it, because what it separates is a dispatcher that kept scanning from
+/// one that stopped — not a fast host from a loaded one, and this suite runs on
+/// hosts that are both.
+const HELD_POLLS_FLOOR: u64 = 50;
 
 // ---------------------------------------------------------------------------
 // Waiting
@@ -2166,6 +2185,19 @@ impl Vault {
             run = run.env(*name, value);
         }
         let outcome = run.wait().expect("running the lockdown child");
+        // **A filter that names nothing is a run that passes having done
+        // nothing.** The child is selected by an exact test name, and a name
+        // that no longer exists leaves the harness reporting success over zero
+        // tests — every outcome below would then be read off a process that
+        // never attached. The harness prints its count before it runs anything,
+        // so the count is here whichever way the child ends, including the
+        // signal a tear child dies from.
+        let stdout = outcome.stdout_text();
+        assert!(
+            stdout.contains("running 1 test\n"),
+            "the child harness ran something other than the one case this spawn selects, so what \
+             is asserted below is a process that may never have attached:\n{stdout}"
+        );
         assert!(
             hits.exists(),
             "the record file this child was pointed at is gone, so what is read below is the \

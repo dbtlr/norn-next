@@ -20,8 +20,10 @@
 //! the entry's root back under classification — against fake entry operations,
 //! with the error handed to the lifecycle rather than produced by a watcher.
 //! What is asserted here is the join: a production attachment over a real
-//! platform watcher, a root that really goes away, and the state a client reads
-//! afterwards.
+//! platform watcher, a root that really goes away, the state a client reads
+//! afterwards, and the way back — the tree put back and demanded again, which
+//! is what says the withdrawal is a state an entry leaves rather than one a
+//! vault is abandoned in.
 //!
 //! [`WatchError::CoverageLost`]: norn_fs::WatchError::CoverageLost
 //!
@@ -55,15 +57,13 @@
 mod attach;
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use norn_testkit::equivalence::{assert_operationally_valid, tombstones};
+use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid, tombstones};
 use norn_testkit::process::Sandbox;
-use norn_wire::{UntrustedReason, WatcherLossCause};
+use norn_wire::{UntrustedReason, VaultName, WatcherLossCause};
 
-use attach::{
-    Vault, attach_and_wait, derived_documents, untrusted_reason, wait_for_withdrawn_trust,
-};
+use attach::{Vault, assert_stands_across, attach_and_wait, derived_documents, untrusted_reason};
 
 /// How many documents the vault holds.
 ///
@@ -81,10 +81,17 @@ const DOCUMENTS: usize = 4;
 const WITHDRAWN_LIMIT: Duration = Duration::from_secs(120);
 
 /// How many times the settle looks at an entry required to stand still.
+///
+/// The interval between two looks is the shared one, so what this suite states
+/// is the length of its own settle and nothing else.
 const SETTLE_LOOKS: u32 = 40;
 
-/// How long the settle waits between two looks.
-const SETTLE_LOOK: Duration = Duration::from_millis(25);
+/// The document the resumed attach finds that the lost one never saw.
+///
+/// The recreated tree is not a copy of the old one: a document that was never
+/// in the vault the first attach derived is what separates an entry that read
+/// the tree again from one that handed back the rows it already held.
+const RESUMED_DOCUMENT: &str = "resumed.md";
 
 /// **A vault root that stops being covered withdraws trust naming that root,
 /// prunes nothing, and does not put coverage back on its own.**
@@ -112,15 +119,25 @@ const SETTLE_LOOK: Duration = Duration::from_millis(25);
 /// has let go of it and is required to hold every row the attach heal derived,
 /// with no tombstone beside them.
 ///
-/// **That is a real claim on a backend that reports each deletion.** A tree
-/// removal is one event to FSEvents and one per path to inotify, so on Linux the
-/// documents are reported gone before the root's own name is — and a batch
-/// carrying those paths is exactly what a prune would run off. What decides it
-/// is the watcher's own ordering rather than a race this case wins: a terminal
-/// failure outranks the facts a batch is still accumulating, and the removal's
-/// events all land far inside the coalescer's quiet window, so the batch of
-/// deletions is never the thing a consumer is handed. The entry is told coverage
-/// ended, not that the vault emptied.
+/// **That is a real claim on a backend that reports each deletion, and two
+/// different mechanisms carry it.** A tree removal is one event to FSEvents and
+/// one per path to inotify, so on Linux the documents are reported gone before
+/// the root's own name is — and a batch carrying those paths is exactly what a
+/// prune would run off. What decides it is the watcher's own ordering rather
+/// than a race this case wins. The coalescer takes a recorded terminal failure
+/// ahead of whatever facts are pending and drops the pending with it, which is
+/// what carries the bar wherever the loss is recorded before an accumulating
+/// batch comes due — every macOS run, where the removal is one report and the
+/// deletions never accumulate at all. **The coalescer's quiet window is the
+/// Linux-side margin**: the per-path deletions land far inside it, so the batch
+/// is still accumulating when the root's own deletion records the terminal that
+/// outranks it. The entry is told coverage ended, not that the vault emptied.
+///
+/// **The bar fails toward failure.** Neither mechanism can make a broken host
+/// look sound: an entry that read the removal as ordinary editing prunes the
+/// rows this case then reads at rest, and an entry never told about the loss
+/// never publishes the cause this case waits for and ends at the runaway bound.
+/// What a scheduling accident costs here is a red run, never a green one.
 ///
 /// **The second forbidden outcome is coverage coming back by itself.** The
 /// demand the vault was attached under is held across the whole failure, and the
@@ -129,6 +146,16 @@ const SETTLE_LOOK: Duration = Duration::from_millis(25);
 /// could run. Standing on the same cause is what says nothing re-acquired —
 /// a watch re-established over a directory that is not there refuses at
 /// registration, which publishes a backend failure rather than this one.
+///
+/// **What ends the loss is stated too.** A withdrawal nothing can come back
+/// from would be a vault a host abandons, so the case puts the tree back and
+/// demands the vault again: the entry reaches `Ready` over the recreated root
+/// and converges on what a derivation built from zero over that tree holds,
+/// including a document that was never in the vault the first attach derived.
+/// The demand is a later one over the same machine-local state rather than one
+/// raised through the host that lost coverage, because the store at rest above
+/// is read with nothing serving it — and a later demand is what the contract
+/// requires resumption of.
 #[test]
 fn a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing() {
     let sandbox = Sandbox::new(
@@ -156,7 +183,7 @@ fn a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing() {
 
     std::fs::remove_dir_all(vault.path()).expect("removing the watched vault root");
 
-    let untrusted = wait_for_withdrawn_trust(&host, vault.name(), WITHDRAWN_LIMIT);
+    let untrusted = wait_for_coverage_loss(&host, vault.name());
     let UntrustedReason::WatcherLost {
         cause: WatcherLossCause::CoverageLost,
         detail,
@@ -169,7 +196,13 @@ fn a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing() {
         detail.contains(&canonical.display().to_string()),
         "the loss names something other than the root coverage was installed over: {detail}"
     );
-    assert_stands_on(&host, vault.name(), &untrusted);
+    assert_stands_across(
+        &host,
+        vault.name(),
+        &untrusted,
+        SETTLE_LOOKS,
+        "a root that stopped being covered",
+    );
 
     // The store is read after the host lets go of it, so what is judged is the
     // state at rest rather than a database another process is writing.
@@ -190,6 +223,35 @@ fn a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing() {
          watcher was read as a change inside the vault"
     );
     assert_operationally_valid(&mut store, "the store an entry that lost its root left");
+    drop(store);
+
+    // The way back. The tree returns with a document the lost attachment never
+    // saw, so what the resumed one derives is read off the vault rather than
+    // off the rows it already held.
+    write_documents(vault.path());
+    std::fs::write(
+        vault.path().join(RESUMED_DOCUMENT),
+        "# Resumed\n\nA document the lost attachment never saw.\n",
+    )
+    .expect("the document the resumed attach finds");
+
+    let resumed = vault.host();
+    let lease = attach_and_wait(&resumed, vault.name());
+    drop((lease, resumed));
+
+    let mut store = vault.store();
+    assert_eq!(
+        derived_documents(&mut store),
+        DOCUMENTS + 1,
+        "the demand that followed the loss did not derive the recreated vault"
+    );
+    assert_operationally_valid(&mut store, "the store a resumed attachment left");
+    drop(store);
+    assert_converged_from_zero(
+        &vault,
+        &root,
+        "the vault a later demand resumed coverage over",
+    );
 }
 
 /// Write the vault tree at `root`, and hand back the view a host serves it from.
@@ -198,7 +260,17 @@ fn a_root_that_stops_being_covered_withdraws_trust_and_prunes_nothing() {
 /// the corpus, and what it needs of the vault is that every document in it is a
 /// row the store is required to still hold afterwards.
 fn arrange(root: &Path) -> Vault {
-    let vault = root.join("vault");
+    write_documents(&root.join("vault"));
+    Vault::adopt(root)
+}
+
+/// Write the schema and every document of the tree at `vault`.
+///
+/// Called twice over one path: once to arrange the vault, and once to put it
+/// back after the removal this case is about. Writing a document that is
+/// already there with the bytes it already has is the same tree either way,
+/// which is what makes the resumed derivation comparable to the lost one.
+fn write_documents(vault: &Path) {
     std::fs::create_dir_all(vault.join(".norn")).expect("a vault root");
     std::fs::write(vault.join(".norn/schema.yaml"), attach::SCHEMA).expect("the vault schema");
     for index in 0..DOCUMENTS {
@@ -208,29 +280,79 @@ fn arrange(root: &Path) -> Vault {
         )
         .expect("a document in the vault");
     }
-    Vault::adopt(root)
 }
 
-/// Fail where the entry moves off `published` while nothing has addressed it.
+/// Wait until the entry is untrusted **for the loss of coverage over its root**.
 ///
-/// The look is repeated rather than taken once, because what is ruled out is an
-/// entry that puts coverage back on its own: a re-acquisition takes a job, and a
-/// single read after the failure would be taken before that job could run.
-#[track_caller]
-fn assert_stands_on(
+/// **The cause is what ends this wait, not the state.** A tree being removed is
+/// a tree changing under a live watcher: a backend can report the documents
+/// going before it reports the root's own name going, and enough such reports
+/// at once are a lost path set — which the entry publishes as
+/// [`UntrustedReason::WatcherOverflow`] while it rereads the vault. That is a
+/// state on the way to this one rather than an outcome, so a wait that stopped
+/// at the first untrusted reason it saw would read a scheduling gap as the
+/// answer. The coverage loss is terminal, so it is where this settles.
+///
+/// Any other reason ends the wait where it is found. An entry untrusted for
+/// something else is this case's subject answering wrongly rather than a state
+/// on the way, and waiting out the bound over it would report a condition that
+/// never arrived instead of the answer that did.
+fn wait_for_coverage_loss(
     host: &norn_host::Host<norn_host::ProductionEntryOps>,
-    name: &norn_wire::VaultName,
-    published: &UntrustedReason,
-) {
-    for _ in 0..SETTLE_LOOKS {
-        std::thread::sleep(SETTLE_LOOK);
+    name: &VaultName,
+) -> UntrustedReason {
+    let deadline = Instant::now() + WITHDRAWN_LIMIT;
+    loop {
         let observed = host.state(name);
-        let standing = untrusted_reason(&observed).unwrap_or_else(|| {
-            panic!("the entry moved off the loss nothing addressed: {observed:?}")
-        });
-        assert_eq!(
-            &standing, published,
-            "the entry published a second reason over the root it lost coverage of"
+        match untrusted_reason(&observed) {
+            Some(
+                reason @ UntrustedReason::WatcherLost {
+                    cause: WatcherLossCause::CoverageLost,
+                    ..
+                },
+            ) => return reason,
+            // The reread the overflow stands for runs under coverage the entry
+            // still holds, so the loss is still ahead of it.
+            Some(UntrustedReason::WatcherOverflow) => {}
+            Some(other) => {
+                panic!("the removed root withdrew trust under something else: {other:?}")
+            }
+            None => {}
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trust was not withdrawn for the lost root inside {WITHDRAWN_LIMIT:?}; observed \
+             {observed:?}"
         );
+        std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Compare what this vault's store holds against a derivation built from zero
+/// over the same tree.
+///
+/// The second derivation is served from a second set of machine-local
+/// directories, so it shares the documents and none of the derived state: it
+/// walks the tree from an empty database, which is what makes it an answer the
+/// first one can be judged against rather than a copy of it. The two are
+/// attached one at a time, because a machine runs one platform watcher service
+/// and this suite holds the lease over it for one attachment at a time.
+fn assert_converged_from_zero(vault: &Vault, root: &Path, subject: &str) {
+    let machine = root.join("from-zero");
+    std::fs::create_dir_all(&machine).expect("a second machine's directories");
+    let beside = vault.beside(&machine);
+    let host = beside.host();
+    let demand = attach_and_wait(&host, beside.name());
+    drop((demand, host));
+
+    let mut left = vault.store();
+    let mut right = beside.store();
+    assert_operationally_valid(&mut right, "the derivation from zero");
+    let left = StoreProjection::read(&mut left).expect("projecting the resumed store");
+    let right = StoreProjection::read(&mut right).expect("projecting the from-zero store");
+    assert!(
+        !right.population().is_empty(),
+        "the derivation from zero holds nothing, so the comparison below compares nothing"
+    );
+    left.assert_equivalent(&right, subject);
 }

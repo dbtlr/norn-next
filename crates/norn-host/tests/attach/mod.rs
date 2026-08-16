@@ -429,6 +429,49 @@ pub fn wait_for_withdrawn_trust(
     }
 }
 
+/// How long a settle waits between two looks at an entry.
+///
+/// One look per interval, and the interval is the shared one because what it
+/// is sized against is shared: it sits above the watcher poll interval these
+/// suites run their hosts at, so consecutive looks fall in different passes of
+/// the dispatcher's scan rather than inside one. How *many* looks a case takes
+/// is the case's own statement and is passed in.
+pub const SETTLE_LOOK: Duration = Duration::from_millis(25);
+
+/// Fail where the entry moves off `published` across `looks` looks, while
+/// nothing has addressed the failure it stands on.
+///
+/// **The look is repeated rather than taken once**, because what a single read
+/// cannot separate is an entry standing still from an entry whose re-acquisition
+/// has not started yet: putting coverage back takes a job, and a read taken
+/// immediately after a withdrawal is taken before that job could run.
+///
+/// A caller states its own `looks`: a settle that rules out a re-acquisition
+/// already on its way is a few dispatch intervals, and a case *about* the
+/// stretch an entry holds a cause across is many. Standing still is a claim
+/// about states alone, so a case that also needs the ticks to have happened
+/// reads them off the host's own account beside this.
+#[track_caller]
+pub fn assert_stands_across(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    published: &UntrustedReason,
+    looks: u32,
+    subject: &str,
+) {
+    for _ in 0..looks {
+        std::thread::sleep(SETTLE_LOOK);
+        let observed = host.state(name);
+        let standing = untrusted_reason(&observed).unwrap_or_else(|| {
+            panic!("{subject} moved off the failure nothing addressed: {observed:?}")
+        });
+        assert_eq!(
+            &standing, published,
+            "{subject} published a second reason over the first"
+        );
+    }
+}
+
 /// How many documents a store holds, read a bounded page at a time.
 ///
 /// The page is far below the changeset a heal itself holds, so counting what an
