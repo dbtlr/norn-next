@@ -59,6 +59,10 @@ const CHILD_SEAM: &str = "lockdown/watch-child";
 /// hangs.
 const CHILD_DEADLINE: Duration = Duration::from_secs(60);
 
+/// The signal an abort raises, which is how an arm that cannot record itself
+/// reports that to the parent.
+const SIGABRT: i32 = 6;
+
 /// What the child gives a boundary that is not withheld. Long enough that a
 /// loaded machine crossing it slowly is not a failure, and never reached at all
 /// by a child whose barrier is armed.
@@ -249,6 +253,43 @@ fn an_unreadable_arm_refuses_the_process_it_was_spelled_for() {
     }
 }
 
+/// **An arm that cannot write the record it was given ends the process.** The
+/// harness named a file, so it wants every firing in it; a firing that recorded
+/// nothing reads to a parent exactly like a boundary the watcher never reached,
+/// and that is the one reading this seam must never allow.
+///
+/// The child dies by abort rather than by unwinding, and the reason is on its
+/// standard error. An unwind would be enough on the establishing thread and not
+/// enough on the backend's delivery thread — where one of the three boundaries
+/// answers, and where an unwind ends that thread and leaves the subscription
+/// standing.
+#[test]
+fn an_arm_that_cannot_record_itself_ends_the_process() {
+    let tree = Tree::new("unwritable-record");
+    let unwritable = tree.root().join("records/no-such-directory/arm-hits");
+
+    let run = tree.spawn(&[
+        (ARMED_STAGES, "install=refuses"),
+        (ARM_HITS, &unwritable.to_string_lossy()),
+    ]);
+
+    assert_eq!(
+        run.status,
+        RunStatus::Signaled(SIGABRT),
+        "an arm answered without the record its harness asked for\n{}",
+        run.stderr_text()
+    );
+    assert!(
+        run.stderr_text().contains("could not record itself"),
+        "the abort said nothing about why: {}",
+        run.stderr_text()
+    );
+    assert!(
+        !unwritable.exists(),
+        "the record the arm could not write is there after all"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The tree
 // ---------------------------------------------------------------------------
@@ -283,7 +324,14 @@ impl Tree {
         Tree { sandbox, root }
     }
 
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Run this binary again as the child, armed as `arm` says.
+    ///
+    /// The record file is named first, so a case that means to name a different
+    /// one — or an unwritable one — spells it among the arm's own variables.
     fn spawn(&self, arm: &[(&str, &str)]) -> norn_testkit::process::Outcome {
         let mut run = Run::new(&self.sandbox, std::env::current_exe().expect("this binary"))
             .args([

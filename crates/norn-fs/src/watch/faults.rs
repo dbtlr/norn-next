@@ -59,8 +59,9 @@
 //!   reached rather than inferring it from a subscription that failed for some
 //!   other reason. The `seam` field is what tells a record written here apart
 //!   from one the write protocol wrote. A file this process named and cannot
-//!   write ends the process saying so: a parent cannot tell a record that was
-//!   never written from a boundary that was never reached.
+//!   write ends the process saying so — an abort, with the reason on standard
+//!   error — because a parent cannot tell a record that was never written from
+//!   a boundary that was never reached.
 //!
 //! **The record file must sit outside every watched tree.** It is written while
 //! coverage is live — by this seam, and by the write protocol's seam in the same
@@ -493,18 +494,27 @@ impl StreamArm {
 /// rather than leaving a parent to read the silence as a boundary the watcher
 /// never reached. That is the one place this seam parts from the write
 /// protocol's, whose arms fire in a process that is already dying.
+///
+/// **Deliberately an abort rather than a panic.** One of the three boundaries
+/// answers on the backend's own delivery thread, where an unwind ends that
+/// thread and leaves the subscription standing — which is the same silence,
+/// reached a different way. Nothing here is recoverable in any case: the
+/// harness named a file this process cannot write, and every later arm would
+/// meet it too. The reason goes to standard error first, because an abort says
+/// nothing on its own.
 #[cfg(any(test, feature = "induced-failure"))]
 fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
     let Some(hits) = hits else {
         return;
     };
-    crate::faults::append_record(hits, SEAM, stage.name(), answer.name()).unwrap_or_else(|error| {
-        panic!(
-            "the {} arm could not record itself in {}: {error}",
+    if let Err(error) = crate::faults::append_record(hits, SEAM, stage.name(), answer.name()) {
+        eprintln!(
+            "norn-fs: the {} arm could not record itself in {}: {error}",
             stage.name(),
             hits.display()
-        )
-    });
+        );
+        std::process::abort();
+    }
 }
 
 /// The arm this process was started under.
@@ -793,25 +803,6 @@ mod tests {
             WatchFaults::at(&[(Stage::Install, Answer::Refuses)])
                 .registration()
                 .is_err()
-        );
-    }
-
-    /// **A record file that cannot be written ends the run.** A harness that
-    /// named one wants every firing in it, and a firing that recorded nothing
-    /// reads to a parent exactly like a boundary the watcher never reached.
-    #[test]
-    fn a_record_file_that_cannot_be_written_refuses_rather_than_answering_quietly() {
-        let scratch = crate::scratch::Scratch::new("watch-arm-unwritable");
-        let hits = scratch.path("no-such-directory/arm-hits");
-
-        let refused = std::panic::catch_unwind(|| {
-            WatchFaults::recording_at(&[(Stage::Install, Answer::Refuses)], hits.clone())
-                .registration()
-        });
-
-        assert!(
-            refused.is_err(),
-            "an arm answered without the record its harness asked for"
         );
     }
 
