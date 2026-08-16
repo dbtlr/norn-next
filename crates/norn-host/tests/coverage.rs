@@ -112,6 +112,16 @@ const SETTLE_LOOK: Duration = Duration::from_millis(25);
 /// has let go of it and is required to hold every row the attach heal derived,
 /// with no tombstone beside them.
 ///
+/// **That is a real claim on a backend that reports each deletion.** A tree
+/// removal is one event to FSEvents and one per path to inotify, so on Linux the
+/// documents are reported gone before the root's own name is — and a batch
+/// carrying those paths is exactly what a prune would run off. What decides it
+/// is the watcher's own ordering rather than a race this case wins: a terminal
+/// failure outranks the facts a batch is still accumulating, and the removal's
+/// events all land far inside the coalescer's quiet window, so the batch of
+/// deletions is never the thing a consumer is handed. The entry is told coverage
+/// ended, not that the vault emptied.
+///
 /// **The second forbidden outcome is coverage coming back by itself.** The
 /// demand the vault was attached under is held across the whole failure, and the
 /// entry is looked at repeatedly rather than once: a re-establishment takes a
