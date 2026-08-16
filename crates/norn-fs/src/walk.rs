@@ -17,6 +17,24 @@
 //! vault or one subtree of it. Paths, exclusion membership and link containment
 //! are therefore vault-relative in both, and a subtree walk of `notes` reads the
 //! same files the vault walk reads under `notes`.
+//!
+//! **The windows between the walk's own observations converge on absence.** A
+//! walk observes a name more than once — the listing that names it, the stat of
+//! the name that listing returned, the open or the readlink that follows that
+//! stat, and, for a file, the open its consumer makes of the fact. Another
+//! writer can unlink the name — or unlink it and give the name to something else
+//! — inside any of those pairs, and one doctrine answers all of them: the walk
+//! read nothing at that name, because a walk begun now holds nothing there
+//! either. It says so, as [`SkipReason::Vanished`], rather than refusing or
+//! staying silent: a name the walk read nothing at is a name whose derived state
+//! this walk earned no authority over. A machine that will not answer is the
+//! other thing entirely, and still refuses.
+//!
+//! The one observation with no such window before it is the open of the vault
+//! root itself. A root that is not there is the vault gone rather than one name
+//! inside it changing, and it refuses.
+
+mod faults;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -30,6 +48,7 @@ use std::time::SystemTime;
 
 use rustix::fs::{AtFlags, Dir, FileType, Mode, open, openat, readlinkat, statat};
 
+use self::faults::{Paged, WalkFaults};
 use crate::exclusion::{Excluded, ExclusionError, Exclusions};
 use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
@@ -98,6 +117,13 @@ enum Frontier {
 ///
 /// A single multi-component open would resolve the intermediate names in the
 /// kernel, where `O_NOFOLLOW` binds only the last of them.
+///
+/// **A component that is not there ends the descent at that name's own
+/// vanishing**, the way every other window between two observations of a name
+/// ends. The caller reached this subtree from an observation of its own, and a
+/// writer editing the vault between that observation and this descent is the
+/// vault evolving: the walk reads nothing under the name and says so, so what is
+/// stored beneath it converges while the findings there stay withheld.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
 fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
     let mut directory = walk.root_fd.clone();
@@ -110,6 +136,12 @@ fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkE
             .normalizer
             .normalize(&traversed)
             .expect("a leading run of a normalized path's components is normalized");
+        let vanished = |path| {
+            Ok(Frontier::Skipped(SkipFact {
+                path,
+                reason: SkipReason::Vanished,
+            }))
+        };
         if is_shadow_name(name) {
             return Ok(Frontier::Skipped(SkipFact {
                 path,
@@ -117,26 +149,34 @@ fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkE
             }));
         }
         crate::reads::count_stat();
-        let metadata = statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|source| environment_errno("stating", &access, source))?;
+        let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(metadata) => metadata,
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return vanished(path),
+            Err(source) => return Err(environment_errno("stating", &access, source)),
+        };
         if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) == EntryKind::Symlink
         {
-            let kind = classify_link(
+            return match classify_link(
                 &walk.root_fd,
                 path.as_path(),
                 &directory,
                 name,
                 &walk.normalizer,
-            )?;
-            return Ok(Frontier::Skipped(SkipFact {
-                path,
-                reason: SkipReason::SymbolicLink(kind),
-            }));
+            )? {
+                Some(kind) => Ok(Frontier::Skipped(SkipFact {
+                    path,
+                    reason: SkipReason::SymbolicLink(kind),
+                })),
+                None => vanished(path),
+            };
         }
-        directory = Arc::new(
-            openat(&directory, name, directory_flags(), Mode::empty())
-                .map_err(|source| environment_errno("opening directory", &access, source))?,
-        );
+        directory = match openat(&directory, name, directory_flags(), Mode::empty()) {
+            Ok(fd) => Arc::new(fd),
+            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+                return vanished(path);
+            }
+            Err(source) => return Err(environment_errno("opening directory", &access, source)),
+        };
     }
     Ok(Frontier::Open(directory))
 }
@@ -157,6 +197,7 @@ fn open_vault(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
         exclusions,
         stack: Vec::new(),
         skipped: None,
+        faults: WalkFaults::entry(),
     })
 }
 
@@ -171,6 +212,10 @@ pub struct Walk {
     exclusions: Exclusions,
     stack: Vec<DirectoryFrontier>,
     skipped: Option<SkipFact>,
+    /// Which of this walk's paging observations a foreign writer's edit stands
+    /// in place of. Empty in every process that armed nothing, which is every
+    /// process outside the induced-failure suites.
+    faults: WalkFaults,
 }
 
 impl Iterator for Walk {
@@ -182,35 +227,47 @@ impl Iterator for Walk {
         }
         loop {
             let frontier = self.stack.last_mut()?;
-            let pending =
-                match frontier.next_pending(&self.root_fd, &self.normalizer, &self.exclusions) {
-                    Ok(Some(pending)) => pending,
-                    Ok(None) => {
-                        self.stack.pop();
-                        continue;
-                    }
-                    Err(error) => {
-                        self.stack.clear();
-                        return Some(Err(error));
-                    }
-                };
+            let pending = match frontier.next_pending(
+                &self.root_fd,
+                &self.normalizer,
+                &self.exclusions,
+                &self.faults,
+            ) {
+                Ok(Some(pending)) => pending,
+                Ok(None) => {
+                    self.stack.pop();
+                    continue;
+                }
+                Err(error) => {
+                    self.stack.clear();
+                    return Some(Err(error));
+                }
+            };
 
-            if let Some(reason) = pending.skip {
-                return Some(Ok(WalkFact::Skipped(SkipFact {
-                    path: pending.path,
-                    reason,
-                })));
-            }
-            match pending.kind {
-                EntryKind::File => {
+            match pending.observed {
+                Observed::Skipped(reason) => {
+                    return Some(Ok(WalkFact::Skipped(SkipFact {
+                        path: pending.path,
+                        reason,
+                    })));
+                }
+                Observed::File(stat) => {
                     return Some(Ok(WalkFact::File(FileFact {
                         root: self.root.clone(),
                         root_fd: self.root_fd.clone(),
                         path: pending.path,
-                        stat: pending.stat,
+                        stat,
                     })));
                 }
-                EntryKind::Directory => {
+                // **The page's stat and this open are two observations of the
+                // same name**, and it is the widest of the walk's windows: a
+                // page is stat'd whole and its entries are handed out one at a
+                // time, so a directory late in a page is opened only after every
+                // earlier entry — whole subtrees included — has been read. A
+                // writer removing the directory in that span, or replacing it
+                // with something that is not one, leaves nothing here to enter,
+                // which is the answer a walk begun now gives at that name.
+                Observed::Directory => {
                     let access = self.root.join(pending.path.as_path());
                     match openat(
                         &pending.parent,
@@ -221,6 +278,16 @@ impl Iterator for Walk {
                         Ok(fd) => self
                             .stack
                             .push(DirectoryFrontier::new(Arc::new(fd), pending.path.as_path())),
+                        Err(
+                            rustix::io::Errno::NOENT
+                            | rustix::io::Errno::NOTDIR
+                            | rustix::io::Errno::LOOP,
+                        ) => {
+                            return Some(Ok(WalkFact::Skipped(SkipFact {
+                                path: pending.path,
+                                reason: SkipReason::Vanished,
+                            })));
+                        }
                         Err(source) => {
                             self.stack.clear();
                             return Some(Err(environment_errno(
@@ -230,9 +297,6 @@ impl Iterator for Walk {
                             )));
                         }
                     }
-                }
-                EntryKind::Symlink | EntryKind::Special(_) => {
-                    unreachable!("unsupported entries are skips")
                 }
             }
         }
@@ -378,7 +442,11 @@ pub struct FileStat {
     pub identity: Identity,
 }
 
-/// One root deliberately omitted from traversal.
+/// One root the walk read nothing under, and why.
+///
+/// Most are roots Norn deliberately does not enter. One is not: a name that went
+/// away inside one of the walk's own windows is a root nothing here read either,
+/// and it carries the same notation so a consumer holds one rule for both.
 #[derive(Clone, Debug)]
 pub struct SkipFact {
     path: NormalizedPath,
@@ -410,6 +478,15 @@ pub enum SkipReason {
     SymbolicLink(LinkKind),
     /// A device-like entry unsafe to open as document content.
     SpecialFile(FileKind),
+    /// A name another writer took away — or took away and gave to something
+    /// else — between two of this walk's observations of it.
+    ///
+    /// **The walk read nothing at the name**, which is the whole of what this
+    /// says. What is stored under it converges on the answer a walk begun now
+    /// holds, and a consumer that concludes from enumeration owes this root the
+    /// same hold it owes every other one here: nothing this walk did earns
+    /// authority over the places beneath a name it never read.
+    Vanished,
 }
 
 impl From<Excluded> for SkipReason {
@@ -511,16 +588,29 @@ struct Pending {
     parent: Arc<OwnedFd>,
     name: OsString,
     path: NormalizedPath,
-    kind: EntryKind,
-    stat: FileStat,
-    skip: Option<SkipReason>,
-    sort_key: Vec<u8>,
+    observed: Observed,
+}
+
+/// What the page's stat of one listed name found there.
+///
+/// Every name a page covers gets one of these, so the page hands back as many
+/// entries as it took in and a name that went away is an entry saying so rather
+/// than a gap.
+enum Observed {
+    /// A directory the walk descends into.
+    Directory,
+    /// A file, with the stat the page took of it.
+    File(FileStat),
+    /// A name the walk states a notation for instead of reading.
+    Skipped(SkipReason),
 }
 
 struct Candidate {
     name: OsString,
     path: NormalizedPath,
-    kind: EntryKind,
+    /// The kind the listing named, or nothing where the name was already gone
+    /// when the stat that learned its kind ran.
+    listed: Option<EntryKind>,
     sort_key: Vec<u8>,
 }
 
@@ -549,11 +639,20 @@ impl DirectoryFrontier {
         }
     }
 
+    /// The next entry this directory holds, paging the directory again where the
+    /// page in hand is spent.
+    ///
+    /// **Every name a page covers comes back as an entry**, so a spent page is a
+    /// spent run of names and the cursor it leaves is the last of them. A name
+    /// another writer took away inside the page's own window comes back as the
+    /// notation saying so rather than as nothing, which is what keeps the run the
+    /// page covered and the entries it hands out one list.
     fn next_pending(
         &mut self,
         root_fd: &Arc<OwnedFd>,
         normalizer: &PathNormalizer,
         exclusions: &Exclusions,
+        faults: &WalkFaults,
     ) -> Result<Option<Pending>, WalkError> {
         if let Some(item) = self.page.next() {
             return Ok(Some(item));
@@ -561,13 +660,14 @@ impl DirectoryFrontier {
         if self.done {
             return Ok(None);
         }
-        let (items, more) = match directory_page(
+        let page = match directory_page(
             root_fd,
             &self.fd,
             &self.relative,
             self.cursor.as_deref(),
             normalizer,
             exclusions,
+            faults,
         ) {
             Ok(page) => page,
             Err(error) => {
@@ -575,17 +675,54 @@ impl DirectoryFrontier {
                 return Err(error);
             }
         };
-        self.done = !more;
+        self.done = !page.more;
         #[cfg(test)]
         {
-            self.max_page = self.max_page.max(items.len());
+            self.max_page = self.max_page.max(page.pending.len());
         }
-        self.cursor = items.last().map(|item| item.sort_key.clone());
-        self.page = items.into_iter();
+        if let Some(covered) = page.covered {
+            self.cursor = Some(covered);
+        }
+        self.page = page.pending.into_iter();
         Ok(self.page.next())
     }
 }
 
+/// One bounded page of a directory's entries.
+struct Page {
+    /// The entries the page holds, in order — one per name it covered.
+    pending: Vec<Pending>,
+    /// Whether the directory holds names past the ones this page covered.
+    more: bool,
+    /// The highest sort key this page covered, which is where the next page of
+    /// the same directory starts.
+    covered: Option<Vec<u8>>,
+}
+
+/// One page of `directory`, listed and then stat'd.
+///
+/// **The listing and the stats are two observations, and the page converges on
+/// what the second one holds.** A name the listing returned can be unlinked
+/// before its stat runs, and it can be unlinked and taken by an entry of another
+/// kind; both are one edit to a tree other writers share, and both are answered
+/// the same way — the page read nothing at that name, and states it as
+/// [`SkipReason::Vanished`]. That is the answer a walk begun now gives, since it
+/// lists no such entry, so a heal reading this page converges on the same state
+/// either way.
+///
+/// **A name stated that way is a name this walk earned nothing over.** The page
+/// says so rather than passing the name over in silence, because a consumer that
+/// prunes what its enumeration did not account for would otherwise read the
+/// silence as a name it had read and found empty. What stands at the name now —
+/// the successor of a replacement, or nothing at all — is not this page's to
+/// describe: it is a change of the vault's own, reached by the watcher delivery
+/// that edit raises or by the next heal that reads the name.
+///
+/// **A machine that will not answer still refuses.** A denied stat, an exhausted
+/// descriptor table and a failing device say nothing about whether an entry is
+/// there, and reading one as absence would let a transient fault prune derived
+/// state. Absence is the one error number that converges; every other one ends
+/// the walk.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
 fn directory_page(
     root_fd: &Arc<OwnedFd>,
@@ -594,7 +731,8 @@ fn directory_page(
     cursor: Option<&[u8]>,
     normalizer: &PathNormalizer,
     exclusions: &Exclusions,
-) -> Result<(Vec<Pending>, bool), WalkError> {
+    faults: &WalkFaults,
+) -> Result<Page, WalkError> {
     let display = relative;
     let entries = Dir::read_from(directory)
         .map_err(|source| environment_errno("reading directory", display, source))?;
@@ -615,16 +753,23 @@ fn directory_page(
                 path: relative_path.clone(),
                 source,
             })?;
-        let kind = if entry.file_type() == FileType::Unknown {
-            crate::reads::count_stat();
-            let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(|source| environment_errno("stating", &relative_path, source))?;
-            classify_file_type(FileType::from_raw_mode(metadata.st_mode as _))
+        // A filesystem whose listing carries no entry type is stat'd to learn
+        // one, which opens the same window one call earlier: a name gone by the
+        // time this runs is a name this page read nothing at. It is the same
+        // doctrine through the same reading, so the two windows cannot answer a
+        // deleted name differently — the candidate is taken in either way, and
+        // the loop below states it.
+        let listed = if entry.file_type() == FileType::Unknown {
+            stat_listed(directory, &name, &relative_path, Paged::default())?
+                .map(|metadata| classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)))
         } else {
-            classify_file_type(entry.file_type())
+            Some(classify_file_type(entry.file_type()))
         };
         let mut sort_key = path.comparison_key().as_bytes().to_vec();
-        if kind == EntryKind::Directory && !exclusions.excludes(&path) && !is_shadow_name(&name) {
+        if listed == Some(EntryKind::Directory)
+            && !exclusions.excludes(&path)
+            && !is_shadow_name(&name)
+        {
             sort_key.push(b'/');
         }
         if cursor.is_some_and(|cursor| sort_key.as_slice() <= cursor) {
@@ -633,7 +778,7 @@ fn directory_page(
         candidates.push(Candidate {
             name,
             path,
-            kind,
+            listed,
             sort_key,
         });
         candidates.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
@@ -644,60 +789,132 @@ fn directory_page(
     candidates.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
     let more = candidates.len() > FRONTIER_PAGE;
     candidates.truncate(FRONTIER_PAGE);
+    let covered = candidates.last().map(|last| last.sort_key.clone());
 
     let mut pending = Vec::with_capacity(candidates.len());
     for candidate in candidates {
+        // The sort key is spent: the page's own run of names is what the cursor
+        // carries, so nothing past this point reads one entry's key.
         let Candidate {
-            name,
-            path,
-            kind,
-            sort_key,
+            name, path, listed, ..
         } = candidate;
         let relative_path = relative.join(&name);
-        crate::reads::count_stat();
-        let metadata = statat(directory, &name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(|source| environment_errno("stating", &relative_path, source))?;
-        let observed_kind = classify_file_type(FileType::from_raw_mode(metadata.st_mode as _));
-        if observed_kind != kind {
-            return Err(environment(
-                "paging directory entry",
-                &relative_path,
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "the entry changed kind during directory enumeration",
-                ),
-            ));
-        }
-        let skip = if let Some(reason) = exclusions.reason(&path) {
-            Some(reason.into())
-        } else if is_shadow_name(&name) {
-            Some(SkipReason::Shadow)
-        } else if kind == EntryKind::Symlink {
-            Some(SkipReason::SymbolicLink(classify_link(
-                root_fd,
-                path.as_path(),
-                directory,
-                &name,
-                normalizer,
-            )?))
-        } else if let EntryKind::Special(kind) = kind {
-            Some(SkipReason::SpecialFile(kind))
-        } else {
-            None
-        };
+        let observed = observe_listed(
+            root_fd,
+            directory,
+            &name,
+            &relative_path,
+            &path,
+            listed,
+            normalizer,
+            exclusions,
+            faults,
+        )?;
         pending.push(Pending {
             parent: directory.clone(),
             name,
             path,
-            kind,
-            stat: stat_raw(&metadata),
-            skip,
-            sort_key,
+            observed,
         });
     }
-    Ok((pending, more))
+    Ok(Page {
+        pending,
+        more,
+        covered,
+    })
 }
 
+/// What the page states for one name the listing named.
+///
+/// The three convergences at this window are all here, and they are one answer:
+/// a name already gone when the listing's own stat ran, a name gone when the
+/// page's stat runs, and a name holding a kind the listing did not name. The
+/// third is the second seen a moment later — the name was unlinked and something
+/// took it — so all three say the page read nothing at the name. A symbolic link
+/// whose target read meets the same absence is the fourth reading of it, one
+/// call further on.
+///
+/// Everything else is the entry the listing named, classified.
+#[allow(clippy::too_many_arguments)] // The whole of one entry's reading, in one place.
+fn observe_listed(
+    root_fd: &Arc<OwnedFd>,
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    access: &Path,
+    path: &NormalizedPath,
+    listed: Option<EntryKind>,
+    normalizer: &PathNormalizer,
+    exclusions: &Exclusions,
+    faults: &WalkFaults,
+) -> Result<Observed, WalkError> {
+    let Some(kind) = listed else {
+        return Ok(Observed::Skipped(SkipReason::Vanished));
+    };
+    let armed = faults.paging(kind);
+    let Some(metadata) = stat_listed(directory, name, access, armed)? else {
+        return Ok(Observed::Skipped(SkipReason::Vanished));
+    };
+    let observed_kind = armed
+        .observes
+        .unwrap_or_else(|| classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)));
+    if observed_kind != kind {
+        return Ok(Observed::Skipped(SkipReason::Vanished));
+    }
+    if let Some(reason) = exclusions.reason(path) {
+        return Ok(Observed::Skipped(reason.into()));
+    }
+    if is_shadow_name(name) {
+        return Ok(Observed::Skipped(SkipReason::Shadow));
+    }
+    Ok(match kind {
+        EntryKind::Symlink => {
+            match classify_link(root_fd, path.as_path(), directory, name, normalizer)? {
+                Some(link) => Observed::Skipped(SkipReason::SymbolicLink(link)),
+                None => Observed::Skipped(SkipReason::Vanished),
+            }
+        }
+        EntryKind::Special(special) => Observed::Skipped(SkipReason::SpecialFile(special)),
+        EntryKind::Directory => Observed::Directory,
+        EntryKind::File => Observed::File(stat_raw(&metadata)),
+    })
+}
+
+/// One stat of a name a listing named, taken inside the window that listing
+/// opened.
+///
+/// **Absence is an answer here, never a refusal**, and `armed` is what lets a
+/// case reach that answer: the seam hands back the error number the stat meets
+/// in place of running, and the reading below is the production one either way.
+/// Every other error number is the machine failing to answer, which ends the
+/// walk.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
+fn stat_listed(
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    access: &Path,
+    armed: Paged,
+) -> Result<Option<rustix::fs::Stat>, WalkError> {
+    crate::reads::count_stat();
+    let observed = match armed.meets {
+        Some(errno) => Err(errno),
+        None => statat(directory, name, AtFlags::SYMLINK_NOFOLLOW),
+    };
+    match observed {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(source) => Err(environment_errno("stating", access, source)),
+    }
+}
+
+/// What the link at `name` names, or nothing where the name no longer holds a
+/// link.
+///
+/// **The stat that named this a link and this read of it are two observations.**
+/// A writer can unlink the link between them, or replace it with a name that is
+/// not a link at all — the reads answer `ENOENT`, `ENOTDIR` and `EINVAL` — and
+/// all three say the same thing the rest of the walk's windows say: nothing here
+/// read the name. Every other error number is the machine failing to answer and
+/// refuses.
 #[allow(clippy::disallowed_methods)] // norn-fs owns vault links and stat.
 fn classify_link(
     root_fd: &Arc<OwnedFd>,
@@ -705,23 +922,29 @@ fn classify_link(
     parent: &Arc<OwnedFd>,
     name: &OsStr,
     normalizer: &PathNormalizer,
-) -> Result<LinkKind, WalkError> {
-    let target = readlinkat(parent, name, Vec::new())
-        .map_err(|source| environment_errno("reading link", relative_link, source))?;
+) -> Result<Option<LinkKind>, WalkError> {
+    let target = match readlinkat(parent, name, Vec::new()) {
+        Ok(target) => target,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::INVAL) => {
+            return Ok(None);
+        }
+        Err(source) => return Err(environment_errno("reading link", relative_link, source)),
+    };
     let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
     if target.is_absolute() {
-        return Ok(LinkKind::Outbound);
+        return Ok(Some(LinkKind::Outbound));
     }
     let Some(relative) = resolve_relative_target(relative_link, &target) else {
-        return Ok(LinkKind::Outbound);
+        return Ok(Some(LinkKind::Outbound));
     };
     if relative.as_os_str().is_empty() {
-        return Ok(LinkKind::InVaultDirectory);
+        return Ok(Some(LinkKind::InVaultDirectory));
     }
     let relative = normalizer
         .normalize(&relative)
         .expect("the lexical resolver returns a non-empty relative path without parents");
     inspect_link_target(root_fd, relative.as_path())
+        .map(Some)
         .map_err(|source| environment_errno("stating link target for", relative_link, source))
 }
 
@@ -846,9 +1069,19 @@ fn environment(operation: &'static str, path: &Path, source: io::Error) -> WalkE
 
 #[cfg(test)]
 mod tests {
+    use super::faults::{Answer, Stage};
     use super::*;
     use crate::scratch::Scratch;
     use std::io::{Cursor, Read};
+
+    /// A walk of `root` whose paging window holds the foreign edit `armed`
+    /// names. The arm is read while a page is stat'd, which is after
+    /// construction, so a walk armed here meets it at its first page.
+    fn walk_armed(root: &Path, armed: &'static [(Stage, Answer)]) -> Walk {
+        let mut walk = walk(root, &[]).expect("walk");
+        walk.faults = WalkFaults::at(armed);
+        walk
+    }
 
     fn paths(walk: Walk) -> Vec<(PathBuf, Option<SkipReason>)> {
         walk.map(|fact| match fact.expect("walk fact") {
@@ -986,6 +1219,12 @@ mod tests {
         );
     }
 
+    /// **A link standing where the page listed a directory is never traversed.**
+    /// The open refuses to follow it, so the name is one the walk read nothing at
+    /// — the kind change any other replacement in this window is — and nothing
+    /// outside the vault is reached through it. Containment holds because the
+    /// descent never follows a name it did not open as a directory, not because
+    /// the walk stops.
     #[test]
     #[allow(clippy::disallowed_methods)]
     fn replacing_a_pending_directory_with_an_outbound_link_cannot_escape() {
@@ -1005,14 +1244,10 @@ mod tests {
         std::os::unix::fs::symlink("../../outside", scratch.at("z-pending"))
             .expect("replacement link");
 
-        let error = facts
-            .next()
-            .expect("pending position")
-            .expect_err("nofollow refuses replacement");
-        assert!(error.to_string().contains("z-pending"), "{error}");
-        assert!(
-            facts.all(|fact| fact.expect("later fact").path().as_path()
-                != Path::new("z-pending/canary.md"))
+        assert_eq!(
+            paths(facts),
+            vec![(PathBuf::from("z-pending"), Some(SkipReason::Vanished))],
+            "the replacement was followed or the walk concluded something about it"
         );
     }
 
@@ -1154,6 +1389,280 @@ mod tests {
         );
     }
 
+    /// **The paging window converges on absence.** A name the listing returned
+    /// and a deletion that lands before its stat are two observations of a tree
+    /// other writers are editing, and the second one is the current truth: there
+    /// is no entry there. The walk states the name as one it read nothing at and
+    /// keeps going.
+    ///
+    /// The forbidden shape is a refusal, which reports one foreign deletion as a
+    /// broken environment and takes the whole enumeration — every sibling
+    /// included — down with it. **The other forbidden shape is silence**: a name
+    /// passed over with no notation is one a consumer that prunes by enumeration
+    /// reads as a name this walk read and found nothing under.
+    #[test]
+    fn an_entry_deleted_between_the_listing_and_its_stat_leaves_the_page() {
+        let scratch = Scratch::new("walk-page-vanishes");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Vanishes)],
+        ));
+        assert_eq!(
+            facts,
+            vec![
+                (PathBuf::from("a.md"), Some(SkipReason::Vanished)),
+                (PathBuf::from("b.md"), None),
+                (PathBuf::from("c.md"), None)
+            ]
+        );
+    }
+
+    /// **A kind change in the same window is the same vanishing.** The name the
+    /// listing named was unlinked and something else took it, so what stands
+    /// there is not the entry that was listed — and the walk states it exactly as
+    /// it states a name that is simply gone.
+    #[test]
+    fn an_entry_whose_kind_changed_in_the_window_leaves_the_page_too() {
+        let scratch = Scratch::new("walk-page-replaced");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Replaced)],
+        ));
+        assert_eq!(
+            facts,
+            vec![
+                (PathBuf::from("a.md"), Some(SkipReason::Vanished)),
+                (PathBuf::from("b.md"), None),
+                (PathBuf::from("c.md"), None)
+            ]
+        );
+    }
+
+    /// **A directory that leaves a page is a root the walk never entered**, and
+    /// it says so. The entries beside it are read as usual — the page's other
+    /// stats are the machine's own — and nothing under the root is yielded,
+    /// because there is nothing there to yield.
+    ///
+    /// This is the half of the convergence with a subtree behind it. A consumer
+    /// concluding from this enumeration can prune what the vault no longer holds
+    /// under that name and must still hold back everything it decides from
+    /// *reading* the place, because this walk read none of it.
+    #[test]
+    fn a_directory_that_leaves_a_page_is_a_root_the_walk_read_nothing_under() {
+        let scratch = Scratch::new("walk-page-vanishing-directory");
+        scratch.place("a.md", b"x");
+        scratch.directory("vault/sub");
+        scratch.place("sub/x.md", b"x");
+        scratch.place("sub/y.md", b"y");
+        scratch.place("z.md", b"z");
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        walk.faults = WalkFaults::at(&[(Stage::Page, Answer::Vanishes)])
+            .over(super::faults::Reach::Directory);
+        assert_eq!(
+            paths(walk),
+            vec![
+                (PathBuf::from("a.md"), None),
+                (PathBuf::from("sub"), Some(SkipReason::Vanished)),
+                (PathBuf::from("z.md"), None),
+            ]
+        );
+    }
+
+    /// **A directory the page listed and something else replaced is the same
+    /// root.** The name still holds a thing, and it is not the thing the listing
+    /// named, so the walk read nothing at the name and nothing under it.
+    #[test]
+    fn a_directory_whose_kind_changed_in_the_window_is_the_same_root() {
+        let scratch = Scratch::new("walk-page-replaced-directory");
+        scratch.place("a.md", b"x");
+        scratch.directory("vault/sub");
+        scratch.place("sub/x.md", b"x");
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        walk.faults = WalkFaults::at(&[(Stage::Page, Answer::Replaced)])
+            .over(super::faults::Reach::Directory);
+        assert_eq!(
+            paths(walk),
+            vec![
+                (PathBuf::from("a.md"), None),
+                (PathBuf::from("sub"), Some(SkipReason::Vanished)),
+            ]
+        );
+    }
+
+    /// **The widest of the walk's windows converges the same way.** A page is
+    /// stat'd whole and hands its entries out one at a time, so a directory it
+    /// listed is opened only after every earlier entry has been consumed — the
+    /// span between that stat and that open is the whole of the reading in
+    /// between, not one call. A writer removing the directory in it leaves
+    /// nothing to enter, which is the answer a walk begun now gives.
+    ///
+    /// No seam arranges this one: the window is wide enough to reach from a test.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing a listed directory.
+    fn a_directory_removed_before_its_own_open_is_a_root_the_walk_read_nothing_under() {
+        let scratch = Scratch::new("walk-descent-vanishes");
+        scratch.place("a.md", b"x");
+        scratch.directory("vault/z-dir");
+        scratch.place("z-dir/inside.md", b"inside");
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        let first = walk.next().expect("the first fact").expect("a file fact");
+        assert_eq!(first.path().as_path(), Path::new("a.md"));
+        fs::remove_dir_all(scratch.at("z-dir")).expect("remove the listed directory");
+
+        assert_eq!(
+            paths(walk),
+            vec![(PathBuf::from("z-dir"), Some(SkipReason::Vanished))]
+        );
+    }
+
+    /// The same window, closed by something that is not a directory taking the
+    /// name. Nothing there is the entry the page listed, so the walk enters
+    /// nothing and states the root it did not enter.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: replacing a listed directory.
+    fn a_directory_replaced_before_its_own_open_is_the_same_root() {
+        let scratch = Scratch::new("walk-descent-replaced");
+        scratch.place("a.md", b"x");
+        scratch.directory("vault/z-dir");
+        scratch.place("z-dir/inside.md", b"inside");
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        walk.next().expect("the first fact").expect("a file fact");
+        fs::remove_dir_all(scratch.at("z-dir")).expect("remove the listed directory");
+        fs::write(scratch.at("z-dir"), b"a file now").expect("a file takes the name");
+
+        assert_eq!(
+            paths(walk),
+            vec![(PathBuf::from("z-dir"), Some(SkipReason::Vanished))]
+        );
+    }
+
+    /// **A machine that will not answer at the descent still refuses.** A
+    /// directory whose open is denied says nothing about whether it is there, so
+    /// the walk ends rather than reporting a root it read nothing under.
+    #[test]
+    fn a_directory_the_machine_will_not_open_refuses_the_walk() {
+        let scratch = Scratch::new("walk-descent-denied");
+        scratch.place("a.md", b"x");
+        let folder = scratch.directory("vault/z-dir");
+        scratch.place("z-dir/inside.md", b"inside");
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        walk.next().expect("the first fact").expect("a file fact");
+        scratch.set_mode(&folder, 0o000);
+
+        let outcome = walk.next().expect("the directory's position");
+        scratch.set_mode(&folder, 0o755);
+        let Err(error) = outcome else {
+            panic!("a directory the machine would not open read as a root that left")
+        };
+        assert!(error.to_string().contains("z-dir"), "{error}");
+    }
+
+    /// **A link read after the name stopped holding one converges too.** The
+    /// stat that named the entry a symbolic link and the read of that link are
+    /// two observations, and a writer between them leaves either no name at all
+    /// or a name that is not a link — `ENOENT` and `EINVAL`. Both say the walk
+    /// read nothing there.
+    #[test]
+    fn a_link_that_stopped_being_one_is_a_name_the_walk_read_nothing_at() {
+        let scratch = Scratch::new("walk-link-window");
+        scratch.place("ordinary.md", b"not a link");
+        let root = scratch.at("");
+        let normalizer = PathNormalizer::detect(&root).expect("normalizer");
+        let root_fd = Arc::new(open(&root, directory_flags(), Mode::empty()).expect("root fd"));
+
+        for name in ["ordinary.md", "never-existed.md"] {
+            let observed = classify_link(
+                &root_fd,
+                Path::new(name),
+                &root_fd,
+                OsStr::new(name),
+                &normalizer,
+            )
+            .expect("a name that holds no link is not a machine failure");
+            assert_eq!(observed, None, "{name} read as a link");
+        }
+    }
+
+    /// **A machine that will not answer still refuses, at this window too.** A
+    /// denied stat says nothing about whether an entry is there, and converging
+    /// on absence would let a revoked permission prune every row under the
+    /// directory. Only absence converges; every other error number ends the
+    /// walk.
+    #[test]
+    fn an_entry_the_machine_will_not_stat_refuses_the_walk() {
+        let scratch = Scratch::new("walk-page-denied");
+        for name in ["a.md", "b.md", "c.md"] {
+            scratch.place(name, b"x");
+        }
+
+        let mut facts = walk_armed(&scratch.at(""), &[(Stage::Page, Answer::Denied)]);
+        let error = facts
+            .next()
+            .expect("the page's position")
+            .expect_err("a stat the machine refused");
+        assert!(error.to_string().contains("a.md"), "{error}");
+        assert!(facts.next().is_none(), "a walk error must be terminal");
+    }
+
+    /// **A page holds one entry per name it covered, so the run it covered and
+    /// the entries it hands out are one list.** The next page of the same
+    /// directory starts after the last name this one listed, and a name that
+    /// went away inside the page's own window is one of those names — so it
+    /// neither hides the names between it and the page boundary nor yields the
+    /// page's own tail twice.
+    #[test]
+    fn a_page_holding_a_vanished_name_pages_the_rest_of_the_directory_once() {
+        let scratch = Scratch::new("walk-page-vanishes-wide");
+        for index in 0..(FRONTIER_PAGE + 1) {
+            scratch.place(&format!("{index:04}.md"), b"x");
+        }
+
+        let facts = paths(walk_armed(
+            &scratch.at(""),
+            &[(Stage::Page, Answer::Vanishes)],
+        ));
+        let mut expected: Vec<(PathBuf, Option<SkipReason>)> =
+            vec![(PathBuf::from("0000.md"), Some(SkipReason::Vanished))];
+        expected.extend(
+            (1..(FRONTIER_PAGE + 1)).map(|index| (PathBuf::from(format!("{index:04}.md")), None)),
+        );
+        assert_eq!(facts, expected);
+    }
+
+    /// **A subtree walk answers a root that left the same way.** The caller
+    /// reached this scope from an observation of its own, and a writer between
+    /// that observation and this descent is the vault evolving: the walk states
+    /// the root it read nothing under and yields nothing else.
+    #[test]
+    fn a_subtree_whose_root_is_gone_is_a_root_the_walk_read_nothing_under() {
+        let scratch = Scratch::new("walk-subtree-vanished");
+        scratch.place("keep.md", b"keep");
+        scratch.place("file.md", b"a file, not a directory");
+
+        assert_eq!(
+            paths(walk_subtree(&scratch.at(""), Path::new("gone"), &[]).expect("walk")),
+            vec![(PathBuf::from("gone"), Some(SkipReason::Vanished))]
+        );
+        assert_eq!(
+            paths(walk_subtree(&scratch.at(""), Path::new("file.md/under"), &[]).expect("walk")),
+            vec![(PathBuf::from("file.md"), Some(SkipReason::Vanished))],
+            "a component that is not a directory read as a machine failure"
+        );
+    }
+
     #[test]
     fn retained_file_facts_share_one_root_descriptor() {
         let scratch = Scratch::new("walk-fact-descriptors");
@@ -1189,7 +1698,7 @@ mod tests {
         let mut frontier = DirectoryFrontier::new(root_fd.clone(), Path::new(""));
         let mut count = 0;
         while frontier
-            .next_pending(&root_fd, &normalizer, &exclusions)
+            .next_pending(&root_fd, &normalizer, &exclusions, &WalkFaults::default())
             .expect("page")
             .is_some()
         {

@@ -273,26 +273,23 @@ impl Answer {
 
 /// Refuse an arm that names something this seam cannot answer.
 ///
-/// Two spellings are unreadable rather than approximately right: a stage
-/// together with an answer it does not carry, and one stage armed twice. The
-/// second would otherwise be the one mistake that passes silently — the seam
-/// reads a stage's first answer, so the second pair a harness spelled would
-/// simply not happen, and the case would report on a condition it never met.
+/// Two spellings are unreadable rather than approximately right. A stage armed
+/// twice is the one every seam here refuses, through
+/// [`crate::faults::refuse_a_stage_armed_twice`]. The other is this seam's own:
+/// its stages do not all carry the same answers, so a pair naming a stage
+/// together with an answer it does not answer is a case stated over a condition
+/// nothing meets.
 #[cfg(any(test, feature = "induced-failure"))]
 fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
-    for (index, (stage, answer)) in armed.iter().enumerate() {
+    for (stage, answer) in armed {
         assert!(
             stage.answers(*answer),
             "the {} stage in {source} answers no `{}`",
             stage.name(),
             answer.name()
         );
-        assert!(
-            !armed[..index].iter().any(|(earlier, _)| earlier == stage),
-            "the {} stage is armed twice in {source}",
-            stage.name()
-        );
     }
+    crate::faults::refuse_a_stage_armed_twice(armed, |stage| stage.name(), source);
 }
 
 /// One fact about a subscription that turns true once and never back, shared
@@ -427,7 +424,7 @@ impl WatchFaults {
         {
             WatchFaults {
                 armed: armed::stages(),
-                hits: armed::hits().cloned(),
+                hits: crate::faults::armed_hits().cloned(),
                 barrier_recorded: Arc::default(),
             }
         }
@@ -605,32 +602,14 @@ impl StreamArm {
 
 /// Append one record saying which boundary fired and how it answered.
 ///
-/// A harness that named no record file wants none. A harness that named one
-/// wants every firing in it, so a file that cannot be written ends the process
-/// rather than leaving a parent to read the silence as a boundary the watcher
-/// never reached. That is the one place this seam parts from the write
-/// protocol's, whose arms fire in a process that is already dying.
-///
-/// **Deliberately an abort rather than a panic.** One of the three boundaries
-/// answers on the backend's own delivery thread, where an unwind ends that
-/// thread and leaves the subscription standing — which is the same silence,
-/// reached a different way. Nothing here is recoverable in any case: the
-/// harness named a file this process cannot write, and every later arm would
-/// meet it too. The reason goes to standard error first, because an abort says
-/// nothing on its own.
+/// A file this process named and cannot write ends the process rather than
+/// leaving a parent to read the silence as a boundary the watcher never reached.
+/// That reading is [`crate::faults::record_or_abort`], shared with the walk's
+/// seam, and it is the one place both part from the write protocol's, whose arms
+/// fire in a process that is already dying.
 #[cfg(any(test, feature = "induced-failure"))]
 fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
-    let Some(hits) = hits else {
-        return;
-    };
-    if let Err(error) = crate::faults::append_record(hits, SEAM, stage.name(), answer.name()) {
-        eprintln!(
-            "norn-fs: the {} arm could not record itself in {}: {error}",
-            stage.name(),
-            hits.display()
-        );
-        std::process::abort();
-    }
+    crate::faults::record_or_abort(hits, SEAM, stage.name(), answer.name());
 }
 
 /// The arm this process was started under.
@@ -644,7 +623,6 @@ mod armed {
     use std::sync::OnceLock;
 
     use super::{ARMED_STAGES, Answer, Stage, refuse_an_unreadable_arm};
-    use crate::faults::ARM_HITS;
 
     /// The stages this process is armed at, in the order they were named.
     pub(super) fn stages() -> &'static [(Stage, Answer)] {
@@ -659,32 +637,16 @@ mod armed {
         })
     }
 
-    /// The file fired arms record themselves in, where this process named one.
-    pub(super) fn hits() -> Option<&'static std::path::PathBuf> {
-        static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
-        HITS.get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
-            .as_ref()
-    }
-
-    /// Read `stage=answer` pairs, and refuse a spelling this seam cannot answer.
-    ///
-    /// A misspelled arm that quietly armed nothing would pass every bar it was
-    /// supposed to carry, so an unreadable pair ends the process saying so.
+    /// Read `stage=answer` pairs, through the grammar all three seams share, and
+    /// then refuse the pairing this seam alone can be given wrong.
     pub(super) fn parse(spelling: &str) -> Vec<(Stage, Answer)> {
-        let armed: Vec<(Stage, Answer)> = spelling
-            .split(',')
-            .filter(|pair| !pair.is_empty())
-            .map(|pair| {
-                let (stage, answer) = pair
-                    .split_once('=')
-                    .unwrap_or_else(|| panic!("`{pair}` in {ARMED_STAGES} is not `stage=answer`"));
-                let stage = Stage::named(stage)
-                    .unwrap_or_else(|| panic!("`{stage}` in {ARMED_STAGES} names no stage"));
-                let answer = Answer::named(answer)
-                    .unwrap_or_else(|| panic!("`{answer}` in {ARMED_STAGES} names no answer"));
-                (stage, answer)
-            })
-            .collect();
+        let armed = crate::faults::read_armed_pairs(
+            spelling,
+            ARMED_STAGES,
+            Stage::named,
+            Answer::named,
+            |stage| stage.name(),
+        );
         refuse_an_unreadable_arm(&armed, ARMED_STAGES);
         armed
     }

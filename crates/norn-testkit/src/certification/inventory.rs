@@ -393,13 +393,35 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: Some(INDUCED_FAILURE),
     },
     Case {
+        id: "induced-paging-window-vanished-entry-converges",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "an entry unlinked between a directory's listing and its stat is a name the walk \
+                 states it read nothing at, and the heal completes with every other document \
+                 derived",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "induced-paging-window-denied-stat-refuses",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a paging stat the machine refuses leaves the entry untrusted naming the path, \
+                 prunes nothing, and reaches no rung 3 — the window converges on absence and on \
+                 nothing else",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
         id: "induced-host-arm-attestation",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "one child role serves both kinds of arm a host case gives it — the tear a torn \
-                 case arms before its demand, and the watcher condition a watcher case arms \
+        states: "one child role serves every kind of arm a host case gives it — the tear a torn \
+                 case arms before its demand, and the watcher and paging conditions a case arms \
                  outside the process — and the control spawned with nothing armed records \
-                 nothing, which is what makes every arm assertion beside either kind mean \
+                 nothing, which is what makes every arm assertion beside any of them mean \
                  something",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   the_child_role_attaches_under_whatever_it_was_armed_at",
