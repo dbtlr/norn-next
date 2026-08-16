@@ -456,7 +456,10 @@ pub(crate) struct StreamArm {
 impl StreamArm {
     /// What the watcher ingests in place of `delivered`.
     pub(crate) fn answer(&mut self, delivered: notify::Result<Event>) -> notify::Result<Event> {
-        if !self.boundary.was_reached() {
+        // The owed check comes first: an unowed arm — every delivery in an
+        // unarmed watch — pays nothing for the boundary, whose load matters
+        // only while an answer is still held.
+        if self.owed.is_none() || !self.boundary.was_reached() {
             return delivered;
         }
         let event = match delivered {
@@ -830,7 +833,9 @@ mod tests {
     }
 
     /// The same refusals bind an arm a case spells in code, which is the other
-    /// door onto the same vocabulary.
+    /// door onto the same vocabulary. The door itself is what is held here —
+    /// [`WatchFaults::at`], not the refusal function — so a constructor that
+    /// stopped asking would fail this case rather than inherit its green.
     #[test]
     fn an_arm_spelled_in_code_meets_the_same_refusals() {
         for armed in [
@@ -841,7 +846,7 @@ mod tests {
             ][..],
         ] {
             assert!(
-                std::panic::catch_unwind(|| refuse_an_unreadable_arm(armed, "this arm")).is_err(),
+                std::panic::catch_unwind(|| WatchFaults::at(armed)).is_err(),
                 "{armed:?} was read as an arm"
             );
         }
