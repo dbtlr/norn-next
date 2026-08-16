@@ -91,9 +91,9 @@
 //!
 //! `norn-host`'s lockdown suite arms one answer per case in a child process,
 //! attaches a real host over a real tree, and states what the heal owes: an
-//! entry that vanishes is dropped and the heal completes with every other
-//! document derived, and an entry the machine will not stat refuses the heal and
-//! leaves the vault entry untrusted. This crate's own cases arm the seam in code
+//! entry that vanishes leaves the heal completing with every other document
+//! derived, and an entry the machine will not stat refuses the heal and leaves
+//! the vault entry untrusted. This crate's own cases arm the seam in code
 //! and read the page itself, which is the observation a host cannot make.
 
 use std::sync::Arc;
