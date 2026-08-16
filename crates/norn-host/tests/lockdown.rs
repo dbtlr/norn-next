@@ -1978,7 +1978,7 @@ fn walk_under_the_arm(root: &Path, condition: &str) {
 /// The armed attach: one entry leaves the page, and the heal converges over the
 /// rest of the vault rather than refusing the whole of it.
 fn an_entry_that_left_a_page_still_serves_the_vault(vault: &Vault) {
-    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let serving = vault.serving_undrained(ProductionPolicy::new(64, 64).unwrap());
     let opening = serving.evidence();
     let lease = serve_or_report_the_refusal(&serving, vault.name());
 
@@ -1999,7 +1999,7 @@ fn an_entry_that_left_a_page_still_serves_the_vault(vault: &Vault) {
 /// The armed attach: the machine will not stat a name the listing named, so the
 /// heal refuses and the entry stays untrusted naming it.
 fn a_paging_stat_the_machine_refused_withdraws_the_entry(vault: &Vault) {
-    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let serving = vault.serving_undrained(ProductionPolicy::new(64, 64).unwrap());
     let opening = serving.evidence();
     let _lease = serving
         .demand(vault.name(), AttachMode::Durable)
@@ -2361,6 +2361,32 @@ impl Vault {
 
     /// A host serving this vault, holding the real-watcher lease while it does.
     fn serving(&self, policy: ProductionPolicy) -> Serving {
+        self.serving_polling_every(policy, Duration::from_millis(20))
+    }
+
+    /// A host whose dispatcher drains no delivery inside the life of the child
+    /// that takes it.
+    ///
+    /// **What a paging case reads is the attach heal's own answer.** A delivery
+    /// drained beside it schedules a scoped heal, and a scoped heal walks again
+    /// with the process's one arm already spent — deriving the very entry the
+    /// case is stated over, late enough to read as a page that never dropped it.
+    /// macOS can deliver a change made before the watch existed after the
+    /// boundary that proves coverage, so that ordering is a real one over a tree
+    /// its parent wrote a moment before the spawn, rather than a hypothetical.
+    ///
+    /// The interval is longer than the child, so no drain comes. Nothing else
+    /// moves: coverage is installed and synchronized the way every other case
+    /// installs it, and the heal that answers the arm is the production one.
+    fn serving_undrained(&self, policy: ProductionPolicy) -> Serving {
+        self.serving_polling_every(policy, Duration::from_secs(3600))
+    }
+
+    fn serving_polling_every(
+        &self,
+        policy: ProductionPolicy,
+        watch_poll_interval: Duration,
+    ) -> Serving {
         let entry = Entry::new(
             self.name.clone(),
             VaultRoot::new(self.path()).expect("a vault root"),
@@ -2378,7 +2404,7 @@ impl Vault {
             LifecyclePolicy {
                 idle_after: Duration::from_secs(3600),
                 worker_slots: 1,
-                watch_poll_interval: Duration::from_millis(20),
+                watch_poll_interval,
             },
         )
         .expect("a production host");
