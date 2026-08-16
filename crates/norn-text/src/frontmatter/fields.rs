@@ -53,6 +53,17 @@
 //! which is an ordinary absorbed tail, or in a block indented throughout,
 //! which names no top-level line at all and refuses on its unlocatable keys.
 //!
+//! # The refusal names its shape
+//!
+//! Those three ways to lose the split — a strip that dropped an entry, a
+//! parsed key no candidate line locates uniquely, a top-level `?` indicator —
+//! ask for three different edits to the block, so the refusal is a
+//! [`SplitRefusal`] naming which one it is rather than a bare absence. The
+//! type carries the fact and nothing else it is read for: the key that could
+//! not be located, the position the indicator sits at. Prose belongs to the
+//! layer that delivers the refusal, which is why [`SplitRefusal::problem`] is
+//! this crate's own account rather than the only one there can be.
+//!
 //! # Blank lines and comments end a field
 //!
 //! A `line_range` stops before the run of blank lines and column-0 comments
@@ -73,7 +84,65 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::frontmatter::extract::MERGE_KEY;
+use crate::span::SourceSpan;
 use crate::value::{KeyIndex, StripReport, Value};
+
+/// Why a block's fields could not be split into spans, and so why every field
+/// edit into that block refuses.
+///
+/// Each variant is a different edit to the document. A dropped entry is a key
+/// the value model has no shape for; an unlocated key is a scan and a parser
+/// reading the same line two ways; an explicit-key indicator is a spelling the
+/// split has no attribution for. Telling a caller only that the split failed
+/// leaves it guessing which of the three to fix, so the refusal carries which
+/// one it is and what it was about.
+///
+/// Plain rather than `#[non_exhaustive]`: a consumer that has not decided what
+/// a new way of losing the split means to it should fail to compile rather
+/// than fall into a default arm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SplitRefusal {
+    /// The value model dropped entries the scan still sees, so a line the
+    /// parser no longer names would be absorbed into a neighbouring field and
+    /// deleted with it.
+    UncleanStrip { dropped_entries: usize },
+    /// A parsed key that no candidate key line locates uniquely: `candidates`
+    /// is how many lines the scan read as spelling this name, and any count
+    /// other than one is a disagreement.
+    KeyNotLocated { key: String, candidates: usize },
+    /// A top-level explicit-key `?` indicator, which writes a key on a line
+    /// carrying no `key:` separator and so leaves the scan nothing to
+    /// attribute. The span is where the indicator sits in the document.
+    ExplicitKeyIndicator { at: SourceSpan },
+}
+
+impl SplitRefusal {
+    /// This crate's own account of the refusal, which a consumer carries
+    /// beside the state when it reports one.
+    ///
+    /// The state is what the refusal *is*; this is one rendering of it. A
+    /// layer with a different audience renders its own from the same fact.
+    pub fn problem(&self) -> String {
+        match self {
+            SplitRefusal::UncleanStrip { dropped_entries: 1 } => {
+                "the value model dropped an entry the scan still sees".to_string()
+            }
+            SplitRefusal::UncleanStrip { dropped_entries } => {
+                format!("the value model dropped {dropped_entries} entries the scan still sees")
+            }
+            SplitRefusal::KeyNotLocated { key, candidates: 0 } => {
+                format!("the parsed key {key:?} is on no candidate key line")
+            }
+            SplitRefusal::KeyNotLocated { key, candidates } => format!(
+                "the parsed key {key:?} is on {candidates} candidate key lines and belongs to one"
+            ),
+            SplitRefusal::ExplicitKeyIndicator { at } => format!(
+                "a top-level explicit-key `?` indicator at line {}, column {}",
+                at.line, at.column
+            ),
+        }
+    }
+}
 
 /// How a field's value is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,25 +184,32 @@ pub struct Field {
 }
 
 /// One field per top-level key in `content[frontmatter_range]`, in document
-/// order, or `None` when the block's spans cannot be trusted.
+/// order, or a [`SplitRefusal`] when the block's spans cannot be trusted.
 ///
-/// `None` and an empty split are different answers and the distinction is
+/// A refusal and an empty split are different answers and the distinction is
 /// load-bearing: a block holding no fields is fully understood and takes an
 /// appended one, while a block whose split was refused has lines nothing can
 /// attribute and refuses every edit. A block whose only key the value model
 /// dropped reaches both descriptions by counting, and only one of them is
 /// true.
+///
+/// The first disagreement found is the one reported. Which shapes refuse is
+/// what the gates below decide and the order they run in does not move that
+/// set; it decides only which cause a block failing several ways is named
+/// with.
 pub(crate) fn field_spans(
     content: &str,
     frontmatter_range: Range<usize>,
     value: &Value,
     strip: StripReport,
-) -> Option<Vec<Field>> {
+) -> Result<Vec<Field>, SplitRefusal> {
     let Some(map) = value.as_map() else {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     };
     if !strip.is_clean() {
-        return None;
+        return Err(SplitRefusal::UncleanStrip {
+            dropped_entries: strip.dropped_keys,
+        });
     }
 
     let candidates = scan_key_lines(content, &frontmatter_range)?;
@@ -142,11 +218,14 @@ pub(crate) fn field_spans(
     for candidate in &candidates {
         *name_counts.entry(candidate.name.as_str()).or_insert(0) += 1;
     }
-    let every_key_uniquely_located = map
+    let mislocated = map
         .keys()
-        .all(|key| name_counts.get(key).copied() == Some(1));
-    if !every_key_uniquely_located {
-        return None;
+        .find(|key| name_counts.get(*key).copied() != Some(1));
+    if let Some(key) = mislocated {
+        return Err(SplitRefusal::KeyNotLocated {
+            key: key.to_string(),
+            candidates: name_counts.get(key).copied().unwrap_or(0),
+        });
     }
 
     // Every scanned line asks the mapping about its key, so the mapping is
@@ -196,7 +275,7 @@ pub(crate) fn field_spans(
         });
     }
 
-    Some(fields)
+    Ok(fields)
 }
 
 /// The trailing lines of `slice` that are whole blank lines or column-0
@@ -345,8 +424,8 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 }
 
 /// Identify every top-level `key:` line and the scanner's candidate value span
-/// for it, or `None` where the block writes a top-level `?` indicator and no
-/// line attribution holds.
+/// for it, or a [`SplitRefusal`] where the block writes a top-level `?`
+/// indicator and no line attribution holds.
 ///
 /// A multi-line value whose continuation can sit at column 0 — an unclosed
 /// flow collection or quoted scalar — is stepped over so its continuation
@@ -366,7 +445,10 @@ pub(crate) fn reparse(text: &str) -> Option<Value> {
 /// truncates the entry above inside that entry's own value. The scan does not
 /// answer for that last case: what refuses the edits over such a split is the
 /// post-image re-read of the bytes a write would produce.
-fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec<RawKeyLine>> {
+fn scan_key_lines(
+    content: &str,
+    frontmatter_range: &Range<usize>,
+) -> Result<Vec<RawKeyLine>, SplitRefusal> {
     let yaml = &content[frontmatter_range.clone()];
     let lines: Vec<&str> = yaml.split_inclusive('\n').collect();
     let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len() + 1);
@@ -389,7 +471,9 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec
         let trimmed_line = line.trim_end_matches(['\r', '\n']);
 
         if opens_explicit_key(trimmed_line) {
-            return None;
+            return Err(SplitRefusal::ExplicitKeyIndicator {
+                at: SourceSpan::at(content, line_start),
+            });
         }
 
         let Some((name, after_colon, spelling)) = parse_top_level_key(trimmed_line) else {
@@ -417,7 +501,7 @@ fn scan_key_lines(content: &str, frontmatter_range: &Range<usize>) -> Option<Vec
         }
     }
 
-    Some(fields)
+    Ok(fields)
 }
 
 /// Whether `line` opens an entry in YAML's explicit-key form: the `?`

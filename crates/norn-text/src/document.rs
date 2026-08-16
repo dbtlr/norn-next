@@ -8,7 +8,9 @@ use crate::diagnostic::{Diagnostic, DiagnosticCode};
 use crate::frontmatter::extract::{
     BOM, BlockRefusal, FRONTMATTER_MAX_BYTES, closed_block, extract,
 };
-use crate::frontmatter::fields::{Field, ValueStyle, classify_value, field_spans, reparse};
+use crate::frontmatter::fields::{
+    Field, SplitRefusal, ValueStyle, classify_value, field_spans, reparse,
+};
 use crate::frontmatter::render::{
     RenderError, ScalarStyle, render_flow_sequence, render_key, render_scalar_entry,
     render_scalar_in_span, render_sequence_entry,
@@ -54,7 +56,12 @@ pub enum EditError {
     /// and the parser disagree somewhere in it, so no field in it is
     /// addressable. The value model still reads whole; the reads built on
     /// field spans report nothing. No edit is attempted.
-    FrontmatterNotEditable,
+    ///
+    /// `cause` names which disagreement it was, because the three shapes ask
+    /// for three different edits to the block.
+    FrontmatterNotEditable {
+        cause: SplitRefusal,
+    },
     /// This field's value cannot be named as one span. Reads are unaffected;
     /// the edit is not attempted.
     FieldNotEditable {
@@ -106,9 +113,11 @@ impl fmt::Display for EditError {
                 f,
                 "the frontmatter block holds a {kind}, and only a mapping has fields"
             ),
-            EditError::FrontmatterNotEditable => f.write_str(
+            EditError::FrontmatterNotEditable { cause } => write!(
+                f,
                 "the frontmatter block's field spans cannot be trusted, so no field in it can be \
-                 edited",
+                 edited ({})",
+                cause.problem()
             ),
             EditError::FieldNotEditable { field } => {
                 write!(f, "the field {field:?} cannot be edited in place")
@@ -182,9 +191,10 @@ pub struct Document<'a> {
     body: &'a str,
     body_start: usize,
     fields: Vec<Field>,
-    /// The block parsed and the field layer refused to split it, so no line in
-    /// it is safely attributable to a field and every edit into it refuses.
-    spans_untrusted: bool,
+    /// Why the field layer refused to split the block, when it did: no line in
+    /// it is then safely attributable to a field and every edit into it
+    /// refuses, carrying this cause.
+    split_refusal: Option<SplitRefusal>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -198,19 +208,26 @@ impl<'a> Document<'a> {
             (Some(value), Some(range)) => {
                 field_spans(source, range.clone(), value, extraction.strip)
             }
-            _ => Some(Vec::new()),
+            _ => Ok(Vec::new()),
         };
-        let spans_untrusted = located.is_none();
+        let split_refusal = located.as_ref().err().cloned();
         let fields = located.unwrap_or_default();
-        if spans_untrusted {
-            diagnostics.push(Diagnostic::warning(
-                DiagnosticCode::FrontmatterNotEditable,
-                "the frontmatter block's field spans cannot be trusted, so field edits refuse and \
-                 no field text is reported; the block still reads whole",
-            ));
+        // The message states the contract that holds for every refused split;
+        // the detail is this block's own cause, rendered here because prose
+        // belongs to the layer that delivers it. One code covers all three
+        // causes: a detail string is advisory prose no consumer matches on.
+        if let Some(cause) = &split_refusal {
+            diagnostics.push(
+                Diagnostic::warning(
+                    DiagnosticCode::FrontmatterNotEditable,
+                    "the frontmatter block's field spans cannot be trusted, so field edits refuse \
+                     and no field text is reported; the block still reads whole",
+                )
+                .with_detail(cause.problem()),
+            );
         }
         Document {
-            spans_untrusted,
+            split_refusal,
             source,
             byte_order_mark: extraction.byte_order_mark,
             line_ending: LineEnding::of(source),
@@ -546,8 +563,10 @@ impl<'a> Document<'a> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
         }
-        if self.spans_untrusted {
-            return Err(EditError::FrontmatterNotEditable);
+        if let Some(cause) = &self.split_refusal {
+            return Err(EditError::FrontmatterNotEditable {
+                cause: cause.clone(),
+            });
         }
         let Some(located) = self.field(field) else {
             return Err(self.absent_or_not_editable(field));
@@ -687,8 +706,10 @@ impl<'a> Document<'a> {
         if self.frontmatter_broken() {
             return Err(EditError::FrontmatterUnreadable);
         }
-        if self.spans_untrusted {
-            return Err(EditError::FrontmatterNotEditable);
+        if let Some(cause) = &self.split_refusal {
+            return Err(EditError::FrontmatterNotEditable {
+                cause: cause.clone(),
+            });
         }
         match &self.frontmatter {
             Some(Value::Map(_)) | Some(Value::Null) | None => {}
