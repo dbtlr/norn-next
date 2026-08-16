@@ -1018,16 +1018,22 @@ const OVERFLOWED_DOCUMENTS: usize = 200;
 // The child role
 // ---------------------------------------------------------------------------
 
-/// The attach a torn case runs, in the process that does not survive it.
+/// The attach a torn case runs, in the process that does not survive it — and
+/// the attach a watcher case runs, in the process the arm was read by.
 ///
-/// The tear is armed before the demand, so the heal below is the ordinary
-/// production one: nothing here knows a boundary was armed, and what ends the
-/// process is the store's own check inside the increment the heal ran.
+/// **Every child of this suite is this one test, told apart by what its
+/// environment names.** A tear is armed here, before the demand, so the heal
+/// below is the ordinary production one: nothing in it knows a boundary was
+/// armed, and what ends the process is the store's own check inside the
+/// increment the heal ran. A watcher condition is armed *outside* this process
+/// entirely — the seam reads the variable once, at the first watch this process
+/// establishes — so a child given one runs its own attach and asserts what the
+/// entry owed, in [`watch_under_the_arm`].
 ///
-/// A child started with no tear named arms nothing and runs the same attach to
-/// the end. That is the **control**, and it is what makes every record
-/// assertion beside a tear mean something: same binary, same spawn, same live
-/// record file, and the arm is the only difference between them.
+/// A child started with no tear and no condition named arms nothing and runs the
+/// same attach to the end. That is the **control**, and it is what makes every
+/// record assertion beside a tear mean something: same binary, same spawn, same
+/// live record file, and the arm is the only difference between them.
 #[test]
 fn the_child_role_attaches_under_whatever_it_was_armed_at() {
     let Some(root) = std::env::var_os(CHILD_ROOT) else {
