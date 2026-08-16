@@ -101,8 +101,10 @@ pub struct EvidenceReading {
     pub rebuilds_run: u64,
     /// Watcher polls taken over an attachment, however each one answered.
     ///
-    /// One per entry per pass of the dispatcher's watcher scan, counted where
-    /// the pass reaches the attachment rather than where it likes the answer:
+    /// One per poll of an entry's attachment — a pass of the dispatcher's
+    /// watcher scan, or one of the bounded drains a heal-bearing leg takes on
+    /// its way out — counted where the poll reaches the attachment rather
+    /// than where it likes the answer:
     /// a pass that drains nothing, one that drains facts, and one that reports
     /// the subscription's terminal failure all move it by one. So this is the
     /// positive fact behind a claim about *ticks* — a state that stood still

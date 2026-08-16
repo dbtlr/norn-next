@@ -635,8 +635,9 @@ pub const REQUIRED_CASES: &[Case] = &[
         suite: Suite::TrustTransition,
         lane: Lane::RealWatcher,
         states: "a cause published for coverage a real backend ended stands unchanged across the \
-                 dispatcher's own watcher ticks — hundreds of them, read off the host's account \
-                 of the polls it took rather than inferred from how long the case waited — and \
+                 dispatcher's own watcher ticks — hundreds of them by the cadence, with the \
+                 host's account of the polls it took required to show scores of them across the \
+                 stretch rather than inferring any from how long the case waited — and \
                  nothing is scheduled against the coverage it says is gone: across that stretch \
                  no document is reread, no row written, no changeset committed and no recovery \
                  run. What makes those counters worth reading is the rescan the loss leaves \

@@ -271,10 +271,10 @@ Four arms are met through the seam: `norn-host`'s lockdown suite starts a child 
 watcher seam and attaches a real host over a real backend, so a refused registration leaves an
 attach that acquired nothing and waits for a new demand, a stream that ends withdraws trust
 naming the backend and resumes only through a recovery demand, that same published cause
-stands unchanged across hundreds of the dispatcher's own ticks — counted, from the host's own
-account of the polls it took, rather than inferred from how long the case waited — with
-nothing scheduled against the coverage it says is gone, a backend
-reporting its path set lost publishes the overflow and rereads the whole vault under coverage
+stands unchanged across hundreds of the dispatcher's own ticks — hundreds by the cadence,
+with the host's own account of the polls it took required to show scores of them across the
+stretch — with nothing scheduled against the coverage it says is gone, a backend reporting
+its path set lost publishes the overflow and rereads the whole vault under coverage
 that stays installed, and a synchronization boundary that never arrives leaves the attach
 untrusted under an expired synchronization holding a store it opened and derived nothing
 into. A stream that ends carries two of those rows because one condition owes two different
@@ -290,8 +290,8 @@ delivered after coverage ended — the production seam holds one stream answer p
 establishment, so a second answer on one establishment is unreachable there — and the alias
 reclassification a lost root raises, whose duplicate-root park stands in front of the trust
 state the production case reads. Both seams append to one record file, told apart by the
-`seam` field a record carries, and **that file sits
-outside every watched tree**: it is written while coverage is live, so a record file inside a
+`seam` field a record carries, and **that file sits outside every watched tree**: it is
+written while coverage is live, so a record file inside a
 vault or in a vault's own parent is a filesystem change the watcher reports back into the
 batches a case is judging.
 
