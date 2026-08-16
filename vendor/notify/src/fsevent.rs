@@ -318,10 +318,18 @@ impl FsEventWatcher {
     ///
     /// Every replayed event reaches `event_handler` before `history_done` runs,
     /// so a caller that reads [`current_event_id`] before it adds its paths
-    /// observes every event from that identifier onward: the replay covers the
-    /// interval between the reading and the start of the stream. `history_done`
-    /// runs on the stream's own thread, once per stream start, whether or not
-    /// the interval held any event.
+    /// loses no change to the interval between the reading and the start of the
+    /// stream: every event the daemon had numbered past that identifier is
+    /// replayed. `history_done` runs on the stream's own thread, once per stream
+    /// start, whether or not the interval held any event.
+    ///
+    /// It marks the end of the replay and nothing more. A change whose syscall
+    /// completed before the reading can still arrive after it: `fseventsd`
+    /// numbers an event when it processes the kernel's notification rather than
+    /// when the syscall returned, so such a change can be numbered past the
+    /// reading, fall outside the backlog the stream started from, and be
+    /// delivered on the live side of `history_done`. A caller that needs *the*
+    /// first change after the stream started cannot read it off this marker.
     ///
     /// `since_when` applies to every stream this watcher starts, so a watcher
     /// built here replays the same interval again if its path set changes.

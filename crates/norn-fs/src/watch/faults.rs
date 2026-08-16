@@ -28,16 +28,31 @@
 //!   [`backend`] conversion and the same teardown a platform's own refusal
 //!   travels, so no subscription reaches a caller.
 //! - [`Stage::Stream`] answers at the handler boundary, upstream of ingest and
-//!   the coalescer, by standing in place of an event the backend delivered. It
-//!   is eligible only once the subscription's synchronization boundary has been
-//!   **reached** — a backend establishing itself delivers too, and macOS
-//!   FSEvents replays event history there, so an arm that answered before the
-//!   boundary would be stating a case about establishment while claiming one
-//!   about a live subscription. After that it fires on the next delivered
-//!   event this watcher reports something about, exactly once: an access is a
-//!   delivery on inotify and not on FSEvents, and it reaches no batch on
-//!   either, so an arm spent on one would fire on a caller's own reads on one
-//!   platform and on a change to the vault on the other.
+//!   the coalescer, by standing in place of an event the backend delivered. The
+//!   delivery it stands in place of is **the first one a consumer meets as a
+//!   live change**, and three conditions say which one that is:
+//!
+//!   1. The subscription's synchronization boundary has been **reached**. A
+//!      backend establishing itself delivers too, and macOS FSEvents replays
+//!      event history there, so an arm answered before the boundary states a
+//!      case about establishment.
+//!   2. The consumer's **first heal window has closed**. A consumer takes up
+//!      coverage by healing the tree under it, and everything the backend
+//!      reports across that window is handed back as the heal's own batch
+//!      rather than met as a change — so a delivery there is absorbed by the
+//!      work already running. The boundary alone cannot stand in for this on
+//!      macOS: a change made before the watch was registered can be delivered
+//!      *after* the history marker, because fseventsd numbers an event when it
+//!      processes it rather than when the syscall returned.
+//!   3. The watcher **folds the delivery into a batch**. Ingest's own rule
+//!      answers, shared rather than restated: an access reaches no batch on
+//!      either backend, and neither does a path the coverage plan takes in and
+//!      ingest then discards — a sibling of the vault root, an excluded place.
+//!      An arm spent on one of those would report a failed or overflowing
+//!      stream over a delivery no consumer ever hears about, on whichever
+//!      platform and tree happened to produce it.
+//!
+//!   The first delivery meeting all three takes the arm, exactly once.
 //! - [`Stage::Barrier`] answers at establishment. From there the subscription
 //!   withholds its `Live` publication on every platform path, and the first
 //!   wait for that boundary ends at once — so the caller's authored deadline is
@@ -87,11 +102,12 @@
 //!
 //! `norn-host`'s lockdown suite arms one stage per case in the child process
 //! that case's watch is established in, and it reaches the install and stream
-//! stages: a registration that refuses, a stream that ends and a stream that
-//! reports its path set lost are how the trust transitions a host owes for each
-//! of those are stated at the production path, over a real backend and a real
-//! attachment. That crate's own `induced-failure` feature forwards to this one,
-//! so a lane arming a host has this reader compiled in.
+//! stages. A registration that refuses, a stream that ends, and a stream that
+//! reports its path set lost are the three conditions those cases meet, and
+//! each states the trust transition a host owes for it at the production path,
+//! over a real backend and a real attachment. That crate's own
+//! `induced-failure` feature forwards to this one, so a lane arming a host has
+//! this reader compiled in.
 //!
 //! This crate's own suites are what carry every stage, including the ones no
 //! other crate arms: the in-crate cases over a real backend, and the environment
@@ -130,8 +146,9 @@ const SEAM: &str = "norn-fs/watch";
 pub(crate) enum Stage {
     /// Registering the coverage plan with the platform backend.
     Install,
-    /// The backend's event stream, under coverage that is already installed and
-    /// past its synchronization boundary.
+    /// The backend's event stream, under coverage that is already installed,
+    /// past its synchronization boundary, and taken up by a consumer's first
+    /// heal.
     Stream,
     /// The synchronization boundary that proves coverage is live.
     Barrier,
@@ -269,6 +286,22 @@ fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
     }
 }
 
+/// One fact about a subscription that turns true once and never back, shared
+/// between the thread that establishes coverage and the arm the backend's
+/// delivery handler holds.
+#[derive(Clone, Debug, Default)]
+struct Latch(Arc<AtomicBool>);
+
+impl Latch {
+    fn set(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn holds(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// Whether a subscription has reached its synchronization boundary.
 ///
 /// The watcher crosses that boundary in one of two places depending on the
@@ -277,17 +310,50 @@ fn refuse_an_unreadable_arm(armed: &[(Stage, Answer)], source: &str) {
 /// than published: an armed barrier withholds the publication and the boundary
 /// is still the point past which the backend is reporting current facts, which
 /// is the only thing the stream stage is stated over.
+///
+/// **It is not the point past which every earlier change has been delivered.**
+/// On macOS it cannot be — see [`crate::watch::history_barrier`] — which is why
+/// the stream stage waits for [`HealWindow`] as well.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Boundary(Arc<AtomicBool>);
+pub(crate) struct Boundary(Latch);
 
 impl Boundary {
     /// Say the subscription has crossed it.
     pub(crate) fn reached(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.set();
     }
 
     pub(crate) fn was_reached(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.holds()
+    }
+}
+
+/// Whether a subscription's first heal window has closed.
+///
+/// A consumer takes up coverage by healing the tree under the watch it just
+/// installed, and everything the backend reports across that window belongs to
+/// the heal: [`Subscription::finish_heal`](crate::watch::Subscription::finish_heal)
+/// hands the whole accumulation back as one batch, which the consumer folds
+/// into the work it was already doing. So the first delivery a consumer sees
+/// *as a change* is the first one after that window closes, and that is the
+/// delivery the stream stage stands in place of.
+///
+/// **A subscription nobody heals over never closes it**, and an arm on such a
+/// subscription is never spent. That is the honest reading rather than a gap:
+/// this crate's consumers heal before they act on a delivery, and an arm that
+/// fired before any of them had is stating a case about establishment.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HealWindow(Latch);
+
+impl HealWindow {
+    /// Say the first heal window has closed. Later heals say it again and
+    /// change nothing.
+    pub(crate) fn closed(&self) {
+        self.0.set();
+    }
+
+    pub(crate) fn has_closed(&self) -> bool {
+        self.0.holds()
     }
 }
 
@@ -425,8 +491,10 @@ impl WatchFaults {
         Duration::ZERO
     }
 
-    /// The stream arm this watch owes the first delivery past `boundary`.
-    pub(crate) fn stream_arm(&self, boundary: Boundary) -> StreamArm {
+    /// The stream arm this watch owes the first delivery a consumer could act
+    /// on: past `boundary`, past the close of `heal`, and one the watcher folds
+    /// into a batch.
+    pub(crate) fn stream_arm(&self, boundary: Boundary, heal: HealWindow) -> StreamArm {
         StreamArm {
             // Only the answers this stage carries are held, which is what makes
             // the delivery boundary below total: an arm cannot reach it owing
@@ -435,6 +503,7 @@ impl WatchFaults {
                 .answer(Stage::Stream)
                 .filter(|answer| Stage::Stream.answers(*answer)),
             boundary,
+            heal,
             #[cfg(any(test, feature = "induced-failure"))]
             hits: self.hits.clone(),
         }
@@ -446,29 +515,41 @@ impl WatchFaults {
     }
 }
 
-/// One armed stream answer, held until a delivery past the boundary displaces
-/// it.
+/// One armed stream answer, held until a delivery a consumer could act on
+/// displaces it.
 ///
 /// The arm stands at the handler boundary, upstream of ingest and the
 /// coalescer, because what a stream failure or an overflow *is* to the rest of
-/// the watcher is a message arriving there. It waits — for the synchronization
-/// boundary, and then for a delivery — so that it stands in place of an event a
-/// live subscription really received, and it is taken when it fires: one armed
-/// answer, one firing, one record, per establishment.
+/// the watcher is a message arriving there. It waits for three things, and each
+/// one is about standing in place of a delivery that reaches a consumer as a
+/// live change: the synchronization boundary, the close of the first heal
+/// window, and then a delivery the watcher folds into a batch. It is taken when
+/// it fires: one armed answer, one firing, one record, per establishment.
 pub(crate) struct StreamArm {
     owed: Option<Answer>,
     boundary: Boundary,
+    heal: HealWindow,
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<PathBuf>,
 }
 
 impl StreamArm {
     /// What the watcher ingests in place of `delivered`.
-    pub(crate) fn answer(&mut self, delivered: notify::Result<Event>) -> notify::Result<Event> {
+    ///
+    /// `folds_into_a_batch` is the watcher's own relevance rule — ingest's,
+    /// shared rather than restated — asked about a delivery that is still the
+    /// backend's own. It is a parameter rather than a call from inside here so
+    /// that the seam holds no watch state: the handler already has the state
+    /// ingest folds into, and this asks it the same question ingest will.
+    pub(crate) fn answer(
+        &mut self,
+        delivered: notify::Result<Event>,
+        folds_into_a_batch: impl Fn(&Event) -> bool,
+    ) -> notify::Result<Event> {
         // The owed check comes first: an unowed arm — every delivery in an
-        // unarmed watch — pays nothing for the boundary, whose load matters
-        // only while an answer is still held.
-        if self.owed.is_none() || !self.boundary.was_reached() {
+        // unarmed watch — pays nothing for the gates below, which matter only
+        // while an answer is still held.
+        if self.owed.is_none() || !self.boundary.was_reached() || !self.heal.has_closed() {
             return delivered;
         }
         let event = match delivered {
@@ -479,12 +560,14 @@ impl StreamArm {
             // the real cause is the one the subscription carries.
             delivered @ Err(_) => return delivered,
         };
-        // A delivery the watcher reports nothing about is not one this arm
-        // stands in place of. inotify asks for `IN_OPEN`, so under live coverage
-        // every document a heal reads arrives here; an arm spent on one would
-        // fire on a caller's own reads on that backend and on a change to the
-        // vault on a backend that reports no such thing.
-        if super::reports_nothing(&event) {
+        // A delivery the watcher folds into no batch is not one this arm stands
+        // in place of. inotify asks for `IN_OPEN`, so under live coverage every
+        // document a heal reads arrives here as an access; and every backend
+        // reports paths this vault's coverage plan takes in and its ingest then
+        // discards — a sibling of the vault root, an excluded place. An arm
+        // spent on one of those would report a stream that failed or overflowed
+        // over a delivery no consumer ever hears about.
+        if !folds_into_a_batch(&event) {
             return Ok(event);
         }
         let Some(answer) = self.owed.take() else {
@@ -606,6 +689,31 @@ mod tests {
         boundary
     }
 
+    /// A first heal window a consumer has already closed, which is the other
+    /// thing every case about a firing arm stands past.
+    fn taken_up() -> HealWindow {
+        let heal = HealWindow::default();
+        heal.closed();
+        heal
+    }
+
+    /// An arm eligible at both gates, holding `armed`.
+    fn eligible(armed: &'static [(Stage, Answer)]) -> StreamArm {
+        WatchFaults::at(armed).stream_arm(crossed(), taken_up())
+    }
+
+    /// A relevance rule that folds every delivery in, which is what a case
+    /// about the other gates holds constant.
+    fn folds_everything(_: &Event) -> bool {
+        true
+    }
+
+    /// A relevance rule that folds nothing in: the answer ingest gives a
+    /// delivery it discards by path.
+    fn folds_nothing(_: &Event) -> bool {
+        false
+    }
+
     /// Every stage and every answer a harness arms round-trips through the name
     /// it is armed under, so a widened seam and the suite arming it cannot drift
     /// into naming different things.
@@ -657,10 +765,11 @@ mod tests {
             faults.synchronization_wait(Duration::from_secs(7)),
             Duration::from_secs(7)
         );
-        let mut arm = faults.stream_arm(crossed());
-        let delivered = arm.answer(Ok(
-            Event::new(EventKind::Other).add_path("/vault/one.md".into())
-        ));
+        let mut arm = faults.stream_arm(crossed(), taken_up());
+        let delivered = arm.answer(
+            Ok(Event::new(EventKind::Other).add_path("/vault/one.md".into())),
+            folds_everything,
+        );
         assert_eq!(
             delivered.expect("the delivery the backend made").paths,
             [PathBuf::from("/vault/one.md")]
@@ -677,7 +786,7 @@ mod tests {
         let faults = WatchFaults::at(&[(Stage::Barrier, Answer::Expires)]);
 
         assert_eq!(faults.registration(), Ok(()));
-        assert!(faults.stream_arm(crossed()).owed.is_none());
+        assert!(faults.stream_arm(crossed(), taken_up()).owed.is_none());
         assert!(faults.withholds_live());
         assert_eq!(
             faults.synchronization_wait(Duration::from_secs(3600)),
@@ -700,72 +809,126 @@ mod tests {
     #[test]
     fn a_stream_arm_waits_for_the_synchronization_boundary() {
         let boundary = Boundary::default();
-        let mut arm =
-            WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(boundary.clone());
+        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)])
+            .stream_arm(boundary.clone(), taken_up());
 
         for _ in 0..3 {
             assert!(
-                arm.answer(Ok(
-                    Event::new(EventKind::Other).add_path("/vault/replayed.md".into())
-                ))
+                arm.answer(
+                    Ok(Event::new(EventKind::Other).add_path("/vault/replayed.md".into())),
+                    folds_everything,
+                )
                 .is_ok(),
                 "an arm answered a delivery from before the boundary"
             );
         }
 
         boundary.reached();
-        assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_err());
+        assert!(
+            arm.answer(Ok(Event::new(EventKind::Other)), folds_everything)
+                .is_err()
+        );
+    }
+
+    /// **A stream arm answers nothing until the first heal window closes.** A
+    /// consumer takes up coverage by healing under it, everything the backend
+    /// reports across that window comes back as the heal's own batch, and a
+    /// change made before the watch existed can still be delivered there — macOS
+    /// numbers an event when the daemon processes it, not when the syscall
+    /// returned. An arm answered inside the window would therefore be absorbed
+    /// by the heal, or would stand in place of a change from before the
+    /// coverage it is stated over.
+    #[test]
+    fn a_stream_arm_waits_for_the_first_heal_window_to_close() {
+        let heal = HealWindow::default();
+        let mut arm =
+            WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed(), heal.clone());
+
+        for _ in 0..3 {
+            assert!(
+                arm.answer(
+                    Ok(Event::new(EventKind::Other).add_path("/vault/healed.md".into())),
+                    folds_everything,
+                )
+                .is_ok(),
+                "an arm answered a delivery the heal window was still absorbing"
+            );
+        }
+
+        heal.closed();
+        assert!(
+            arm.answer(
+                Ok(Event::new(EventKind::Other).add_path("/vault/live.md".into())),
+                folds_everything,
+            )
+            .is_err()
+        );
+    }
+
+    /// **A delivery the watcher folds into no batch leaves the arm owed.** The
+    /// coverage plan takes in paths ingest then discards — a sibling of the
+    /// vault root, an excluded place — and no consumer ever hears about one, so
+    /// an arm spent there would report a failed stream over a delivery that
+    /// changed nothing.
+    #[test]
+    fn a_delivery_that_reaches_no_batch_leaves_the_arm_owed() {
+        let mut arm = eligible(&[(Stage::Stream, Answer::Fails)]);
+
+        for _ in 0..3 {
+            let passed = arm.answer(
+                Ok(
+                    Event::new(EventKind::Create(notify::event::CreateKind::Folder))
+                        .add_path("/beside-the-vault/data".into()),
+                ),
+                folds_nothing,
+            );
+            assert_eq!(
+                passed.expect("a discarded delivery is not a failure").paths,
+                [PathBuf::from("/beside-the-vault/data")]
+            );
+        }
+
+        assert!(
+            arm.answer(
+                Ok(Event::new(EventKind::Other).add_path("/vault/one.md".into())),
+                folds_everything,
+            )
+            .is_err(),
+            "the arm was spent on a delivery the watcher folds into no batch"
+        );
     }
 
     /// The stream answers stand in place of the delivery, and the arm is taken
     /// when it fires: a second delivery is the backend's own again.
     #[test]
     fn a_stream_arm_displaces_one_delivery_and_no_more() {
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Rescans)]).stream_arm(crossed());
+        let mut arm = eligible(&[(Stage::Stream, Answer::Rescans)]);
         let answered = arm
-            .answer(Ok(
-                Event::new(EventKind::Other).add_path("/vault/one.md".into())
-            ))
+            .answer(
+                Ok(Event::new(EventKind::Other).add_path("/vault/one.md".into())),
+                folds_everything,
+            )
             .expect("a rescan answer is a delivery, not a failure");
         assert!(answered.need_rescan());
         assert!(answered.paths.is_empty());
 
-        let after = arm.answer(Ok(
-            Event::new(EventKind::Other).add_path("/vault/two.md".into())
-        ));
+        let after = arm.answer(
+            Ok(Event::new(EventKind::Other).add_path("/vault/two.md".into())),
+            folds_everything,
+        );
         assert_eq!(
             after.expect("the delivery the backend made").paths,
             [PathBuf::from("/vault/two.md")]
         );
 
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed());
-        assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_err());
-        assert!(arm.answer(Ok(Event::new(EventKind::Other))).is_ok());
-    }
-
-    /// **A delivery this watcher reports nothing about never spends the arm.**
-    /// inotify asks for `IN_OPEN`, so a heal reading documents under live
-    /// coverage delivers an access per open — and an arm spent on one would
-    /// stand in place of a caller's own read rather than of a change to the
-    /// vault, on that backend and on no other.
-    #[test]
-    fn an_access_passes_through_and_leaves_the_arm_owed() {
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Fails)]).stream_arm(crossed());
-
-        for _ in 0..3 {
-            let passed = arm.answer(Ok(Event::new(EventKind::Access(
-                notify::event::AccessKind::Open(notify::event::AccessMode::Read),
-            ))
-            .add_path("/vault/read.md".into())));
-            assert_eq!(
-                passed.expect("an access is not a failure").paths,
-                [PathBuf::from("/vault/read.md")]
-            );
-        }
-
+        let mut arm = eligible(&[(Stage::Stream, Answer::Fails)]);
         assert!(
-            arm.answer(Ok(Event::new(EventKind::Other))).is_err(),
-            "the arm was spent on a delivery the watcher reports nothing about"
+            arm.answer(Ok(Event::new(EventKind::Other)), folds_everything)
+                .is_err()
+        );
+        assert!(
+            arm.answer(Ok(Event::new(EventKind::Other)), folds_everything)
+                .is_ok()
         );
     }
 
@@ -775,14 +938,17 @@ mod tests {
     /// live-and-overflowing stream over a stream that had stopped.
     #[test]
     fn a_delivered_failure_passes_through_and_leaves_the_arm_owed() {
-        let mut arm = WatchFaults::at(&[(Stage::Stream, Answer::Rescans)]).stream_arm(crossed());
+        let mut arm = eligible(&[(Stage::Stream, Answer::Rescans)]);
 
-        let passed = arm.answer(Err(notify::Error::generic("the backend's own failure")));
+        let passed = arm.answer(
+            Err(notify::Error::generic("the backend's own failure")),
+            folds_everything,
+        );
 
         let error = passed.expect_err("the backend's failure reaches ingest");
         assert!(error.to_string().contains("the backend's own failure"));
         assert!(
-            arm.answer(Ok(Event::new(EventKind::Other)))
+            arm.answer(Ok(Event::new(EventKind::Other)), folds_everything)
                 .expect("the arm is still owed")
                 .need_rescan()
         );
@@ -802,8 +968,8 @@ mod tests {
         WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone())
             .synchronization_wait(Duration::from_secs(3600));
         WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone())
-            .stream_arm(crossed())
-            .answer(Ok(Event::new(EventKind::Other)))
+            .stream_arm(crossed(), taken_up())
+            .answer(Ok(Event::new(EventKind::Other)), folds_everything)
             .expect_err("the armed stream");
 
         assert_eq!(
