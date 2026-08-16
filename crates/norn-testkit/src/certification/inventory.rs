@@ -396,8 +396,9 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-paging-window-vanished-entry-converges",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "an entry unlinked between a directory's listing and its stat is dropped from the \
-                 page, and the heal completes with every other document derived",
+        states: "an entry unlinked between a directory's listing and its stat is a name the walk \
+                 states it read nothing at, and the heal completes with every other document \
+                 derived",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes",
         feature: Some(INDUCED_FAILURE),

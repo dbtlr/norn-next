@@ -73,12 +73,12 @@
 //! observations, and a foreign writer can act between them — a window one call
 //! wide that nothing can arrange over a temporary directory, so each is armed at
 //! `norn-fs`'s walk seam through the environment the child is started with. An
-//! entry that vanishes there is the vault evolving: it is dropped from the page,
-//! the heal completes, and every other document derives. A stat the machine
-//! refuses is the environment breaking: the heal refuses, the entry stays
-//! untrusted naming the path, and nothing is pruned. Neither is stated without
-//! the other, because what the pair says is where the boundary between them
-//! runs.
+//! entry that vanishes there is the vault evolving: the walk states the name as
+//! one it read nothing at, the heal completes, and every other document derives.
+//! A stat the machine refuses is the environment breaking: the heal refuses, the
+//! entry stays untrusted naming the path, and nothing is pruned. Neither is
+//! stated without the other, because what the pair says is where the boundary
+//! between them runs.
 //!
 //! **Two of them share one arm and state different things.** A stream that ends
 //! is the condition behind both the recovery case and the case about the cause
@@ -1284,8 +1284,9 @@ const OVERFLOWED_DOCUMENTS: usize = 200;
 ///
 /// Paging a directory is two observations, and a foreign writer can unlink a
 /// name between them. That is the vault evolving rather than the machine
-/// breaking: a walk begun now lists no such entry either, so the page drops it
-/// and the merge answers exactly as it answers a name the walk never yielded.
+/// breaking: a walk begun now lists no such entry either, so the walk states the
+/// name as one it read nothing at and the merge answers exactly as it answers a
+/// name the walk never yielded.
 /// The condition is one call wide, so it is armed at `norn-fs`'s walk seam
 /// through the environment the child is started with, and what answers the arm
 /// is the production heal from the paging stat through to the trust state a
