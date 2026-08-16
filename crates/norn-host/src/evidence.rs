@@ -66,6 +66,7 @@ pub struct JobEvidence {
     findings_discarded: AtomicU64,
     recoveries_run: AtomicU64,
     rebuilds_run: AtomicU64,
+    watcher_polls: AtomicU64,
     watcher_rescans_reported: AtomicU64,
 }
 
@@ -98,6 +99,17 @@ pub struct EvidenceReading {
     /// Rung-3 rebuilds run: how many times a job discarded damaged derived state
     /// and built it from the vault again.
     pub rebuilds_run: u64,
+    /// Watcher polls taken over an attachment, however each one answered.
+    ///
+    /// One per entry per pass of the dispatcher's watcher scan, counted where
+    /// the pass reaches the attachment rather than where it likes the answer:
+    /// a pass that drains nothing, one that drains facts, and one that reports
+    /// the subscription's terminal failure all move it by one. So this is the
+    /// positive fact behind a claim about *ticks* — a state that stood still
+    /// over a stretch of polls is only that where the polls happened, and a
+    /// dispatcher that stopped taking them leaves the same still state behind
+    /// with this reading at zero.
+    pub watcher_polls: u64,
     /// Polls that drained facts carrying a backend rescan.
     ///
     /// A watcher reports a lost path set as a rescan naming no path, and an
@@ -145,6 +157,7 @@ impl EvidenceReading {
                 .saturating_sub(earlier.findings_discarded),
             recoveries_run: self.recoveries_run.saturating_sub(earlier.recoveries_run),
             rebuilds_run: self.rebuilds_run.saturating_sub(earlier.rebuilds_run),
+            watcher_polls: self.watcher_polls.saturating_sub(earlier.watcher_polls),
             watcher_rescans_reported: self
                 .watcher_rescans_reported
                 .saturating_sub(earlier.watcher_rescans_reported),
@@ -168,6 +181,7 @@ impl JobEvidence {
             findings_discarded: get(&self.findings_discarded),
             recoveries_run: get(&self.recoveries_run),
             rebuilds_run: get(&self.rebuilds_run),
+            watcher_polls: get(&self.watcher_polls),
             watcher_rescans_reported: get(&self.watcher_rescans_reported),
         }
     }
@@ -178,6 +192,10 @@ impl JobEvidence {
 
     pub(crate) fn count_rebuild(&self) {
         self.rebuilds_run.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_watcher_poll(&self) {
+        self.watcher_polls.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn count_watcher_rescan(&self) {
@@ -351,15 +369,19 @@ mod tests {
         evidence.count_recovery();
         evidence.count_rebuild();
         evidence.count_rebuild();
+        evidence.count_watcher_poll();
+        evidence.count_watcher_poll();
+        evidence.count_watcher_poll();
         evidence.count_watcher_rescan();
         let read = evidence.read();
         assert_eq!(
             (
                 read.recoveries_run,
                 read.rebuilds_run,
+                read.watcher_polls,
                 read.watcher_rescans_reported
             ),
-            (1, 2, 1)
+            (1, 2, 3, 1)
         );
     }
 }

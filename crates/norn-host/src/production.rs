@@ -630,6 +630,10 @@ impl EntryOps for ProductionEntryOps {
         attachment: &mut Self::Attachment,
     ) -> Result<Option<norn_fs::Batch>, JobFailure> {
         let _job = self.evidence.attributing();
+        // Counted where the pass arrives rather than where it succeeds: what
+        // this reading answers is whether the dispatcher kept scanning this
+        // attachment at all, and a pass that refuses below is one it took.
+        self.evidence.count_watcher_poll();
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
