@@ -40,7 +40,7 @@ use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::wait::Budget;
-use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
+use norn_wire::{ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName};
 
 /// The seed every generated tree is drawn at. One value, so two readings
 /// differ by the profile alone.
@@ -366,6 +366,110 @@ pub fn attach_and_wait(
 /// nothing, so it ends the wait where it is found instead of at the deadline.
 fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
     matches!(observed, Err(envelope) if envelope.code() == &ReasonCode::HostUnknownVault)
+}
+
+/// The reason an observation says the entry is untrusted for, or nothing where
+/// it says something else.
+///
+/// **The two spellings are one fact.** An untrusted entry does not answer a
+/// status read with its state — it refuses the read, under the code that says
+/// the derived state cannot be trusted, carrying the reason as the refusal's
+/// detail — and which of the two a caller meets depends on where the read came
+/// from rather than on what the entry published. Every suite here that reads a
+/// withdrawal reads it through this one function, so a case cannot pass by
+/// having looked at the spelling the entry did not use.
+pub fn untrusted_reason(observed: &Result<TrustState, ErrorEnvelope>) -> Option<UntrustedReason> {
+    match observed {
+        Ok(TrustState::Untrusted { reason, .. }) => Some(reason.clone()),
+        Err(envelope) if envelope.code() == &ReasonCode::HostEntryUntrusted => {
+            let ErrorDetail::EntryUntrusted { reason, .. } = envelope.detail() else {
+                panic!(
+                    "the refusal is coded `host/entry-untrusted` and carries another detail: \
+                     {envelope:?}"
+                )
+            };
+            Some(reason.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Wait until trust is withdrawn from an entry that is already serving, and
+/// hand back the reason it names.
+///
+/// **`Ready` is where this wait starts rather than a failure.** The condition
+/// is met by something the backend reports under live coverage, so the entry
+/// serves the vault until the poll that drains the subscription reports it.
+/// What says a condition never arrived is `limit` alone, and the failure it
+/// raises names the state the entry was last seen in.
+///
+/// `limit` is the caller's runaway bound rather than a bar on how fast a
+/// withdrawal lands: the suites here wait different lengths because their
+/// conditions arrive on different schedules, and a bound is not a shared fact.
+pub fn wait_for_withdrawn_trust(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    limit: Duration,
+) -> UntrustedReason {
+    let deadline = Instant::now() + limit;
+    loop {
+        let observed = host.state(name);
+        if let Some(reason) = untrusted_reason(&observed) {
+            return reason;
+        }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "trust was not withdrawn inside {limit:?}; observed {observed:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How long a settle waits between two looks at an entry.
+///
+/// One look per interval, and the interval is the shared one because what it
+/// is sized against is shared: it sits above the watcher poll interval these
+/// suites run their hosts at, so consecutive looks fall in different passes of
+/// the dispatcher's scan rather than inside one. How *many* looks a case takes
+/// is the case's own statement and is passed in.
+pub const SETTLE_LOOK: Duration = Duration::from_millis(25);
+
+/// Fail where the entry moves off `published` across `looks` looks, while
+/// nothing has addressed the failure it stands on.
+///
+/// **The look is repeated rather than taken once**, because what a single read
+/// cannot separate is an entry standing still from an entry whose re-acquisition
+/// has not started yet: putting coverage back takes a job, and a read taken
+/// immediately after a withdrawal is taken before that job could run.
+///
+/// A caller states its own `looks`: a settle that rules out a re-acquisition
+/// already on its way is a few dispatch intervals, and a case *about* the
+/// stretch an entry holds a cause across is many. Standing still is a claim
+/// about states alone, so a case that also needs the ticks to have happened
+/// reads them off the host's own account beside this.
+#[track_caller]
+pub fn assert_stands_across(
+    host: &Host<ProductionEntryOps>,
+    name: &VaultName,
+    published: &UntrustedReason,
+    looks: u32,
+    subject: &str,
+) {
+    for _ in 0..looks {
+        std::thread::sleep(SETTLE_LOOK);
+        let observed = host.state(name);
+        let standing = untrusted_reason(&observed).unwrap_or_else(|| {
+            panic!("{subject} moved off the failure nothing addressed: {observed:?}")
+        });
+        assert_eq!(
+            &standing, published,
+            "{subject} published a second reason over the first"
+        );
+    }
 }
 
 /// How many documents a store holds, read a bounded page at a time.

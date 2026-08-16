@@ -101,19 +101,28 @@
 //! # What consumes it
 //!
 //! `norn-host`'s lockdown suite arms one stage per case in the child process
-//! that case's watch is established in, and it reaches the install and stream
-//! stages. A registration that refuses, a stream that ends, and a stream that
-//! reports its path set lost are the three conditions those cases meet, and
-//! each states the trust transition a host owes for it at the production path,
-//! over a real backend and a real attachment. That crate's own
-//! `induced-failure` feature forwards to this one, so a lane arming a host has
-//! this reader compiled in.
+//! that case's watch is established in, and it reaches all three stages. A
+//! registration that refuses, a stream that ends, a stream that reports its path
+//! set lost, and a boundary that never arrives are the four conditions those
+//! cases meet, and each states the trust transition a host owes for it at the
+//! production path, over a real backend and a real attachment. **A stream that
+//! ends is armed by two cases**, because one condition owes two different
+//! outcomes there — trust withdrawn and resumed by a recovery demand, and the
+//! published cause standing unchanged across the ticks that follow it — and an
+//! arm is a condition rather than a case. That crate's own `induced-failure`
+//! feature forwards to this one, so a lane arming a host has this reader
+//! compiled in.
 //!
-//! This crate's own suites are what carry every stage, including the ones no
-//! other crate arms: the in-crate cases over a real backend, and the environment
-//! round trip in `tests/watch_lockdown.rs`, which walks the route from a
-//! variable to an answered boundary for each of the four pairs. An ordinary
-//! process reads an empty arm and every boundary passes through.
+//! **The one watcher trust transition that arms nothing is a root that stops
+//! being covered.** A directory removal is a condition a test can arrange, so
+//! `norn-host`'s coverage suite states it over a real attachment behind no
+//! feature at all, and nothing here takes part.
+//!
+//! This crate's own suites are what carry every stage in its own right: the
+//! in-crate cases over a real backend, and the environment round trip in
+//! `tests/watch_lockdown.rs`, which walks the route from a variable to an
+//! answered boundary for each of the four pairs. An ordinary process reads an
+//! empty arm and every boundary passes through.
 
 #[cfg(any(test, feature = "induced-failure"))]
 use std::path::{Path, PathBuf};

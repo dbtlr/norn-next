@@ -1909,51 +1909,101 @@ mod tests {
     /// stays synchronizing, the wait for it ends in the typed expiry without
     /// the caller's authored deadline elapsing, and the expiry is the
     /// subscription's own fact rather than the waiting caller's.
+    ///
+    /// **The two halves of the arm are pinned separately.** Shortening the wait
+    /// and withholding the publication are two answers, and a case that read
+    /// only the expiry could not tell them apart: a wait of no length over a
+    /// subscription whose boundary is merely *late* expires as well. So the
+    /// still-synchronizing state is read against a control — an unarmed
+    /// subscription over the same backend, waited to `Live` first — and only
+    /// then is the armed subscription's own wait taken. A publication that
+    /// stopped being withheld is a control that goes live and an armed watch
+    /// that goes live beside it.
+    ///
+    /// **Both backends, because the publication has two homes.** Where
+    /// registration is the boundary it is withheld at the registration call,
+    /// and on the macOS native path it is withheld at the event-history marker;
+    /// an arm that meant one thing on one path and nothing on the other is what
+    /// running the pair rules out.
     #[test]
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn an_armed_barrier_expires_without_consuming_the_authored_deadline() {
-        let (_scratch, vault, schema, hits) = armed_tree("watch-barrier-armed");
-        let (subscription, _) = establish(
-            &vault,
-            &schema,
-            true,
-            WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone()),
-        )
-        .expect("coverage installs");
+        for (label, poll) in BACKENDS {
+            let (_scratch, vault, schema, hits) =
+                armed_tree(&format!("watch-barrier-armed-{label}"));
+            // One native backend at a time across the machine, and both
+            // subscriptions below are this case's.
+            let _lease = (!poll).then(|| {
+                norn_testkit::isolation::Lease::hold(
+                    norn_testkit::isolation::REAL_WATCHER,
+                    norn_testkit::isolation::acquisition_budget(watch_budget()),
+                )
+            });
+            let (subscription, _) = establish(
+                &vault,
+                &schema,
+                poll,
+                WatchFaults::recording_at(&[(Stage::Barrier, Answer::Expires)], hits.clone()),
+            )
+            .expect("coverage installs");
 
-        assert_eq!(
-            subscription.state(),
-            SubscriptionState::Synchronizing,
-            "an armed barrier published the boundary it withholds"
-        );
-        let authored = Duration::from_secs(3600);
-        let began = Instant::now();
-        assert_eq!(
-            subscription.synchronize(authored),
-            Err(WatchError::SynchronizationExpired)
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(1),
-            "the wait spent the caller's authored deadline rather than reaching expiry"
-        );
-        assert_eq!(
-            subscription.state(),
-            SubscriptionState::Terminal(WatchError::SynchronizationExpired)
-        );
+            // The control is a tree of its own, so nothing arranging it is a
+            // change under an edge the armed subscription covers.
+            let (_control_scratch, control_vault, control_schema, _) =
+                armed_tree(&format!("watch-barrier-control-{label}"));
+            let (control, _) = establish(
+                &control_vault,
+                &control_schema,
+                poll,
+                WatchFaults::default(),
+            )
+            .expect("the control's coverage installs");
+            control
+                .synchronize(watch_budget().work())
+                .expect("the backend's own synchronization boundary, with nothing armed");
+            assert_eq!(
+                subscription.state(),
+                SubscriptionState::Synchronizing,
+                "{label}: an armed barrier published the boundary it withholds, over a backend \
+                 that had just published one for a watch with nothing armed"
+            );
+            drop(control);
 
-        norn_testkit::wait::wait_until(
-            "the batch stream to refuse with the recorded expiry",
-            watch_budget(),
-            || match subscription.try_recv() {
-                Err(WatchError::SynchronizationExpired) => norn_testkit::wait::Observed::Met(()),
-                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
-        assert_eq!(
-            recorded(&hits),
-            "seam=norn-fs/watch stage=barrier answer=expires\n"
-        );
+            let authored = Duration::from_secs(3600);
+            let began = Instant::now();
+            assert_eq!(
+                subscription.synchronize(authored),
+                Err(WatchError::SynchronizationExpired),
+                "{label}"
+            );
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "{label}: the wait spent the caller's authored deadline rather than reaching \
+                 expiry"
+            );
+            assert_eq!(
+                subscription.state(),
+                SubscriptionState::Terminal(WatchError::SynchronizationExpired),
+                "{label}"
+            );
+
+            norn_testkit::wait::wait_until(
+                "the batch stream to refuse with the recorded expiry",
+                watch_budget(),
+                || match subscription.try_recv() {
+                    Err(WatchError::SynchronizationExpired) => {
+                        norn_testkit::wait::Observed::Met(())
+                    }
+                    other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+            assert_eq!(
+                recorded(&hits),
+                "seam=norn-fs/watch stage=barrier answer=expires\n",
+                "{label}"
+            );
+        }
     }
 
     /// A subscription past its synchronization boundary, over `poll`'s

@@ -6374,9 +6374,14 @@ mod tests {
     }
 
     /// The watch error a terminal failure carried reaches the trust state: a
-    /// backend that stopped and a vault root that left coverage are two causes
-    /// with two states, and the error's own account of itself is the state's
-    /// detail — a sentence a person reads, not a value shaped to be parsed.
+    /// backend that stopped, a vault root that left coverage, and a
+    /// synchronization boundary that never arrived are three causes with three
+    /// states, and the error's own account of itself is the state's detail — a
+    /// sentence a person reads, not a value shaped to be parsed.
+    ///
+    /// **The table is every arm [`watcher_lost`] maps.** A cause the mapping
+    /// carries and this table does not is a transition nothing here drives, so
+    /// the row set is the match's row set rather than a sample of it.
     #[test]
     fn a_terminal_watcher_failure_publishes_the_cause_it_carried() {
         for (error, expected) in [
@@ -6392,6 +6397,13 @@ mod tests {
                 lost(
                     WatcherLossCause::CoverageLost,
                     "watch coverage was lost for /tmp/norn-host-vault-root",
+                ),
+            ),
+            (
+                WatchError::SynchronizationExpired,
+                lost(
+                    WatcherLossCause::SynchronizationExpired,
+                    "filesystem watcher synchronization expired",
                 ),
             ),
         ] {
