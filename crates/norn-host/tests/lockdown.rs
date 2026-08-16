@@ -1818,7 +1818,13 @@ impl Vault {
     /// used. The file exists before the run and is checked to exist after it,
     /// which is what makes the absence a fact about the seam.
     fn spawn(&self, hits: &Path, arm: &[(&str, &str)]) -> Ran {
-        std::fs::write(hits, b"").expect("the record file the child appends to");
+        // Created, never truncated: an arm appends, and a file two children
+        // shared would lose the first one's records to the second one's spawn.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(hits)
+            .expect("the record file the child appends to");
         let sandbox = self
             .sandbox
             .as_ref()
