@@ -381,9 +381,11 @@ pub const REQUIRED_CASES: &[Case] = &[
         id: "induced-host-arm-attestation",
         suite: Suite::InducedFailure,
         lane: Lane::Any,
-        states: "the child a torn host case spawns attaches under whatever it was armed at, and \
-                 the control spawned with nothing armed records nothing — which is what makes \
-                 every arm assertion beside a tear mean something",
+        states: "one child role serves both kinds of arm a host case gives it — the tear a torn \
+                 case arms before its demand, and the watcher condition a watcher case arms \
+                 outside the process — and the control spawned with nothing armed records \
+                 nothing, which is what makes every arm assertion beside either kind mean \
+                 something",
         carrier: "crates/norn-host/tests/lockdown.rs::\
                   the_child_role_attaches_under_whatever_it_was_armed_at",
         feature: Some(INDUCED_FAILURE),
@@ -501,11 +503,21 @@ pub const REQUIRED_CASES: &[Case] = &[
     },
     // ---- the trust-transition arms ----
     //
-    // These sit in `norn-host`'s library rather than in an integration suite,
-    // because a watcher failure is arranged through the entry operations a host
-    // is generic over and no seam outside the crate reaches them. The library
-    // target is therefore named by these entries and never claimed whole: it
-    // holds every unit test the crate has.
+    // Two doors reach these, and each row's carrier says which it took.
+    //
+    // The rows carried in `norn-host`'s library drive the transition through the
+    // entry operations a host is generic over: the condition is handed to the
+    // lifecycle rather than produced by a backend, which is what lets an arm no
+    // seam outside the crate reaches be stated at all. The library target is
+    // named by those entries and never claimed whole: it holds every unit test
+    // the crate has.
+    //
+    // The rows carried in the lockdown suite meet the condition at the
+    // production path. A child process is started armed at `norn-fs`'s watcher
+    // seam and attaches a real host over a real backend, so what answers the arm
+    // is the registration call, the event the backend delivered and the trust
+    // state a client reads — and the seam's own record of the boundary that
+    // fired is what says the case met the condition it names.
     Case {
         id: "trust-vault-wide-overflow-reconcile",
         suite: Suite::TrustTransition,
@@ -556,6 +568,41 @@ pub const REQUIRED_CASES: &[Case] = &[
                   a_published_watcher_cause_outlives_the_ticks_that_follow_it",
         feature: None,
     },
+    Case {
+        id: "trust-production-watcher-install-refusal",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "an attach whose registration a real backend refuses acquires nothing — no store \
+                 opened, no changeset committed — and nothing re-acquires coverage while the \
+                 demand that asked for it stands: a second demand is what serves the vault again, \
+                 and that second child is the suite's unarmed watcher control, which installs a \
+                 live subscription, reports a change through it, and records nothing",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  an_attach_that_cannot_install_coverage_acquires_nothing",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "trust-production-watcher-stream-failure",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "a real backend that stops reporting after readiness withdraws trust naming the \
+                 backend as the cause, and the entry resumes through the recovery a demand asks \
+                 for rather than on its own",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand",
+        feature: Some(INDUCED_FAILURE),
+    },
+    Case {
+        id: "trust-production-watcher-overflow",
+        suite: Suite::TrustTransition,
+        lane: Lane::RealWatcher,
+        states: "a real backend that reports its path set lost publishes the overflow, rereads the \
+                 whole vault through a reconcile rather than a recovery, and keeps reporting on \
+                 the coverage the overflow was delivered over",
+        carrier: "crates/norn-host/tests/lockdown.rs::\
+                  a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed",
+        feature: Some(INDUCED_FAILURE),
+    },
 ];
 
 /// **The unreached table.** Trust-transition arms no test reaches at the
@@ -585,35 +632,25 @@ pub const UNREACHED_ARMS: &[UnreachedArm] = &[
                  terminal boundary is proven un-revivable, and at the wire seam, where the cause \
                  round-trips — but the trust transition it drives is asserted for `Backend` and \
                  `CoverageLost` only. The cheapest carrier is a third row in the fake-ops cause \
-                 table; a case at the production entry operations additionally needs either an \
-                 injectable synchronization deadline or a way to stall the backend past the pinned \
-                 one, and neither exists.",
-    },
-    UnreachedArm {
-        arm: "a backend failure met by the production watcher rather than by a fake",
-        awaits: "the attach-time and post-ready backend arms are carried against the entry \
-                 operations a host is generic over. Driving a real backend into failure needs a \
-                 watcher stage in `norn-fs`'s fault seam, which today widens the write protocol \
-                 alone. The one production-level door that exists is the revoked subtree, and \
-                 which of two refusals it takes is the backend's rather than the case's.",
-    },
-    UnreachedArm {
-        arm: "a vault-wide overflow met by the production watcher rather than by a fake",
-        awaits: "`a_polled_rescan_publishes_the_overflow_and_schedules_its_reconcile` drives the \
-                 arm through `FakeOps`, whose poll hands back a batch carrying a vault-wide \
-                 rescan. A production backend reports one when its own queue overflows, which no \
-                 case can arrange: `norn-fs`'s fault seam widens the write protocol alone and \
-                 carries no watcher stage, and flooding a real backend until it overflows is a \
-                 volume of events with no bound a suite could assert under.",
+                 table. The door onto the production path is already open: the watcher fault \
+                 seam's barrier stage, armed `barrier=expires`, withholds the `Live` publication \
+                 and ends the wait at once, so a child spawned with that pair meets the expiry \
+                 through a real backend without an authored deadline having to elapse. What the \
+                 carrier still owes is the case itself — a lockdown child that arms the barrier, \
+                 asserts the entry goes untrusted under `SynchronizationExpired`, and states what \
+                 an attach that never proved its coverage may leave behind.",
     },
     UnreachedArm {
         arm: "a published watcher cause outliving production ticks rather than fake ones",
         awaits: "`a_published_watcher_cause_outlives_the_ticks_that_follow_it` publishes the cause \
-                 by handing `FakeOps` a terminal poll error and then ticks the same fake. Reaching \
-                 it through a production attachment needs a real backend driven into a terminal \
-                 failure — the same missing watcher stage the two arms above name — and then a \
-                 second condition on top of it: ticks that keep arriving after coverage ended, \
-                 which is the dispatcher's own schedule rather than anything a case hands it.",
+                 by handing `FakeOps` a terminal poll error and then ticks the same fake over two \
+                 kinds of tick: one that reports nothing, and one that reports a vault-wide \
+                 rescan. The first kind is reached at the production path — \
+                 `a_backend_failure_after_readiness_resumes_only_through_a_recovery_demand` drives \
+                 a real backend terminal through the watcher seam's stream stage and then holds \
+                 the entry still across the polls that follow. The second is not: a rescan \
+                 delivered after coverage ended needs a second stream answer on one \
+                 establishment, and the seam holds one answer per establishment by construction.",
     },
     UnreachedArm {
         arm: "root coverage loss met end to end through a production attachment",

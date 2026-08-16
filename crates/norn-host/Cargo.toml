@@ -8,15 +8,18 @@ repository.workspace = true
 publish.workspace = true
 
 # `induced-failure` is this crate's harness-reachable surface, and it carries
-# two things. It forwards to `norn-store`'s feature of the same name, which is
-# the fenced seam a suite reaches a rung or a refusal through from outside. And
-# it gates the readers of what a host's own jobs did — `JobEvidence`,
-# `EvidenceReading`, `ProductionEntryOps::account`, `Host::classifications` and
+# two things. It forwards to the feature of the same name in both effect crates:
+# `norn-store`'s, which is the fenced seam a suite reaches a rung or a refusal
+# through from outside, and `norn-fs`'s, whose watcher half is what makes a
+# refused registration, a stream that fails and a stream that reports its path
+# set lost reachable by a host attached over a real backend. And it gates the
+# readers of what a host's own jobs did — `JobEvidence`, `EvidenceReading`,
+# `ProductionEntryOps::account`, `Host::classifications` and
 # `Host::recovery_demands`. Those accounts are *written* on every build, because
 # that is how a job's cost stops being discarded; nothing in the shipped
 # artifact reads them back, so a build without this feature carries no reader.
 [features]
-induced-failure = ["norn-store/induced-failure"]
+induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
 
 [dependencies]
 norn-config = { path = "../norn-config" }

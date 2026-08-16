@@ -633,10 +633,22 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
-        if !attachment.heal_observed.is_empty() {
-            return Ok(Some(std::mem::take(&mut attachment.heal_observed)));
+        let drained = if attachment.heal_observed.is_empty() {
+            poll_subscription(attachment)?
+        } else {
+            Some(std::mem::take(&mut attachment.heal_observed))
+        };
+        // A rescan among the facts is the backend saying it lost the path set,
+        // and it is what the entry publishes an overflow for. The account is
+        // where that report survives the reconcile that clears it: the trust
+        // state carrying it stands only while the reread runs.
+        if drained
+            .as_ref()
+            .is_some_and(|batch| !batch.rescans().is_empty())
+        {
+            self.evidence.count_watcher_rescan();
         }
-        poll_subscription(attachment)
+        Ok(drained)
     }
 
     fn rebuild(

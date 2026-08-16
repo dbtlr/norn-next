@@ -26,7 +26,7 @@ use crate::write::{Landed, Moved, Vacated};
 
 mod faults;
 
-use faults::{Boundary, WatchFaults};
+use faults::{Boundary, HealWindow, WatchFaults};
 
 /// A trailing quiet period that closes a naturally settled batch.
 pub const QUIET_WINDOW: Duration = Duration::from_millis(50);
@@ -204,6 +204,10 @@ pub struct Subscription {
     state: Arc<Mutex<State>>,
     wake: Option<mpsc::SyncSender<()>>,
     faults: WatchFaults,
+    /// Closed by the first [`Subscription::finish_heal`], and read by the fault
+    /// seam's stream arm: the first delivery a consumer sees as a live change
+    /// is the first one after a heal has taken up the coverage.
+    first_heal: HealWindow,
 }
 
 impl Subscription {
@@ -248,9 +252,18 @@ impl Subscription {
     }
 
     /// Close the heal window and take every fact accumulated during it.
+    ///
+    /// Everything the backend reported across the window is handed back here,
+    /// so the first delivery this consumer meets as a change of its own is the
+    /// next one. That is what the fault seam's stream stage stands in place of,
+    /// and closing the first window is what makes its arm eligible.
     pub fn finish_heal(&self) -> Result<Batch, WatchError> {
         let work = {
             let mut state = self.state.lock().expect("watch state poisoned");
+            // Closed under the state lock: a delivery cannot pass the arm's
+            // gate and land in the batch this call is about to take, so an
+            // arm's answer is always a live report, never the heal's own.
+            self.first_heal.closed();
             state.healing = false;
             if let Some(error) = state.terminal.take() {
                 state.pending.take();
@@ -521,18 +534,21 @@ fn establish(
     let callback_state = shared.clone();
     let callback_wake = wake_tx.clone();
     let callback_control = control.clone();
-    // Where this subscription says it has crossed its synchronization
-    // boundary. The stream stage is stated over a live subscription, so the arm
-    // it holds answers nothing before that.
+    // The two facts that make a delivery one a consumer sees as a live change:
+    // this subscription has crossed its synchronization boundary, and the
+    // consumer's first heal window over it has closed. The stream stage is
+    // stated over such a delivery, so the arm answers nothing before both hold.
     let boundary = Boundary::default();
-    let mut stream_arm = faults.stream_arm(boundary.clone());
+    let first_heal = HealWindow::default();
+    let mut stream_arm = faults.stream_arm(boundary.clone(), first_heal.clone());
     let handler = move |result| {
         // The stream stage answers here, upstream of ingest and the coalescer,
         // by standing in place of the message the backend delivered: what a
         // stream that failed or overflowed is to the rest of the watcher is a
-        // message arriving at this boundary. An unarmed watch hands the
-        // delivery through unchanged.
-        let result = stream_arm.answer(result);
+        // message arriving at this boundary. It asks the same state ingest is
+        // about to fold into whether this delivery is one that reaches a batch
+        // at all. An unarmed watch hands the delivery through unchanged.
+        let result = stream_arm.answer(result, |event| folds_into_a_batch(&callback_state, event));
         // A backend failure is control state as well as the subscription's
         // last fact: a caller waiting on the boundary is waiting on this
         // thread, so it learns of the failure here rather than at the
@@ -562,8 +578,10 @@ fn establish(
 
     if registration_is_the_boundary(poll) {
         // Reached, whatever is published for it: an armed barrier withholds the
-        // publication below and the backend is reporting current facts from
-        // here either way, which is what the stream stage stands on.
+        // publication below, and the complete plan is registered from here
+        // either way. This backend queues everything inside the registration
+        // call, so the boundary really is the point past which every delivery
+        // is a change that followed it.
         boundary.reached();
         let established = shared
             .lock()
@@ -593,6 +611,7 @@ fn establish(
             state: shared,
             wake: Some(wake_tx),
             faults,
+            first_heal,
         },
         owns,
     ))
@@ -625,7 +644,7 @@ fn registration_is_the_boundary(_poll: bool) -> bool {
 ///
 /// On macOS the stream is created with the per-host event identifier read
 /// here, before any coverage edge is installed. The stream therefore replays
-/// every event the host recorded after that reading, delivers them to the
+/// the backlog the host had recorded past that reading, delivers it to the
 /// handler, and then reports the history boundary — which is what publishes
 /// [`SubscriptionState::Live`]. Identifiers come from one per-host source and
 /// increase across every attached volume, so the one boundary covers the
@@ -635,6 +654,10 @@ fn registration_is_the_boundary(_poll: bool) -> bool {
 /// never reports its boundary leaves the subscription synchronizing until the
 /// caller's deadline, which is a typed [`WatchError::SynchronizationExpired`]
 /// rather than a subscription that claims coverage it cannot prove.
+///
+/// **What the boundary proves is that coverage is installed, not that the tree
+/// is quiet.** See [`history_barrier`] for what the replay does and does not
+/// account for.
 #[cfg(target_os = "macos")]
 fn native_watcher(
     handler: impl notify::EventHandler,
@@ -660,6 +683,26 @@ fn native_watcher(
 /// withholds the publication here, exactly as one whose boundary is
 /// registration withholds it there, so a barrier that never arrives is the same
 /// fact on both platform paths.
+///
+/// # What this boundary does not exclude
+///
+/// It says the replay of the recorded backlog is finished. It does **not** say
+/// every change already made to the tree has been delivered, and it cannot:
+/// `FSEventsGetCurrentEventId` reports the last identifier *fseventsd assigned*,
+/// and the daemon assigns one when it processes the kernel's notification
+/// rather than when the syscall returned. A change whose syscall completed
+/// before the reading can therefore be numbered after it, fall outside the
+/// backlog, and arrive on the live side of this marker — and the daemon's
+/// per-path coalescing can carry it there under a later identifier still.
+///
+/// Coverage is unaffected: such a delivery is folded into a batch and the tree
+/// is reread, which is the same bias every other report gets. What it costs is
+/// determinism for anything that wants *the* first live change, and the fault
+/// seam's stream stage is the one such caller. That is why its arm waits for a
+/// consumer's first heal window to close as well
+/// ([`faults::HealWindow`]): the tail belongs to the establishment a heal takes
+/// up, and past the heal, a delivery from before the watch carries nothing the
+/// heal has not already taken up.
 #[cfg(target_os = "macos")]
 fn history_barrier(
     control: &Arc<(Mutex<SubscriptionState>, Condvar)>,
@@ -670,8 +713,8 @@ fn history_barrier(
     let faults = faults.clone();
     move || {
         // Reached before anything is published for it, and whether or not
-        // anything is: every delivery after this one is a current fact, which
-        // is what the stream stage is stated over.
+        // anything is: the replay is done and coverage is installed, which is
+        // what the barrier stage is stated over.
         boundary.reached();
         if !faults.withholds_live() {
             publish_control(&control, SubscriptionState::Live);
@@ -926,6 +969,52 @@ impl State {
     }
 }
 
+/// Whether a delivered event is an access, which is the one kind no batch
+/// carries whatever path it names.
+///
+/// **Reading a covered path is a delivery on some backends.** inotify asks for
+/// `IN_OPEN`, so every document the heal opens under live coverage arrives here
+/// as an access; FSEvents reports no such thing. An access says nothing about
+/// what any path holds, so no batch carries one — and the difference between
+/// the backends is invisible above this crate for exactly that reason.
+///
+/// This is one half of what [`ingest`] discards and not the whole of it. What a
+/// delivery *at a path* is worth is [`classify_path`]'s answer, and
+/// [`folds_into_a_batch`] is where both halves are asked together.
+fn is_an_access(event: &Event) -> bool {
+    matches!(event.kind, EventKind::Access(_))
+}
+
+/// Whether the watcher folds `event` into a batch — [`ingest`]'s own rule,
+/// asked without ingesting anything.
+///
+/// **The fault seam's stream arm asks it.** [`faults::StreamArm`] stands in
+/// place of a delivery, upstream of ingest, and what it is stated over is a
+/// delivery a consumer could act on: an arm spent on something ingest discards
+/// would report a stream failure or an overflow over a delivery no consumer
+/// ever hears about, and which deliveries those are differs per backend and per
+/// tree. It is the same code rather than a second predicate because two
+/// spellings of one rule drift, and the drift is invisible — it shows up only as
+/// an armed case firing somewhere it was not stated over.
+///
+/// The lock is taken only where an arm is still owed: the caller checks what it
+/// holds first, so an unarmed watch asks nothing here.
+fn folds_into_a_batch(state: &Mutex<State>, event: &Event) -> bool {
+    if is_an_access(event) {
+        return false;
+    }
+    // A backend saying the path set is incomplete names no path and widens
+    // every partition, which is the loudest thing a delivery can be.
+    if event.need_rescan() || event.paths.is_empty() {
+        return true;
+    }
+    let state = state.lock().expect("watch state poisoned");
+    event
+        .paths
+        .iter()
+        .any(|path| !classify_path(&state, event.kind, path).is_nothing())
+}
+
 /// Fold one backend delivery into shared state, reporting the terminal failure
 /// the subscription now carries.
 ///
@@ -938,7 +1027,7 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
         Err(error) => {
             state.terminal.get_or_insert_with(|| backend(error));
         }
-        Ok(event) if matches!(event.kind, EventKind::Access(_)) => {}
+        Ok(event) if is_an_access(&event) => {}
         Ok(event) => {
             // A backend saying the path set is incomplete is the one report
             // that widens work to a rescan: an explicit rescan flag over
@@ -962,8 +1051,8 @@ fn ingest(shared: &Arc<Mutex<State>>, result: notify::Result<Event>) -> Option<W
 /// The set is closed: the directory being created, a change to its metadata,
 /// and the backend's unspecified modify. Every change to something inside the
 /// directory arrives at the path that changed, so a kind in this set names no
-/// dirty path at all. Access-only kinds never reach this predicate — [`ingest`]
-/// drops them before any path is examined.
+/// dirty path at all. Access-only kinds never reach this predicate — both
+/// callers of [`classify_path`] drop them before any path is examined.
 ///
 /// Every other kind at that same path can replace what the directory holds
 /// without one event per item — macOS reports a volume mounted over a watched
@@ -979,12 +1068,44 @@ fn names_only_the_directory_entry(kind: EventKind) -> bool {
     )
 }
 
-fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
+/// What one delivered path does to the watcher's account of the vault.
+///
+/// **Classifying is separate from applying because two questions ask it.**
+/// [`ingest_path`] asks what to fold in; [`folds_into_a_batch`] asks whether
+/// there is anything to fold in at all, on behalf of the fault seam's stream
+/// arm, and it must not move any of the state the answer is read out of. One
+/// classification answers both.
+///
+/// Nothing at all — every field at its default — is a path this watcher reports
+/// nothing about: outside the vault and not its root's own name, outside the
+/// schema, or refused by the vault's exclusions.
+#[derive(Debug, Default, Eq, PartialEq)]
+struct PathEffect {
+    /// The path the coverage was installed over is not the entry's any more.
+    coverage_lost: bool,
+    /// The vault partition's path set is no longer known.
+    vault_rescan: bool,
+    /// The schema partition's path set is no longer known.
+    schema_rescan: bool,
+    /// The schema source may hold something else.
+    schema_dirty: bool,
+    /// The vault-relative path a scoped increment starts from.
+    dirty_root: Option<NormalizedPath>,
+}
+
+impl PathEffect {
+    /// Whether this delivery changes nothing the watcher reports.
+    fn is_nothing(&self) -> bool {
+        *self == PathEffect::default()
+    }
+}
+
+fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
+    let mut effect = PathEffect::default();
     if path == state.root {
         if kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))) {
-            let root = state.root.clone();
-            state.terminal.get_or_insert(WatchError::CoverageLost(root));
-            return;
+            effect.coverage_lost = true;
+            return effect;
         }
         // A kind naming only the root directory entry carries no dirty path,
         // and it is emphatically not a report that the path set is incomplete:
@@ -992,18 +1113,15 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
         // for an event that lost nothing. Anything else at the root can put a
         // different tree behind that name with no event per item, which is
         // exactly what [`RescanScope::Vault`] reports.
-        if !names_only_the_directory_entry(kind) {
-            state.rescan(RescanScope::Vault);
-        }
-        return;
+        effect.vault_rescan = !names_only_the_directory_entry(kind);
+        return effect;
     }
     let root_name_relevant = state.root.parent().is_some_and(|parent| {
         path.parent() == Some(parent) && path.file_name() == state.root.file_name()
     });
     if root_name_relevant {
-        let root = state.root.clone();
-        state.terminal.get_or_insert(WatchError::CoverageLost(root));
-        return;
+        effect.coverage_lost = true;
+        return effect;
     }
     let (schema_dirty, schema_rescan) = match &state.schema {
         SchemaLocation::InVault(schema) => (
@@ -1042,23 +1160,49 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
             }
         }
     };
+    effect.schema_rescan = schema_rescan;
+    effect.schema_dirty = schema_dirty;
+
+    let Ok(relative) = path.strip_prefix(&state.root) else {
+        return effect;
+    };
+    let Ok(normalized) = state.normalizer.normalize(relative) else {
+        effect.vault_rescan = true;
+        return effect;
+    };
+    if state.exclusions.excludes(&normalized) {
+        return effect;
+    }
+    effect.dirty_root = Some(normalized);
+    effect
+}
+
+/// Fold one delivered path's effect into the batch this watcher is building.
+fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
+    let PathEffect {
+        coverage_lost,
+        vault_rescan,
+        schema_rescan,
+        schema_dirty,
+        dirty_root,
+    } = classify_path(state, kind, path);
+    if coverage_lost {
+        let root = state.root.clone();
+        state.terminal.get_or_insert(WatchError::CoverageLost(root));
+        return;
+    }
     if schema_rescan {
         state.rescan(RescanScope::Schema);
     }
     if schema_dirty {
         state.batch().schema_dirty = true;
     }
-
-    let Ok(relative) = path.strip_prefix(&state.root) else {
-        return;
-    };
-    let Ok(normalized) = state.normalizer.normalize(relative) else {
+    if vault_rescan {
         state.rescan(RescanScope::Vault);
+    }
+    let Some(normalized) = dirty_root else {
         return;
     };
-    if state.exclusions.excludes(&normalized) {
-        return;
-    }
     let batch = state.batch();
     if !batch.rescans.contains(&RescanScope::Vault) {
         batch.vault_roots.insert(normalized);
@@ -1554,6 +1698,70 @@ mod tests {
         );
     }
 
+    /// **The relevance rule the fault seam asks is ingest's own answer.** Every
+    /// delivery below is put to both: [`folds_into_a_batch`] predicts, and then
+    /// ingest itself runs over a state of its own and is asked whether anything
+    /// moved. The two must agree on each of them.
+    ///
+    /// The forbidden shapes are both directions of drift. A rule answering yes
+    /// where ingest discards spends an armed answer on a delivery no consumer
+    /// ever hears about — which is what a directory created beside the vault
+    /// root is, since coverage takes in the vault's own parent. A rule answering
+    /// no where ingest folds in leaves the arm owed past the change a case
+    /// arranged, and the case then waits for a transition nothing produces.
+    #[test]
+    fn the_relevance_rule_answers_what_ingest_does() {
+        let deliveries: [(&str, Event); 8] = [
+            (
+                "a document in the vault",
+                Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path("/vault/one.md".into()),
+            ),
+            (
+                "the schema source in the vault",
+                Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path("/vault/schema.yml".into()),
+            ),
+            (
+                "a directory created beside the vault root",
+                Event::new(EventKind::Create(CreateKind::Folder)).add_path("/data".into()),
+            ),
+            (
+                "the vault root's own name, taken away",
+                Event::new(EventKind::Remove(RemoveKind::Folder)).add_path("/vault".into()),
+            ),
+            (
+                "an access under the vault",
+                Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read)))
+                    .add_path("/vault/one.md".into()),
+            ),
+            (
+                "a path under no watched edge at all",
+                Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Any)))
+                    .add_path("/elsewhere/one.md".into()),
+            ),
+            (
+                "a backend reporting its path set lost",
+                Event::new(EventKind::Other).set_flag(Flag::Rescan),
+            ),
+            ("a delivery naming no path", Event::new(EventKind::Other)),
+        ];
+
+        for (label, event) in deliveries {
+            let state = state();
+            let predicted = folds_into_a_batch(&state, &event);
+            let moved = {
+                ingest(&state, Ok(event.clone()));
+                let state = state.lock().unwrap();
+                state.pending.is_some() || state.terminal.is_some()
+            };
+            assert_eq!(
+                predicted, moved,
+                "{label}: the relevance rule and ingest disagree"
+            );
+        }
+    }
+
     #[test]
     fn synchronization_expiry_is_terminal_and_a_late_live_signal_cannot_revive_it() {
         let control = Arc::new((Mutex::new(SubscriptionState::Synchronizing), Condvar::new()));
@@ -1780,14 +1988,32 @@ mod tests {
         (subscription, lease)
     }
 
+    /// Take up the coverage the way a consumer does: open a heal window over
+    /// it and close it again.
+    ///
+    /// **This is the other half of what makes a stream arm eligible.** A
+    /// consumer heals the tree under the watch it just installed and takes
+    /// everything the backend reported across that window back as the heal's
+    /// own batch, so the first delivery it meets as a change is the one after
+    /// the window closes. Nothing is read out of the heal here: what the cases
+    /// below are about is what happens *after* it.
+    fn taken_up_by_a_heal(subscription: &Subscription) {
+        subscription.begin_heal();
+        subscription
+            .finish_heal()
+            .expect("the heal window closes over live coverage");
+    }
+
     /// The two backends a stream case runs over, and what a failure calls each.
     const BACKENDS: [(&str, bool); 2] = [("polling", true), ("native", false)];
 
-    /// **Establishing a watch is not a delivery an armed stream answers.** The
-    /// tree is written immediately before coverage is installed, which is what
-    /// a native backend replays into the handler while it establishes itself,
-    /// and the arm is still owed afterwards: the subscription reaches its
-    /// boundary, publishes `Live`, and has recorded nothing.
+    /// **Establishing a watch, and healing under it, are not deliveries an
+    /// armed stream answers.** The tree is written immediately before coverage
+    /// is installed, which is what a native backend replays into the handler
+    /// while it establishes itself, and a consumer's first heal window closes
+    /// over whatever else arrived meanwhile. The arm is still owed after both:
+    /// the subscription reaches its boundary, publishes `Live`, takes up a
+    /// heal, and has recorded nothing.
     ///
     /// The forbidden shape is an arm answering there. It would refuse the
     /// attach — establishment failing, not a live subscription failing — while
@@ -1807,12 +2033,161 @@ mod tests {
             );
 
             assert_eq!(subscription.state(), SubscriptionState::Live, "{label}");
+            taken_up_by_a_heal(&subscription);
             assert!(
                 std::fs::metadata(&hits).is_err(),
-                "{label}: the stream arm answered a delivery from before the boundary"
+                "{label}: the stream arm answered a delivery from before a consumer met one"
             );
         }
     }
+
+    /// **A delivery the watcher folds into no batch never spends the arm.**
+    /// Coverage over a vault takes in the vault's own parent, so a directory
+    /// created beside the tree is delivered to the handler and then discarded
+    /// by ingest: no batch carries it and no consumer hears about it. The arm
+    /// stands past it and is spent on the change to the vault that follows.
+    ///
+    /// **The forbidden shape is read off what the batches name.** An arm spent
+    /// on the sibling writes the same record a legitimate firing writes, so the
+    /// record alone cannot tell the two apart — but the vault's own change
+    /// would then go on to be reported by path, which is exactly what a
+    /// displaced delivery is not. So the case reads both: the rescan arrives,
+    /// and nothing ever names the place whose delivery the arm was supposed to
+    /// stand in place of.
+    ///
+    /// **The change inside the vault is a directory rather than a document**,
+    /// because the assertion is that nothing names it and one write is not one
+    /// delivery on every backend: inotify reports creating a file, writing it
+    /// and closing it separately, so a displaced create would leave the rest to
+    /// name the path anyway. Creating a directory is one report everywhere.
+    ///
+    /// The settle before the vault is touched is ordering rather than proof: it
+    /// puts the sibling's delivery at the handler first, so an arm that answers
+    /// on paths it should discard answers on that one.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_armed_stream_answers_nothing_for_a_delivery_that_reaches_no_batch() {
+        for (label, poll) in BACKENDS {
+            let (scratch, vault, schema, hits) =
+                armed_tree(&format!("watch-stream-discarded-{label}"));
+            let (subscription, _lease) = established_past_the_boundary(
+                &vault,
+                &schema,
+                poll,
+                WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+            );
+            taken_up_by_a_heal(&subscription);
+
+            std::fs::create_dir(scratch.path("beside-the-vault"))
+                .expect("a directory beside the tree, under the parent edge");
+            std::thread::sleep(DELIVERED_BY_NOW);
+            std::fs::create_dir(vault.join("inside")).expect("a real change under a real watch");
+
+            let widened = norn_testkit::wait::wait_until(
+                "a batch carrying the rescan the backend reports",
+                watch_budget(),
+                || match subscription.try_recv() {
+                    Ok(Some(batch)) if !batch.rescans().is_empty() => {
+                        norn_testkit::wait::Observed::Met(batch)
+                    }
+                    other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+            assert!(widened.vault_roots().is_empty(), "{label}");
+
+            // The arm stood in place of the vault's own delivery, so nothing
+            // reports that place by path. A batch that names it is an arm that
+            // was spent on the sibling directory instead.
+            std::thread::sleep(DELIVERED_BY_NOW);
+            while let Ok(Some(batch)) = subscription.try_recv() {
+                assert!(
+                    !batch
+                        .vault_roots()
+                        .iter()
+                        .any(|root| root.as_path() == Path::new("inside")),
+                    "{label}: the arm was spent on a delivery the watcher folds into no batch, so \
+                     the vault's own change was reported by path"
+                );
+            }
+            assert_eq!(
+                recorded(&hits),
+                "seam=norn-fs/watch stage=stream answer=rescans\n",
+                "{label}"
+            );
+        }
+    }
+
+    /// **A relevant delivery inside the first heal window leaves the arm
+    /// owed.** A consumer takes up coverage by healing under it, and what the
+    /// backend reports across that window comes back as the heal's own batch —
+    /// so the arm waits for the window to close and is spent on the first
+    /// change the consumer meets afterwards.
+    ///
+    /// The forbidden shape is the arm answering inside the window. The heal
+    /// absorbs whatever it answered with, and the case that armed it then waits
+    /// for a transition that already happened where nobody was looking.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_armed_stream_answers_nothing_inside_the_first_heal_window() {
+        for (label, poll) in BACKENDS {
+            let (_scratch, vault, schema, hits) =
+                armed_tree(&format!("watch-stream-healing-{label}"));
+            let (subscription, _lease) = established_past_the_boundary(
+                &vault,
+                &schema,
+                poll,
+                WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+            );
+
+            subscription.begin_heal();
+            std::fs::write(vault.join("healed.md"), b"healed\n")
+                .expect("a change the heal window is open across");
+            std::thread::sleep(DELIVERED_BY_NOW);
+            let observed = subscription
+                .finish_heal()
+                .expect("the heal window closes over live coverage");
+            assert!(
+                observed.rescans().is_empty(),
+                "{label}: the arm answered inside the heal window, so the heal absorbed it: \
+                 {observed:?}"
+            );
+            assert!(
+                std::fs::metadata(&hits).is_err(),
+                "{label}: the stream arm answered a delivery the heal window was open across"
+            );
+
+            // Past the window, the next change is the one the arm stands in
+            // place of.
+            std::fs::write(vault.join("one.md"), b"one\n")
+                .expect("a real change under a real watch");
+            norn_testkit::wait::wait_until(
+                "a batch carrying the rescan the backend reports",
+                watch_budget(),
+                || match subscription.try_recv() {
+                    Ok(Some(batch)) if !batch.rescans().is_empty() => {
+                        norn_testkit::wait::Observed::Met(())
+                    }
+                    other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+                },
+            )
+            .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+            assert_eq!(
+                recorded(&hits),
+                "seam=norn-fs/watch stage=stream answer=rescans\n",
+                "{label}"
+            );
+        }
+    }
+
+    /// How long a case waits before it says a delivery that was going to arrive
+    /// has arrived.
+    ///
+    /// Four polling intervals, which is the slower of the two backends by a
+    /// wide margin: a native stream is built with no latency at all. It orders
+    /// two deliveries against each other rather than proving a negative — every
+    /// case here reads its verdict off a positive signal that follows.
+    const DELIVERED_BY_NOW: Duration = Duration::from_secs(1);
 
     /// **An armed stream failure is the last thing the subscription carries.**
     /// It stands in place of a delivery the backend really made, and what
@@ -1836,6 +2211,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone()),
             );
+            taken_up_by_a_heal(&subscription);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
@@ -1891,6 +2267,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
             );
+            taken_up_by_a_heal(&subscription);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
