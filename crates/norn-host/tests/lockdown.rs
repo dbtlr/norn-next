@@ -68,6 +68,18 @@
 //! seam whose check was removed leaves the child's expectations unmet *and* the
 //! record missing.
 //!
+//! **Two more are the walk's own paging window, and they are one boundary read
+//! twice.** Listing a directory and stating the names it listed are two
+//! observations, and a foreign writer can act between them — a window one call
+//! wide that nothing can arrange over a temporary directory, so each is armed at
+//! `norn-fs`'s walk seam through the environment the child is started with. An
+//! entry that vanishes there is the vault evolving: it is dropped from the page,
+//! the heal completes, and every other document derives. A stat the machine
+//! refuses is the environment breaking: the heal refuses, the entry stays
+//! untrusted naming the path, and nothing is pruned. Neither is stated without
+//! the other, because what the pair says is where the boundary between them
+//! runs.
+//!
 //! **Two of them share one arm and state different things.** A stream that ends
 //! is the condition behind both the recovery case and the case about the cause
 //! that outlives the ticks after it: one is about the way back and the other
@@ -128,6 +140,9 @@ const CHILD_TEAR: &str = "NORN_HOST_LOCKDOWN_TEAR";
 /// The variable naming which watcher condition the child meets.
 const CHILD_WATCH: &str = "NORN_HOST_LOCKDOWN_WATCH";
 
+/// The variable naming which paging-window condition the child meets.
+const CHILD_WALK: &str = "NORN_HOST_LOCKDOWN_WALK";
+
 /// The variable a harness arms `norn-fs`'s watcher seam through.
 ///
 /// It is spelled here rather than imported because the seam it reaches is
@@ -144,8 +159,16 @@ const WATCH_ARMED_STAGES: &str = "NORN_FS_WATCH_ARMED_STAGES";
 /// which file it landed in.
 const FS_ARM_HITS: &str = "NORN_FS_ARM_HITS";
 
+/// The variable a harness arms `norn-fs`'s walk seam through, spelled here for
+/// the same reason the watcher's is: the seam it reaches is fenced inside
+/// `norn-fs`, and a harness arms it the way anything outside that crate does.
+const WALK_ARMED_STAGES: &str = "NORN_FS_WALK_ARMED_STAGES";
+
 /// The seam a fired watcher arm records itself under.
 const WATCH_SEAM: &str = "norn-fs/watch";
+
+/// The seam a fired walk arm records itself under.
+const WALK_SEAM: &str = "norn-fs/walk";
 
 /// A runaway bound on a state converging, not a bar on how fast it does.
 const WAIT_LIMIT: Duration = Duration::from_secs(120);
@@ -1253,6 +1276,168 @@ fn a_vault_wide_overflow_reconciles_under_coverage_that_stays_installed() {
 const OVERFLOWED_DOCUMENTS: usize = 200;
 
 // ---------------------------------------------------------------------------
+// Rung 2, converged: an entry that leaves a directory page
+// ---------------------------------------------------------------------------
+
+/// **An entry that vanishes between a directory's listing and its stat is
+/// dropped from the page, and the heal completes.**
+///
+/// Paging a directory is two observations, and a foreign writer can unlink a
+/// name between them. That is the vault evolving rather than the machine
+/// breaking: a walk begun now lists no such entry either, so the page drops it
+/// and the merge answers exactly as it answers a name the walk never yielded.
+/// The condition is one call wide, so it is armed at `norn-fs`'s walk seam
+/// through the environment the child is started with, and what answers the arm
+/// is the production heal from the paging stat through to the trust state a
+/// client reads.
+///
+/// **The forbidden outcome is the refusal.** A whole heal that stops because one
+/// document was deleted while it ran leaves the entry untrusted waiting for a
+/// demand, with every other document in the vault underived — one foreign
+/// deletion turned into a vault nobody is serving. The child asserts the entry
+/// serves the vault and reached it without rung 3; the parent asserts the rows
+/// the heal left, and neither half is enough alone.
+///
+/// **The entry that left is not a quarantine and not a death.** Nothing was read
+/// and nothing was there to prune, so a finding at that path or a tombstone
+/// standing for it would be the heal concluding something about a document it
+/// never saw.
+///
+/// Recovery is the ordinary attach heal: the arm is spent, the document is where
+/// it always was, and the next walk derives it. The bound is what tells that
+/// from a store rebuilt and walked again — one row, one changeset, where a
+/// derivation from zero writes four.
+#[test]
+fn an_entry_that_vanishes_from_a_page_is_dropped_and_the_heal_completes() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("walk-page-vanishes");
+    for index in 0..4 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    let converged = vault.run_walk_child("vanished", "page=vanishes");
+    assert_eq!(
+        converged.status,
+        RunStatus::Exited(0),
+        "the child did not answer an entry that left a page the way the entry is required to\n{}",
+        converged.stderr
+    );
+    converged.attestation.assert_reached(
+        "an entry that vanished from a page",
+        &[(SEAM, WALK_SEAM), ("stage", "page"), ("answer", "vanishes")],
+    );
+    converged
+        .attestation
+        .assert_count("an entry that vanished from a page", 1);
+
+    let mut store = vault.store();
+    let paths: Vec<String> = every_row(&mut store)
+        .iter()
+        .map(|row| row.path.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "note-001.md".to_owned(),
+            "note-002.md".to_owned(),
+            "note-003.md".to_owned()
+        ],
+        "the heal derived something other than every document beside the one that left the page"
+    );
+    assert!(
+        findings_at(&mut store, "note-000.md").is_empty(),
+        "the heal quarantined an entry that left the page, which states that norn read the \
+         document and could derive nothing from it"
+    );
+    assert_eq!(
+        tombstones(&mut store).expect("reading the tombstones"),
+        Vec::new(),
+        "the heal recorded a death for a path that never held a row"
+    );
+    assert_operationally_valid(&mut store, "the store an entry left a page in");
+    drop(store);
+
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let healed = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_healed_only("an entry that left one page", healed, 1, 1);
+    vault.assert_converged_from_zero("an entry that left one page");
+}
+
+/// **An entry the machine will not stat refuses the heal, at that same
+/// window.**
+///
+/// The convergence above narrows the paging window to absence; it does not
+/// remove the environmental boundary there. A denied stat says nothing about
+/// whether an entry is at that name, so reading it as one that left would let a
+/// revoked permission prune every row the page covers. The condition is armed at
+/// the same seam and the same window as the vanishing above, which is what makes
+/// the pair a boundary rather than two unrelated cases.
+///
+/// **The forbidden outcome is the prune.** A row that disappeared, or a
+/// tombstone recorded for it, would be the walk reading a machine that would not
+/// answer as a deletion. Rung 3 is forbidden for the same reason a full disk
+/// forbids it: the environment is broken and the stored state is not.
+#[test]
+fn an_entry_the_machine_will_not_stat_refuses_the_heal_rather_than_dropping_it() {
+    let _beside = beside_the_arms();
+    let vault = Vault::new("walk-page-denied");
+    for index in 0..4 {
+        vault.write(&format!("note-{index:03}.md"), &readable(index));
+    }
+
+    let before = {
+        let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+        let lease = attach_and_wait(&serving, vault.name());
+        drop(lease);
+        let mut store = vault.store();
+        StoreProjection::read(&mut store).expect("projecting the first attach")
+    };
+    assert_eq!(before.documents().len(), 4);
+
+    let refused = vault.run_walk_child("denied", "page=denied");
+    assert_eq!(
+        refused.status,
+        RunStatus::Exited(0),
+        "the child did not answer a stat the machine refused the way the entry is required to\n{}",
+        refused.stderr
+    );
+    refused.attestation.assert_reached(
+        "a paging stat the machine refused",
+        &[(SEAM, WALK_SEAM), ("stage", "page"), ("answer", "denied")],
+    );
+    refused
+        .attestation
+        .assert_count("a paging stat the machine refused", 1);
+
+    let mut store = vault.store();
+    let after = StoreProjection::read(&mut store).expect("projecting the refused attach");
+    assert_eq!(
+        after.documents(),
+        before.documents(),
+        "the refused heal changed what the store holds"
+    );
+    assert_eq!(
+        tombstones(&mut store).expect("reading the tombstones"),
+        Vec::new(),
+        "the heal read a stat the machine refused as evidence that the entry was gone"
+    );
+    assert_operationally_valid(&mut store, "the store a refused paging stat stands in");
+    drop(store);
+
+    // The recovery bar: with nothing armed, an ordinary demand converges on what
+    // a derivation from zero over this tree holds. The refused heal committed
+    // nothing and no document's bytes moved, so the work left over is nothing at
+    // all — where a derivation from zero writes all four documents in one
+    // changeset.
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let healed = heal_and_read(&serving, vault.name());
+    drop(serving);
+    assert_healed_only("a paging stat that answers again", healed, 0, 0);
+    vault.assert_converged_from_zero("a paging stat that answers again");
+}
+
+// ---------------------------------------------------------------------------
 // The child role
 // ---------------------------------------------------------------------------
 
@@ -1285,6 +1470,14 @@ fn the_child_role_attaches_under_whatever_it_was_armed_at() {
             .expect("the watcher condition a child is given is UTF-8")
             .to_owned();
         watch_under_the_arm(Path::new(&root), &condition);
+        return;
+    }
+    if let Some(condition) = std::env::var_os(CHILD_WALK) {
+        let condition = condition
+            .to_str()
+            .expect("the paging condition a child is given is UTF-8")
+            .to_owned();
+        walk_under_the_arm(Path::new(&root), &condition);
         return;
     }
     let armed = match std::env::var(CHILD_TEAR).as_deref() {
@@ -1764,6 +1957,114 @@ const HELD_LOOKS: u32 = 240;
 const HELD_POLLS_FLOOR: u64 = 50;
 
 // ---------------------------------------------------------------------------
+// The paging-window conditions, met inside the child
+// ---------------------------------------------------------------------------
+
+/// Meet `condition` over the vault at `root`, and assert what the entry owes.
+///
+/// The arm is already in this process's environment, so the attach below is the
+/// ordinary production one: nothing here knows a window was armed, and what the
+/// case reads is the trust state a client would read. The rows the heal left are
+/// the parent's half — it opens the store after this process is gone.
+fn walk_under_the_arm(root: &Path, condition: &str) {
+    let vault = Vault::adopt(root);
+    match condition {
+        "vanished" => an_entry_that_left_a_page_still_serves_the_vault(&vault),
+        "denied" => a_paging_stat_the_machine_refused_withdraws_the_entry(&vault),
+        other => panic!("the child was given no paging condition it knows: {other:?}"),
+    }
+}
+
+/// The armed attach: one entry leaves the page, and the heal converges over the
+/// rest of the vault rather than refusing the whole of it.
+fn an_entry_that_left_a_page_still_serves_the_vault(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let opening = serving.evidence();
+    let lease = serve_or_report_the_refusal(&serving, vault.name());
+
+    let spent = serving.evidence().since(opening);
+    assert!(
+        spent.changesets_applied > 0,
+        "the entry serves a vault the heal committed nothing to, so what is read after this is a \
+         store no attach wrote: {spent:?}"
+    );
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "an entry leaving one directory page reached rung 3, which discards derived state to \
+         answer an edit another writer made: {spent:?}"
+    );
+    drop(lease);
+}
+
+/// The armed attach: the machine will not stat a name the listing named, so the
+/// heal refuses and the entry stays untrusted naming it.
+fn a_paging_stat_the_machine_refused_withdraws_the_entry(vault: &Vault) {
+    let serving = vault.serving(ProductionPolicy::new(64, 64).unwrap());
+    let opening = serving.evidence();
+    let _lease = serving
+        .demand(vault.name(), AttachMode::Durable)
+        .expect("request the attachment");
+
+    let untrusted = wait_for_untrusted(&serving, vault.name());
+    let spent = serving.evidence().since(opening);
+    assert_eq!(
+        spent.rebuilds_run, 0,
+        "a refused paging stat reached rung 3, which discards a sound database to fix a broken \
+         environment: {spent:?}"
+    );
+    // The reason is the case's own arm attesting: it has to name the entry the
+    // stat was refused over and the denial that came of it, or the entry is
+    // untrusted for something this arrangement did not cause.
+    let UntrustedReason::EnvironmentalRefusal { detail, .. } = &untrusted else {
+        panic!(
+            "a refused paging stat was published as something other than a broken environment: \
+             {untrusted:?}"
+        )
+    };
+    assert!(
+        detail.contains("note-000.md") && detail.contains("Permission denied"),
+        "the entry is untrusted for a reason that is not the refused stat: {detail}"
+    );
+}
+
+/// Demand `name`, wait for it to serve the vault, and fail at once where it
+/// refuses instead.
+///
+/// **A refusal is what the case around this is stated against**, so it ends the
+/// wait rather than running it out: the reason the entry published says what
+/// went wrong, where an elapsed deadline says only that something did.
+fn serve_or_report_the_refusal(
+    serving: &Serving,
+    name: &VaultName,
+) -> DemandLease<ProductionEntryOps> {
+    let lease = serving
+        .demand(name, AttachMode::Durable)
+        .expect("request the attachment");
+    let deadline = Instant::now() + WAIT_LIMIT;
+    loop {
+        let observed = serving.state(name);
+        if observed == Ok(TrustState::Ready) {
+            return lease;
+        }
+        if let Some(reason) = untrusted_reason(&observed) {
+            panic!(
+                "the heal refused over an edit another writer made inside one of its own \
+                 windows: {reason:?}"
+            );
+        }
+        assert!(
+            !names_no_vault(&observed),
+            "the host serves no vault under `{name}`: {observed:?}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the attach did not converge inside {WAIT_LIMIT:?}; observed {observed:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Waiting
 // ---------------------------------------------------------------------------
 
@@ -2131,6 +2432,20 @@ impl Vault {
             arm.push((WATCH_ARMED_STAGES, stages));
         }
         self.spawn(&hits, &arm)
+    }
+
+    /// Run this binary again as a child meeting the paging-window `condition`,
+    /// armed at `stages`, and report what it left behind.
+    ///
+    /// The arm is the process's and it fires once, so a child here meets the
+    /// condition at the first entry any of its walks pages — which is the attach
+    /// heal's own walk of the vault root.
+    fn run_walk_child(&self, condition: &str, stages: &str) -> Ran {
+        let hits = self.records().join(format!("{condition}-arm-hits"));
+        self.spawn(
+            &hits,
+            &[(CHILD_WALK, condition), (WALK_ARMED_STAGES, stages)],
+        )
     }
 
     /// Run this binary again as a child, recording into `hits`, with `arm` in

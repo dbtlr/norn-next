@@ -46,7 +46,7 @@
 //! # Which entry an arm stands over
 //!
 //! **The first entry a page stats that the listing named a regular file**, once
-//! per walk. Two things decide that:
+//! in the process that armed it. Two things decide that:
 //!
 //! - *A regular file*, because the entry class is what makes the outcome
 //!   readable. A file leaving a page is one document; a directory leaving one
@@ -54,7 +54,9 @@
 //!   whether the entries beside it were reached.
 //! - *Once*, because the condition is one foreign edit landing in one window. An
 //!   arm that answered every stat would state a vault every writer is emptying,
-//!   which is a different claim and not one this seam is for.
+//!   which is a different claim and not one this seam is for — and a second walk
+//!   of the same tree is not a second edit, so the firing is the process's rather
+//!   than each walk's.
 //!
 //! Everything else in the page is stat'd by the machine, which is what lets a
 //! case read the entries beside the one that left.
@@ -90,6 +92,7 @@
 //! leaves the vault entry untrusted. This crate's own cases arm the seam in code
 //! and read the page itself, which is the observation a host cannot make.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustix::io::Errno;
@@ -227,9 +230,13 @@ pub(crate) struct Paged {
 /// Which window of a walk holds a foreign edit, and which one.
 ///
 /// The default is the empty arm — a walk whose observations are all the
-/// machine's own — and it is what every process that armed nothing carries. Each
-/// walk gets its own arm and its own one-shot, so two walks in one armed process
-/// each drop one entry.
+/// machine's own — and it is what every process that armed nothing carries.
+///
+/// **An armed process spends one arm across every walk it runs.** The condition
+/// is one foreign edit landing in one window, and a second walk of the same tree
+/// is not a second edit — so a heal that walks again after the entry left the
+/// page sees the tree the machine holds, which is what a case reads a
+/// convergence off.
 #[derive(Debug, Default)]
 pub(crate) struct WalkFaults {
     /// The stages this walk is armed at, in the order they were named.
@@ -237,8 +244,10 @@ pub(crate) struct WalkFaults {
     /// The file a fired arm records itself in, where anything named one.
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<std::path::PathBuf>,
-    /// Whether the arm has already been spent on an entry.
-    spent: AtomicBool,
+    /// Whether the arm has already been spent on an entry. Shared with every
+    /// other walk of an armed process, and this walk's own where a case spelled
+    /// the arm in code.
+    spent: Arc<AtomicBool>,
 }
 
 impl WalkFaults {
@@ -273,14 +282,15 @@ impl WalkFaults {
     /// Without the `induced-failure` feature this is an empty arm and each
     /// paging stat asks one comparison against an empty list. With it, the
     /// answer is whatever this process was started armed with — read once, and
-    /// empty in every process that armed nothing.
+    /// empty in every process that armed nothing — over the one firing that
+    /// process has.
     pub(crate) fn entry() -> WalkFaults {
         #[cfg(feature = "induced-failure")]
         {
             WalkFaults {
                 armed: armed::stages(),
                 hits: armed::hits().cloned(),
-                spent: AtomicBool::new(false),
+                spent: armed::spent(),
             }
         }
         #[cfg(not(feature = "induced-failure"))]
@@ -344,7 +354,9 @@ impl WalkFaults {
 /// cost a function of how many documents the vault holds.
 #[cfg(feature = "induced-failure")]
 mod armed {
+    use std::sync::Arc;
     use std::sync::OnceLock;
+    use std::sync::atomic::AtomicBool;
 
     use super::{ARMED_STAGES, Answer, Stage, refuse_an_unreadable_arm};
     use crate::faults::ARM_HITS;
@@ -367,6 +379,12 @@ mod armed {
         static HITS: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
         HITS.get_or_init(|| std::env::var_os(ARM_HITS).map(std::path::PathBuf::from))
             .as_ref()
+    }
+
+    /// The one firing this process has, held across every walk it runs.
+    pub(super) fn spent() -> Arc<AtomicBool> {
+        static SPENT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+        SPENT.get_or_init(Arc::default).clone()
     }
 
     /// Read `stage=answer` pairs, and refuse a spelling this seam cannot answer.
