@@ -2048,8 +2048,14 @@ mod tests {
     /// record alone cannot tell the two apart — but the vault's own change
     /// would then go on to be reported by path, which is exactly what a
     /// displaced delivery is not. So the case reads both: the rescan arrives,
-    /// and nothing ever names the document whose delivery the arm was supposed
-    /// to stand in place of.
+    /// and nothing ever names the place whose delivery the arm was supposed to
+    /// stand in place of.
+    ///
+    /// **The change inside the vault is a directory rather than a document**,
+    /// because the assertion is that nothing names it and one write is not one
+    /// delivery on every backend: inotify reports creating a file, writing it
+    /// and closing it separately, so a displaced create would leave the rest to
+    /// name the path anyway. Creating a directory is one report everywhere.
     ///
     /// The settle before the vault is touched is ordering rather than proof: it
     /// puts the sibling's delivery at the handler first, so an arm that answers
@@ -2071,8 +2077,7 @@ mod tests {
             std::fs::create_dir(scratch.path("beside-the-vault"))
                 .expect("a directory beside the tree, under the parent edge");
             std::thread::sleep(DELIVERED_BY_NOW);
-            std::fs::write(vault.join("one.md"), b"one\n")
-                .expect("a real change under a real watch");
+            std::fs::create_dir(vault.join("inside")).expect("a real change under a real watch");
 
             let widened = norn_testkit::wait::wait_until(
                 "a batch carrying the rescan the backend reports",
@@ -2087,16 +2092,16 @@ mod tests {
             .unwrap_or_else(|failure| panic!("{label}: {failure}"));
             assert!(widened.vault_roots().is_empty(), "{label}");
 
-            // The arm stood in place of the document's delivery, so nothing
-            // reports the document by path. A batch that names it is an arm
-            // that was spent on the sibling directory instead.
+            // The arm stood in place of the vault's own delivery, so nothing
+            // reports that place by path. A batch that names it is an arm that
+            // was spent on the sibling directory instead.
             std::thread::sleep(DELIVERED_BY_NOW);
             while let Ok(Some(batch)) = subscription.try_recv() {
                 assert!(
                     !batch
                         .vault_roots()
                         .iter()
-                        .any(|root| root.as_path() == Path::new("one.md")),
+                        .any(|root| root.as_path() == Path::new("inside")),
                     "{label}: the arm was spent on a delivery the watcher folds into no batch, so \
                      the vault's own change was reported by path"
                 );
