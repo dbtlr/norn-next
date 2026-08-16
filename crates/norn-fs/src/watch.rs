@@ -118,6 +118,11 @@ impl Batch {
         }
     }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
+    ///
+    /// A root stands at one identity, and on a folding volume several spellings
+    /// share one. The spelling a root carries is the one the **last** event
+    /// naming that identity spelled it at, which is the spelling the tree
+    /// renders once the reports settle.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
     }
@@ -130,9 +135,27 @@ impl Batch {
         &self.rescans
     }
 
+    /// Record one dirty root, keeping the **last** spelling of its identity.
+    ///
+    /// A [`NormalizedPath`] compares on its fold identity alone, so a plain set
+    /// insert of a fold-equal root is a no-op and the set keeps whichever
+    /// spelling arrived first. A rename that only flips case reports the same
+    /// identity at a new spelling, and the tree afterwards renders the later
+    /// one; a consumer deriving from the earlier spelling would carry a name no
+    /// directory entry holds. So the later spelling displaces the earlier, and
+    /// the identity is recorded once either way.
+    fn note_vault_root(&mut self, root: NormalizedPath) {
+        self.vault_roots.replace(root);
+    }
+
     /// Merge another settled batch without losing any uncertainty.
+    ///
+    /// `other` is the later of the two, so its spellings win where the two name
+    /// one identity.
     pub fn merge(&mut self, other: Batch) {
-        self.vault_roots.extend(other.vault_roots);
+        for root in other.vault_roots {
+            self.note_vault_root(root);
+        }
         self.schema_dirty |= other.schema_dirty;
         self.rescans.extend(other.rescans);
         if self.vault_roots.len() > DIRTY_ROOT_CAP {
@@ -1205,7 +1228,7 @@ fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     };
     let batch = state.batch();
     if !batch.rescans.contains(&RescanScope::Vault) {
-        batch.vault_roots.insert(normalized);
+        batch.note_vault_root(normalized);
         if batch.vault_roots.len() >= DIRTY_ROOT_CAP {
             batch.vault_roots.clear();
             batch.rescans.insert(RescanScope::Vault);
@@ -1339,6 +1362,7 @@ mod tests {
     use super::*;
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, Flag, MetadataKind, ModifyKind, RemoveKind,
+        RenameMode,
     };
 
     use crate::ContentHash;
@@ -2442,6 +2466,73 @@ mod tests {
             ]
         );
         assert!(batch.schema_dirty);
+    }
+
+    /// **A fold-equal re-ingest keeps the last spelling.**
+    ///
+    /// On a folding vault a rename that only flips case names one identity
+    /// twice, and the dirty set compares identities. The spelling is what a
+    /// consumer derives at, so the set has to hand back the one the directory
+    /// renders after the rename rather than the one it rendered before — and
+    /// that holds wherever the flipped component sits, because the identity a
+    /// dirty root carries covers the whole path and not just its last name.
+    ///
+    /// One root stands per identity either way: a re-spelling is not a second
+    /// place to walk.
+    #[test]
+    fn a_fold_equal_re_ingest_keeps_the_last_spelling() {
+        for (label, first, second, kept) in [
+            (
+                "a file's own name",
+                "/vault/notes/flipping.md",
+                "/vault/notes/FLIPPING.md",
+                "notes/FLIPPING.md",
+            ),
+            (
+                "a directory above the file",
+                "/vault/notes/one.md",
+                "/vault/NOTES/one.md",
+                "NOTES/one.md",
+            ),
+            (
+                "a directory's own name",
+                "/vault/notes",
+                "/vault/NOTES",
+                "NOTES",
+            ),
+        ] {
+            let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+            for path in [first, second] {
+                ingest(
+                    &state,
+                    Ok(
+                        Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+                            .add_path(path.into()),
+                    ),
+                );
+            }
+            let mut locked = state.lock().unwrap();
+            let batch = &locked.pending.as_mut().unwrap().batch;
+            let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(paths, [Path::new(kept)], "{label}");
+        }
+    }
+
+    /// **A merge takes the later batch's spelling**, for the same reason one
+    /// batch takes the later event's: the batches a host folds together arrive
+    /// in the order the vault changed, so the one merged in last is the one the
+    /// tree agrees with.
+    #[test]
+    fn a_host_side_merge_keeps_the_later_batch_spelling() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let mut pending =
+            Batch::vault_change(normalizer.normalize(Path::new("flipping.md")).unwrap());
+        pending.merge(Batch::vault_change(
+            normalizer.normalize(Path::new("FLIPPING.md")).unwrap(),
+        ));
+
+        let paths: Vec<_> = pending.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("FLIPPING.md")]);
     }
 
     /// **An event above a nested in-vault schema reaches it.** A schema below

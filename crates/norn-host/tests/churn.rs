@@ -231,22 +231,21 @@ fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
 /// Where two spellings are two places, the flip is a move and everything below
 /// holds straight through.
 ///
-/// Where they are one place, one thing does not. The increment a watcher report
-/// drives **converges the document and not its spelling**: the row keeps the
-/// spelling the vault was first walked at while holding the bytes that landed at
-/// the flipped one, so a keyed read at the spelling on disk finds nothing until
-/// the next attach heal re-walks the vault and moves the row. This case waits for
-/// the identity to hold the last bytes, states that it does, and takes the
-/// equivalence bar after that heal — and the difference between the two lanes is
-/// a gap this suite found rather than a contract it is transcribing.
+/// Where they are one place, the flip re-spells that place, and it holds
+/// straight through as well. The increment a watcher report drives **converges
+/// the spelling along with the bytes**: a settled batch names each dirty
+/// identity at the last spelling its events carried, so the derivation runs at
+/// the name the directory now renders and the standing row moves to it. Both
+/// lanes therefore take the equivalence bar off the watcher-driven settle
+/// alone, with no attach heal between the flip and the judgement.
 ///
 /// **The flip is held to three things a phase that did nothing would fail.**
 /// The directory itself is asked what it renders the name as, which is the only
 /// answer a volume that folds case cannot give twice; the row at the identity
 /// holds bytes the opening phase's row did not; and one row stands there rather
-/// than two. The re-attach below applies no acts at all, which is why this case
-/// states them itself rather than leaning on the phase driver's own claim that a
-/// phase moved the tree.
+/// than two. The equivalence bar below compares two derivations and so would
+/// hold over a pair that both missed the flip; these three read the tree and the
+/// churned store directly, and do not.
 #[test]
 fn a_case_flip_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-flip");
@@ -267,10 +266,6 @@ fn a_case_flip_converges_on_a_build_from_zero() {
         "two probes of one volume disagree"
     );
     churned.assert_the_flip_landed(&before_the_flip);
-
-    if folding == Folding::Folded {
-        churned = churned.then(&Script::new("nothing at all", Vec::new()), When::Settled);
-    }
     churned.judge(workload.changing().name(), 0);
 }
 
