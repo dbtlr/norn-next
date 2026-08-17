@@ -33,9 +33,17 @@
 //! the workspace paths it stands on, each claimed as one the tree holds or one
 //! it does not, and the audit resolves every one of them:
 //! [`a_dormancy_reason_whose_subject_landed_fails_the_audit`] is that gate seen
-//! from the failing side. A dormancy claim therefore expires by itself, and
-//! re-deriving it — binding the case, or restating why a built subject still
-//! carries nothing — is the only way back to green.
+//! from the failing side. A dormancy claim standing on a path therefore expires
+//! by itself, and re-deriving it — binding the case, or restating why a built
+//! subject still carries nothing — is the only way back to green.
+//!
+//! Not every missing subject is a path. A reason may wait on a guard nobody
+//! wrote, on a member absent from a counter vocabulary, or on a carrier the
+//! reference grammar cannot name, and no path claim refutes any of those. Those
+//! reasons expire only when a person re-derives them, so the class is pinned by
+//! name in [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees
+//! mechanically is that the class is a reviewed list rather than a silent
+//! majority.
 //!
 //! # What this suite is not
 //!
@@ -73,7 +81,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "ec18b00aa93e76e4c29cad1e78966ed9f2b36319685bd4ec2a41526f32c4fa70";
+const CONTRACT_DIGEST: &str = "c8d6b44103320be0bd52fd3ab1d7ed9f43a988ded48ce5f80d5c74ca05862c3a";
 
 /// The cases carried by tests today, by name.
 ///
@@ -94,6 +102,43 @@ const BOUND_CASES: &[&str] = &[
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
     "one-field-edit-is-a-one-field-diff",
+];
+
+/// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
+/// absence, by name — **the dormancy the falsifiability gate cannot refute.**
+///
+/// Each of these waits on something that is not a path: a guard nobody wrote, a
+/// member absent from a counter vocabulary, a vault-rule vocabulary that does
+/// not exist, a carrier the reference grammar cannot name because it is a shell
+/// step, a module of an integration target, or a reader behind a feature. The
+/// grounds beside such a reason hold the paths it cites as present, so the audit
+/// still catches those moving; the claim that something is missing is refuted by
+/// nobody but the next person to read the code.
+///
+/// Pinned for the reason [`BOUND_CASES`] is: the size of this class is the
+/// honest scope of the gate. A case that gains an `absent` ground leaves the
+/// list, a reason that newly waits on a non-path subject joins it, and either
+/// way the edit is in the diff.
+const UNFALSIFIABLE_DORMANCY: &[&str] = &[
+    "a-measurement-step-asserts-a-nonzero-pass-count",
+    "cache-identity-is-total",
+    "comment-claims-are-test-bound",
+    "derived-findings-are-materialized-and-maintained",
+    "each-file-is-read-once-per-build",
+    "guard-binds-executed-sql",
+    "harness-assertions-observe-stable-facts",
+    "incremental-equals-rebuild",
+    "instrumentation-exists-and-is-consumed",
+    "maintenance-touches-the-affected-set-only",
+    "output-parity-cannot-certify-structure",
+    "present-but-unusable-config-refuses-loudly",
+    "scale-assertions-vary-documents-and-bytes-independently",
+    "statements-are-prepared-once",
+    "steps-report-their-own-outcome",
+    "storage-configuration-is-explicit",
+    "substrate-capabilities-are-probed-before-they-are-relied-on",
+    "unsatisfiable-config-is-rejected-at-load",
+    "warm-state-survives-process-lifetime",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -178,6 +223,30 @@ fn a_dormancy_reason_whose_subject_landed_fails_the_audit() {
         1,
         "`{subject}` stands on the absence of a file the workspace holds, and the audit said: \
          {problems:#?}"
+    );
+}
+
+/// **The gate states its own reach.** The dormant cases the audit cannot
+/// refute are exactly the ones pinned in [`UNFALSIFIABLE_DORMANCY`].
+///
+/// A ground is a claim about a path, so a reason whose missing subject is not a
+/// path — a guard, a counter member, a vocabulary, a carrier this grammar
+/// cannot name — carries no claim that can fail. Left unnamed, that class grows
+/// by one every time a reason is written the easy way, and the registry reads
+/// as if every reason were held to the tree. Named, it is a list a reviewer can
+/// count, and a reason that gains an absence has to leave it in the same diff.
+#[test]
+fn the_dormancy_the_gate_cannot_refute_is_the_pinned_set() {
+    let registry = registry();
+    let unrefuted: BTreeSet<&str> = registry
+        .dormant_without_an_absence()
+        .map(|case| case.name.as_str())
+        .collect();
+    let pinned: BTreeSet<&str> = UNFALSIFIABLE_DORMANCY.iter().copied().collect();
+    assert_eq!(
+        unrefuted, pinned,
+        "the set of dormancy reasons standing on no absence moved. A case that gained an `absent` \
+         ground leaves this pin; a reason that now waits on a subject no path names joins it."
     );
 }
 

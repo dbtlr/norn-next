@@ -15,6 +15,12 @@
 //!   still serving are different subjects: once over the rows an attachment left
 //!   behind, and once with the entry still attached under a held demand, across
 //!   two passes so a cost paid on first touch is separated from the steady state.
+//!   **The counters answer for derivation, not for reading.** The vocabulary
+//!   counts rows written and facts discarded, and no member counts rows read, so
+//!   a reader whose row count grew with the tree still reads zero here: what this
+//!   bar holds is that a warm read derives nothing, and the read's own cost shape
+//!   is held by the descriptor budget beside it and by the plan taken off the
+//!   executing statement in the store's suite.
 //! - **Size independence.** One bounded write costs the same at 300 documents
 //!   and at 2000. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together.
