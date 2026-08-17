@@ -96,10 +96,10 @@
 //!
 //! The wall is written against the walls the lanes themselves run under, which
 //! is the constraint a depth-derived bound cannot meet: [`QUEUED_HOLDERS`]
-//! holders at a fifteen-second hold window is forty-eight minutes, and a bound
-//! past the job's own wall never fires. Under it a stuck holder ends the run as
-//! a job timeout that names nothing, which is precisely the diagnostic this
-//! module exists to produce.
+//! holders at a fifteen-second hold window is hours, and a bound past the job's
+//! own wall never fires. Under it a stuck holder ends the run as a job timeout
+//! that names nothing, which is precisely the diagnostic this module exists to
+//! produce.
 
 use std::fs::TryLockError;
 use std::io::{Read, Seek, SeekFrom, Write};
