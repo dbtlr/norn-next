@@ -87,8 +87,8 @@
 //! **Work an invalidation supersedes goes with the epoch it was raised under.**
 //! Carried by [`Claim::invalidate`], where the supersession, the abandoned slot
 //! and the dropped marker are one move: an entry left holding any one of them
-//! is one a later dispatch reaches for work it has moved on from. Two of the
-//! three limbs are pinned. The supersession is pinned through
+//! is one a later dispatch reaches for work it has moved on from. All three
+//! limbs are pinned. The supersession is pinned through
 //! [`Claim::stands_at`] by `an_identity_refusal_invalidates_an_in_flight_reconcile`
 //! and `a_refused_entry_is_polled_by_nothing_afterwards`, and the abandoned
 //! slot by `an_invalidation_stops_the_entry_waiting_on_the_job_it_supersedes`.
@@ -123,11 +123,23 @@
 //! taken under the lock publishing the state it warms into. The hand-on is
 //! pinned by `a_job_leg_release_honors_a_demand_with_a_claimed_re_attach` and
 //! `a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes`.
-//! The slot the pair takes is unpinned: the re-arm plants no marker, so the
-//! only reader that would refuse a second send —
-//! [`Claim::take_slot_for_marked`] — answers None over this entry whether the
-//! slot is taken or not, and no case in the suite reaches the queue pressure
-//! that would tell the two apart.
+//! The slot the pair takes is what holds the entry to the attach the re-arm
+//! sends: the re-arm plants no marker of its own, so the reader that refuses a
+//! second send — [`Claim::take_slot_for_marked`] — has the slot alone to read a
+//! marker recorded beside it against.
+//!
+//! That reader is a dormant carrier over this slot. No producer the current
+//! call graph reaches records a marker beside a standing slot: the ones that
+//! schedule work read an unheld gate first, the one that marks a refused send
+//! frees the slot under the same lock, and the hand-on above holds the gate
+//! for the whole window this slot stands — so today the slot and its absence
+//! part in nothing a run observes. Layer 4's request-driven work submission is
+//! the producer that parts them, naming the work an entry owes at the epoch it
+//! stands at whether the gate is held or not. The slot is kept for it and
+//! covered at its seam by
+//! `a_release_re_arm_holds_the_queue_slot_against_a_second_send`, which writes
+//! that producer's marker itself, drives a tick against a queue with room for
+//! a second send, and reads the room the tick leaves.
 //!
 //! **A poll and a job leg do not end each other.** Carried by the [`Leg`] kind
 //! and the equality checks in [`Claim::end_poll`] and [`Claim::end_job_leg`].
@@ -168,10 +180,10 @@
 //! `worker_defers_followup_when_a_sibling_fills_its_only_queue_slot`,
 //! `a_refused_follow_up_takes_the_marker_from_work_the_entry_has_left` and
 //! `failed_send_releases_the_marker_after_a_newer_epoch_is_installed`. The slot
-//! [`Claim::hand_off`] takes under the lock ending the claim is unpinned, for
-//! the reason the re-arm's slot above is: a hand-off leaves no marker naming
-//! the job it sends, so the reader that would refuse a second send has nothing
-//! to send twice.
+//! [`Claim::hand_off`] takes under the lock ending the claim is what stands for
+//! the job where the hand-off leaves no marker naming it, and is pinned by
+//! `an_entry_holding_its_queue_slot_stays_in_the_set`, which drives the entry
+//! through a hand-off over an open gate and reads the slot it left.
 //!
 //! **A taken slot is a hold on the entry in its own right.** Carried by
 //! [`Claim::slot_taken`], which `EntryState::held_by_anything` reads beside the
@@ -190,11 +202,13 @@
 //! `destruction_leaves_coverage_out_with_a_leg_to_that_leg`, which is the case
 //! that fails where that record is discarded and a teardown then reads an entry
 //! holding nothing as an entry with nothing out. [`Coverage::take`] leaving it
-//! is unpinned: a non-`Parked` take recording [`Custody::None`] instead leaves
-//! the whole suite standing. The state that would differ is coverage out with a
-//! leg no registration names, which the debug assertion in `refuse_conflict`
-//! says no entry reaches, and the readers that would tell the two apart pair
-//! the record with that registration under an `||`.
+//! is pinned by `a_refused_take_leaves_the_record_of_the_leg_holding_the_coverage`:
+//! a non-`Parked` take recording [`Custody::None`] instead leaves an entry
+//! accounting for nothing while a leg still holds its coverage, and the pass
+//! `Host::drop` runs after the joins reads that record with no registration to
+//! fall back on. Both release-window arms pair the record with the leg
+//! registration under an `||`, so that bare read is where the two spellings
+//! part.
 //!
 //! [`Coverage::out_with_leg`] reading that record rather than inferring it from
 //! an empty attachment has four readers. The debug assertion in
