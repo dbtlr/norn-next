@@ -13,14 +13,25 @@
 //! the suite. A case at or below [`LAYER_LANDING`] is bindable against a
 //! subject that exists, so leaving one dormant costs a stated reason.
 //!
+//! **A dormancy reason is falsifiable too.** A reason is prose, and prose does
+//! not notice its subject landing. So a dormant case at or below
+//! [`LAYER_LANDING`] states [`Ground`]s beside the reason: the workspace paths
+//! the reason stands on, each marked as one the workspace holds or one it does
+//! not. The audit resolves every one of them, so **a reason claiming its
+//! subject does not exist fails the moment the subject is in the tree** — which
+//! is what makes a stale reason loud rather than a thing a review has to
+//! notice. Each ground's path is also required to appear in the reason text, so
+//! the prose and the mechanical claim cannot drift apart.
+//!
 //! **The audit holds content, not only shape.** [`Registry::contract_digest`]
 //! is one value over every case's name, kind, mandatory flag, venue, property,
-//! sources and binding, pinned as a constant in the suite: an edit to any of
-//! them moves it, so a gutted property, a swapped citation, a re-laned venue
-//! and a shrunk binding each fail the gate the same way a deleted case does.
-//! Test references are checked against cargo's own list of what compiled into
-//! each target, so a reference naming a string literal, a function behind a
-//! disabled `cfg`, or a file whose spelling differs only in case is refused.
+//! sources and binding — grounds included — pinned as a constant in the suite:
+//! an edit to any of them moves it, so a gutted property, a swapped citation, a
+//! re-laned venue and a shrunk binding each fail the gate the same way a
+//! deleted case does. Test references are checked against cargo's own list of
+//! what compiled into each target, so a reference naming a string literal, a
+//! function behind a disabled `cfg`, or a file whose spelling differs only in
+//! case is refused.
 //!
 //! This module is the loader and the gate. The suite it gates lives in the
 //! `norn` bin package, beside the registry data.
@@ -147,6 +158,43 @@ pub enum BindingStatus {
     Bound,
 }
 
+/// One machine-checkable claim a dormancy reason stands on.
+///
+/// A reason is prose about the workspace, and the workspace moves. A ground is
+/// the part of that prose the audit can check: a path, and which way the
+/// workspace is required to answer for it. [`Registry::audit`] resolves every
+/// one against the tree, so a reason whose grounds stopped holding fails.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ground {
+    /// A path the reason says the workspace does not hold — the subject that
+    /// has not been built. **This is the falsifiability claim**: the audit
+    /// fails when the path is there, because the reason has outlived its
+    /// subject's absence.
+    Absent(String),
+    /// A path the reason cites as a subject that did land, which is what a
+    /// reason for a case still dormant beside a built subject has to name. The
+    /// audit fails when the path is not there, because the grounds moved.
+    Present(String),
+}
+
+impl Ground {
+    /// The path the claim is about.
+    pub fn subject(&self) -> &str {
+        match self {
+            Ground::Absent(subject) | Ground::Present(subject) => subject,
+        }
+    }
+
+    /// The claim's name, as the data spells it.
+    fn claim(&self) -> &'static str {
+        match self {
+            Ground::Absent(_) => "absent",
+            Ground::Present(_) => "present",
+        }
+    }
+}
+
 /// A case's binding: the tests carrying it, or the reason it carries none.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -159,6 +207,11 @@ pub struct Binding {
     /// at or below [`LAYER_LANDING`], because that is what exists.
     #[serde(default)]
     pub reason: Option<String>,
+    /// The paths the reason stands on. Required alongside the reason, and held
+    /// to the tree by [`Registry::audit`]: this is what makes a reason go stale
+    /// loudly instead of quietly.
+    #[serde(default)]
+    pub grounds: Vec<Ground>,
 }
 
 /// One named regression case.
@@ -580,8 +633,8 @@ impl Registry {
     /// One value over the whole contract every case states.
     ///
     /// Every field a reviewer weighs goes in — name, kind, mandatory flag,
-    /// venue, property, sources and binding — so any edit to any of them moves
-    /// it. That is the point: the case total catches a deletion, and this
+    /// venue, property, sources and binding, down to the grounds a dormancy
+    /// reason stands on — so any edit to any of them moves it. That is the point: the case total catches a deletion, and this
     /// catches everything a deletion-plus-replacement would hide. A property
     /// gutted to a word, a citation swapped for another, a venue quietly
     /// re-laned, a binding shrunk from four tests to one — each moves this
@@ -622,6 +675,11 @@ impl Registry {
                     hasher.update_framed(reason.as_bytes());
                 }
                 None => hasher.update_framed(b"no-reason"),
+            }
+            hasher.update_framed(&(case.binding.grounds.len() as u64).to_be_bytes());
+            for ground in &case.binding.grounds {
+                hasher.update_framed(ground.claim().as_bytes());
+                hasher.update_framed(ground.subject().as_bytes());
             }
         }
         hex(&hasher.finish())
@@ -666,7 +724,8 @@ impl Registry {
     /// and cites sources of a shape a citation has; that the mandatory set is
     /// exactly the one the harness pins; that a bound case names tests cargo
     /// compiled into the suite; and that a dormant case at or below the layer
-    /// that exists says why it is still dormant.
+    /// that exists says why it is still dormant, on grounds that still hold
+    /// against the tree.
     ///
     /// `workspace_root` is where a test reference's path resolves from, and
     /// `tests` is what cargo says each cited target compiled.
@@ -803,6 +862,9 @@ impl Registry {
                             "`{name}` is bound and states a reason for dormancy"
                         ));
                     }
+                    if !case.binding.grounds.is_empty() {
+                        problems.push(format!("`{name}` is bound and states grounds for dormancy"));
+                    }
                     for reference in &case.binding.tests {
                         for problem in self.audit_carrier(
                             workspace_root,
@@ -829,7 +891,82 @@ impl Registry {
                         )),
                         _ => {}
                     }
+                    self.audit_grounds(workspace_root, case, problems);
                 }
+            }
+        }
+    }
+
+    /// **The falsifiability gate.** What is wrong with one dormant case's
+    /// grounds, held against the tree as it is now.
+    ///
+    /// A reason is prose, and prose about an absent subject reads the same
+    /// forever. The grounds are the part of it a machine can check, and this is
+    /// where the check happens: an `absent` path the workspace now holds means
+    /// the subject landed while the reason went on saying it had not, so the
+    /// case fails until somebody re-derives it — binds it, or restates why a
+    /// built subject still carries nothing. A `present` path that is gone is the
+    /// same failure from the other side: the reason is standing on a file the
+    /// workspace no longer has.
+    ///
+    /// Every ground's path is also required to appear in the reason itself. The
+    /// grounds are what the audit reads and the reason is what a person reads,
+    /// and a reason that never names its own subject leaves the two free to
+    /// disagree.
+    ///
+    /// Grounds are required exactly where a reason is — at or below
+    /// [`LAYER_LANDING`], the layers whose subjects exist. Above it a case is
+    /// waiting on a layer nobody has built, and there is no path to point at.
+    fn audit_grounds(&self, workspace_root: &Path, case: &Case, problems: &mut Vec<String>) {
+        let name = case.name.as_str();
+        if case.binding.grounds.is_empty() {
+            if case.venue <= LAYER_LANDING {
+                problems.push(format!(
+                    "`{name}` is dormant at layer {}, which is at or below the layer that exists, \
+                     and states no grounds: a reason at these layers names the paths it stands on, \
+                     so the audit fails when its subject lands",
+                    case.venue
+                ));
+            }
+            return;
+        }
+        let reason = case.binding.reason.as_deref().unwrap_or_default();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for ground in &case.binding.grounds {
+            let subject = ground.subject();
+            if subject.trim().is_empty() {
+                problems.push(format!("`{name}` states a ground naming no path"));
+                continue;
+            }
+            if !seen.insert(subject) {
+                problems.push(format!("`{name}` stands on `{subject}` twice"));
+            }
+            let path = Path::new(subject);
+            if path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
+                problems.push(format!(
+                    "`{name}` stands on `{subject}`, which is not a workspace-relative path \
+                     without parent traversal"
+                ));
+                continue;
+            }
+            if !reason.contains(subject) {
+                problems.push(format!(
+                    "`{name}` stands on `{subject}` and its reason does not name it: a ground is \
+                     the reason's own claim, checked"
+                ));
+            }
+            let held = resolves_case_exactly(workspace_root, path, LastComponent::FileOrDirectory);
+            match ground {
+                Ground::Absent(_) if held => problems.push(format!(
+                    "`{name}` stands on `{subject}` being absent, and the workspace holds it. The \
+                     subject landed, so the reason is stale: bind the case, or restate why a built \
+                     subject still carries nothing"
+                )),
+                Ground::Present(_) if !held => problems.push(format!(
+                    "`{name}` cites `{subject}` as a subject that landed, and the workspace holds \
+                     no such path under that exact spelling"
+                )),
+                _ => {}
             }
         }
     }
@@ -867,7 +1004,7 @@ impl Registry {
         };
 
         let mut problems = Vec::new();
-        if !resolves_case_exactly(workspace_root, &test.file) {
+        if !resolves_case_exactly(workspace_root, &test.file, LastComponent::File) {
             return vec![format!(
                 "names `{test}`, whose file is not in the workspace under that exact spelling"
             )];
@@ -907,14 +1044,24 @@ impl Registry {
     }
 }
 
+/// What the last component of a resolved path is allowed to be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LastComponent {
+    /// A carrier reference names a file, because it names a function in one.
+    File,
+    /// A dormancy ground names a subject, which is a crate directory as often
+    /// as it is a module file.
+    FileOrDirectory,
+}
+
 /// Whether every component of `relative` is spelled the way the directory
-/// holding it spells it, and the last one is a file.
+/// holding it spells it, and the last one is of the kind `last` allows.
 ///
 /// `Path::is_file` is not this question: a case-insensitive filesystem answers
 /// it for `Tests/Lanes.rs` and a case-sensitive one does not, so a reference
 /// that passes here and fails in CI is exactly what asking it would allow.
 #[allow(clippy::disallowed_methods)] // Resolves a reference against the workspace's own directory entries.
-fn resolves_case_exactly(workspace_root: &Path, relative: &Path) -> bool {
+fn resolves_case_exactly(workspace_root: &Path, relative: &Path, last: LastComponent) -> bool {
     let mut current = workspace_root.to_path_buf();
     let components: Vec<&OsStr> = relative
         .components()
@@ -923,7 +1070,7 @@ fn resolves_case_exactly(workspace_root: &Path, relative: &Path) -> bool {
             _ => None,
         })
         .collect();
-    let Some((last, directories)) = components.split_last() else {
+    let Some((leaf, directories)) = components.split_last() else {
         return false;
     };
     for name in directories {
@@ -932,7 +1079,12 @@ fn resolves_case_exactly(workspace_root: &Path, relative: &Path) -> bool {
         }
         current.push(name);
     }
-    holds(&current, last, false)
+    match last {
+        LastComponent::File => holds(&current, leaf, false),
+        LastComponent::FileOrDirectory => {
+            holds(&current, leaf, false) || holds(&current, leaf, true)
+        }
+    }
 }
 
 /// Whether `dir` holds an entry named exactly `name`, of the kind wanted.
@@ -1065,7 +1217,7 @@ fn read(path: &Path) -> Result<String, RegistryError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Binding, BindingStatus, Case, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
+        Binding, BindingStatus, Case, Ground, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
         MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_test,
         ignore_reason, is_identifier, is_kebab_case, opens_fn,
     };
@@ -1153,6 +1305,18 @@ fn a_name_in_prose() {
             status: BindingStatus::Dormant,
             tests: Vec::new(),
             reason: reason.map(String::from),
+            grounds: Vec::new(),
+        }
+    }
+
+    /// A dormant binding whose reason names the paths it stands on, which is
+    /// what a case at or below the landed layer is held to.
+    fn grounded(reason: &str, grounds: Vec<Ground>) -> Binding {
+        Binding {
+            status: BindingStatus::Dormant,
+            tests: Vec::new(),
+            reason: Some(reason.to_string()),
+            grounds,
         }
     }
 
@@ -1161,6 +1325,7 @@ fn a_name_in_prose() {
             status: BindingStatus::Bound,
             tests: tests.iter().map(|test| (*test).to_string()).collect(),
             reason: None,
+            grounds: Vec::new(),
         }
     }
 
@@ -1184,7 +1349,14 @@ fn a_name_in_prose() {
         cases.push(case(
             "a-dormant-layer-zero-case",
             0,
-            dormant(Some("its subject has not landed")),
+            grounded(
+                "crates/demo/tests/suite.rs holds the recognition half, and the half this case \
+                 waits on has no subject: crates/demo/src is not in the workspace",
+                vec![
+                    Ground::Present("crates/demo/tests/suite.rs".to_string()),
+                    Ground::Absent("crates/demo/src".to_string()),
+                ],
+            ),
         ));
         Registry {
             note: "a scratch registry".to_string(),
@@ -1391,14 +1563,159 @@ fn a_name_in_prose() {
             );
         }
         // Above the landed layer there is nothing to explain: the subject has
-        // not been built.
+        // not been built, so neither a reason nor the grounds one stands on is
+        // asked for.
         assert_eq!(
             problems(|registry| {
                 let case = find(registry, "a-dormant-layer-zero-case");
                 case.venue = LAYER_LANDING + 1;
                 case.binding.reason = None;
+                case.binding.grounds.clear();
             }),
             Vec::<String>::new()
+        );
+    }
+
+    /// **The falsifiability gate.** A reason standing on a subject's absence
+    /// fails the moment the workspace holds that subject.
+    ///
+    /// This is the whole point of a ground. The reason text still reads exactly
+    /// as it did — prose does not notice a crate landing — and the audit does.
+    #[test]
+    fn a_dormancy_reason_whose_absent_subject_landed_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some(
+                    "no carrier exists: crates/demo/tests/suite.rs is not in the workspace"
+                        .to_string(),
+                );
+                case.binding.grounds =
+                    vec![Ground::Absent("crates/demo/tests/suite.rs".to_string())];
+            },
+            "and the workspace holds it. The subject landed, so the reason is stale",
+        );
+    }
+
+    /// A directory is a subject too: a case waiting on a whole crate names the
+    /// crate, and lands loudly when the crate does.
+    #[test]
+    fn a_dormancy_reason_whose_absent_subject_directory_landed_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("crates/demo/tests is not in the workspace".to_string());
+                case.binding.grounds = vec![Ground::Absent("crates/demo/tests".to_string())];
+            },
+            "and the workspace holds it",
+        );
+    }
+
+    /// The other direction: a reason citing a landed subject that is not there.
+    #[test]
+    fn a_dormancy_reason_citing_a_subject_the_workspace_does_not_hold_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("crates/demo/tests/gone.rs holds half".to_string());
+                case.binding.grounds =
+                    vec![Ground::Present("crates/demo/tests/gone.rs".to_string())];
+            },
+            "and the workspace holds no such path under that exact spelling",
+        );
+    }
+
+    /// A subject whose spelling differs only in case is a different subject, for
+    /// the reason a carrier reference is held to the same rule.
+    #[test]
+    fn a_ground_whose_spelling_differs_only_in_case_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("crates/demo/tests/Suite.rs holds half".to_string());
+                case.binding.grounds =
+                    vec![Ground::Present("crates/demo/tests/Suite.rs".to_string())];
+            },
+            "holds no such path under that exact spelling",
+        );
+    }
+
+    /// A dormant case at a landed layer states grounds, not prose alone.
+    #[test]
+    fn a_dormant_case_at_a_landed_layer_with_no_grounds_is_caught() {
+        for venue in 0..=LAYER_LANDING {
+            refused(
+                |registry| {
+                    let case = find(registry, "a-dormant-layer-zero-case");
+                    case.venue = venue;
+                    case.binding.grounds.clear();
+                },
+                "and states no grounds",
+            );
+        }
+    }
+
+    /// The reason and the grounds are one claim, so the reason names every path
+    /// the audit checks for it.
+    #[test]
+    fn a_ground_the_reason_does_not_name_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("its subject has not landed".to_string());
+                case.binding.grounds = vec![Ground::Absent("crates/demo/src".to_string())];
+            },
+            "and its reason does not name it",
+        );
+    }
+
+    #[test]
+    fn a_ground_naming_no_path_is_caught() {
+        refused(
+            |registry| {
+                find(registry, "a-dormant-layer-zero-case").binding.grounds =
+                    vec![Ground::Present("  ".to_string())];
+            },
+            "states a ground naming no path",
+        );
+    }
+
+    #[test]
+    fn one_path_stood_on_twice_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.grounds = vec![
+                    Ground::Present("crates/demo/tests/suite.rs".to_string()),
+                    Ground::Present("crates/demo/tests/suite.rs".to_string()),
+                ];
+            },
+            "twice",
+        );
+    }
+
+    #[test]
+    fn a_ground_reaching_outside_the_workspace_is_caught() {
+        for subject in ["/etc/passwd", "../elsewhere/crates/demo"] {
+            refused(
+                |registry| {
+                    let case = find(registry, "a-dormant-layer-zero-case");
+                    case.binding.reason = Some(format!("{subject} is not in the workspace"));
+                    case.binding.grounds = vec![Ground::Absent(subject.to_string())];
+                },
+                "workspace-relative path without parent traversal",
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_case_stating_grounds_is_caught() {
+        refused(
+            |registry| {
+                find(registry, "a-bound-case").binding.grounds =
+                    vec![Ground::Absent("crates/demo/src".to_string())];
+            },
+            "is bound and states grounds",
         );
     }
 
@@ -1719,6 +2036,32 @@ fn a_name_in_prose() {
                     find(registry, "a-dormant-layer-zero-case").binding.reason = None;
                 }),
             ),
+            (
+                "a reground reason",
+                Box::new(|registry: &mut Registry| {
+                    find(registry, "a-dormant-layer-zero-case").binding.grounds =
+                        vec![Ground::Absent("crates/demo/src".to_string())];
+                }),
+            ),
+            (
+                "a ground whose claim flipped",
+                Box::new(|registry: &mut Registry| {
+                    // The same two paths, one of them claimed the other way.
+                    find(registry, "a-dormant-layer-zero-case").binding.grounds = vec![
+                        Ground::Absent("crates/demo/tests/suite.rs".to_string()),
+                        Ground::Absent("crates/demo/src".to_string()),
+                    ];
+                }),
+            ),
+            (
+                "dropped grounds",
+                Box::new(|registry: &mut Registry| {
+                    find(registry, "a-dormant-layer-zero-case")
+                        .binding
+                        .grounds
+                        .clear();
+                }),
+            ),
         ];
         for (what, mutate) in mutations {
             let mut registry = sound();
@@ -1766,6 +2109,34 @@ fn a_name_in_prose() {
         assert_eq!(case.name, "a-case");
         assert!(!case.mandatory);
         assert!(case.binding.tests.is_empty());
+        assert!(case.binding.grounds.is_empty());
+    }
+
+    /// A ground is one claim over one path, and the claim is the key it is
+    /// written under.
+    #[test]
+    fn grounds_load_as_the_claims_the_data_spells() {
+        let case = DORMANT.replace(
+            r#""status": "dormant""#,
+            r#""status": "dormant", "grounds": [{"absent": "crates/absent"}, {"present": "crates/present"}]"#,
+        );
+        let registry = registry(&case).expect("a well-formed case");
+        assert_eq!(
+            registry.cases[0].binding.grounds,
+            vec![
+                Ground::Absent("crates/absent".to_string()),
+                Ground::Present("crates/present".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_claim_the_grammar_does_not_name_is_refused() {
+        let case = DORMANT.replace(
+            r#""status": "dormant""#,
+            r#""status": "dormant", "grounds": [{"missing": "crates/absent"}]"#,
+        );
+        registry(&case).expect_err("`missing` is not a claim");
     }
 
     #[test]

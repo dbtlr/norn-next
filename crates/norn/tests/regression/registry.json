@@ -42,7 +42,10 @@
       "sources": ["NRN-a59", "NRN-a61", "NRN-a58", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm path to count and no floor verb to pin: the composition root is a stub, so no request surface exists to hold a budget."
+        "reason": "there is no warm path to count and no floor verb to pin: the composition root is a stub, so no request surface exists to hold a budget: crates/norn-host/tests/counter_gate.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-host/tests/counter_gate.rs" }
+        ]
       }
     },
     {
@@ -53,7 +56,10 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "no counter helper has a subject yet; the convention binds when the first cost-shaped comment lands beside a counter that can hold it. Cost-shaped comments do exist, in norn-text's frontmatter split and text derive, and what backs them is a wall-clock ratio in a soak lane rather than a counter — which is the evidence kind this case would hold them to. One more sits on the value model's by-key view, where the claim is which of two arms costs less at a given entry count: a structural case pins the count the arms turn at, so the constant cannot move unreviewed, but nothing counts the comparisons either arm makes."
+        "reason": "no counter helper has a subject yet; the convention binds when the first cost-shaped comment lands beside a counter that can hold it. Cost-shaped comments do exist, in norn-text's frontmatter split and text derive, and what backs them is a wall-clock ratio in a soak lane rather than a counter — which is the evidence kind this case would hold them to. One more sits on the value model's by-key view, where the claim is which of two arms costs less at a given entry count: a structural case pins the count the arms turn at, so the constant cannot move unreviewed, but nothing counts the comparisons either arm makes: crates/norn-store/src/counters.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/counters.rs" }
+        ]
       }
     },
     {
@@ -79,7 +85,10 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the harness pairs a plan with the statement it was taken of, but no builder emits SQL yet, so there is no request from which a statement could be captured."
+        "reason": "the harness pairs a plan with the statement it was taken of, but no builder emits SQL yet, so there is no request from which a statement could be captured: crates/norn-store/src/request.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/request.rs" }
+        ]
       }
     },
     {
@@ -90,7 +99,10 @@
       "sources": ["NRN-391", "NRN-373", "NRN-444", "NRN-462"],
       "binding": {
         "status": "dormant",
-        "reason": "no suite waits on a background condition, because there is no daemon, watcher or idle reaper to observe."
+        "reason": "no suite waits on a background condition, because there is no daemon, watcher or idle reaper to observe: crates/norn-fs/src/watch.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-fs/src/watch.rs" }
+        ]
       }
     },
     {
@@ -136,7 +148,10 @@
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no resident service to contaminate and no comparison harness to check itself; the class binds with the first harness that generates its own traffic."
+        "reason": "there is no resident service to contaminate and no comparison harness to check itself; the class binds with the first harness that generates its own traffic: crates/norn-testkit/src/equivalence.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-testkit/src/equivalence.rs" }
+        ]
       }
     },
     {
@@ -162,7 +177,10 @@
       "sources": ["NRN-a59", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no counter has a producer yet; the rule binds when the substrate emits its first."
+        "reason": "no counter has a producer yet; the rule binds when the substrate emits its first: crates/norn-store/src/counters.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/counters.rs" }
+        ]
       }
     },
     {
@@ -217,7 +235,10 @@
       "sources": ["NRN-a61", "NRN-a63", "NRN-457"],
       "binding": {
         "status": "dormant",
-        "reason": "no derivation counter exists to move; the rule binds with the first one."
+        "reason": "no derivation counter exists to move; the rule binds with the first one: crates/norn-store/src/counters.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/counters.rs" }
+        ]
       }
     },
     {
@@ -239,7 +260,10 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the substrate has no maintenance schedule yet to hold flat."
+        "reason": "the substrate has no maintenance schedule yet to hold flat: crates/norn-host/src/production.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-host/src/production.rs" }
+        ]
       }
     },
     {
@@ -250,7 +274,10 @@
       "sources": ["NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolver exists to hold to the shape."
+        "reason": "no resolver exists to hold to the shape: crates/norn-store/src/path.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/path.rs" }
+        ]
       }
     },
     {
@@ -261,7 +288,10 @@
       "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no derived store exists to carry an identity."
+        "reason": "no derived store exists to carry an identity: crates/norn-store/src/store.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/store.rs" }
+        ]
       }
     },
     {
@@ -294,7 +324,10 @@
       "sources": ["NORN-a1", "NRN-a60", "NRN-a58", "NRN-a63", "NRN-154", "NRN-155", "NRN-156", "NRN-83", "NRN-275", "NRN-413", "NRN-523", "NRN-533", "NRN-158", "NRN-109", "NRN-526", "NRN-534", "NRN-535"],
       "binding": {
         "status": "dormant",
-        "reason": "the size-independence pair has no request to run; the helper exists and the subject does not."
+        "reason": "the size-independence pair has no request to run; the helper exists and the subject does not: crates/norn-store/src/request.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/request.rs" }
+        ]
       }
     },
     {
@@ -305,7 +338,10 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no schema to declare an index and no reader to call."
+        "reason": "there is no schema to declare an index and no reader to call: crates/norn-store/src/ddl/mod.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/mod.rs" }
+        ]
       }
     },
     {
@@ -316,7 +352,10 @@
       "sources": ["NRN-a61", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no findings table exists, and no rule engine derives against one."
+        "reason": "no findings table exists, and no rule engine derives against one: crates/norn-store/src/ddl/findings.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/findings.rs" }
+        ]
       }
     },
     {
@@ -327,7 +366,10 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing builds derived state from a tree yet."
+        "reason": "nothing builds derived state from a tree yet: crates/norn-host/src/production.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-host/src/production.rs" }
+        ]
       }
     },
     {
@@ -354,7 +396,10 @@
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm read to keep a freshness sweep off."
+        "reason": "there is no warm read to keep a freshness sweep off: crates/norn-host/tests/counter_gate.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-host/tests/counter_gate.rs" }
+        ]
       }
     },
     {
@@ -406,7 +451,10 @@
       "sources": ["NRN-126", "NRN-122", "NRN-439", "NRN-524", "NRN-529", "NRN-117", "NRN-351", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no index to maintain incrementally and nothing to rebuild it from."
+        "reason": "there is no index to maintain incrementally and nothing to rebuild it from: crates/norn-store/src/increment.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/increment.rs" }
+        ]
       }
     },
     {
@@ -417,7 +465,10 @@
       "sources": ["NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolution or reverse-link structure exists."
+        "reason": "no resolution or reverse-link structure exists: crates/norn-store/src/ddl/facts.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/facts.rs" }
+        ]
       }
     },
     {
@@ -428,7 +479,10 @@
       "sources": ["NRN-a62", "NRN-a63", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no increment exists to scope."
+        "reason": "no increment exists to scope: crates/norn-store/src/increment.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/increment.rs" }
+        ]
       }
     },
     {
@@ -480,7 +534,10 @@
       "sources": ["NRN-76", "NRN-202", "NRN-131", "NRN-117", "NRN-134"],
       "binding": {
         "status": "dormant",
-        "reason": "no walker and no membership configuration exist."
+        "reason": "no walker and no membership configuration exist: crates/norn-fs/src/exclusion.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-fs/src/exclusion.rs" }
+        ]
       }
     },
     {
@@ -502,7 +559,10 @@
       "sources": ["NRN-266", "NRN-524"],
       "binding": {
         "status": "dormant",
-        "reason": "no path comparison site exists."
+        "reason": "no path comparison site exists: crates/norn-fs/src/path.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-fs/src/path.rs" }
+        ]
       }
     },
     {
@@ -513,7 +573,10 @@
       "sources": ["NRN-122", "NRN-123", "NRN-124", "NRN-57", "NRN-216", "NRN-167", "NRN-168", "NRN-440", "NRN-510"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolver exists, and no verb has a target to resolve."
+        "reason": "no resolver exists, and no verb has a target to resolve: crates/norn-store/src/path.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/path.rs" }
+        ]
       }
     },
     {
@@ -535,7 +598,10 @@
       "sources": ["NRN-493", "NRN-501", "NRN-475", "NRN-360", "NRN-351", "NRN-353", "NRN-438"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no configuration file to load."
+        "reason": "there is no configuration file to load: crates/norn-config/src/file.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-config/src/file.rs" }
+        ]
       }
     },
     {
@@ -579,7 +645,10 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no connection prepares a statement."
+        "reason": "no connection prepares a statement: crates/norn-store/src/increment.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/increment.rs" }
+        ]
       }
     },
     {
@@ -590,7 +659,10 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no database is opened to configure."
+        "reason": "no database is opened to configure: crates/norn-store/src/store.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/store.rs" }
+        ]
       }
     },
     {
@@ -601,7 +673,10 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no substrate capability is relied on yet."
+        "reason": "no substrate capability is relied on yet: crates/norn-store/src/ddl/fts.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/fts.rs" }
+        ]
       }
     },
     {
@@ -612,7 +687,10 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no index and no targeted reader exist."
+        "reason": "no index and no targeted reader exist: crates/norn-store/src/ddl/documents.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/documents.rs" }
+        ]
       }
     },
     {
@@ -623,7 +701,10 @@
       "sources": ["NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no text index and no search surface."
+        "reason": "there is no text index and no search surface: crates/norn-store/src/ddl/fts.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/ddl/fts.rs" }
+        ]
       }
     },
     {
@@ -645,7 +726,10 @@
       "sources": ["NRN-a58", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "no persistent derived state exists."
+        "reason": "no persistent derived state exists: crates/norn-store/src/store.rs is not in the workspace.",
+        "grounds": [
+          { "absent": "crates/norn-store/src/store.rs" }
+        ]
       }
     },
     {

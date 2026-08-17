@@ -26,6 +26,17 @@
 //! and [`the_registry_is_structurally_sound`] requires it to be written down:
 //! a dormant case at or below that layer with no reason fails.
 //!
+//! # A reason is held to the tree, not just to being present
+//!
+//! A reason is prose, and prose about a subject that has not been built reads
+//! the same forever after the subject lands. So a reason at these layers states
+//! the workspace paths it stands on, each claimed as one the tree holds or one
+//! it does not, and the audit resolves every one of them:
+//! [`a_dormancy_reason_whose_subject_landed_fails_the_audit`] is that gate seen
+//! from the failing side. A dormancy claim therefore expires by itself, and
+//! re-deriving it — binding the case, or restating why a built subject still
+//! carries nothing — is the only way back to green.
+//!
 //! # What this suite is not
 //!
 //! It judges no property. A property is judged by the test that binds it, and
@@ -47,7 +58,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_testkit::regression::{BindingStatus, Kind, LAYER_LANDING, Registry, TestIndex};
+use norn_testkit::regression::{
+    Binding, BindingStatus, Ground, Kind, LAYER_LANDING, Registry, TestIndex,
+};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
@@ -60,15 +73,16 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c2be3c32a81efdb0e4c6e3a20c27311ee5df5daf967dd5af0381c877d404ed02";
+const CONTRACT_DIGEST: &str = "592a12273582bdfb6c007d5ebec56cd8468c5f776171642ed675d6b179920646";
 
 /// The cases carried by tests today, by name.
 ///
 /// Pinned rather than counted, because which ones are bound is the whole
-/// claim: these are the ones whose subject — the harness itself — already
-/// exists. A case that stops being carried has to leave this list to pass,
-/// which is a diff a reviewer reads. Compared as a set, because the order
-/// cases sit in the file is the file's business.
+/// claim: these are the ones whose subject — the harness, and the substrate
+/// under it — already exists and is asserted over. A case that stops being
+/// carried has to leave this list to pass, which is a diff a reviewer reads.
+/// Compared as a set, because the order cases sit in the file is the file's
+/// business.
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
     "encoding-prefix-transparency",
@@ -117,6 +131,52 @@ fn the_registry_is_structurally_sound() {
         problems.is_empty(),
         "the registry is not structurally sound:\n  {}",
         problems.join("\n  ")
+    );
+}
+
+/// **A dormancy reason goes stale loudly.** A reason standing on a subject's
+/// absence fails this registry's own audit the moment the workspace holds that
+/// subject.
+///
+/// The binding installed below is a reason of exactly the shape the gate exists
+/// to catch: it says no database is opened, while `crates/norn-store/src/store.rs`
+/// is in the tree opening one. Nothing about the prose says it is out of date —
+/// prose never does — so the check is over the grounds beside it, and it is the
+/// reason the registry's own layer-0 and layer-1 entries can be trusted to
+/// describe the workspace as it is rather than as it was.
+///
+/// The audit runs against an empty test index here, because what a bound case's
+/// carriers compiled into is a different question and asking cargo about it
+/// costs a full listing pass. The problem asserted is the grounds' own.
+#[test]
+fn a_dormancy_reason_whose_subject_landed_fails_the_audit() {
+    let mut registry = registry();
+    let subject = "storage-configuration-is-explicit";
+    let case = registry
+        .cases
+        .iter_mut()
+        .find(|case| case.name == subject)
+        .unwrap_or_else(|| panic!("no case named `{subject}`"));
+    case.binding = Binding {
+        status: BindingStatus::Dormant,
+        tests: Vec::new(),
+        reason: Some("no database is opened to configure".to_string()),
+        grounds: vec![Ground::Absent("crates/norn-store/src/store.rs".to_string())],
+    };
+
+    let problems = registry.audit(&workspace_root(), &TestIndex::default());
+    let stale: Vec<&String> = problems
+        .iter()
+        .filter(|problem| {
+            problem.starts_with(&format!("`{subject}`"))
+                && problem.contains("The subject landed, so the reason is stale")
+        })
+        .collect();
+    assert_eq!(
+        stale.len(),
+        1,
+        "`{subject}` stands on the absence of a file the workspace holds, and the audit said: \
+         {problems:#?}"
     );
 }
 
