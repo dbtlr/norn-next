@@ -180,14 +180,12 @@ pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 /// [`ACQUISITION_WALL`]. At a fifteen-second hold window the first of those is
 /// forty-eight minutes and the ceiling is what binds; at a hold window short
 /// enough that the depth comes in under the ceiling, the depth binds instead.
+/// Fifteen seconds is the shortest window any call site in the workspace
+/// passes, so the ceiling is the bound at all of them and the depth branch is
+/// the one a shorter window would take.
 ///
 /// The probe bound carries over unchanged: one probe is one non-blocking
 /// attempt at the lock, which costs a syscall whatever the queue is doing.
-///
-/// **The ceiling is what binds at every call site the workspace has.** The
-/// shortest hold window any of them passes is fifteen seconds, and
-/// [`QUEUED_HOLDERS`] of those is forty-eight minutes, so the depth branch is
-/// the one a shorter window would take rather than one a suite reaches today.
 pub fn acquisition_budget(hold_window: Budget) -> Budget {
     Budget::new(
         hold_window
@@ -543,16 +541,27 @@ mod tests {
 
     /// A hold that cannot be taken inside its bound reports the holder rather
     /// than a bare timeout, and reports it as the wait's own failure.
+    ///
+    /// The bound it is reported against is the one the caller passed, which is
+    /// what says [`Lease::try_hold`] carries a per-holder bound wider than a
+    /// wall of milliseconds: an acquisition given fifty of them against a
+    /// holder that never moves is the wall's failure and not the patience's.
     #[test]
     fn a_hold_that_never_comes_free_names_the_holder_it_waited_on() {
         let key = PrivateKey::new("occupied");
         let occupier = Lease::hold(key.as_str(), budget());
 
-        let failure = Lease::try_hold(
-            key.as_str(),
-            Budget::new(Duration::from_millis(50), Duration::from_millis(500)),
-        )
-        .expect_err("a lease another holder has");
+        let wall = Budget::new(Duration::from_millis(50), Duration::from_millis(500));
+        let failure = Lease::try_hold(key.as_str(), wall).expect_err("a lease another holder has");
+
+        assert_eq!(
+            failure.budget.work(),
+            wall.work(),
+            "the failure is reported against {:?} rather than the {:?} wall the caller passed, so \
+             this acquisition ran under a per-holder bound of its own: {failure}",
+            failure.budget.work(),
+            wall.work()
+        );
 
         let rendered = failure.to_string();
         assert!(
