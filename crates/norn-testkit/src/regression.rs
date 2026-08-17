@@ -655,10 +655,10 @@ impl Registry {
     /// venue, property, sources and binding, down to the grounds a dormancy
     /// reason stands on — so any edit to any of them moves it. That is the
     /// point: the case total catches a deletion, and this catches everything a
-    /// deletion-plus-replacement would hide. A property
-    /// gutted to a word, a citation swapped for another, a venue quietly
-    /// re-laned, a binding shrunk from four tests to one — each moves this
-    /// value, and moving it means editing a constant a reviewer reads.
+    /// deletion-plus-replacement would hide. A property gutted to a word, a
+    /// citation swapped for another, a venue quietly re-laned, a binding shrunk
+    /// from four tests to one — each moves this value, and moving it means
+    /// editing a constant a reviewer reads.
     ///
     /// Cases are digested in name order, so reordering the file alone does not
     /// move it, and every field is absorbed behind its own length, so no two
