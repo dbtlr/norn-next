@@ -96,10 +96,10 @@
 //!
 //! The wall is written against the walls the lanes themselves run under, which
 //! is the constraint a depth-derived bound cannot meet: [`QUEUED_HOLDERS`]
-//! holders at a fifteen-second hold window is forty-eight minutes, and a bound
-//! past the job's own wall never fires. Under it a stuck holder ends the run as
-//! a job timeout that names nothing, which is precisely the diagnostic this
-//! module exists to produce.
+//! holders at a fifteen-second hold window is hours, and a bound past the job's
+//! own wall never fires. Under it a stuck holder ends the run as a job timeout
+//! that names nothing, which is precisely the diagnostic this module exists to
+//! produce.
 
 use std::fs::TryLockError;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -118,22 +118,31 @@ pub const REAL_WATCHER: &str = "real-watcher";
 /// The real-watcher holders that can be queued ahead of one case.
 ///
 /// **A census, written as its two factors.** Cases across the workspace hold
-/// [`REAL_WATCHER`] by the dozen — the host's in-crate production suite holds
-/// most of them, with the host's lockdown, coverage, crash-recovery,
-/// descriptor-budget and measurement targets and the filesystem crate's watcher
-/// cases beside it — and the runner starts up to four binaries of them at once,
-/// so the depth is written `48 * 4`. Both factors are here rather than the
-/// product alone, because a suite that gains cases moves one of them and a
-/// runner configured differently moves the other.
+/// [`REAL_WATCHER`] by the hundred, and which ones is a rule rather than a
+/// list: a case takes it when it attaches a vault through the host's production
+/// ops or establishes a native filesystem subscription, because both install a
+/// real platform watcher. The host's in-crate production suite holds most of
+/// them. Beside it, a host integration target that serves through the attach
+/// module those targets share takes one per attachment there; a target that
+/// composes its own host takes its own, which the crash-recovery,
+/// descriptor-budget and lockdown targets each do; and the filesystem crate
+/// holds it in both its in-crate watch suite and its watcher target. The runner
+/// starts up to four binaries of them at once, so the depth is written
+/// `160 * 4`. Both factors are here rather than the product alone, because a
+/// suite that gains cases moves one of them and a runner configured differently
+/// moves the other.
 ///
 /// **The first factor is a round figure for that census rather than a headcount
 /// of it**, and it can be: the number is a queue depth and not a measurement —
 /// queueing behind holders that are working is what the lease is for — and the
 /// product it forms with the hold windows the cases here take is capped by
 /// [`ACQUISITION_WALL`] well before the last holder in it, so a case arriving or
-/// leaving does not move the bound. It sizes the wall in [`acquisition_budget`],
+/// leaving does not move the bound. It stays a figure for the census all the
+/// same: at a hold window short enough for the depth to come in under the
+/// ceiling the depth is what binds, and a factor under the population derives a
+/// wall a working queue outruns. It sizes the wall in [`acquisition_budget`],
 /// and what actually diagnoses a stuck holder is [`HOLDER_PATIENCE`].
-pub const QUEUED_HOLDERS: u32 = 48 * 4;
+pub const QUEUED_HOLDERS: u32 = 160 * 4;
 
 /// How long the lease may stay in one holder's hands before a waiter names it.
 ///
@@ -153,6 +162,36 @@ pub const QUEUED_HOLDERS: u32 = 48 * 4;
 /// waiting to happen, because that lane runs its one binary alone: nothing is
 /// queued behind it to do the diagnosing.
 pub const HOLDER_PATIENCE: Duration = Duration::from_secs(300);
+
+/// The per-holder bound one acquisition runs under.
+///
+/// **Outside this module's own cases there is one of these and it is
+/// [`HOLDER_PATIENCE`].** The other shape does not compile into a build that is
+/// not running this module's tests, so no call site anywhere can widen the
+/// bound past what [`ACQUISITION_WALL`] is sized against, or narrow it under
+/// the window a case honestly holds the lease for. Moving the bound the
+/// workspace runs under means moving the constant, which is where the relation
+/// between the two is asserted.
+#[derive(Debug, Clone, Copy)]
+enum Patience {
+    /// [`HOLDER_PATIENCE`], which is what every acquisition outside this
+    /// module's tests runs under.
+    Standing,
+    /// A bound short enough to spend inside a case's own budget, so that the
+    /// behavior five minutes describes can be driven in milliseconds.
+    #[cfg(test)]
+    Of(Duration),
+}
+
+impl Patience {
+    fn bound(self) -> Duration {
+        match self {
+            Self::Standing => HOLDER_PATIENCE,
+            #[cfg(test)]
+            Self::Of(bound) => bound,
+        }
+    }
+}
 
 /// The wall the per-PR job runs under, which every bound here has to fire
 /// inside of.
@@ -174,8 +213,8 @@ pub const ACQUISITION_WALL: Duration = Duration::from_secs(15 * 60);
 /// The work bound is the shorter of two real constraints: what a fully queued
 /// acquisition can honestly take — [`QUEUED_HOLDERS`] hold windows — and
 /// [`ACQUISITION_WALL`]. At a fifteen-second hold window the first of those is
-/// forty-eight minutes and the ceiling is what binds; at a hold window short
-/// enough that the depth comes in under the ceiling, the depth binds instead.
+/// hours and the ceiling is what binds; at a hold window short enough that the
+/// depth comes in under the ceiling, the depth binds instead.
 ///
 /// The probe bound carries over unchanged: one probe is one non-blocking
 /// attempt at the lock, which costs a syscall whatever the queue is doing.
@@ -195,6 +234,15 @@ pub fn acquisition_budget(hold_window: Budget) -> Budget {
 /// directory — a filesystem that supports locking, or a directory of its own so
 /// that two independent runs on one machine do not queue against each other —
 /// sets this.
+///
+/// **A lease excludes only across the runs that resolve it to the same
+/// directory.** The subject [`REAL_WATCHER`] covers is one service per machine,
+/// so two concurrent runs pointed at different roots take two lease files, queue
+/// behind nobody, and install the watchers each is meant to be excluding — an
+/// opt-out that reports nothing and shows up as the silent-watcher failures this
+/// module exists to prevent. Giving a run a root of its own is therefore a
+/// statement that it contends with nothing else on the machine, and a run
+/// holding this key contends with every other one.
 pub const ISOLATION_ROOT: &str = "NORN_TEST_ISOLATION_DIR";
 
 /// The directory the lease files live in.
@@ -264,8 +312,22 @@ impl Lease {
     /// names it is one holder that stopped letting go. Both come back as the
     /// same [`WaitFailure`] shape, carrying the bound that was passed and the
     /// holder that was there when it went.
-    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The lease is this crate's own machine-local state, and a file lock is what makes it cross-process.
     pub fn try_hold(key: &str, budget: Budget) -> Result<Self, WaitFailure> {
+        Self::try_hold_under(key, budget, Patience::Standing)
+    }
+
+    /// The acquisition, with the per-holder bound named rather than assumed.
+    ///
+    /// The bound is a parameter because it is the thing worth pinning and five
+    /// minutes is longer than a case may run. [`Patience`] is what keeps that
+    /// from being a way to run production under some other bound: the only
+    /// bound nameable outside this module's tests is the constant. Nothing else
+    /// about the acquisition moves with it — the failure a spent patience
+    /// raises carries whatever bound spent it, which is what makes the two
+    /// bounds tell themselves apart in the diagnostic.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The lease is this crate's own machine-local state, and a file lock is what makes it cross-process.
+    fn try_hold_under(key: &str, budget: Budget, patience: Patience) -> Result<Self, WaitFailure> {
+        let patience = patience.bound();
         let root = root();
         let path = lease_path(&root, key);
         std::fs::create_dir_all(&root)
@@ -300,11 +362,11 @@ impl Lease {
                         }
                     };
                     let unmoved = since.elapsed();
-                    if unmoved >= HOLDER_PATIENCE {
+                    if unmoved >= patience {
                         Observed::Met(Err(WaitFailure {
                             what: what.clone(),
                             kind: FailureKind::Elapsed,
-                            budget: Budget::new(HOLDER_PATIENCE, budget.probe()),
+                            budget: Budget::new(patience, budget.probe()),
                             elapsed: started.elapsed(),
                             probes,
                             last_state: format!(
@@ -322,7 +384,7 @@ impl Lease {
             }
         })??;
 
-        record_holder(&file, key);
+        record_holder(&file, key, write_record);
         Ok(Lease {
             key: key.to_owned(),
             file,
@@ -349,7 +411,8 @@ impl Drop for Lease {
     }
 }
 
-/// Write who holds the lease, for whoever is waiting on it.
+/// Write who holds the lease, for whoever is waiting on it, putting the line
+/// down through `write`.
 ///
 /// The record is diagnostic only: a waiter reads it while the holder writes
 /// it, so a torn read is possible and costs a confusing line in a failure that
@@ -361,8 +424,18 @@ impl Drop for Lease {
 /// but a wrong one — the previous holder's line, read by a waiter as the name
 /// of the process it is queued behind — and an empty record reads as the
 /// holder that recorded nothing about itself, which is true.
+///
+/// That arm is why the write is a parameter: it is the arm worth pinning, and a
+/// filesystem does not fail on request. The acquisition passes
+/// [`write_record`]; the case over the failure arm passes a write that returns
+/// an error. What follows the error is here, so it is the same clearing either
+/// caller gets.
 #[allow(clippy::disallowed_types)] // This crate's own lease handle; see `try_hold`.
-fn record_holder(file: &std::fs::File, key: &str) {
+fn record_holder(
+    file: &std::fs::File,
+    key: &str,
+    write: impl FnOnce(&std::fs::File, &str) -> std::io::Result<()>,
+) {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -371,7 +444,7 @@ fn record_holder(file: &std::fs::File, key: &str) {
         "pid {} holding {key} since unix {since}",
         std::process::id()
     );
-    if write_record(file, &record).is_err() {
+    if write(file, &record).is_err() {
         clear_record(file);
     }
 }
@@ -412,7 +485,7 @@ fn holder(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -495,16 +568,27 @@ mod tests {
 
     /// A hold that cannot be taken inside its bound reports the holder rather
     /// than a bare timeout, and reports it as the wait's own failure.
+    ///
+    /// The bound it is reported against is the one the caller passed, which is
+    /// what says [`Lease::try_hold`] carries a per-holder bound wider than a
+    /// wall of milliseconds: an acquisition given fifty of them against a
+    /// holder that never moves is the wall's failure and not the patience's.
     #[test]
     fn a_hold_that_never_comes_free_names_the_holder_it_waited_on() {
         let key = PrivateKey::new("occupied");
         let occupier = Lease::hold(key.as_str(), budget());
 
-        let failure = Lease::try_hold(
-            key.as_str(),
-            Budget::new(Duration::from_millis(50), Duration::from_millis(500)),
-        )
-        .expect_err("a lease another holder has");
+        let wall = Budget::new(Duration::from_millis(50), Duration::from_millis(500));
+        let failure = Lease::try_hold(key.as_str(), wall).expect_err("a lease another holder has");
+
+        assert_eq!(
+            failure.budget.work(),
+            wall.work(),
+            "the failure is reported against {:?} rather than the {:?} wall the caller passed, so \
+             this acquisition ran under a per-holder bound of its own: {failure}",
+            failure.budget.work(),
+            wall.work()
+        );
 
         let rendered = failure.to_string();
         assert!(
@@ -555,6 +639,219 @@ mod tests {
             !after.contains("pid "),
             "the lease still names a holder after it was let go: {after}"
         );
+    }
+
+    /// **The bar on the per-holder bound.** A lease that stays in one holder's
+    /// hands for the patience is reported against the patience, and the
+    /// diagnostic says that is what happened.
+    ///
+    /// The forbidden shape is the bound that never fires — a look that re-arms
+    /// whatever the record says, which is what a re-arm written without its
+    /// comparison does. Under it a stuck holder is reported only when the whole
+    /// acquisition wall runs out, minutes later and against a bound that says
+    /// "the queue kept moving" about a queue that never moved.
+    #[test]
+    fn a_holder_that_never_changes_hands_is_named_at_the_patience_bound() {
+        let key = PrivateKey::new("unmoving");
+        let occupier = Lease::hold(key.as_str(), budget());
+
+        let patience = Duration::from_millis(200);
+        let wall = Budget::new(Duration::from_secs(10), Duration::from_millis(500));
+        let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
+            .expect_err("a lease whose holder never lets go");
+
+        assert_eq!(
+            failure.budget.work(),
+            patience,
+            "the failure is reported against {:?} rather than the {patience:?} patience that is \
+             what ran out: {failure}",
+            failure.budget.work()
+        );
+        assert!(
+            failure
+                .last_state
+                .contains("neither let go nor changed hands"),
+            "the failure does not say the holder stopped rather than queued: {failure}"
+        );
+        assert!(
+            failure
+                .last_state
+                .contains(&format!("pid {}", std::process::id())),
+            "the failure does not name the holder that stopped: {failure}"
+        );
+        assert!(
+            failure.elapsed < wall.work(),
+            "the wait ran to its {:?} wall instead of ending at the patience: {failure}",
+            wall.work()
+        );
+        drop(occupier);
+    }
+
+    /// **The bar on the re-arm.** A queue whose record keeps naming different
+    /// hands runs on past the patience and ends at the acquisition wall
+    /// instead, however many patience windows it outlives.
+    ///
+    /// The forbidden shape is the patience armed once for the whole
+    /// acquisition — a look that keeps the first `since` whatever the record
+    /// now says. Under it a deep queue that is changing hands every few
+    /// milliseconds is cut off as a stuck holder, and the case that was next in
+    /// line fails naming a process that was working the whole time.
+    #[test]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Writing this module's own scratch lease record.
+    fn a_queue_that_keeps_changing_hands_outlives_the_patience_bound() {
+        let key = PrivateKey::new("changing-hands");
+        let path = lease_path(&root(), key.as_str());
+        let occupier = Lease::hold(key.as_str(), budget());
+
+        let patience = Duration::from_millis(500);
+        let wall = Budget::new(Duration::from_secs(2), Duration::from_millis(500));
+
+        // The queue changing hands, written where a waiter reads it: each pass
+        // leaves a record naming a different holder than the last. The widest
+        // gap between two writes that landed is kept because it, and not the
+        // count, is what the waiter sees: hands starved for longer than the
+        // patience have left the waiter a record that did stop moving, and the
+        // failure that follows would be this thread's rather than the re-arm's.
+        // A gap ends at the next landed write or at the waiter's failure,
+        // whichever comes first, so a stall the stop flag interrupts is still
+        // measured rather than lost with the write it prevented.
+        let stop = Arc::new(AtomicBool::new(false));
+        let handovers = Arc::new(AtomicUsize::new(0));
+        let widest_gap = Arc::new(AtomicU64::new(0));
+        let epoch = Instant::now();
+        let last_write = Arc::new(AtomicU64::new(0));
+        let hands = {
+            let (path, stop, handovers, widest_gap, last_write) = (
+                path.clone(),
+                Arc::clone(&stop),
+                Arc::clone(&handovers),
+                Arc::clone(&widest_gap),
+                Arc::clone(&last_write),
+            );
+            thread::spawn(move || {
+                let mut last: Option<Instant> = None;
+                let mut nth = 0usize;
+                while !stop.load(Ordering::SeqCst) {
+                    nth += 1;
+                    let record = format!("pid {nth} holding a lease since unix 0");
+                    let wrote = std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&path)
+                        .and_then(|mut file| file.write_all(record.as_bytes()))
+                        .is_ok();
+                    if wrote {
+                        let now = Instant::now();
+                        if let Some(previous) = last {
+                            widest_gap.fetch_max(
+                                now.duration_since(previous).as_micros() as u64,
+                                Ordering::SeqCst,
+                            );
+                        }
+                        last = Some(now);
+                        last_write.store(epoch.elapsed().as_micros() as u64, Ordering::SeqCst);
+                        handovers.fetch_add(1, Ordering::SeqCst);
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+            })
+        };
+
+        // The waiter starts once the record is these hands' own, so the window
+        // it reads begins at a write and every gap inside it is one the thread
+        // above measured. Started ahead of that, it would be reading the
+        // occupier's line for however long the thread waits to be scheduled.
+        let spawned = Instant::now();
+        while handovers.load(Ordering::SeqCst) == 0 && spawned.elapsed() < patience {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if handovers.load(Ordering::SeqCst) == 0 {
+            stop.store(true, Ordering::SeqCst);
+            hands.join().expect("the hands that never took the record");
+            panic!(
+                "this case's own hands did not take the record inside the {patience:?} patience, \
+                 so the waiter below would read the occupier's line as one that stopped moving"
+            );
+        }
+
+        let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
+            .expect_err("a lease no waiter is ever handed");
+        let at_failure = epoch.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        hands.join().expect("the hands the record kept changing to");
+
+        let changed = handovers.load(Ordering::SeqCst);
+        // The tail is judged from the failure the waiter observed: hands
+        // starved through the patience are still asleep when the flag stops
+        // them, so the stall they caused reaches from their last landed write
+        // to the failure itself and never to a write that follows it.
+        let tail =
+            at_failure.saturating_sub(Duration::from_micros(last_write.load(Ordering::SeqCst)));
+        let widest = Duration::from_micros(widest_gap.load(Ordering::SeqCst)).max(tail);
+        assert!(
+            widest < patience,
+            "this case's own hands stalled for {widest:?}, past the {patience:?} patience, so the \
+             record they left did stop moving and what follows judges the stall rather than the \
+             re-arm"
+        );
+        assert!(
+            changed as u32 > wall.work().as_millis() as u32 / patience.as_millis() as u32,
+            "the record changed hands {changed} times, too few to outlive a {patience:?} patience \
+             inside a {:?} wall",
+            wall.work()
+        );
+        assert_eq!(
+            failure.budget.work(),
+            wall.work(),
+            "a queue that changed hands {changed} times was cut off against the {:?} per-holder \
+             bound instead of running to its wall: {failure}",
+            failure.budget.work()
+        );
+        assert!(
+            !failure
+                .last_state
+                .contains("neither let go nor changed hands"),
+            "a queue that changed hands {changed} times is reported as a holder that stopped: \
+             {failure}"
+        );
+        drop(occupier);
+    }
+
+    /// **The bar on a holder record that cannot be written.** A failed write
+    /// leaves the lease file saying nothing, not saying what the last holder
+    /// said.
+    ///
+    /// The forbidden shape is the swallowed error that leaves the previous
+    /// record standing. Under it the next waiter's timeout names a process that
+    /// let go before this holder ever took the lease — a pid a reader goes and
+    /// looks at, and a wrong answer is worse than none.
+    #[test]
+    fn a_holder_record_that_cannot_be_written_leaves_no_record_at_all() {
+        let key = PrivateKey::new("unwritable-record");
+        let path = lease_path(&root(), key.as_str());
+
+        let held = Lease::hold(key.as_str(), budget());
+        let standing = holder(&path);
+        assert!(
+            standing.contains(&format!("pid {}", std::process::id())),
+            "a held lease does not record its holder: {standing}"
+        );
+
+        record_holder(&held.file, key.as_str(), |_, _| {
+            Err(std::io::Error::other("the record could not be written"))
+        });
+
+        assert_eq!(
+            holder(&path),
+            "a holder that recorded nothing about itself",
+            "a record that could not be written left the previous one standing"
+        );
+        assert_eq!(
+            held.file.metadata().expect("the lease file").len(),
+            0,
+            "the lease file still carries bytes a waiter would read as a holder"
+        );
+        drop(held);
     }
 
     /// The acquisition wall is the shorter of the depth the census derives and

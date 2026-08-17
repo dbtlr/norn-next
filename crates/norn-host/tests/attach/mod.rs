@@ -289,8 +289,10 @@ fn lease_budget() -> Budget {
 /// host cannot be built here without the lease, and the lease cannot be let go
 /// while the host that installed the watcher is still serving.
 ///
-/// The lease is not reentrant, so this is the only place these suites take it.
-/// A caller holds what this hands back and takes none of its own.
+/// The lease is not reentrant, so a target that serves through this module
+/// takes it here and nowhere else: a caller holds what this hands back and
+/// takes none of its own. A target that composes its own host instead of
+/// asking for this one takes its own lease around it.
 pub struct ServingHost {
     host: Host<ProductionEntryOps>,
     /// What this host's jobs have spent and done. The ops that write it are
