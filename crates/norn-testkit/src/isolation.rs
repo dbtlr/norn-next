@@ -712,15 +712,21 @@ mod tests {
         // count, is what the waiter sees: hands starved for longer than the
         // patience have left the waiter a record that did stop moving, and the
         // failure that follows would be this thread's rather than the re-arm's.
+        // A gap ends at the next landed write or at the waiter's failure,
+        // whichever comes first, so a stall the stop flag interrupts is still
+        // measured rather than lost with the write it prevented.
         let stop = Arc::new(AtomicBool::new(false));
         let handovers = Arc::new(AtomicUsize::new(0));
         let widest_gap = Arc::new(AtomicU64::new(0));
+        let epoch = Instant::now();
+        let last_write = Arc::new(AtomicU64::new(0));
         let hands = {
-            let (path, stop, handovers, widest_gap) = (
+            let (path, stop, handovers, widest_gap, last_write) = (
                 path.clone(),
                 Arc::clone(&stop),
                 Arc::clone(&handovers),
                 Arc::clone(&widest_gap),
+                Arc::clone(&last_write),
             );
             thread::spawn(move || {
                 let mut last: Option<Instant> = None;
@@ -743,6 +749,7 @@ mod tests {
                             );
                         }
                         last = Some(now);
+                        last_write.store(epoch.elapsed().as_micros() as u64, Ordering::SeqCst);
                         handovers.fetch_add(1, Ordering::SeqCst);
                     }
                     thread::sleep(Duration::from_millis(2));
@@ -769,11 +776,18 @@ mod tests {
 
         let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
             .expect_err("a lease no waiter is ever handed");
+        let at_failure = epoch.elapsed();
         stop.store(true, Ordering::SeqCst);
         hands.join().expect("the hands the record kept changing to");
 
         let changed = handovers.load(Ordering::SeqCst);
-        let widest = Duration::from_micros(widest_gap.load(Ordering::SeqCst));
+        // The tail is judged from the failure the waiter observed: hands
+        // starved through the patience are still asleep when the flag stops
+        // them, so the stall they caused reaches from their last landed write
+        // to the failure itself and never to a write that follows it.
+        let tail =
+            at_failure.saturating_sub(Duration::from_micros(last_write.load(Ordering::SeqCst)));
+        let widest = Duration::from_micros(widest_gap.load(Ordering::SeqCst)).max(tail);
         assert!(
             widest < patience,
             "this case's own hands stalled for {widest:?}, past the {patience:?} patience, so the \
