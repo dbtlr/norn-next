@@ -5966,87 +5966,117 @@ mod tests {
     }
 
     /// A release that re-arms takes the entry's queue slot for the attach it
-    /// sends, and that slot is the entry's hold on the job while the channel
-    /// carries it: a tick reaching a marker beside it takes nothing, because
-    /// the entry already has a job in flight.
+    /// sends, and that slot is what refuses a second send while the channel
+    /// still carries the attach: the re-arm plants no marker of its own, so
+    /// [`Claim::take_slot_for_marked`] has the slot alone to weigh a marker
+    /// recorded beside it against. An entry left with a free slot behind a job
+    /// the channel really holds is one a tick sends a second job for, and the
+    /// arrival that frees the slot then frees one naming work the entry never
+    /// sent.
     ///
-    /// The slot the re-arm takes is what says so. An entry left with a free
-    /// slot behind a job the channel really holds is one a tick puts a second
-    /// job in flight for, and the arrival that frees the slot then frees one
-    /// naming work the entry never sent.
+    /// The producer that records the marker is written out here. Every
+    /// producer the call graph reaches today either reads an unheld gate
+    /// before it schedules or frees the slot under the lock it marks in, and
+    /// the hand-on holds the gate for the whole window the re-arm's slot
+    /// stands, so no run reaches this state. Layer 4's request-driven work
+    /// submission is the producer that will: it names the work an entry owes
+    /// at the epoch the entry stands at, held gate or not. The carrier is kept
+    /// for it and covered here at its seam.
     ///
-    /// The one worker is held inside the other vault's attach, so the attach
-    /// the release sends stays in the channel for the window this case reads,
-    /// and the poll that reports the maintainer lost is driven from here, so
-    /// the release and its re-arm run on this thread.
+    /// The queue has room for the second send: both workers are held inside
+    /// another vault's attach, so the channel carries the re-armed attach
+    /// alone and takes one more job. What refuses the send is the slot, not a
+    /// full queue. The poll that reports the maintainer lost is driven from
+    /// here, so the release and its re-arm run on this thread.
     #[test]
     fn a_release_re_arm_holds_the_queue_slot_against_a_second_send() {
         let ops = Arc::new(FakeOps::default());
         let working = VaultName::new("a").unwrap();
         let holding = VaultName::new("b").unwrap();
-        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding], 1);
+        let holding_too = VaultName::new("c").unwrap();
+        let host =
+            host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding, &holding_too], 2);
         let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
         wait_for_state(&host, &working, TrustState::Ready);
 
+        // Both workers inside an attach they cannot leave: nothing takes a job
+        // out of the channel from here, so what the channel holds below is
+        // what this case put in it.
         ops.block_attach.store(true, Ordering::SeqCst);
         let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
-        wait_for_flag("attach_started", &ops.attach_started);
+        let holding_too_lease = host.demand(&holding_too, AttachMode::Durable).unwrap();
+        wait_until(
+            "both workers to reach an attach that blocks",
+            lifecycle_wait_budget(),
+            || {
+                let attaches = ops.attaches.load(Ordering::SeqCst);
+                if attaches == 3 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending(format!("{attaches} attaches so far"))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
 
         // The teardown: the poll reports the maintainer lost, the release
         // gives the coverage back, and the lease standing over the entry is
-        // what it re-arms for. The entry beside it is skipped by the round,
-        // its own attach holding its gate.
+        // what it re-arms for. The entries beside it are skipped by the round,
+        // their own attaches holding their gates.
         ops.lost_poll.store(true, Ordering::SeqCst);
         poll_watchers(&host.shared);
 
         let entry = host.shared.entries.get(&working).unwrap();
-        let (attach, slot, leg) = {
-            let state = entry.gate.lock().unwrap();
-            (state.claim.epoch(), state.claim.slot(), state.claim.leg())
-        };
         assert_eq!(
             ops.detaches.load(Ordering::SeqCst),
             1,
             "the release gave nothing back, so nothing re-armed"
         );
-        assert_eq!(
-            slot,
-            Some(attach),
-            "the re-arm sent an attach the entry's slot does not name"
-        );
-        assert!(
-            leg.is_none(),
-            "a registered leg stands beside the slot, so the slot is not what refuses below"
-        );
 
-        // A job that lost the coverage it was dispatched against, recording
-        // itself against the entry for a later tick: the marker holds the
-        // gate, and the slot is the only thing left that says the entry has a
-        // job in flight already.
-        let marked = {
+        // The work a producer records against the entry as it stands. The
+        // reader below refuses on a marker of the entry's own or a leg
+        // registered against it as readily as on the slot, and the re-arm left
+        // neither, so the slot is what answers for the refusal.
+        let attach = {
             let mut state = entry.gate.lock().unwrap();
-            state.claim.restore(Job::Reconcile(working.clone(), attach));
-            state.claim.marker().is_some()
+            assert!(
+                state.claim.marker().is_none(),
+                "the re-arm scheduled work of its own, so the marker below is not what the tick reads"
+            );
+            assert!(
+                state.claim.leg().is_none(),
+                "a leg stands over the entry, so the slot is not what refuses below"
+            );
+            let attach = state.claim.epoch();
+            state.claim.mark(Job::Reconcile(working.clone(), attach));
+            attach
         };
-        assert!(marked, "nothing is scheduled against the entry");
 
         dispatch_pending(&host.shared, &entry).unwrap();
-        let (slot, marker) = {
-            let state = entry.gate.lock().unwrap();
-            (state.claim.slot(), state.claim.marker().cloned())
+        assert!(
+            entry.gate.lock().unwrap().claim.marker().is_some(),
+            "nothing is scheduled against the entry, so the tick read no marker"
+        );
+        // The room left in the channel is what says the tick sent nothing. The
+        // re-armed attach is the one job in it, so a second send would have
+        // taken the room this job finds; the name it carries is served by no
+        // entry, so the worker that reaches it answers nothing.
+        let room = {
+            let jobs = host.shared.jobs.lock().unwrap();
+            jobs.as_ref()
+                .expect("the host is running")
+                .try_send(Job::Reconcile(VaultName::new("d").unwrap(), attach))
         };
-        assert_eq!(
-            slot,
-            Some(attach),
+        // The workers are let go before the read is judged, so a case that
+        // reads a second send reports it rather than timing out behind the
+        // attaches it left blocked.
+        ops.attach_release.store(true, Ordering::SeqCst);
+        assert!(
+            room.is_ok(),
             "a tick sent a second job against an entry whose attach is already in the channel"
         );
-        assert!(
-            marker.is_some(),
-            "the tick took the marker for a job it never sent"
-        );
 
-        ops.attach_release.store(true, Ordering::SeqCst);
-        drop((working_lease, holding_lease, host));
+        drop((working_lease, holding_lease, holding_too_lease, host));
     }
 
     /// A teardown that parks the entry on a contended maintainer honors the
@@ -6297,22 +6327,19 @@ mod tests {
 
         // The leg that follows it: registered against the entry, reaching for
         // coverage the entry does not have in its own hand.
-        let (took, out_with_leg) = {
+        let took = {
             let mut state = entry.gate.lock().unwrap();
             let next = state.claim.supersede();
             state.claim.begin_job_leg(next);
-            let took = state.coverage.take(next);
-            (took, state.coverage.out_with_leg())
+            state.coverage.take(next)
         };
         assert!(
             took.is_none(),
             "a leg took the coverage another leg is holding"
         );
-        assert!(
-            out_with_leg,
-            "the refused take discarded the record of the leg holding the coverage"
-        );
 
+        // Destruction reads the record, so the record is read here through
+        // what destruction does with it rather than off the field.
         drop(host);
         let (trust, in_flight) = {
             let state = entry.gate.lock().unwrap();

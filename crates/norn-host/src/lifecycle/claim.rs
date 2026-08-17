@@ -126,9 +126,20 @@
 //! The slot the pair takes is what holds the entry to the attach the re-arm
 //! sends: the re-arm plants no marker of its own, so the reader that refuses a
 //! second send — [`Claim::take_slot_for_marked`] — has the slot alone to read a
-//! marker recorded beside it against. Pinned by
-//! `a_release_re_arm_holds_the_queue_slot_against_a_second_send`, where the
-//! attach stays in the channel and a tick reaching a marker takes nothing.
+//! marker recorded beside it against.
+//!
+//! That reader is a dormant carrier over this slot. No producer the current
+//! call graph reaches records a marker beside a standing slot: the ones that
+//! schedule work read an unheld gate first, the one that marks a refused send
+//! frees the slot under the same lock, and the hand-on above holds the gate
+//! for the whole window this slot stands — so today the slot and its absence
+//! part in nothing a run observes. Layer 4's request-driven work submission is
+//! the producer that parts them, naming the work an entry owes at the epoch it
+//! stands at whether the gate is held or not. The slot is kept for it and
+//! covered at its seam by
+//! `a_release_re_arm_holds_the_queue_slot_against_a_second_send`, which writes
+//! that producer's marker itself, drives a tick against a queue with room for
+//! a second send, and reads the room the tick leaves.
 //!
 //! **A poll and a job leg do not end each other.** Carried by the [`Leg`] kind
 //! and the equality checks in [`Claim::end_poll`] and [`Claim::end_job_leg`].
