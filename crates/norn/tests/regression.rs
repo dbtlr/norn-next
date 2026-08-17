@@ -72,7 +72,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 104;
+const CASE_TOTAL: usize = 105;
 
 /// The whole registry's contract, as one value.
 ///
@@ -81,7 +81,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "e9b218c8daf986ac30740099ef4fb2cdbb3f0647648163a0192c796e8eef4804";
+const CONTRACT_DIGEST: &str = "f0f9736f96b65e146659d98dfb0d2db72e8c0aca634d8bd6a508a9ed08ba63f9";
 
 /// The cases carried by tests today, by name.
 ///
@@ -121,6 +121,7 @@ const BOUND_CASES: &[&str] = &[
 /// list, a reason that newly waits on a non-path subject joins it, and either
 /// way the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
+    "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "cache-identity-is-total",
     "comment-claims-are-test-bound",
