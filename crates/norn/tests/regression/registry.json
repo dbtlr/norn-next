@@ -31,7 +31,10 @@
       "sources": ["NORN-13", "NRN-a59", "NRN-472"],
       "binding": {
         "status": "dormant",
-        "reason": "its carrier is a workflow script, and a test reference in this file is a workspace-relative source file and a `#[test]` function in it — a grammar that cannot name a CI step."
+        "reason": "the subject exists and this file cannot name it: .github/scripts/lane-suite.sh runs a suite's ignored cases and fails the step when none of them ran, which is the property, and a reference here is a workspace-relative source file and a `#[test]` function in it — a grammar that names no shell script and no CI step.",
+        "grounds": [
+          { "present": ".github/scripts/lane-suite.sh" }
+        ]
       }
     },
     {
@@ -42,9 +45,10 @@
       "sources": ["NRN-a59", "NRN-a61", "NRN-a58", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm path to count and no floor verb to pin: the composition root is a stub, so no request surface exists to hold a budget: crates/norn-host/tests/counter_gate.rs is not in the workspace.",
+        "reason": "the counters a budget would be read off exist and are asserted: crates/norn-host/tests/counter_gate.rs takes one request's whole reading over an attached vault, in counts rather than in a clock. The budget's other half has no subject — there is no verb to hold under a ceiling and no refusal stub to pin a floor against, because crates/norn-serve is not in the workspace and the composition root wires nothing.",
         "grounds": [
-          { "absent": "crates/norn-host/tests/counter_gate.rs" }
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -56,9 +60,11 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a62", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "no counter helper has a subject yet; the convention binds when the first cost-shaped comment lands beside a counter that can hold it. Cost-shaped comments do exist, in norn-text's frontmatter split and text derive, and what backs them is a wall-clock ratio in a soak lane rather than a counter — which is the evidence kind this case would hold them to. One more sits on the value model's by-key view, where the claim is which of two arms costs less at a given entry count: a structural case pins the count the arms turn at, so the constant cannot move unreviewed, but nothing counts the comparisons either arm makes: crates/norn-store/src/counters.rs is not in the workspace.",
+        "reason": "the counters a cost-shaped comment would be bound to exist: crates/norn-store/src/counters.rs is read by assertions in the same suites as the code it counts. What has no subject is the guard — nothing scans for a comment asserting a cost shape, so a claim landing with no counter beside it fails nothing. The cost-shaped comments that do exist name the two evidence kinds this case would replace: crates/norn-text/src/frontmatter/fields.rs and crates/norn-text/src/value.rs resolve a block's keys through a by-key view, and what bars the scan they forbid is a wall-clock ratio in a soak lane plus a structural case pinning the count the arms turn at, with nothing counting the comparisons either arm makes.",
         "grounds": [
-          { "absent": "crates/norn-store/src/counters.rs" }
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "present": "crates/norn-text/src/frontmatter/fields.rs" },
+          { "present": "crates/norn-text/src/value.rs" }
         ]
       }
     },
@@ -85,9 +91,11 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the harness pairs a plan with the statement it was taken of, but no builder emits SQL yet, so there is no request from which a statement could be captured: crates/norn-store/src/request.rs is not in the workspace.",
+        "reason": "the seam exists and the pairing is structural: crates/norn-store/src/request.rs takes a plan of the SQL a reader emitted, and crates/norn-testkit/src/explain.rs holds a plan together with that statement so no assertion can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it.",
         "grounds": [
-          { "absent": "crates/norn-store/src/request.rs" }
+          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-testkit/src/explain.rs" },
+          { "present": "crates/norn-store/tests/store/pillars.rs" }
         ]
       }
     },
@@ -99,9 +107,11 @@
       "sources": ["NRN-391", "NRN-373", "NRN-444", "NRN-462"],
       "binding": {
         "status": "dormant",
-        "reason": "no suite waits on a background condition, because there is no daemon, watcher or idle reaper to observe: crates/norn-fs/src/watch.rs is not in the workspace.",
+        "reason": "the conditions exist and the waits are already on them: crates/norn-fs/src/watch.rs publishes filesystem facts a suite subscribes to, and crates/norn-testkit/src/wait.rs is the deadline-bearing wait a suite uses in place of a sleep. What has no carrier is the prohibition: nothing refuses a sleep, a TTL boundary or an assertion over an identifier the kernel may reuse, and crates/norn-fs/src/identity.rs keeps `(device, inode)` for deciding that a held name still resolves to the held handle rather than as an identity two assertions could be compared across.",
         "grounds": [
-          { "absent": "crates/norn-fs/src/watch.rs" }
+          { "present": "crates/norn-fs/src/watch.rs" },
+          { "present": "crates/norn-testkit/src/wait.rs" },
+          { "present": "crates/norn-fs/src/identity.rs" }
         ]
       }
     },
@@ -148,9 +158,11 @@
       "sources": ["NRN-480", "NRN-522", "NRN-29"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no resident service to contaminate and no comparison harness to check itself; the class binds with the first harness that generates its own traffic: crates/norn-testkit/src/equivalence.rs is not in the workspace.",
+        "reason": "the comparison harness exists — crates/norn-testkit/src/equivalence.rs compares two derived stores field by field and crates/norn-testkit/src/fidelity.rs is the seam a verdict is recorded through — and there is no resident service for a run's traffic to meet: crates/norn-serve is not in the workspace, so no run can share a subject with a host it did not start, and the self-check has no divergence to misattribute.",
         "grounds": [
-          { "absent": "crates/norn-testkit/src/equivalence.rs" }
+          { "present": "crates/norn-testkit/src/equivalence.rs" },
+          { "present": "crates/norn-testkit/src/fidelity.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -177,9 +189,11 @@
       "sources": ["NRN-a59", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no counter has a producer yet; the rule binds when the substrate emits its first: crates/norn-store/src/counters.rs is not in the workspace.",
+        "reason": "the counters exist and every one of them is consumed: crates/norn-store/src/counters.rs declares the vocabulary and every reading carries all of it, and crates/norn-host/tests/counter_gate.rs records each counter by name at the value a request finished on. Two halves have no subject. Nothing fails a build for a metric computed and dropped, because no guard reads the vocabulary against its consumers; and the process-harness half is narrower than the property, because the reader of a host's own account is crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature — a build without it writes the account and carries no reader.",
         "grounds": [
-          { "absent": "crates/norn-store/src/counters.rs" }
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "present": "crates/norn-host/src/evidence.rs" }
         ]
       }
     },
@@ -191,7 +205,11 @@
       "sources": ["NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no request surface to enroll; the roster binds with the first one."
+        "reason": "there is no request surface to enroll: crates/norn-serve and crates/norn-mcp are not in the workspace, and the composition root wires nothing, so the roster has no member to hold to a named executable property.",
+        "grounds": [
+          { "absent": "crates/norn-serve" },
+          { "absent": "crates/norn-mcp" }
+        ]
       }
     },
     {
@@ -202,7 +220,11 @@
       "sources": ["NORN-10", "NORN-14"],
       "binding": {
         "status": "dormant",
-        "reason": "the corpus audit carries the declared-versus-observed half — every mask and normalization a case declares appears in its recorded bytes, and every one present in the bytes is declared, in both directions and only against names the harness knows — but the two-run byte-equality gate does not exist: the corpus reads recordings and records none, so the gate binds with the first recording or comparison run this line performs."
+        "reason": "crates/norn-testkit/src/corpus.rs carries the declared-versus-observed half — every mask and normalization a case declares appears in its recorded bytes, and every one present in the bytes is declared, in both directions and only against names the harness knows. The two-run byte-equality gate has no subject: the corpus reads recordings and records none, and the output a run would be compared across is crates/norn-client's, which is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-testkit/src/corpus.rs" },
+          { "absent": "crates/norn-client" }
+        ]
       }
     },
     {
@@ -213,7 +235,11 @@
       "sources": ["NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no output comparison runs: every recorded corpus case is dormant behind the activation gate, so there is no invocation for a structural assertion to accompany."
+        "reason": "no output comparison runs: every recorded case in crates/norn/tests/corpus.rs sits behind the activation gate, and the binary that would emit output is crates/norn/src/main.rs, which wires nothing — so there is no invocation for a structural assertion to accompany.",
+        "grounds": [
+          { "present": "crates/norn/tests/corpus.rs" },
+          { "present": "crates/norn/src/main.rs" }
+        ]
       }
     },
     {
@@ -224,7 +250,11 @@
       "sources": ["NRN-a58", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "the per-PR flatness pair moves both axes together — its two profiles differ in document count and in body and clutter volume at once — so no assertion isolates an axis today."
+        "reason": "the per-PR pair moves both axes together: crates/norn-fixtures/src/profile.rs sizes `ambiguous` at 300 documents of compact body and `realistic` at 2000 of realistic body, so the pair crates/norn-host/tests/counter_gate.rs runs differs in document count and in body and clutter volume at once and no assertion over it isolates an axis. A pair that varied one axis needs a profile whose scale moves while its body shape holds, and the generator's knobs are declared per profile rather than per axis.",
+        "grounds": [
+          { "present": "crates/norn-fixtures/src/profile.rs" },
+          { "present": "crates/norn-host/tests/counter_gate.rs" }
+        ]
       }
     },
     {
@@ -235,9 +265,11 @@
       "sources": ["NRN-a61", "NRN-a63", "NRN-457"],
       "binding": {
         "status": "dormant",
-        "reason": "no derivation counter exists to move; the rule binds with the first one: crates/norn-store/src/counters.rs is not in the workspace.",
+        "reason": "the counters exist and a narrowing is already visible in them: crates/norn-store/src/counters.rs is scoped to one request, and crates/norn-host/tests/churn.rs brackets what maintenance after one edit costs against what the same bound would admit for a changed set of nothing. What the rule needs is an operation a change could narrow, and crates/norn-serve is not in the workspace: no request path exists whose scoping win a counter would have to show.",
         "grounds": [
-          { "absent": "crates/norn-store/src/counters.rs" }
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "present": "crates/norn-host/tests/churn.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -249,7 +281,10 @@
       "sources": ["NRN-366"],
       "binding": {
         "status": "dormant",
-        "reason": "no step pipes its output into a reader that can close early — there is no `tee` and no chain carrying a pipeline's earlier failure — so nothing can produce the outcome this forbids; the clause binds with the first step that has one."
+        "reason": "the shape this forbids has a subject now and this file cannot name it: .github/scripts/lane-suite.sh streams a run through `tee` and reads cargo's own status out of `PIPESTATUS[0]` rather than through the pipeline's, which is the property. A reference here is a workspace-relative source file and a `#[test]` function in it, and neither names a shell script.",
+        "grounds": [
+          { "present": ".github/scripts/lane-suite.sh" }
+        ]
       }
     },
     {
@@ -260,9 +295,11 @@
       "sources": ["NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "the substrate has no maintenance schedule yet to hold flat: crates/norn-host/src/production.rs is not in the workspace.",
+        "reason": "the substrate has one periodic leg now: crates/norn-host/src/production.rs verifies an attached entry's derived state on a declared interval, on the lifecycle worker pool and never on a caller's thread. The sweep this control is stated over has no subject — crates/norn-store/src/ddl/tombstones.rs keeps a death until something says otherwise and nothing decides when — and the request half has nothing to cost, because crates/norn-serve is not in the workspace.",
         "grounds": [
-          { "absent": "crates/norn-host/src/production.rs" }
+          { "present": "crates/norn-host/src/production.rs" },
+          { "present": "crates/norn-store/src/ddl/tombstones.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -274,9 +311,10 @@
       "sources": ["NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolver exists to hold to the shape: crates/norn-store/src/path.rs is not in the workspace.",
+        "reason": "the indexed half of the shape exists: crates/norn-store/src/path.rs reverses a path into the suffix key the resolution ladder is indexed by, so a candidate lookup is a range over that key rather than a fold over the vault. The resolver this control is about does not exist — nothing answers a target string, because crates/norn-serve is not in the workspace and no verb carries a target — so there is nothing to hold to the shape or to prove equivalent to the whole-vault fold it replaces.",
         "grounds": [
-          { "absent": "crates/norn-store/src/path.rs" }
+          { "present": "crates/norn-store/src/path.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -288,9 +326,10 @@
       "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "no derived store exists to carry an identity: crates/norn-store/src/store.rs is not in the workspace.",
+        "reason": "the derived store and part of its identity exist: crates/norn-config/src/lib.rs keys a vault's derived-state directory by name and channel, and crates/norn-store/src/store.rs rebuilds from zero rather than opening a file whose store-schema version or DDL fingerprint is not this build's, with destructive recovery never requiring a successful open. Two clauses have no subject: the vault schema is projected into the store as derived state rather than folded into the identity that chooses the directory, and no config identity exists to fold in at all; and no open declares a read-only intent, so the clause about a read-only-intent open having a write or wipe effect has no site to hold.",
         "grounds": [
-          { "absent": "crates/norn-store/src/store.rs" }
+          { "present": "crates/norn-config/src/lib.rs" },
+          { "present": "crates/norn-store/src/store.rs" }
         ]
       }
     },
@@ -302,7 +341,13 @@
       "sources": ["NRN-a61", "NRN-a62", "NRN-a60", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no owner generation and no request to compile against."
+        "reason": "the two lifetimes the property is stated over exist: crates/norn-store/src/increment.rs stamps one generation across every row a changeset writes, and crates/norn-host/src/lifecycle.rs holds an attachment across the work that reaches it. What has no subject is everything that would be compiled — no matcher, no predicate field type and no field universe is compiled anywhere, because crates/norn-serve is not in the workspace and nothing carries a query. The counters the property reads are not in crates/norn-store/src/counters.rs either: that vocabulary counts derivation, and a compile, an open and a parse are not members of it.",
+        "grounds": [
+          { "present": "crates/norn-store/src/increment.rs" },
+          { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -313,7 +358,11 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no socket is opened anywhere in the workspace."
+        "reason": "no socket is opened anywhere in the workspace: the serving socket is crates/norn-serve's and the loopback client is crates/norn-client's, and neither crate is here — so no descriptor exists whose options a second set could refuse.",
+        "grounds": [
+          { "absent": "crates/norn-serve" },
+          { "absent": "crates/norn-client" }
+        ]
       }
     },
     {
@@ -323,10 +372,12 @@
       "property": "Warm cost and warm counters for reads and for mutations are independent of vault size: the same commands costing 2.5 ms on a 10-document tree and 11.3 to 238.3 ms on a 1593-document one measure vault size, not work. Per-operation cost is a function of the changed set plus its link neighborhood, and a size-independence pair fails the build when an operation's counters track the tree.",
       "sources": ["NORN-a1", "NRN-a60", "NRN-a58", "NRN-a63", "NRN-154", "NRN-155", "NRN-156", "NRN-83", "NRN-275", "NRN-413", "NRN-523", "NRN-533", "NRN-158", "NRN-109", "NRN-526", "NRN-534", "NRN-535"],
       "binding": {
-        "status": "dormant",
-        "reason": "the size-independence pair has no request to run; the helper exists and the subject does not: crates/norn-store/src/request.rs is not in the workspace.",
-        "grounds": [
-          { "absent": "crates/norn-store/src/request.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-host/tests/counter_gate.rs::a_bounded_write_costs_the_same_at_both_scales",
+          "crates/norn-host/tests/counter_gate.rs::a_warm_request_over_an_attached_vault_finishes_at_zero",
+          "crates/norn-host/tests/counter_gate.rs::warm_requests_under_a_live_attachment_finish_at_zero",
+          "crates/norn-host/tests/fd_budget.rs::attached_entry_has_a_bounded_vault_size_independent_fd_cost"
         ]
       }
     },
@@ -338,9 +389,12 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no schema to declare an index and no reader to call: crates/norn-store/src/ddl/mod.rs is not in the workspace.",
+        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers arrives with crates/norn-serve, which is not in the workspace.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/mod.rs" }
+          { "present": "crates/norn-store/src/ddl/mod.rs" },
+          { "present": "crates/norn-store/tests/store/pillars.rs" },
+          { "present": "crates/norn-store/src/request.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -352,9 +406,10 @@
       "sources": ["NRN-a61", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no findings table exists, and no rule engine derives against one: crates/norn-store/src/ddl/findings.rs is not in the workspace.",
+        "reason": "findings are stored state and maintained over the affected set: crates/norn-store/src/ddl/findings.rs holds the rows, and a changeset discards and re-records them by subject and by ambiguity class rather than re-deriving the vault. The rule engine has no subject — the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a rule set — so the warm-validate clause has neither a validate to run nor a rules-evaluated counter to read at zero.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/findings.rs" }
+          { "present": "crates/norn-store/src/ddl/findings.rs" },
+          { "present": "crates/norn-store/src/facts.rs" }
         ]
       }
     },
@@ -366,9 +421,11 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "nothing builds derived state from a tree yet: crates/norn-host/src/production.rs is not in the workspace.",
+        "reason": "the build exists and one clause is carried at its seam: crates/norn-fs/src/hash.rs reads and hashes a file in one act against one descriptor, so hashing buys no second read, and crates/norn-fs/src/reads.rs counts the opens a build performs. The equality clause has no carrier this file can name: the tally is read through crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature, and a carrier here is held to what cargo compiled with no feature turned on.",
         "grounds": [
-          { "absent": "crates/norn-host/src/production.rs" }
+          { "present": "crates/norn-fs/src/hash.rs" },
+          { "present": "crates/norn-fs/src/reads.rs" },
+          { "present": "crates/norn-host/src/evidence.rs" }
         ]
       }
     },
@@ -396,9 +453,12 @@
       "sources": ["NRN-a60", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm read to keep a freshness sweep off: crates/norn-host/tests/counter_gate.rs is not in the workspace.",
+        "reason": "the warm read exists and derives nothing: crates/norn-host/tests/counter_gate.rs reads every reader the store offers over an attached vault and finishes with every counter at zero, and trust is asserted by coverage crates/norn-host/src/lifecycle.rs holds rather than re-proven per read. The stat half has no bar: crates/norn-fs/src/reads.rs counts filesystem acts per thread and its reader is behind the `induced-failure` feature, so nothing holds a warm read to zero stats and zero freshness-baseline rows, and what the mechanism itself costs waits on the request path crates/norn-serve owns.",
         "grounds": [
-          { "absent": "crates/norn-host/tests/counter_gate.rs" }
+          { "present": "crates/norn-host/tests/counter_gate.rs" },
+          { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "present": "crates/norn-fs/src/reads.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -451,9 +511,10 @@
       "sources": ["NRN-126", "NRN-122", "NRN-439", "NRN-524", "NRN-529", "NRN-117", "NRN-351", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no index to maintain incrementally and nothing to rebuild it from: crates/norn-store/src/increment.rs is not in the workspace.",
+        "reason": "the core of this property is carried: crates/norn-host/tests/churn.rs settles a live attachment through ordinary editing, atomic replacement, a case flip, validity crossings, an external tool's catch-up and an active heal, then compares what it converged on against a derivation from zero over the same final tree, field by field. Two clauses name nothing — there is no configuration to edit and no alias table to change — and the invalidation half is narrower than the property: crates/norn-store/src/facts.rs keys invalidation to the vault schema pin, so no derived table carries a key a config change would re-derive it by.",
         "grounds": [
-          { "absent": "crates/norn-store/src/increment.rs" }
+          { "present": "crates/norn-host/tests/churn.rs" },
+          { "present": "crates/norn-store/src/facts.rs" }
         ]
       }
     },
@@ -465,9 +526,11 @@
       "sources": ["NRN-a63", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolution or reverse-link structure exists: crates/norn-store/src/ddl/facts.rs is not in the workspace.",
+        "reason": "the structures are resident: crates/norn-store/src/ddl/facts.rs holds links and the reverse suffix key as maintained rows rather than a per-request build, and crates/norn-store/src/increment.rs writes them over the changed set alone. The quantity the property bounds has no subject — per-mutation build cost — because no mutation exists: crates/norn-serve is not in the workspace, so nothing requests one and no blast radius is computed for it.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/facts.rs" }
+          { "present": "crates/norn-store/src/ddl/facts.rs" },
+          { "present": "crates/norn-store/src/increment.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -479,9 +542,11 @@
       "sources": ["NRN-a62", "NRN-a63", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no increment exists to scope: crates/norn-store/src/increment.rs is not in the workspace.",
+        "reason": "the increment exists and is scoped: crates/norn-store/src/increment.rs writes every derived table over the changeset's own paths and classes, with no table exempt, and crates/norn-host/tests/churn.rs brackets what one seeded edit costs a live attachment above and below. That bracket is the carrier this case wants and it cannot be named here: it reads the host's account through crates/norn-host/src/evidence.rs, which sits behind the `induced-failure` feature, while a carrier here is held to what cargo compiled with no feature turned on.",
         "grounds": [
-          { "absent": "crates/norn-store/src/increment.rs" }
+          { "present": "crates/norn-store/src/increment.rs" },
+          { "present": "crates/norn-host/tests/churn.rs" },
+          { "present": "crates/norn-host/src/evidence.rs" }
         ]
       }
     },
@@ -493,7 +558,13 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no reader and no planner exist to exhibit a cost term. A nested scan has occurred outside them — resolving each key of one frontmatter block by scanning that block's parsed mapping — and it is caught by a wall-clock ratio in a soak lane, which is not an evidence kind this stratum binds on; the case binds when a counted or structurally assertable subject exists."
+        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. What has no subject is a request that could multiply two of its own quantities: nothing issues a statement per row of a result set and nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "grounds": [
+          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-testkit/src/work.rs" },
+          { "present": "crates/norn-text/src/frontmatter/fields.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -505,7 +576,13 @@
       "sources": ["NRN-s13", "NRN-467", "NRN-448", "NRN-509", "NRN-279", "NRN-504"],
       "binding": {
         "status": "dormant",
-        "reason": "no error type carries prose, and no surface renders one."
+        "reason": "the error types carry prose now: crates/norn-wire/src/error.rs spells the one refusal envelope and its code registry, and crates/norn-store/src/error.rs renders the store's own refusals beside the equivalents in the config and filesystem crates. Every clause of the guard is about a surface, and there is none: crates/norn-console owns the render seam and crates/norn-client owns the projections onto it, and neither crate is in the workspace — so no operator-visible text exists to be a function of its condition, and a workspace-wide scan for a call-site literal or for debug formatting reachable from user-facing output has no output to reach.",
+        "grounds": [
+          { "present": "crates/norn-wire/src/error.rs" },
+          { "present": "crates/norn-store/src/error.rs" },
+          { "absent": "crates/norn-console" },
+          { "absent": "crates/norn-client" }
+        ]
       }
     },
     {
@@ -534,9 +611,11 @@
       "sources": ["NRN-76", "NRN-202", "NRN-131", "NRN-117", "NRN-134"],
       "binding": {
         "status": "dormant",
-        "reason": "no walker and no membership configuration exist: crates/norn-fs/src/exclusion.rs is not in the workspace.",
+        "reason": "the predicate and the matcher exist and are one: crates/norn-fs/src/exclusion.rs decides membership on normalized identity through the vault root's own normalizer, so a walk rooted at a subdirectory excludes what a walk of the whole vault excludes, and crates/norn-fs/src/walk.rs is the only walker. The clauses about verbs have no subject — every verb agreeing that a path is addressable, and a refusal naming configuration rather than asserting non-existence, both need a verb and a refusal surface, and crates/norn-serve is not in the workspace — and the membership configuration is not configured: the excluded roots are handed to a walk rather than read from a file.",
         "grounds": [
-          { "absent": "crates/norn-fs/src/exclusion.rs" }
+          { "present": "crates/norn-fs/src/exclusion.rs" },
+          { "present": "crates/norn-fs/src/walk.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -548,7 +627,13 @@
       "sources": ["NRN-433", "NRN-440", "NRN-356", "NRN-357", "NRN-350", "NRN-432", "NRN-123"],
       "binding": {
         "status": "dormant",
-        "reason": "the recognition halves are carried today — norn-text's suite holds code opacity, the destination split and the caret rule, and crates/norn-text/tests/markdown_links.rs::the_link_universe_is_the_same_whichever_accessor_computes_it holds one universe across all four accessors. The target-normalization half has no subject at any layer: norn-text normalizes nothing by charter, so the extension-stripping rule binds wherever resolution lands and this case stays dormant until it does."
+        "reason": "the recognition half is carried: crates/norn-text/src/link.rs is the one authority, and crates/norn-text/tests/markdown_links.rs holds code opacity, the destination split, the caret rule and one link universe across all four accessors. The target-normalization half has a subject now and no consumer: crates/norn-store/src/path.rs drops a leaf's markdown extension and opens both readings of a leaf that carries a dot, and nothing resolves a link's target through it — the two halves meet in a resolver a request reaches, and crates/norn-serve is not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-text/src/link.rs" },
+          { "present": "crates/norn-text/tests/markdown_links.rs" },
+          { "present": "crates/norn-store/src/path.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -559,9 +644,11 @@
       "sources": ["NRN-266", "NRN-524"],
       "binding": {
         "status": "dormant",
-        "reason": "no path comparison site exists: crates/norn-fs/src/path.rs is not in the workspace.",
+        "reason": "the relation exists and is stated once: crates/norn-fs/src/path.rs folds ASCII case only where a directory entry proves the root treats two spellings as one, and crates/norn-store/src/path.rs carries that same folding into the order derived rows are paged in. The sites the property is about are the ones that do not exist: selection, verification, subtree and collision checks all belong to a move, and no move exists because crates/norn-serve is not in the workspace — so there is no second comparison site to fold asymmetrically and no deduplicated survivor to carry a directory entry's spelling.",
         "grounds": [
-          { "absent": "crates/norn-fs/src/path.rs" }
+          { "present": "crates/norn-fs/src/path.rs" },
+          { "present": "crates/norn-store/src/path.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -573,9 +660,12 @@
       "sources": ["NRN-122", "NRN-123", "NRN-124", "NRN-57", "NRN-216", "NRN-167", "NRN-168", "NRN-440", "NRN-510"],
       "binding": {
         "status": "dormant",
-        "reason": "no resolver exists, and no verb has a target to resolve: crates/norn-store/src/path.rs is not in the workspace.",
+        "reason": "the indexed half of a resolver exists: crates/norn-store/src/path.rs reduces a suffix target to the prefix its candidates share, crates/norn-store/src/ddl/documents.rs indexes the key it probes, and crates/norn-wire/src/finding.rs already spells what an ambiguous answer looks like — a bounded head of candidates with its total. Nothing answers a target string: crates/norn-serve is not in the workspace, so no verb resolves, no candidate set is refused with its candidates named, and no plan is built from a resolved path.",
         "grounds": [
-          { "absent": "crates/norn-store/src/path.rs" }
+          { "present": "crates/norn-store/src/path.rs" },
+          { "present": "crates/norn-store/src/ddl/documents.rs" },
+          { "present": "crates/norn-wire/src/finding.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -587,7 +677,12 @@
       "sources": ["NRN-42"],
       "binding": {
         "status": "dormant",
-        "reason": "diagnostics are produced; no consumer exists to hold to not-dropping them. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure."
+        "reason": "the failure is a distinct state and one consumer already holds it as one: crates/norn-text/src/diagnostic.rs is the state, and crates/norn-host/src/production.rs carries it into derived state rather than dropping the document, so an illegible document is derived and legible as illegible. The consumers that could collapse it have no subject: no query result exists to drop a document from, and no second mutation arm exists to disagree with a first, because crates/norn-serve is not in the workspace. Carve-out: a frontmatter tag string the grammar does not describe yields no tag AND no diagnostic, by ruling — judging such a string is validation's venue, so its silence is a decision rather than a collapsed failure.",
+        "grounds": [
+          { "present": "crates/norn-text/src/diagnostic.rs" },
+          { "present": "crates/norn-host/src/production.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -598,9 +693,10 @@
       "sources": ["NRN-493", "NRN-501", "NRN-475", "NRN-360", "NRN-351", "NRN-353", "NRN-438"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no configuration file to load: crates/norn-config/src/file.rs is not in the workspace.",
+        "reason": "most of this property has a subject and a carrier: crates/norn-config/src/file.rs refuses a zero-byte file rather than reading it as empty, refuses a version ahead of this build, reports a stat failure rather than calling a dangling ancestor an absence, and refuses a mutation taken inside a mutation of the same file rather than blocking on itself. The completeness clause has no subject: naming every offender in a stable order is about a configuration that can hold many offenders at once, and no such vocabulary exists — crates/norn-wire/src/lib.rs spells trust states, refusals and finding kinds and no rule.",
         "grounds": [
-          { "absent": "crates/norn-config/src/file.rs" }
+          { "present": "crates/norn-config/src/file.rs" },
+          { "present": "crates/norn-wire/src/lib.rs" }
         ]
       }
     },
@@ -612,7 +708,12 @@
       "sources": ["NRN-a60", "NRN-a61", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "no reader projects columns and no wire report carries them."
+        "reason": "the readers project into typed rows: crates/norn-store/src/facts.rs is what a read hands back, and a page carries the columns its shape declares. Neither boundary the property measures exists. No reader takes its projection from a requested output shape, because nothing requests one; and no wire report carries a document at all — crates/norn-wire/src/lib.rs spells trust, refusals and findings and no read answer — so peak resident set and wire bytes for a body-less verb have no verb to be measured over, with crates/norn-serve not in the workspace.",
+        "grounds": [
+          { "present": "crates/norn-store/src/facts.rs" },
+          { "present": "crates/norn-wire/src/lib.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -623,7 +724,13 @@
       "sources": ["NRN-a59", "NRN-a62"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no warm state to recover and no pool to grow."
+        "reason": "recovery exists and runs off every caller's thread: crates/norn-host/src/lifecycle.rs answers a recovery demand on the bounded lifecycle worker pool, and crates/norn-host/tests/kill_recovery.rs converges after a process died mid-increment. The billing has no subject: there is no request whose latency after an out-of-band change could be compared with warm and no pool to grow, because crates/norn-serve is not in the workspace, and a connection-open counter is not in crates/norn-store/src/counters.rs — that vocabulary counts derivation alone.",
+        "grounds": [
+          { "present": "crates/norn-host/src/lifecycle.rs" },
+          { "present": "crates/norn-host/tests/kill_recovery.rs" },
+          { "present": "crates/norn-store/src/counters.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -634,7 +741,11 @@
       "sources": ["frozen NRN board sweep"],
       "binding": {
         "status": "dormant",
-        "reason": "no date-word resolver and no locale-sensitive comparison exists to declare a basis for."
+        "reason": "the folding half is stated once and has no second site to disagree with it: crates/norn-fs/src/path.rs declares ASCII-only folding, decided by the entry the root holds rather than by a platform guess. The date half has no subject: no filter, default or rendered field accepts a relative word, because crates/norn-serve is not in the workspace and no vocabulary spells a time zone to resolve one against.",
+        "grounds": [
+          { "present": "crates/norn-fs/src/path.rs" },
+          { "absent": "crates/norn-serve" }
+        ]
       }
     },
     {
@@ -645,9 +756,10 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no connection prepares a statement: crates/norn-store/src/increment.rs is not in the workspace.",
+        "reason": "the caching half exists: crates/norn-store/src/increment.rs prepares a changeset's statements through the connection's own cache, so a changeset of n documents compiles a bounded set rather than a set per document. The counter the property reads does not exist — crates/norn-store/src/counters.rs counts derivation, and statement compilation is not a member of that vocabulary — so there is no reading to hold to a bounded constant independent of row count.",
         "grounds": [
-          { "absent": "crates/norn-store/src/increment.rs" }
+          { "present": "crates/norn-store/src/increment.rs" },
+          { "present": "crates/norn-store/src/counters.rs" }
         ]
       }
     },
@@ -659,9 +771,9 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "no database is opened to configure: crates/norn-store/src/store.rs is not in the workspace.",
+        "reason": "every pragma is set explicitly rather than inherited: crates/norn-store/src/store.rs sets the journal mode, the synchronous level and foreign-key enforcement at open. The property asks for two things this workspace does not do: no suite reads a pragma back, so none of them is asserted; and no statistics collection exists at all, on a schedule or otherwise, so there is no ANALYZE to hold to a declared one.",
         "grounds": [
-          { "absent": "crates/norn-store/src/store.rs" }
+          { "present": "crates/norn-store/src/store.rs" }
         ]
       }
     },
@@ -673,9 +785,12 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "no substrate capability is relied on yet: crates/norn-store/src/ddl/fts.rs is not in the workspace.",
+        "reason": "the capabilities are relied on now: crates/norn-store/src/ddl/fts.rs leans on the full-text index and crates/norn-store/src/ddl/vectors.rs on the vector table. The capability this class was mined from is not one of them — crates/norn-store/src/json.rs projects a value tree to canonical JSON of its own rather than through the engine's JSON aggregation — and no declaration records that as the alternative the property's second arm asks for. The probe has no home either: crates/norn-host/tests/counter_gate.rs reaches the index over a generated tree as a reader inside a counter bar, not as a probe of the capability at corpus scale.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/fts.rs" }
+          { "present": "crates/norn-store/src/ddl/fts.rs" },
+          { "present": "crates/norn-store/src/ddl/vectors.rs" },
+          { "present": "crates/norn-store/src/json.rs" },
+          { "present": "crates/norn-host/tests/counter_gate.rs" }
         ]
       }
     },
@@ -687,9 +802,12 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "no index and no targeted reader exist: crates/norn-store/src/ddl/documents.rs is not in the workspace.",
+        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. The re-entry points the property binds have no subject: resolving one string, asking which documents link here, k membership probes and every advisory uniqueness or collision check are request paths, and crates/norn-serve is not in the workspace — so statements-per-request has no request to be O(1) in.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/documents.rs" }
+          { "present": "crates/norn-store/src/ddl/documents.rs" },
+          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/tests/store/pillars.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -701,9 +819,11 @@
       "sources": ["NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no text index and no search surface: crates/norn-store/src/ddl/fts.rs is not in the workspace.",
+        "reason": "the text index exists and is maintained across every write: crates/norn-store/src/ddl/fts.rs declares it and crates/norn-store/src/request.rs matches against it, so no path case-folds a substring over every body. The cost claim has no subject: a search surface is what turns a match count into a request's cost, and crates/norn-serve is not in the workspace — so nothing scales with match count rather than corpus bytes, and no bar reads either quantity.",
         "grounds": [
-          { "absent": "crates/norn-store/src/ddl/fts.rs" }
+          { "present": "crates/norn-store/src/ddl/fts.rs" },
+          { "present": "crates/norn-store/src/request.rs" },
+          { "absent": "crates/norn-serve" }
         ]
       }
     },
@@ -715,7 +835,11 @@
       "sources": ["NRN-494", "NRN-495", "NRN-59", "NRN-438", "norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no rule vocabulary to check for satisfiability."
+        "reason": "there is no rule vocabulary to check for satisfiability: crates/norn-wire/src/lib.rs spells trust states, refusals and finding kinds and no rule, and the vault schema crates/norn-store/src/facts.rs pins is bytes and a fingerprint rather than a parsed rule set. Every clause names a rule — one shared effective matcher per selection site, a repair that never writes what the validator flags, unique rule names — so this case waits on the vocabulary rather than on a surface.",
+        "grounds": [
+          { "present": "crates/norn-wire/src/lib.rs" },
+          { "present": "crates/norn-store/src/facts.rs" }
+        ]
       }
     },
     {
@@ -726,9 +850,11 @@
       "sources": ["NRN-a58", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "no persistent derived state exists: crates/norn-store/src/store.rs is not in the workspace.",
+        "reason": "the state survives by construction: crates/norn-store/src/store.rs creates a durable store on a first open and reuses it on the next, and crates/norn-host/tests/kill_recovery.rs attaches again after a process died mid-increment and converges. The ratio the property declares is a clock and nothing reads one across a cold and a warm start: crates/norn-host/tests/host_soak.rs holds memory and descriptors over a long mixed load and takes no cold-versus-warm reading, so the bounded number has nothing to bound.",
         "grounds": [
-          { "absent": "crates/norn-store/src/store.rs" }
+          { "present": "crates/norn-store/src/store.rs" },
+          { "present": "crates/norn-host/tests/kill_recovery.rs" },
+          { "present": "crates/norn-host/tests/host_soak.rs" }
         ]
       }
     },
@@ -850,7 +976,7 @@
       "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99"],
       "binding": {
         "status": "dormant",
-        "reason": "no mutation handler and no lock seam exist."
+        "reason": "no mutation handler exists to take a lock, and the substrate's own lock is a different subject: crates/norn-fs/src/lock.rs admits one host as the maintainer of a derived store and restricts nobody's access to vault files. This property presumes a per-write mutation lock and a force affordance instead, and re-deriving it is a design judgment rather than a restatement — task NORN-47 owns it."
       }
     },
     {
