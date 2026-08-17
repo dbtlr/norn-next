@@ -26,6 +26,25 @@
 //! and [`the_registry_is_structurally_sound`] requires it to be written down:
 //! a dormant case at or below that layer with no reason fails.
 //!
+//! # A reason is held to the tree, not just to being present
+//!
+//! A reason is prose, and prose about a subject that has not been built reads
+//! the same forever after the subject lands. So a reason at these layers states
+//! the workspace paths it stands on, each claimed as one the tree holds or one
+//! it does not, and the audit resolves every one of them:
+//! [`a_dormancy_reason_whose_subject_landed_fails_the_audit`] is that gate seen
+//! from the failing side. A dormancy claim standing on a path therefore expires
+//! by itself, and re-deriving it — binding the case, or restating why a built
+//! subject still carries nothing — is the only way back to green.
+//!
+//! Not every missing subject is a path. A reason may wait on a guard nobody
+//! wrote, on a member absent from a counter vocabulary, or on a carrier the
+//! reference grammar cannot name, and no path claim refutes any of those. Those
+//! reasons expire only when a person re-derives them, so the class is pinned by
+//! name in [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees
+//! mechanically is that the class is a reviewed list rather than a silent
+//! majority.
+//!
 //! # What this suite is not
 //!
 //! It judges no property. A property is judged by the test that binds it, and
@@ -47,7 +66,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use norn_testkit::regression::{BindingStatus, Kind, LAYER_LANDING, Registry, TestIndex};
+use norn_testkit::regression::{
+    Binding, BindingStatus, Ground, Kind, LAYER_LANDING, Registry, TestIndex,
+};
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
@@ -60,17 +81,19 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c2be3c32a81efdb0e4c6e3a20c27311ee5df5daf967dd5af0381c877d404ed02";
+const CONTRACT_DIGEST: &str = "c8d6b44103320be0bd52fd3ab1d7ed9f43a988ded48ce5f80d5c74ca05862c3a";
 
 /// The cases carried by tests today, by name.
 ///
 /// Pinned rather than counted, because which ones are bound is the whole
-/// claim: these are the ones whose subject — the harness itself — already
-/// exists. A case that stops being carried has to leave this list to pass,
-/// which is a diff a reviewer reads. Compared as a set, because the order
-/// cases sit in the file is the file's business.
+/// claim: these are the ones whose subject — the harness, and the substrate
+/// under it — already exists and is asserted over. A case that stops being
+/// carried has to leave this list to pass, which is a diff a reviewer reads.
+/// Compared as a set, because the order cases sit in the file is the file's
+/// business.
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
+    "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
@@ -79,6 +102,43 @@ const BOUND_CASES: &[&str] = &[
     "harness-runs-under-isolated-state-roots",
     "harness-waits-have-deadlines",
     "one-field-edit-is-a-one-field-diff",
+];
+
+/// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
+/// absence, by name — **the dormancy the falsifiability gate cannot refute.**
+///
+/// Each of these waits on something that is not a path: a guard nobody wrote, a
+/// member absent from a counter vocabulary, a vault-rule vocabulary that does
+/// not exist, a carrier the reference grammar cannot name because it is a shell
+/// step, a module of an integration target, or a reader behind a feature. The
+/// grounds beside such a reason hold the paths it cites as present, so the audit
+/// still catches those moving; the claim that something is missing is refuted by
+/// nobody but the next person to read the code.
+///
+/// Pinned for the reason [`BOUND_CASES`] is: the size of this class is the
+/// honest scope of the gate. A case that gains an `absent` ground leaves the
+/// list, a reason that newly waits on a non-path subject joins it, and either
+/// way the edit is in the diff.
+const UNFALSIFIABLE_DORMANCY: &[&str] = &[
+    "a-measurement-step-asserts-a-nonzero-pass-count",
+    "cache-identity-is-total",
+    "comment-claims-are-test-bound",
+    "derived-findings-are-materialized-and-maintained",
+    "each-file-is-read-once-per-build",
+    "guard-binds-executed-sql",
+    "harness-assertions-observe-stable-facts",
+    "incremental-equals-rebuild",
+    "instrumentation-exists-and-is-consumed",
+    "maintenance-touches-the-affected-set-only",
+    "output-parity-cannot-certify-structure",
+    "present-but-unusable-config-refuses-loudly",
+    "scale-assertions-vary-documents-and-bytes-independently",
+    "statements-are-prepared-once",
+    "steps-report-their-own-outcome",
+    "storage-configuration-is-explicit",
+    "substrate-capabilities-are-probed-before-they-are-relied-on",
+    "unsatisfiable-config-is-rejected-at-load",
+    "warm-state-survives-process-lifetime",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -106,7 +166,7 @@ fn registry() -> Registry {
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
 /// runs rather than about the text of a file: one `--list` pair per cited
-/// target, which is ten targets across five packages today.
+/// target, which is twelve targets across five packages today.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();
@@ -117,6 +177,76 @@ fn the_registry_is_structurally_sound() {
         problems.is_empty(),
         "the registry is not structurally sound:\n  {}",
         problems.join("\n  ")
+    );
+}
+
+/// **A dormancy reason goes stale loudly.** A reason standing on a subject's
+/// absence fails this registry's own audit the moment the workspace holds that
+/// subject.
+///
+/// The binding installed below is a reason of exactly the shape the gate exists
+/// to catch: it says no database is opened, while `crates/norn-store/src/store.rs`
+/// is in the tree opening one. Nothing about the prose says it is out of date —
+/// prose never does — so the check is over the grounds beside it, and it is the
+/// reason the registry's own layer-0 and layer-1 entries can be trusted to
+/// describe the workspace as it is rather than as it was.
+///
+/// The audit runs against an empty test index here, because what a bound case's
+/// carriers compiled into is a different question and asking cargo about it
+/// costs a full listing pass. The problem asserted is the grounds' own.
+#[test]
+fn a_dormancy_reason_whose_subject_landed_fails_the_audit() {
+    let mut registry = registry();
+    let subject = "storage-configuration-is-explicit";
+    let case = registry
+        .cases
+        .iter_mut()
+        .find(|case| case.name == subject)
+        .unwrap_or_else(|| panic!("no case named `{subject}`"));
+    case.binding = Binding {
+        status: BindingStatus::Dormant,
+        tests: Vec::new(),
+        reason: Some("no database is opened to configure".to_string()),
+        grounds: vec![Ground::Absent("crates/norn-store/src/store.rs".to_string())],
+    };
+
+    let problems = registry.audit(&workspace_root(), &TestIndex::default());
+    let stale: Vec<&String> = problems
+        .iter()
+        .filter(|problem| {
+            problem.starts_with(&format!("`{subject}`"))
+                && problem.contains("The subject landed, so the reason is stale")
+        })
+        .collect();
+    assert_eq!(
+        stale.len(),
+        1,
+        "`{subject}` stands on the absence of a file the workspace holds, and the audit said: \
+         {problems:#?}"
+    );
+}
+
+/// **The gate states its own reach.** The dormant cases the audit cannot
+/// refute are exactly the ones pinned in [`UNFALSIFIABLE_DORMANCY`].
+///
+/// A ground is a claim about a path, so a reason whose missing subject is not a
+/// path — a guard, a counter member, a vocabulary, a carrier this grammar
+/// cannot name — carries no claim that can fail. Left unnamed, that class grows
+/// by one every time a reason is written the easy way, and the registry reads
+/// as if every reason were held to the tree. Named, it is a list a reviewer can
+/// count, and a reason that gains an absence has to leave it in the same diff.
+#[test]
+fn the_dormancy_the_gate_cannot_refute_is_the_pinned_set() {
+    let registry = registry();
+    let unrefuted: BTreeSet<&str> = registry
+        .dormant_without_an_absence()
+        .map(|case| case.name.as_str())
+        .collect();
+    let pinned: BTreeSet<&str> = UNFALSIFIABLE_DORMANCY.iter().copied().collect();
+    assert_eq!(
+        unrefuted, pinned,
+        "the set of dormancy reasons standing on no absence moved. A case that gained an `absent` \
+         ground leaves this pin; a reason that now waits on a subject no path names joins it."
     );
 }
 
