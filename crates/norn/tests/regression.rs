@@ -72,7 +72,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 104;
+const CASE_TOTAL: usize = 105;
 
 /// The whole registry's contract, as one value.
 ///
@@ -81,7 +81,7 @@ const CASE_TOTAL: usize = 104;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "c8d6b44103320be0bd52fd3ab1d7ed9f43a988ded48ce5f80d5c74ca05862c3a";
+const CONTRACT_DIGEST: &str = "f0f9736f96b65e146659d98dfb0d2db72e8c0aca634d8bd6a508a9ed08ba63f9";
 
 /// The cases carried by tests today, by name.
 ///
@@ -93,6 +93,7 @@ const CONTRACT_DIGEST: &str = "c8d6b44103320be0bd52fd3ab1d7ed9f43a988ded48ce5f80
 /// business.
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
+    "a-mutation-confirms-the-file-it-holds-before-it-publishes",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
@@ -120,6 +121,7 @@ const BOUND_CASES: &[&str] = &[
 /// list, a reason that newly waits on a non-path subject joins it, and either
 /// way the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
+    "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
     "cache-identity-is-total",
     "comment-claims-are-test-bound",
@@ -166,7 +168,7 @@ fn registry() -> Registry {
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
 /// runs rather than about the text of a file: one `--list` pair per cited
-/// target, which is twelve targets across five packages today.
+/// target, which is thirteen targets across five packages today.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();

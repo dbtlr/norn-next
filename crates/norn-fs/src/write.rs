@@ -63,6 +63,15 @@
 //! converges on the winner. A caller that needs to know whether it won compares
 //! the [`PostState`] it was handed against what is at the path.
 //!
+//! **Two arms carry a wider version of the same residual, because they re-ask
+//! the identity and not the hash.** A removal ([`vacate`]) and the suppressed
+//! no-op ([`Landed::Unchanged`]) publish on the strength of the precondition's
+//! own hash plus one identity comparison, so a foreign write into the file that
+//! was read is invisible to them: the removal takes a document whose content
+//! nobody looked at, and the no-op reports content the path no longer holds.
+//! Their window is a `stat` wide where the replacement's spans a shadow's fill
+//! and its fsync, and a second full read is what a re-hash there would cost.
+//!
 //! # Two durability barriers, and no third
 //!
 //! A replacement fsyncs exactly twice: **the shadow's bytes before the rename**,
@@ -234,6 +243,15 @@ pub enum Landed {
     /// this content, and a foreign replacement that landed during the
     /// precondition's read makes that false about a file a caller can go and
     /// look at.
+    ///
+    /// **What the confirmation does not cover is a foreign write into that same
+    /// file**, which leaves the identity unchanged and the bytes different, so
+    /// this outcome is reported about content the path no longer holds. The
+    /// window is between the precondition's hash and the confirmation's `stat`
+    /// and is not widened by anything; the replacement arm pays for a re-hash
+    /// because its window spans a shadow's fill and fsync instead, and this one
+    /// buys a narrower window with a second full read of the file. Whatever is
+    /// finally at the path is what the watcher reports, which is what bounds it.
     Unchanged(PostState),
 }
 
@@ -420,6 +438,16 @@ fn write_disturbed(
 /// other side: between the confirmation and the `unlink` the name could come to
 /// mean a different file, and the removal would take that one. The window is
 /// the width of one call and POSIX offers nothing to close it.
+///
+/// **The bytes are not hashed a second time**, so the two questions here are not
+/// the replacement's two: that arm asks a re-hash through the held handle and an
+/// identity comparison, and this one asks the precondition's own hash and the
+/// identity comparison. A foreign write into the same file between the hash and
+/// the `unlink` therefore removes a document whose content nobody read, and the
+/// [`Vacated::removed`] state describes the bytes the precondition saw rather
+/// than the bytes that were there at the unlink. The window is a `stat` and an
+/// `unlink` wide, where the replacement's spans a shadow's fill and its fsync,
+/// which is why only that arm pays a second full read for a narrower one.
 pub fn vacate(path: &Path, expected: ContentHash) -> Result<Vacated, Refusal> {
     vacate_disturbed(path, expected, &mut |_| {})
 }

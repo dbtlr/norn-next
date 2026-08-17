@@ -288,6 +288,41 @@
       }
     },
     {
+      "name": "a-create-never-takes-a-name-somebody-else-holds",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "Placing a document at a name nothing is expected to hold is an exclusive create, and the open is what decides the name was free — never a precheck a create then follows, which answers a question the open already answers correctly and answers it earlier. A document a foreign writer published at that name between the caller's look and the call is refused with its bytes untouched. There is no arm of the write vocabulary that turns that refusal into an overwrite: a caller that means to replace what is there reads it and passes what it read, so forcing is spelled as another pass through the same seam rather than as an escape from it.",
+      "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the guarantee is shipped and neither bar that carries it is nameable here: crates/norn-fs/src/write.rs claims the name with `create_new` and no precheck, and the bar on it — a create onto a document a racer published, refused with the racer's bytes intact — sits in crates/norn-fs/tests/kernel/preconditions.rs, a module of an integration target rather than a target, which a reference in this file cannot name. The missing overwrite arm is held by the type and pinned by a `compile_fail` doctest in that same source file, and a doctest is not a `#[test]` function a reference can name either. Task NORN-159 owns the grammar; until it widens, what carries this property cannot be cited as carrying it.",
+        "grounds": [
+          { "present": "crates/norn-fs/src/write.rs" },
+          { "present": "crates/norn-fs/tests/kernel/preconditions.rs" }
+        ]
+      }
+    },
+    {
+      "name": "a-mutation-confirms-the-file-it-holds-before-it-publishes",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "A mutation evaluates its precondition against bytes the call reads itself, through a handle the call opens and holds — never against a caller-supplied snapshot and never against what an index remembers. At the last point before anything is published, the call resolves the name again and compares what it finds against that handle's device and inode; a replacement, a suppressed no-op, a removal and a move's source read all ask that one question, and both answers that are not the file the call read refuse it — a name republished onto a different file, and a name that resolves to nothing. Re-hashing the bytes through the same handle is the second question, and it is asked where the window between the read and the publication spans staging a shadow and syncing it: on a replacement, a foreign write into the file that was read refuses there. A move's second leg re-reads its source under its own precondition rather than trusting the first leg's read. On a create the exclusive open is itself the publication, so the identity comparison there governs cleanup instead: a create that fails takes back only a name that still resolves to the file it created.",
+      "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15"],
+      "binding": {
+        "status": "bound",
+        "tests": [
+          "crates/norn-fs/src/write.rs::a_foreign_write_inside_the_window_is_caught_before_the_swap",
+          "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused",
+          "crates/norn-fs/src/write.rs::an_unchanged_outcome_whose_name_was_republished_is_refused",
+          "crates/norn-fs/src/write.rs::a_document_removed_inside_the_window_is_not_resurrected",
+          "crates/norn-fs/src/write.rs::a_removal_whose_name_was_republished_is_refused",
+          "crates/norn-fs/src/write.rs::a_move_whose_source_is_republished_while_it_is_read_is_refused",
+          "crates/norn-fs/src/write.rs::a_move_whose_source_is_rewritten_between_the_legs_keeps_it",
+          "crates/norn-fs/src/write.rs::a_create_that_fails_never_removes_a_foreign_document"
+        ]
+      }
+    },
+    {
       "name": "amortized-periodic-work-stays-amortized",
       "kind": "positive-control",
       "venue": 1,
@@ -966,17 +1001,6 @@
       "binding": {
         "status": "dormant",
         "reason": "no planner captures a precondition."
-      }
-    },
-    {
-      "name": "read-that-feeds-a-write-is-under-the-writes-lock",
-      "kind": "defect-class",
-      "venue": 2,
-      "property": "Every read feeding a write occurs inside the write's exclusive scope, enforced structurally at one seam rather than by convention repeated per handler. Final placement is exclusive-create unless force is given, so a concurrent external create is never clobbered, and a new mutation cannot opt out of the seam.",
-      "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99"],
-      "binding": {
-        "status": "dormant",
-        "reason": "no mutation handler exists to take a lock, and the substrate's own lock is a different subject: crates/norn-fs/src/lock.rs admits one host as the maintainer of a derived store and restricts nobody's access to vault files. This property presumes a per-write mutation lock and a force affordance instead, and re-deriving it is a design judgment rather than a restatement — task NORN-47 owns it."
       }
     },
     {
