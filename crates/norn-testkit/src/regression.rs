@@ -17,11 +17,21 @@
 //! not notice its subject landing. So a dormant case at or below
 //! [`LAYER_LANDING`] states [`Ground`]s beside the reason: the workspace paths
 //! the reason stands on, each marked as one the workspace holds or one it does
-//! not. The audit resolves every one of them, so **a reason claiming its
-//! subject does not exist fails the moment the subject is in the tree** — which
-//! is what makes a stale reason loud rather than a thing a review has to
-//! notice. Each ground's path is also required to appear in the reason text, so
-//! the prose and the mechanical claim cannot drift apart.
+//! not. The audit resolves every one of them, so **a reason standing on a path
+//! the workspace does not hold fails the moment that path is in the tree** —
+//! which is what makes that reason's staleness loud rather than a thing a review
+//! has to notice. Each ground's path is also required to appear in the reason
+//! text, so the prose and the mechanical claim cannot drift apart.
+//!
+//! **A ground is a claim about a path, and not every missing subject is one.** A
+//! reason may wait on a guard nobody wrote, on a member absent from a
+//! vocabulary, or on a carrier this file's reference grammar cannot name. Its
+//! grounds then hold the paths it does cite and nothing refutes the rest, so the
+//! gate covers the absences that are path-shaped and no others. That class is
+//! finite and named rather than left to be discovered:
+//! [`Registry::dormant_without_an_absence`] enumerates the dormant cases
+//! stating no `absent` ground, and the suite pins the set, so a reason joins the
+//! class in a diff instead of drifting into it.
 //!
 //! **The audit holds content, not only shape.** [`Registry::contract_digest`]
 //! is one value over every case's name, kind, mandatory flag, venue, property,
@@ -37,7 +47,7 @@
 //! `norn` bin package, beside the registry data.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -171,6 +181,15 @@ pub enum Ground {
     /// has not been built. **This is the falsifiability claim**: the audit
     /// fails when the path is there, because the reason has outlived its
     /// subject's absence.
+    ///
+    /// The path is the shallowest one the absence turns on: the crate directory
+    /// while the crate is unbuilt, a module inside it once the crate is there.
+    /// [`Registry::audit`] holds it to that by requiring the parent to resolve,
+    /// because a deeper path guessed ahead of the tree is a spelling the tree
+    /// may never use, and an absence nothing can satisfy is an absence that
+    /// never ends. The cost of the shallow claim is that a case flips when the
+    /// directory lands rather than when its own subject does, which is the
+    /// moment the reason has to be re-derived against real code anyway.
     Absent(String),
     /// A path the reason cites as a subject that did land, which is what a
     /// reason for a case still dormant beside a built subject has to name. The
@@ -634,8 +653,9 @@ impl Registry {
     ///
     /// Every field a reviewer weighs goes in — name, kind, mandatory flag,
     /// venue, property, sources and binding, down to the grounds a dormancy
-    /// reason stands on — so any edit to any of them moves it. That is the point: the case total catches a deletion, and this
-    /// catches everything a deletion-plus-replacement would hide. A property
+    /// reason stands on — so any edit to any of them moves it. That is the
+    /// point: the case total catches a deletion, and this catches everything a
+    /// deletion-plus-replacement would hide. A property
     /// gutted to a word, a citation swapped for another, a venue quietly
     /// re-laned, a binding shrunk from four tests to one — each moves this
     /// value, and moving it means editing a constant a reviewer reads.
@@ -714,6 +734,30 @@ impl Registry {
     /// The cases at one venue.
     pub fn cases_at(&self, venue: u8) -> impl Iterator<Item = &Case> {
         self.cases.iter().filter(move |case| case.venue == venue)
+    }
+
+    /// The dormant cases at or below [`LAYER_LANDING`] stating no [`Ground`] of
+    /// absence — **the dormancy the falsifiability gate cannot refute.**
+    ///
+    /// A reason in this class waits on something that is not a path: a guard
+    /// nobody wrote, a member absent from a counter vocabulary, a carrier the
+    /// reference grammar cannot name. Its grounds hold the paths it cites as
+    /// present, so the audit still catches those moving, but nothing mechanical
+    /// contradicts the claim that something is missing — that part expires only
+    /// when a person re-derives it.
+    ///
+    /// The set is what the suite pins, which is what keeps it a reviewed list:
+    /// a case that gains an absence leaves it, and a reason that newly waits on
+    /// a non-path subject fails the suite until it is written down.
+    pub fn dormant_without_an_absence(&self) -> impl Iterator<Item = &Case> {
+        self.dormant_cases().filter(|case| {
+            case.venue <= LAYER_LANDING
+                && !case
+                    .binding
+                    .grounds
+                    .iter()
+                    .any(|ground| matches!(ground, Ground::Absent(_)))
+        })
     }
 
     /// Structural violations, one line each. A sound registry produces none.
@@ -909,6 +953,17 @@ impl Registry {
     /// same failure from the other side: the reason is standing on a file the
     /// workspace no longer has.
     ///
+    /// **The two arms fail in opposite directions, so the `absent` arm is held
+    /// to its spelling.** A `present` path resolves or the audit says so; an
+    /// `absent` path that fails to resolve *for any reason* reads as satisfied,
+    /// so a padded component, a case-folded one, or a subject under a parent
+    /// that is not there would pass today and go on passing after the subject
+    /// landed. Each is refused: a ground's components are held to their own
+    /// trimmed spelling, an `absent` subject the tree holds under another case
+    /// is a landed subject rather than an absence, and an `absent` subject's
+    /// parent has to resolve, which keeps the claim at the boundary the tree can
+    /// answer.
+    ///
     /// Every ground's path is also required to appear in the reason itself. The
     /// grounds are what the audit reads and the reason is what a person reads,
     /// and a reason that never names its own subject leaves the two free to
@@ -941,12 +996,8 @@ impl Registry {
             if !seen.insert(subject) {
                 problems.push(format!("`{name}` stands on `{subject}` twice"));
             }
-            let path = Path::new(subject);
-            if path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
-                problems.push(format!(
-                    "`{name}` stands on `{subject}`, which is not a workspace-relative path \
-                     without parent traversal"
-                ));
+            if let Some(fault) = ill_spelled_ground(subject) {
+                problems.push(format!("`{name}` stands on `{subject}`, which is {fault}"));
                 continue;
             }
             if !reason.contains(subject) {
@@ -955,18 +1006,40 @@ impl Registry {
                      the reason's own claim, checked"
                 ));
             }
-            let held = resolves_case_exactly(workspace_root, path, LastComponent::FileOrDirectory);
-            match ground {
-                Ground::Absent(_) if held => problems.push(format!(
+            let resolution = resolve(
+                workspace_root,
+                Path::new(subject),
+                LastComponent::FileOrDirectory,
+            );
+            match (ground, resolution) {
+                (Ground::Absent(_), Resolution::Held) => problems.push(format!(
                     "`{name}` stands on `{subject}` being absent, and the workspace holds it. The \
                      subject landed, so the reason is stale: bind the case, or restate why a built \
                      subject still carries nothing"
                 )),
-                Ground::Present(_) if !held => problems.push(format!(
+                (Ground::Absent(_), Resolution::Confusable { asked, found }) => {
+                    problems.push(format!(
+                        "`{name}` stands on `{subject}` being absent, and the workspace holds \
+                         `{found}` where that path asks for `{asked}`. An absence claimed under a \
+                         spelling the tree does not use is an absence nothing can end, so it never \
+                         goes stale: spell the subject the way the tree spells it"
+                    ));
+                }
+                (Ground::Absent(_), Resolution::MissingAncestor { missing }) => {
+                    problems.push(format!(
+                        "`{name}` stands on `{subject}` being absent, and `{missing}` above it is \
+                         not in the workspace either. An absence is claimed at the boundary the \
+                         tree can answer — the shallowest path that is not there — because a \
+                         deeper spelling the tree may never use is a claim its subject's landing \
+                         does not touch"
+                    ));
+                }
+                (Ground::Absent(_), Resolution::MissingLeaf) => {}
+                (Ground::Present(_), Resolution::Held) => {}
+                (Ground::Present(_), _) => problems.push(format!(
                     "`{name}` cites `{subject}` as a subject that landed, and the workspace holds \
                      no such path under that exact spelling"
                 )),
-                _ => {}
             }
         }
     }
@@ -1054,14 +1127,43 @@ enum LastComponent {
     FileOrDirectory,
 }
 
+/// How a path answers against the workspace's own directory entries.
+///
+/// Whether a path is there is one bit, and one bit is not enough for a claim of
+/// absence: an absence has to be told apart from a spelling the tree cannot
+/// resolve under any name, which reads the same to a bit and means the opposite.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Resolution {
+    /// Every component is spelled the way the directory holding it spells it,
+    /// and the last is of the kind asked for.
+    Held,
+    /// A component resolves only under another spelling: the tree holds `found`
+    /// where the path asks for `asked`, and the two differ in case alone.
+    Confusable { asked: String, found: String },
+    /// Every directory above the last component is there and the last is not.
+    MissingLeaf,
+    /// A directory above the last component is not there. `missing` is the
+    /// first one, so what the path says about its own leaf is unanswerable.
+    MissingAncestor { missing: String },
+}
+
 /// Whether every component of `relative` is spelled the way the directory
 /// holding it spells it, and the last one is of the kind `last` allows.
 ///
 /// `Path::is_file` is not this question: a case-insensitive filesystem answers
 /// it for `Tests/Lanes.rs` and a case-sensitive one does not, so a reference
 /// that passes here and fails in CI is exactly what asking it would allow.
-#[allow(clippy::disallowed_methods)] // Resolves a reference against the workspace's own directory entries.
 fn resolves_case_exactly(workspace_root: &Path, relative: &Path, last: LastComponent) -> bool {
+    resolve(workspace_root, relative, last) == Resolution::Held
+}
+
+/// How `relative` resolves under `workspace_root`, component by component.
+///
+/// The walk stops at the first component the holding directory does not spell
+/// that way, and reports whether the directory spells it some other way — which
+/// is the difference between a subject that is not there and a subject named
+/// wrong.
+fn resolve(workspace_root: &Path, relative: &Path, last: LastComponent) -> Resolution {
     let mut current = workspace_root.to_path_buf();
     let components: Vec<&OsStr> = relative
         .components()
@@ -1071,19 +1173,41 @@ fn resolves_case_exactly(workspace_root: &Path, relative: &Path, last: LastCompo
         })
         .collect();
     let Some((leaf, directories)) = components.split_last() else {
-        return false;
+        return Resolution::MissingAncestor {
+            missing: relative.display().to_string(),
+        };
     };
     for name in directories {
-        if !holds(&current, name, true) {
-            return false;
+        if holds(&current, name, true) {
+            current.push(name);
+            continue;
         }
-        current.push(name);
+        return match spelled_otherwise(&current, name, Some(true)) {
+            Some(found) => Resolution::Confusable {
+                asked: shown(name),
+                found: shown(&found),
+            },
+            None => Resolution::MissingAncestor {
+                missing: shown(name),
+            },
+        };
     }
-    match last {
-        LastComponent::File => holds(&current, leaf, false),
-        LastComponent::FileOrDirectory => {
-            holds(&current, leaf, false) || holds(&current, leaf, true)
-        }
+    let kind = match last {
+        LastComponent::File => Some(false),
+        LastComponent::FileOrDirectory => None,
+    };
+    if kind.map_or_else(
+        || holds(&current, leaf, false) || holds(&current, leaf, true),
+        |want_directory| holds(&current, leaf, want_directory),
+    ) {
+        return Resolution::Held;
+    }
+    match spelled_otherwise(&current, leaf, kind) {
+        Some(found) => Resolution::Confusable {
+            asked: shown(leaf),
+            found: shown(&found),
+        },
+        None => Resolution::MissingLeaf,
     }
 }
 
@@ -1099,6 +1223,63 @@ fn holds(dir: &Path, name: &OsStr, want_directory: bool) -> bool {
                 .file_type()
                 .is_ok_and(|kind| kind.is_dir() == want_directory)
     })
+}
+
+/// The entry `dir` holds for `name` under a different case, if it holds one.
+///
+/// `want_directory` restricts the kind; `None` takes either. Case is the only
+/// difference this recognizes, because it is the one a case-insensitive
+/// filesystem and a hurried edit both produce.
+#[allow(clippy::disallowed_methods)] // Resolves a reference against the workspace's own directory entries.
+fn spelled_otherwise(dir: &Path, name: &OsStr, want_directory: Option<bool>) -> Option<OsString> {
+    let folded = name.to_string_lossy().to_lowercase();
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry.file_name().to_string_lossy().to_lowercase() == folded
+                && want_directory
+                    .is_none_or(|want| entry.file_type().is_ok_and(|kind| kind.is_dir() == want))
+        })
+        .map(|entry| entry.file_name())
+}
+
+/// One path component as a problem message spells it.
+fn shown(name: &OsStr) -> String {
+    name.to_string_lossy().into_owned()
+}
+
+/// Why `subject` is not a spelling a [`Ground`] may stand on, or nothing.
+///
+/// A ground is resolved against directory entries, and for an `absent` ground
+/// resolving to nothing is the answer that passes. A spelling no tree can ever
+/// hold therefore passes forever, so the shape is held before the tree is asked:
+/// a component padded with whitespace, an empty one, a bare dot and a parent
+/// traversal are all refused whichever arm states them.
+fn ill_spelled_ground(subject: &str) -> Option<&'static str> {
+    if Path::new(subject).is_absolute() {
+        return Some("not a workspace-relative path without parent traversal");
+    }
+    for component in subject.split('/') {
+        if component == ".." {
+            return Some("not a workspace-relative path without parent traversal");
+        }
+        if component.is_empty() || component == "." {
+            return Some(
+                "not a workspace-relative path whose every component names something: an empty \
+                 component and a bare dot resolve to nothing, so an absence claimed under one \
+                 never ends",
+            );
+        }
+        if component != component.trim() {
+            return Some(
+                "a path with a component padded by whitespace, which no directory entry is \
+                 spelled with: the padded spelling resolves to nothing, so an absence claimed \
+                 under it never ends",
+            );
+        }
+    }
+    None
 }
 
 /// Whether `source` is a citation identifier: `NRN-` or `NORN-`, an optional
@@ -1638,6 +1819,77 @@ fn a_name_in_prose() {
             },
             "holds no such path under that exact spelling",
         );
+    }
+
+    /// **An absence is held to its spelling.** A padded component resolves to
+    /// nothing, and for an `absent` ground resolving to nothing is the answer
+    /// that passes — so the padding would buy a claim no landing can ever
+    /// falsify. One space is the whole edit, and the reason reads unchanged
+    /// because the prose has a space in the same place.
+    #[test]
+    fn an_absent_ground_padded_with_whitespace_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("crates/demo/src is not in the workspace".to_string());
+                case.binding.grounds = vec![Ground::Absent("crates/demo/src ".to_string())];
+            },
+            "padded by whitespace",
+        );
+    }
+
+    /// An `absent` subject the tree holds under another case is the landed
+    /// subject, not an absence: the spelling is what failed to resolve.
+    #[test]
+    fn an_absent_ground_whose_spelling_differs_only_in_case_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason = Some("crates/demo/Tests is not in the workspace".to_string());
+                case.binding.grounds = vec![Ground::Absent("crates/demo/Tests".to_string())];
+            },
+            "where that path asks for",
+        );
+    }
+
+    /// An absence is claimed at the boundary the tree can answer. A path under a
+    /// directory that is not there says nothing about its own leaf, and the leaf
+    /// landing under a spelling nobody guessed leaves the claim standing.
+    #[test]
+    fn an_absent_ground_under_an_absent_parent_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason =
+                    Some("crates/demo/src/verb.rs is not in the workspace".to_string());
+                case.binding.grounds = vec![Ground::Absent("crates/demo/src/verb.rs".to_string())];
+            },
+            "above it is not in the workspace either",
+        );
+    }
+
+    /// **The dormancy the gate cannot refute is enumerable.** A reason waiting
+    /// on something that is not a path states no absence, so nothing mechanical
+    /// contradicts it; what the registry can do is name that class, and this is
+    /// the reading the suite pins.
+    #[test]
+    fn dormancy_stating_no_absence_is_enumerated() {
+        let registry = sound();
+        assert_eq!(
+            registry.dormant_without_an_absence().count(),
+            0,
+            "the scratch registry's one landed-layer dormancy stands on an absence"
+        );
+
+        let mut prose_only = sound();
+        let case = find(&mut prose_only, "a-dormant-layer-zero-case");
+        case.binding.reason = Some("crates/demo/tests/suite.rs holds half".to_string());
+        case.binding.grounds = vec![Ground::Present("crates/demo/tests/suite.rs".to_string())];
+        let named: Vec<&str> = prose_only
+            .dormant_without_an_absence()
+            .map(|case| case.name.as_str())
+            .collect();
+        assert_eq!(named, vec!["a-dormant-layer-zero-case"]);
     }
 
     /// A dormant case at a landed layer states grounds, not prose alone.
