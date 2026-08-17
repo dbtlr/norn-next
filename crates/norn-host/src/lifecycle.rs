@@ -5965,6 +5965,90 @@ mod tests {
         drop(recovering);
     }
 
+    /// A release that re-arms takes the entry's queue slot for the attach it
+    /// sends, and that slot is the entry's hold on the job while the channel
+    /// carries it: a tick reaching a marker beside it takes nothing, because
+    /// the entry already has a job in flight.
+    ///
+    /// The slot the re-arm takes is what says so. An entry left with a free
+    /// slot behind a job the channel really holds is one a tick puts a second
+    /// job in flight for, and the arrival that frees the slot then frees one
+    /// naming work the entry never sent.
+    ///
+    /// The one worker is held inside the other vault's attach, so the attach
+    /// the release sends stays in the channel for the window this case reads,
+    /// and the poll that reports the maintainer lost is driven from here, so
+    /// the release and its re-arm run on this thread.
+    #[test]
+    fn a_release_re_arm_holds_the_queue_slot_against_a_second_send() {
+        let ops = Arc::new(FakeOps::default());
+        let working = VaultName::new("a").unwrap();
+        let holding = VaultName::new("b").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&working, &holding], 1);
+        let working_lease = host.demand(&working, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &working, TrustState::Ready);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+
+        // The teardown: the poll reports the maintainer lost, the release
+        // gives the coverage back, and the lease standing over the entry is
+        // what it re-arms for. The entry beside it is skipped by the round,
+        // its own attach holding its gate.
+        ops.lost_poll.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+
+        let entry = host.shared.entries.get(&working).unwrap();
+        let (attach, slot, leg) = {
+            let state = entry.gate.lock().unwrap();
+            (state.claim.epoch(), state.claim.slot(), state.claim.leg())
+        };
+        assert_eq!(
+            ops.detaches.load(Ordering::SeqCst),
+            1,
+            "the release gave nothing back, so nothing re-armed"
+        );
+        assert_eq!(
+            slot,
+            Some(attach),
+            "the re-arm sent an attach the entry's slot does not name"
+        );
+        assert!(
+            leg.is_none(),
+            "a registered leg stands beside the slot, so the slot is not what refuses below"
+        );
+
+        // A job that lost the coverage it was dispatched against, recording
+        // itself against the entry for a later tick: the marker holds the
+        // gate, and the slot is the only thing left that says the entry has a
+        // job in flight already.
+        let marked = {
+            let mut state = entry.gate.lock().unwrap();
+            state.claim.restore(Job::Reconcile(working.clone(), attach));
+            state.claim.marker().is_some()
+        };
+        assert!(marked, "nothing is scheduled against the entry");
+
+        dispatch_pending(&host.shared, &entry).unwrap();
+        let (slot, marker) = {
+            let state = entry.gate.lock().unwrap();
+            (state.claim.slot(), state.claim.marker().cloned())
+        };
+        assert_eq!(
+            slot,
+            Some(attach),
+            "a tick sent a second job against an entry whose attach is already in the channel"
+        );
+        assert!(
+            marker.is_some(),
+            "the tick took the marker for a job it never sent"
+        );
+
+        ops.attach_release.store(true, Ordering::SeqCst);
+        drop((working_lease, holding_lease, host));
+    }
+
     /// A teardown that parks the entry on a contended maintainer honors the
     /// demand raised inside it by reporting the contention: the release owes
     /// the lease an answer, and re-attaching against another process's lock is
@@ -6179,6 +6263,76 @@ mod tests {
         assert_eq!(state.trust, TrustState::Unattached);
         assert!(!state.detach_in_flight, "the release window is still open");
         assert!(!state.coverage.in_hand());
+    }
+
+    /// A leg reaching for coverage another leg holds takes none, and the record
+    /// of who holds it stands over the refusal. Custody is read rather than
+    /// inferred, so an entry with an empty attachment beside a registered leg
+    /// is not what says the coverage is out — the record is.
+    ///
+    /// Destruction is where the record answers alone. The pass that runs after
+    /// the joins has no registration to fall back on: it reads custody bare and
+    /// leaves the window open for whatever is still out. A refused take that
+    /// recorded the entry as accounting for nothing would put this entry on
+    /// that pass's other route, and Unattached would be published over coverage
+    /// the first leg is still holding.
+    #[test]
+    fn a_refused_take_leaves_the_record_of_the_leg_holding_the_coverage() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+        let shared = Arc::clone(&host.shared);
+        let entry = shared.entries.get(&name).expect("the vault is registered");
+
+        // The leg holding the entry's coverage.
+        let (holder, attachment) = {
+            let mut state = entry.gate.lock().unwrap();
+            let holder = state.claim.epoch();
+            state.claim.begin_job_leg(holder);
+            let attachment = state.coverage.take(holder);
+            (holder, attachment)
+        };
+        assert!(attachment.is_some(), "the entry parked its coverage");
+
+        // The leg that follows it: registered against the entry, reaching for
+        // coverage the entry does not have in its own hand.
+        let (took, out_with_leg) = {
+            let mut state = entry.gate.lock().unwrap();
+            let next = state.claim.supersede();
+            state.claim.begin_job_leg(next);
+            let took = state.coverage.take(next);
+            (took, state.coverage.out_with_leg())
+        };
+        assert!(
+            took.is_none(),
+            "a leg took the coverage another leg is holding"
+        );
+        assert!(
+            out_with_leg,
+            "the refused take discarded the record of the leg holding the coverage"
+        );
+
+        drop(host);
+        let (trust, in_flight) = {
+            let state = entry.gate.lock().unwrap();
+            (state.trust.clone(), state.detach_in_flight)
+        };
+        assert_eq!(
+            trust,
+            releasing(),
+            "destruction published released over coverage a leg still held"
+        );
+        assert!(in_flight, "the window the leg has to close is not open");
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
+
+        // The leg that holds it, reaching the release every leg reaches.
+        finish_release(&shared, &entry, &name, holder, attachment);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        let state = entry.gate.lock().unwrap();
+        assert_eq!(state.trust, TrustState::Unattached);
+        assert!(!state.detach_in_flight, "the release window is still open");
+        assert!(!state.coverage.out_with_leg());
     }
 
     /// A job the joins wait for may have given its attachment back to the entry
