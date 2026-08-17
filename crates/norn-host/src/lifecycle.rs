@@ -6315,23 +6315,23 @@ mod tests {
         let shared = Arc::clone(&host.shared);
         let entry = shared.entries.get(&name).expect("the vault is registered");
 
-        // The leg holding the entry's coverage.
+        // The poll holding the entry's coverage.
         let (holder, attachment) = {
             let mut state = entry.gate.lock().unwrap();
             let holder = state.claim.epoch();
-            state.claim.begin_job_leg(holder);
+            state.claim.begin_poll(holder);
             let attachment = state.coverage.take(holder);
             (holder, attachment)
         };
         assert!(attachment.is_some(), "the entry parked its coverage");
 
-        // The leg that follows it: registered against the entry, reaching for
-        // coverage the entry does not have in its own hand.
+        // The job dispatched at that same epoch, registering its own leg over
+        // the poll's and reaching for coverage the entry does not have in its
+        // own hand.
         let took = {
             let mut state = entry.gate.lock().unwrap();
-            let next = state.claim.supersede();
-            state.claim.begin_job_leg(next);
-            state.coverage.take(next)
+            state.claim.begin_job_leg(holder);
+            state.coverage.take(holder)
         };
         assert!(
             took.is_none(),
