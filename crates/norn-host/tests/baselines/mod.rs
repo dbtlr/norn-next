@@ -19,12 +19,21 @@
 //! over a long mixed load. Repeated local readings cover **macos-arm64**
 //! natively.
 //!
-//! **The platform that gates is `ubuntu-latest` x86_64-glibc.** The attachment
-//! bands carry their first hosted readings beside the local ones, the same way
-//! the generator's baselines carry both architectures they were measured on.
-//! The soak bands are not measured there yet: the nightly lane is what produces
-//! their first hosted readings, and until it does those values are the
-//! macos-arm64 bands with headroom over them.
+//! **The platform that gates is `ubuntu-latest` x86_64-glibc.** Every band
+//! below carries its hosted readings beside the local ones, the same way the
+//! generator's baselines carry both architectures they were measured on. The
+//! soak bands' hosted readings come off the nightly lane's hour-long load at
+//! the ≥5k profile; the local readings beside them are the same case at the
+//! short default duration, which is what a developer runs.
+//!
+//! **One band here is unauthored.** [`SOAK_PEAK_RSS_CEILING_BYTES`] is `None`:
+//! the host's peak resident set at the ≥5k profile is recorded each run and
+//! barred against nothing, because no run before the one that records it
+//! measured it. A ceiling authored from the slope's quartile means would be a
+//! number with no reading behind it, and under [ADR
+//! 0007](../../../../docs/decisions/0007-authored-measurement-thresholds.md) a
+//! threshold is an authored constraint with stated grounds — so the bar waits
+//! for calibration runs of the scheduled lane on the scheduled platform.
 //!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
 //! lane and `host_soak.rs` for the scheduled one — and each asserts against the
@@ -42,11 +51,19 @@
 ///
 /// Observed over 5 runs: **20.26–20.60 MiB on macos-arm64** — an indicative
 /// band from repeated local runs, not a fixed measurement, so a rerun lands
-/// near an edge rather than the middle. The first hosted run read **17.69 and
-/// 18.26 MiB on ubuntu-latest x86_64-glibc** across this lane's two attaches at
-/// this profile — lower than the local band, as 4 KiB pages against 16 KiB
-/// predict. The ceiling sits at roughly twice the local band's top, because a
-/// bar that flakes teaches people to rerun rather than to look.
+/// near an edge rather than the middle. On `ubuntu-latest` x86_64-glibc the
+/// hosted band across this lane's two attaches at this profile is **16.73–18.26
+/// MiB**: 17.69 and 18.26 at the first hosted run, 16.73 and 17.00 at the two
+/// collected in the Layer 1 acceptance pass. Every hosted reading sits below
+/// the local band, as 4 KiB pages against 16 KiB predict, and the hosted
+/// readings have moved down rather than up.
+///
+/// The ceiling stays at roughly twice the local band's top. The readings it
+/// holds are whole-process peaks, so each carries the child binary and its
+/// runtime as a fixed addend that a page-size or allocator change moves without
+/// the attachment costing more — and a bar that flakes teaches people to rerun
+/// rather than to look. What a vault-shaped cost would read here is multiples
+/// of the band, not the 2 MiB of spread between platforms.
 ///
 /// What it forbids is an attachment whose cost is the vault. The heal walks the
 /// tree and commits it in bounded changesets, so what stays resident is one
@@ -86,6 +103,12 @@ pub const ATTACH_PAIR_PEAK_RSS_PER_MILLE: u64 = 1_600;
 /// a run legitimately holds at the sampling instant — a watcher re-subscribing,
 /// a store file reopened — rather than headroom for a leak, which grows with
 /// the load and passes no allowance this small.
+///
+/// Observed on `ubuntu-latest` x86_64-glibc over four hour-long nightlies
+/// (runs 30981205447, 31077245035, 31151158232 and 31240414969): **growth of
+/// zero in every one**, at 14 descriptors first-to-last in three of them and 15
+/// in the fourth. The count a load holds moves with the runner image; what this
+/// bar reads is the difference across one run, which does not.
 pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 
 /// How much of the first quartile's mean resident set the last quartile's mean
@@ -97,18 +120,49 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// quartile means rather than endpoints is what keeps one sample taken during a
 /// changeset commit from deciding the run.
 ///
-/// Observed on macos-arm64: **1.04–1.07 over three 90-second runs, and 0.96
-/// over a 300-second one**, against first-quartile means of 21.50–22.31 MiB.
-/// The short runs read higher because their first quartile covers the minute
-/// after an attach, where a store's caches are still filling; a longer run
-/// spends that in its first quartile too and reads flat or falling, which is
-/// the shape the hour-long scheduled run has.
+/// Observed on `ubuntu-latest` x86_64-glibc, which is the platform that gates:
+/// **1.00 on each of four hour-long nightlies** — runs 30981205447 (q1 17.41,
+/// q4 17.43 MiB), 31077245035 (17.30, 17.31), 31151158232 (17.27, 17.28) and
+/// 31240414969 (17.40, 17.42). The comparison is in integer per mille, so a
+/// displayed 1.00 is a true ratio under 1.010, and those quartile means put
+/// each run near 1.001. Observed on macos-arm64 at the short default duration:
+/// **1.04–1.07 over three 90-second runs, and 0.96 over a 300-second one**,
+/// against first-quartile means of 21.50–22.31 MiB. A short run reads higher
+/// because its first quartile covers the minute after an attach, where a
+/// store's caches are still filling; the hour-long run spends that inside its
+/// first quartile and reads flat.
 ///
-/// The bar is 1.25, which is loose enough that the settling a short run
-/// measures does not fail the lane, and tight enough that a load paying for
-/// each reconciliation does: a leak at that scale compounds over an hour rather
-/// than levelling off.
-pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_250;
+/// The bar is 1.15, and **what sets it is the short run rather than the hosted
+/// one**: the same constant judges a 90-second local run, whose worst reading
+/// is 1.07, so the bar keeps 0.15 over 1.00 — a little over twice the 0.07 that
+/// reading stands above it. Against the hour-long load that allowance is 150
+/// times the 0.001 four nightlies actually show, which is the price of one bar
+/// over both durations — and it is still
+/// tight enough to fail a load paying for each reconciliation, because a leak
+/// at that scale compounds over an hour rather than levelling off.
+pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
+
+/// Peak resident set the host may reach under the long mixed load at the ≥5k
+/// profile, or `None` while no ceiling is authored.
+///
+/// **The peak term of the memory invariant at soak scale.** The slope beside
+/// this reads the trend and says nothing about the height the series reaches;
+/// the maximum of the same samples is what says a load that stayed flat stayed
+/// flat somewhere reasonable. The reading is recorded every run either way, and
+/// the comparison happens only where a ceiling is authored: `Some` bars the
+/// run, `None` records the reading and bars nothing.
+///
+/// **It is `None` because no reading exists yet.** No run before the one that
+/// records it took a peak at this profile — `host_soak` sampled the current
+/// resident set for the slope and kept no maximum — so there is nothing to
+/// author a ceiling from. The quartile means beside it are means of a sampled
+/// series and not its height, so deriving a ceiling from them would state a
+/// number no measurement stands behind, which is what [ADR
+/// 0007](../../../../docs/decisions/0007-authored-measurement-thresholds.md)
+/// refuses. The value it takes comes from calibration runs of the scheduled
+/// lane on the scheduled platform at the scheduled duration, and it lands as a
+/// reviewed edit carrying those readings.
+pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = None;
 
 /// Every band above is a reading of the unoptimized build. An optimized one
 /// allocates differently enough that the bars would be measuring a subject they
