@@ -413,9 +413,12 @@ impl fmt::Display for Value {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct StripReport {
     /// Entries dropped because their key is not a string. A dropped key makes
-    /// the block's field spans untrustworthy: the scanner still sees the line,
-    /// the value no longer names it, and absorbing that line into a
-    /// neighbour's range is how a remove deletes an unrelated field.
+    /// the block's field spans untrustworthy at any depth: the value is no
+    /// longer everything the parser read, so a span the value agrees with is
+    /// no longer a span the block agrees with. Where the drop is at the top
+    /// level the cost is concrete — the scanner still sees the line the value
+    /// no longer names, and absorbing that line into a neighbour's range is
+    /// how a remove deletes an unrelated field.
     pub(crate) dropped_keys: usize,
 }
 

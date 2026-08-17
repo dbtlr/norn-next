@@ -5,7 +5,10 @@
 //! edited construct do not move.** Comments, blank structure, key order, line
 //! terminators and the quoting of untouched values all survive.
 
-use norn_text::{DiagnosticCode, Document, EditError, LineEnding, Mapping, Value, render_document};
+use norn_text::{
+    DiagnosticCode, Document, EditError, LineEnding, Mapping, SourceSpan, SplitRefusal, Value,
+    render_document,
+};
 
 fn set(source: &str, field: &str, value: Value) -> Result<String, EditError> {
     Document::parse(source).set_field(field, &value)
@@ -384,14 +387,25 @@ fn a_key_the_scanner_decodes_differently_refuses_the_whole_block() {
     // The refusal is the block's, not any one field's: the disagreement is
     // about the block's split, and a field-level answer would suggest another
     // field might be fine.
+    // The refusal names the disagreement: the parser's `a` is the key no
+    // candidate line spells, and every edit into the block reports that one
+    // cause rather than the field it was asked about.
+    let unlocated = SplitRefusal::KeyNotLocated {
+        key: "a".to_string(),
+        candidates: 0,
+    };
     for field in ["a", "x61"] {
         assert_eq!(
             document.set_field(field, &Value::Int(9)),
-            Err(EditError::FrontmatterNotEditable)
+            Err(EditError::FrontmatterNotEditable {
+                cause: unlocated.clone()
+            })
         );
         assert_eq!(
             document.remove_field(field),
-            Err(EditError::FrontmatterNotEditable)
+            Err(EditError::FrontmatterNotEditable {
+                cause: unlocated.clone()
+            })
         );
     }
     // Appending a field the block does not have is an edit into the block too,
@@ -399,11 +413,13 @@ fn a_key_the_scanner_decodes_differently_refuses_the_whole_block() {
     // terms rather than slipping past a per-field guard.
     assert_eq!(
         document.set_field("brand new", &Value::Int(1)),
-        Err(EditError::FrontmatterNotEditable)
+        Err(EditError::FrontmatterNotEditable {
+            cause: unlocated.clone()
+        })
     );
     assert_eq!(
         document.remove_field("brand new"),
-        Err(EditError::FrontmatterNotEditable)
+        Err(EditError::FrontmatterNotEditable { cause: unlocated })
     );
 }
 
@@ -423,7 +439,9 @@ fn a_block_with_no_fields_and_a_block_with_no_trustworthy_fields_refuse_differen
     );
     assert_eq!(
         set("---\n1: x\n---\nbody\n", "title", Value::String("t".into())),
-        Err(EditError::FrontmatterNotEditable)
+        Err(EditError::FrontmatterNotEditable {
+            cause: SplitRefusal::UncleanStrip { dropped_entries: 1 }
+        })
     );
     // And the empty block, which is null rather than a mapping, still takes
     // its first field.
@@ -443,7 +461,12 @@ fn a_well_formed_field_beside_an_ambiguous_one_refuses_as_well() {
     assert!(document.field("title").is_none());
     assert_eq!(
         document.set_field("title", &Value::String("changed".into())),
-        Err(EditError::FrontmatterNotEditable)
+        Err(EditError::FrontmatterNotEditable {
+            cause: SplitRefusal::KeyNotLocated {
+                key: "a".to_string(),
+                candidates: 0,
+            }
+        })
     );
 }
 
@@ -499,6 +522,198 @@ fn no_accepted_edit_over_hostile_documents_loses_a_field() {
             }
         }
     }
+}
+
+// ── The refused split names its cause (NRN-152) ──────────────────────────
+
+/// The cause a refused block reports, and the note filed beside it.
+fn refusal_and_detail(source: &str) -> (SplitRefusal, String) {
+    let document = Document::parse(source);
+    let cause = match document.remove_field("any") {
+        Err(EditError::FrontmatterNotEditable { cause }) => cause,
+        other => panic!("{source:?}: expected a refused split, got {other:?}"),
+    };
+    // A reader that proposes no edit reaches the same cause off the document.
+    assert_eq!(
+        document.split_refusal(),
+        Some(&cause),
+        "{source:?}: the read side and the edit refusal name one cause"
+    );
+    let detail = document
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterNotEditable)
+        .unwrap_or_else(|| panic!("{source:?}: a note about the refusal"))
+        .detail
+        .clone()
+        .unwrap_or_else(|| panic!("{source:?}: the note carries the cause"));
+    (cause, detail)
+}
+
+/// A strip that dropped an entry is fixed by rewriting the entry the value
+/// model has no shape for, so that is what the refusal says — and how many
+/// entries went, which a block losing several does not have to be re-read to
+/// find out.
+#[test]
+fn an_unclean_strip_reports_the_entries_the_value_model_dropped() {
+    let (cause, detail) = refusal_and_detail("---\n1: x\ntitle: t\n---\nbody\n");
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
+    assert_eq!(detail, "the value model dropped an entry the parser read");
+
+    let (cause, detail) = refusal_and_detail("---\n1: x\n2: y\ntitle: t\n---\nbody\n");
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 2 });
+    assert_eq!(detail, "the value model dropped 2 entries the parser read");
+}
+
+/// A drop below the top level costs the split too, and the cause says only
+/// what is true of it: an entry went. Where it sits is the note filed as it
+/// was dropped, which carries the path — the cause claims no top-level line
+/// the dropped entry never occupied.
+#[test]
+fn a_drop_below_the_top_level_reports_the_same_cause_and_claims_no_line() {
+    let source = "---\ntitle: t\nlist:\n  - 1: x\n---\nbody\n";
+    let (cause, detail) = refusal_and_detail(source);
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
+    assert_eq!(detail, "the value model dropped an entry the parser read");
+
+    // The note beside it is what places the entry, and it places this one
+    // inside the sequence rather than at the top level.
+    let placed = Document::parse(source)
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::FrontmatterNonStringKey)
+        .and_then(|diagnostic| diagnostic.detail.clone());
+    assert_eq!(placed.as_deref(), Some("at `list[0]`"));
+}
+
+/// A key the scan cannot locate is fixed by rewriting that key, so the refusal
+/// names it. Zero candidate lines and two are the same refusal and different
+/// documents — one key the scan never spells, one name two lines claim — and
+/// the count separates them without a second read.
+#[test]
+fn a_key_no_line_uniquely_locates_reports_the_key_and_how_many_lines_claim_it() {
+    // The parser decodes `"\x61"` to `a` and the scan does not, so `a` is a
+    // parsed key no candidate line spells.
+    let (cause, detail) = refusal_and_detail("---\n\"\\x61\": 1\nx61: 2\n---\nbody\n");
+    assert_eq!(
+        cause,
+        SplitRefusal::KeyNotLocated {
+            key: "a".to_string(),
+            candidates: 0,
+        }
+    );
+    assert_eq!(detail, "the parsed key \"a\" is on no candidate key line");
+
+    // The quoted scalar's step-over stops at its interior quote, re-exposing
+    // an `other:` line that collides with the real one.
+    let (cause, detail) =
+        refusal_and_detail("---\nq: 'a\nb'' c\nother: inside\nz'\nother: 2\n---\nbody\n");
+    assert_eq!(
+        cause,
+        SplitRefusal::KeyNotLocated {
+            key: "other".to_string(),
+            candidates: 2,
+        }
+    );
+    assert_eq!(
+        detail,
+        "the parsed key \"other\" is on 2 candidate key lines and belongs to one"
+    );
+}
+
+/// An explicit-key indicator is fixed by rewriting one line, so the refusal
+/// points at it. The position is the document's, not the block's: a caller
+/// holding the source opens it at that line.
+#[test]
+fn an_explicit_key_indicator_reports_where_it_is_written() {
+    let source = "---\nk: 1\n? title\n: My Note\n---\nbody\n";
+    let (cause, detail) = refusal_and_detail(source);
+    assert_eq!(
+        cause,
+        SplitRefusal::ExplicitKeyIndicator {
+            at: SourceSpan {
+                line: 3,
+                column: 1,
+                byte_offset: source.find("? title").expect("the indicator line"),
+            }
+        }
+    );
+    assert_eq!(
+        detail,
+        "the scan reads line 3 as a top-level explicit-key `?` indicator"
+    );
+
+    // The first indicator is the one reported: a block writing two is one
+    // document to open, at the line the scan stopped on.
+    let source = "---\n? one\n: 1\n? two\n: 2\n---\nbody\n";
+    let (cause, _) = refusal_and_detail(source);
+    assert_eq!(
+        cause,
+        SplitRefusal::ExplicitKeyIndicator {
+            at: SourceSpan {
+                line: 2,
+                column: 1,
+                byte_offset: source.find("? one").expect("the first indicator line"),
+            }
+        }
+    );
+}
+
+/// The three causes are three answers, so a caller reading one knows which
+/// shape to change. The set of blocks that refuse is unchanged by their being
+/// told apart: each of these refused before it named why.
+#[test]
+fn the_three_refusal_shapes_report_three_different_causes() {
+    let causes: Vec<SplitRefusal> = [
+        "---\n1: x\ntitle: t\n---\nbody\n",
+        "---\n\"\\x61\": 1\nx61: 2\n---\nbody\n",
+        "---\nk: 1\n? title\n: My Note\n---\nbody\n",
+    ]
+    .iter()
+    .map(|source| refusal_and_detail(source).0)
+    .collect();
+
+    assert!(
+        matches!(causes[0], SplitRefusal::UncleanStrip { .. })
+            && matches!(causes[1], SplitRefusal::KeyNotLocated { .. })
+            && matches!(causes[2], SplitRefusal::ExplicitKeyIndicator { .. }),
+        "{causes:?}"
+    );
+    // And the prose a caller reads differs with them, which is the whole point
+    // of carrying the cause rather than a bare absence.
+    let problems: Vec<String> = causes.iter().map(SplitRefusal::problem).collect();
+    assert_eq!(
+        problems
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "{problems:?}"
+    );
+}
+
+/// A block failing two gates at once still reports one cause, and it is the
+/// first gate checked: the strip is read before the block is scanned, so a
+/// dropped entry is named ahead of an indicator further down. Which blocks
+/// refuse does not move with that order — this one refuses either way — but
+/// which remedy the caller is handed does, so the order is pinned here.
+#[test]
+fn a_block_failing_two_gates_reports_the_gate_checked_first() {
+    // A non-string key the value model drops, and a top-level `? ` indicator
+    // below it, each enough on its own.
+    let (cause, detail) = refusal_and_detail("---\n1: x\n? k\n: 1\n---\nbody\n");
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
+    assert_eq!(detail, "the value model dropped an entry the parser read");
+    assert_eq!(
+        refusal_and_detail("---\n? k\n: 1\n---\nbody\n").0,
+        SplitRefusal::ExplicitKeyIndicator {
+            at: SourceSpan {
+                line: 2,
+                column: 1,
+                byte_offset: 4,
+            }
+        }
+    );
 }
 
 // ── What refuses ─────────────────────────────────────────────────────────
@@ -626,14 +841,22 @@ fn an_explicit_key_refuses_every_field_edit() {
             "for {source:?}"
         );
         for field in ["title", "k", "other", "absent"] {
-            assert_eq!(
-                document.set_field(field, &Value::String("x".into())),
-                Err(EditError::FrontmatterNotEditable),
+            assert!(
+                matches!(
+                    document.set_field(field, &Value::String("x".into())),
+                    Err(EditError::FrontmatterNotEditable {
+                        cause: SplitRefusal::ExplicitKeyIndicator { .. }
+                    })
+                ),
                 "{source:?}: setting {field:?}"
             );
-            assert_eq!(
-                document.remove_field(field),
-                Err(EditError::FrontmatterNotEditable),
+            assert!(
+                matches!(
+                    document.remove_field(field),
+                    Err(EditError::FrontmatterNotEditable {
+                        cause: SplitRefusal::ExplicitKeyIndicator { .. }
+                    })
+                ),
                 "{source:?}: removing {field:?}"
             );
         }
@@ -675,13 +898,17 @@ fn an_explicit_merge_directive_is_never_deleted_by_a_neighbours_remove() {
     let source = "---\nbase: &b {title: x}\n? <<\n: *b\ntitle: t\n---\nbody\n";
     let document = Document::parse(source);
     assert!(document.fields().is_empty());
-    assert_eq!(
-        document.remove_field("base"),
-        Err(EditError::FrontmatterNotEditable)
-    );
+    // The directive is refused as the explicit-key spelling it is written in,
+    // named at the line that writes it.
+    let indicator = EditError::FrontmatterNotEditable {
+        cause: SplitRefusal::ExplicitKeyIndicator {
+            at: SourceSpan::at(source, source.find("? <<").expect("the directive line")),
+        },
+    };
+    assert_eq!(document.remove_field("base"), Err(indicator.clone()));
     assert_eq!(
         document.set_field("title", &Value::String("new".into())),
-        Err(EditError::FrontmatterNotEditable)
+        Err(indicator)
     );
     assert_eq!(
         document.frontmatter(),
@@ -742,9 +969,29 @@ fn a_question_mark_below_an_interior_quote_refuses_the_block() {
     ] {
         let document = Document::parse(source);
         assert!(document.fields().is_empty(), "for {source:?}");
+        // The reported line is the re-exposed one, which is where the scan
+        // read the indicator and not where the remedy is: those bytes are
+        // interior to `q`'s value and the quoting above them is what would
+        // have to change. The cause says what the scan read for that reason.
         assert_eq!(
             document.remove_field("k"),
-            Err(EditError::FrontmatterNotEditable),
+            Err(EditError::FrontmatterNotEditable {
+                cause: SplitRefusal::ExplicitKeyIndicator {
+                    at: SourceSpan {
+                        line: 4,
+                        column: 1,
+                        byte_offset: source.find("? d").expect("the re-exposed line"),
+                    }
+                }
+            }),
+            "for {source:?}"
+        );
+        assert_eq!(
+            document
+                .split_refusal()
+                .map(SplitRefusal::problem)
+                .as_deref(),
+            Some("the scan reads line 4 as a top-level explicit-key `?` indicator"),
             "for {source:?}"
         );
         let map = document
@@ -771,7 +1018,12 @@ fn a_key_re_exposed_below_an_interior_quote_is_answered_for_downstream() {
     assert!(colliding.fields().is_empty());
     assert_eq!(
         colliding.remove_field("other"),
-        Err(EditError::FrontmatterNotEditable)
+        Err(EditError::FrontmatterNotEditable {
+            cause: SplitRefusal::KeyNotLocated {
+                key: "other".to_string(),
+                candidates: 2,
+            }
+        })
     );
     assert_eq!(
         colliding.frontmatter().and_then(Value::as_map),
