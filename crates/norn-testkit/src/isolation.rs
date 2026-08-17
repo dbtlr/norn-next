@@ -708,10 +708,10 @@ mod tests {
 
         // The queue changing hands, written where a waiter reads it: each pass
         // leaves a record naming a different holder than the last. The widest
-        // gap between two of them is kept because it, and not the count, is
-        // what the waiter sees: a writer starved for longer than the patience
-        // has handed the waiter a record that did not move, and the failure
-        // that follows would be this thread's rather than the re-arm's.
+        // gap between two writes that landed is kept because it, and not the
+        // count, is what the waiter sees: hands starved for longer than the
+        // patience have left the waiter a record that did stop moving, and the
+        // failure that follows would be this thread's rather than the re-arm's.
         let stop = Arc::new(AtomicBool::new(false));
         let handovers = Arc::new(AtomicUsize::new(0));
         let widest_gap = Arc::new(AtomicU64::new(0));
@@ -723,25 +723,49 @@ mod tests {
                 Arc::clone(&widest_gap),
             );
             thread::spawn(move || {
-                let mut last = Instant::now();
+                let mut last: Option<Instant> = None;
+                let mut nth = 0usize;
                 while !stop.load(Ordering::SeqCst) {
-                    let nth = handovers.fetch_add(1, Ordering::SeqCst);
+                    nth += 1;
                     let record = format!("pid {nth} holding a lease since unix 0");
-                    let _ = std::fs::OpenOptions::new()
+                    let wrote = std::fs::OpenOptions::new()
                         .write(true)
                         .truncate(true)
                         .open(&path)
-                        .and_then(|mut file| file.write_all(record.as_bytes()));
-                    let now = Instant::now();
-                    widest_gap.fetch_max(
-                        now.duration_since(last).as_micros() as u64,
-                        Ordering::SeqCst,
-                    );
-                    last = now;
+                        .and_then(|mut file| file.write_all(record.as_bytes()))
+                        .is_ok();
+                    if wrote {
+                        let now = Instant::now();
+                        if let Some(previous) = last {
+                            widest_gap.fetch_max(
+                                now.duration_since(previous).as_micros() as u64,
+                                Ordering::SeqCst,
+                            );
+                        }
+                        last = Some(now);
+                        handovers.fetch_add(1, Ordering::SeqCst);
+                    }
                     thread::sleep(Duration::from_millis(2));
                 }
             })
         };
+
+        // The waiter starts once the record is these hands' own, so the window
+        // it reads begins at a write and every gap inside it is one the thread
+        // above measured. Started ahead of that, it would be reading the
+        // occupier's line for however long the thread waits to be scheduled.
+        let spawned = Instant::now();
+        while handovers.load(Ordering::SeqCst) == 0 && spawned.elapsed() < patience {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if handovers.load(Ordering::SeqCst) == 0 {
+            stop.store(true, Ordering::SeqCst);
+            hands.join().expect("the hands that never took the record");
+            panic!(
+                "this case's own hands did not take the record inside the {patience:?} patience, \
+                 so the waiter below would read the occupier's line as one that stopped moving"
+            );
+        }
 
         let failure = Lease::try_hold_under(key.as_str(), wall, Patience::Of(patience))
             .expect_err("a lease no waiter is ever handed");
