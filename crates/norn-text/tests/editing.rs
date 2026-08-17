@@ -533,6 +533,12 @@ fn refusal_and_detail(source: &str) -> (SplitRefusal, String) {
         Err(EditError::FrontmatterNotEditable { cause }) => cause,
         other => panic!("{source:?}: expected a refused split, got {other:?}"),
     };
+    // A reader that proposes no edit reaches the same cause off the document.
+    assert_eq!(
+        document.split_refusal(),
+        Some(&cause),
+        "{source:?}: the read side and the edit refusal name one cause"
+    );
     let detail = document
         .diagnostics()
         .iter()
@@ -634,7 +640,7 @@ fn an_explicit_key_indicator_reports_where_it_is_written() {
     );
     assert_eq!(
         detail,
-        "a top-level explicit-key `?` indicator at line 3, column 1"
+        "the scan reads line 3 as a top-level explicit-key `?` indicator"
     );
 
     // The first indicator is the one reported: a block writing two is one
@@ -683,6 +689,30 @@ fn the_three_refusal_shapes_report_three_different_causes() {
             .len(),
         3,
         "{problems:?}"
+    );
+}
+
+/// A block failing two gates at once still reports one cause, and it is the
+/// first gate checked: the strip is read before the block is scanned, so a
+/// dropped entry is named ahead of an indicator further down. Which blocks
+/// refuse does not move with that order — this one refuses either way — but
+/// which remedy the caller is handed does, so the order is pinned here.
+#[test]
+fn a_block_failing_two_gates_reports_the_gate_checked_first() {
+    // A non-string key the value model drops, and a top-level `? ` indicator
+    // below it, each enough on its own.
+    let (cause, detail) = refusal_and_detail("---\n1: x\n? k\n: 1\n---\nbody\n");
+    assert_eq!(cause, SplitRefusal::UncleanStrip { dropped_entries: 1 });
+    assert_eq!(detail, "the value model dropped an entry the parser read");
+    assert_eq!(
+        refusal_and_detail("---\n? k\n: 1\n---\nbody\n").0,
+        SplitRefusal::ExplicitKeyIndicator {
+            at: SourceSpan {
+                line: 2,
+                column: 1,
+                byte_offset: 4,
+            }
+        }
     );
 }
 
@@ -939,13 +969,29 @@ fn a_question_mark_below_an_interior_quote_refuses_the_block() {
     ] {
         let document = Document::parse(source);
         assert!(document.fields().is_empty(), "for {source:?}");
-        assert!(
-            matches!(
-                document.remove_field("k"),
-                Err(EditError::FrontmatterNotEditable {
-                    cause: SplitRefusal::ExplicitKeyIndicator { .. }
-                })
-            ),
+        // The reported line is the re-exposed one, which is where the scan
+        // read the indicator and not where the remedy is: those bytes are
+        // interior to `q`'s value and the quoting above them is what would
+        // have to change. The cause says what the scan read for that reason.
+        assert_eq!(
+            document.remove_field("k"),
+            Err(EditError::FrontmatterNotEditable {
+                cause: SplitRefusal::ExplicitKeyIndicator {
+                    at: SourceSpan {
+                        line: 4,
+                        column: 1,
+                        byte_offset: source.find("? d").expect("the re-exposed line"),
+                    }
+                }
+            }),
+            "for {source:?}"
+        );
+        assert_eq!(
+            document
+                .split_refusal()
+                .map(SplitRefusal::problem)
+                .as_deref(),
+            Some("the scan reads line 4 as a top-level explicit-key `?` indicator"),
             "for {source:?}"
         );
         let map = document

@@ -31,8 +31,9 @@
 //! and there is no safe per-field split — the mis-located key's bytes would be
 //! absorbed into a neighbour and deleted by an unrelated remove. No field gets
 //! a span and every field edit refuses. The same holds when the value model
-//! had to drop an entry: the scanner still sees the line the parser no longer
-//! names.
+//! had to drop an entry: the model every proposal is validated against no
+//! longer holds everything the parser read, so agreeing with it stops being
+//! proof that the scan read the block.
 //!
 //! What a refused block keeps is its value model: it reads whole, every entry
 //! the parser folded included. What it loses is every read built on field
@@ -91,11 +92,12 @@ use crate::value::{KeyIndex, StripReport, Value};
 /// edit into that block refuses.
 ///
 /// Each variant is a different edit to the document. A dropped entry is a key
-/// the value model has no shape for; an unlocated key is a scan and a parser
-/// reading the same line two ways; an explicit-key indicator is a spelling the
-/// split has no attribution for. Telling a caller only that the split failed
-/// leaves it guessing which of the three to fix, so the refusal carries which
-/// one it is and what it was about.
+/// the value model has no shape for; an unlocated key is a name the scan and
+/// the parser do not agree on one line for — no line spells it, two do, or a
+/// merge target supplied it and it occupies none; an explicit-key indicator is
+/// a spelling the split has no attribution for. Telling a caller only that the
+/// split failed leaves it guessing which of the three to fix, so the refusal
+/// carries which one it is and what it was about.
 ///
 /// Plain rather than `#[non_exhaustive]`: a consumer that has not decided what
 /// a new way of losing the split means to it should fail to compile rather
@@ -103,8 +105,8 @@ use crate::value::{KeyIndex, StripReport, Value};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SplitRefusal {
     /// The value model dropped entries the parser read, anywhere in the block
-    /// and at any depth, so the key set the split is checked against is no
-    /// longer the one the block writes.
+    /// and at any depth, so the model the split is checked against is not what
+    /// the parser read and agreement with it proves nothing about the block.
     ///
     /// `dropped_entries` is how many went. Where each one sits is not here: a
     /// `frontmatter-non-string-key` note is filed as it is dropped and that
@@ -113,11 +115,23 @@ pub enum SplitRefusal {
     UncleanStrip { dropped_entries: usize },
     /// A parsed key that no candidate key line locates uniquely: `candidates`
     /// is how many lines the scan read as spelling this name, and any count
-    /// other than one is a disagreement.
+    /// other than one is a disagreement. Zero covers a key written nowhere the
+    /// scan looks as well as one written on no line at all — a merge target's
+    /// key is the parser's and occupies no line of this block.
     KeyNotLocated { key: String, candidates: usize },
-    /// A top-level explicit-key `?` indicator, which writes a key on a line
-    /// carrying no `key:` separator and so leaves the scan nothing to
-    /// attribute. The span is where the indicator sits in the document.
+    /// A line the scan read as a top-level explicit-key `?` indicator: it
+    /// carries no `key:` separator, so the scan has no line to attribute the
+    /// key written there to.
+    ///
+    /// The span is the line the scan read it on, which is where to look before
+    /// it is where to edit. Its column is always 1: the scan reads structure
+    /// only on an unindented line, and the indicator is that line's first
+    /// byte, so the line alone addresses it and the prose says only the line.
+    /// The scan's step-over of a multi-line quoted scalar is best-effort, so
+    /// an interior line of such a value reaches this arm too: there the bytes
+    /// at the span belong to the value above and the quoting is what would
+    /// have to change. Hence the prose states what the scan read rather than
+    /// what the document holds.
     ExplicitKeyIndicator { at: SourceSpan },
 }
 
@@ -142,8 +156,8 @@ impl SplitRefusal {
                 "the parsed key {key:?} is on {candidates} candidate key lines and belongs to one"
             ),
             SplitRefusal::ExplicitKeyIndicator { at } => format!(
-                "a top-level explicit-key `?` indicator at line {}, column {}",
-                at.line, at.column
+                "the scan reads line {} as a top-level explicit-key `?` indicator",
+                at.line
             ),
         }
     }

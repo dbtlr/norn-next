@@ -302,6 +302,27 @@ impl<'a> Document<'a> {
         self.fields.iter().find(|field| field.name == name)
     }
 
+    /// Why the field layer refused to split this document's block, or `None`
+    /// where it did not.
+    ///
+    /// A refused split reaches a reader as absence — no fields, no field
+    /// texts, no frontmatter tags or wikilinks — and this is the state that
+    /// separates that absence from a block holding nothing, the same way
+    /// [`Document::frontmatter_refusal`] separates an unread block from a
+    /// document carrying none. It is the cause
+    /// [`EditError::FrontmatterNotEditable`] carries, readable without
+    /// proposing an edit the caller never meant to make.
+    ///
+    /// The host's read side reports an unread block from
+    /// [`Document::frontmatter_refusal`] and reports a refused split as the
+    /// diagnostic alone, so nothing outside this crate reads this yet. The
+    /// apply seam that gives the cause a shape of its own is where it is read
+    /// from; until then the state is reachable rather than only inferable, so
+    /// no consumer has to sham an edit or match on advisory prose to learn it.
+    pub fn split_refusal(&self) -> Option<&SplitRefusal> {
+        self.split_refusal.as_ref()
+    }
+
     /// What reading this document had to work around.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
