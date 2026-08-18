@@ -149,11 +149,12 @@ jobs:
       # without it the file compiles to zero tests. That pairing is held to the
       # inventory by `norn --test certification`, so a case added to a target no
       # lane runs fails a pull request rather than the fifth nightly.
-      # The library target too: five of the trust-transition cases are unit
-      # tests of the host's lifecycle rather than integration suites, and a lane
-      # that ran only the suites would record those five not-run. Its log holds
-      # every unit test the crate has, and the collector reads the ones the
-      # inventory names.
+      #
+      # The library target is one of them: five of the trust-transition cases
+      # are unit tests of the host's lifecycle rather than integration suites,
+      # and a lane that ran only the suites would record those five not-run. Its
+      # log holds every unit test the crate has, and the collector reads the
+      # ones the inventory names.
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host lib
@@ -303,11 +304,11 @@ jobs:
       - name: Assert architecture
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
-      # The library target too: five of the trust-transition cases are unit
-      # tests of the host's lifecycle rather than integration suites, and a lane
-      # that ran only the suites would record those five not-run. Its log holds
-      # every unit test the crate has, and the collector reads the ones the
-      # inventory names.
+      # The library target is one of them: five of the trust-transition cases
+      # are unit tests of the host's lifecycle rather than integration suites,
+      # and a lane that ran only the suites would record those five not-run. Its
+      # log holds every unit test the crate has, and the collector reads the
+      # ones the inventory names.
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host lib
