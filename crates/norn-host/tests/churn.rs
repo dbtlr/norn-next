@@ -269,6 +269,52 @@ fn a_case_flip_converges_on_a_build_from_zero() {
     churned.judge(workload.changing().name(), 0);
 }
 
+/// **A save, and then the case of the directory holding it renamed on top of
+/// the save**, close enough together that one settled account of the tree
+/// carries both.
+///
+/// This is the shape a directory rename makes that no other case here reaches.
+/// A rename of a directory reports the directory and nothing under it, so the
+/// document's own report — the save's — carries the spelling the parent
+/// rendered *before* the rename, while the directory's report carries the one
+/// it renders after. Two names for one identity in one account, and a host that
+/// derives at both lands the document at whichever it derived at last.
+///
+/// **The settle is the watcher's alone.** The opening phase is settled and the
+/// changing phase runs against a live attachment, with no attach heal between
+/// the acts and the judgement, so what converges the spelling is the increment
+/// the reports drive rather than a walk of the whole vault.
+///
+/// **The two assertions the equivalence bar cannot make.** A pair of
+/// derivations that both landed the document at the pre-rename spelling would
+/// agree with each other, so the bar below would hold over the very failure
+/// this case is about. The directory is therefore asked what it renders, and
+/// the store is asked to hold exactly one row for that identity at exactly that
+/// spelling.
+#[test]
+fn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero() {
+    let sandbox = sandbox("churn-case-rename-parent");
+    let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
+    let workload = churn::case_rename_parent(79, folding);
+    let opened = attach_and_churn(sandbox, workload.opening(), When::Settled);
+    let before_the_rename = opened
+        .census
+        .rows
+        .get(&identity(
+            &format!("{}/held.md", churn::RENAMED_PARENT_FROM),
+            folding,
+        ))
+        .expect("the document under the directory about to be renamed stands in the tree")
+        .clone();
+    let mut churned = opened.then(workload.changing(), When::Settled);
+    assert_eq!(
+        folding, churned.folding,
+        "two probes of one volume disagree"
+    );
+    churned.assert_the_renamed_parent_landed(&before_the_rename);
+    churned.judge(workload.changing().name(), 0);
+}
+
 /// **Family 3.** A burst against one path and a burst across many.
 ///
 /// The bar is what the store ends up holding rather than how many times it was
@@ -1304,6 +1350,63 @@ impl Churned {
             held[0].1, before_the_flip,
             "the row at `{}` holds the hash the opening phase settled on, so the changing phase's \
              acts reached neither the tree nor the store",
+            held[0].0
+        );
+    }
+
+    /// **The rename reached the tree, and the store holds the document at the
+    /// spelling the renamed directory renders.**
+    ///
+    /// The directory is asked first, because everything below is about which
+    /// spelling of a name the tree really holds and a phase whose rename never
+    /// landed would make the rest vacuous. Then the identity is asked to hold
+    /// one row and no fold alias beside it, at the rendered spelling, holding
+    /// bytes the opening phase never wrote — which is what says the save under
+    /// the pre-rename spelling reached the same row.
+    fn assert_the_renamed_parent_landed(&self, before_the_rename: &str) {
+        let renamed = Path::new(churn::RENAMED_PARENT_TO)
+            .file_name()
+            .expect("the renamed directory's name")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            dirent_spelling(self.vault.path(), churn::RENAMED_PARENT_TO),
+            renamed,
+            "the tree renders the renamed directory at another spelling, so the rename this case \
+             is about did not reach the tree"
+        );
+
+        let place = identity(churn::RENAMED_PARENT_DOCUMENT, self.folding);
+        let expected = self
+            .census
+            .rows
+            .get(&place)
+            .expect("the document under the renamed directory stands in the tree");
+        let mut store = self.vault.store();
+        let held: Vec<(String, String)> = derived_hashes(&mut store)
+            .into_iter()
+            .filter(|(path, _)| identity(path, self.folding) == place)
+            .collect();
+        assert_eq!(
+            held.len(),
+            1,
+            "the document under the renamed directory holds {} rows: {held:?}",
+            held.len()
+        );
+        assert_eq!(
+            held[0].0,
+            churn::RENAMED_PARENT_DOCUMENT,
+            "the store holds the document at a spelling no directory entry renders"
+        );
+        assert_eq!(
+            &held[0].1, expected,
+            "the row at `{}` does not hold the bytes last written under the renamed directory",
+            held[0].0
+        );
+        assert_ne!(
+            held[0].1, before_the_rename,
+            "the row at `{}` holds the hash the opening phase settled on, so the save this case \
+             renames on top of reached neither the tree nor the store",
             held[0].0
         );
     }
