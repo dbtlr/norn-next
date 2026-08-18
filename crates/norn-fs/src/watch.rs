@@ -87,19 +87,19 @@ enum Spelling {
 #[derive(Debug, Default)]
 pub struct Batch {
     vault_roots: BTreeSet<NormalizedPath>,
-    /// Those of `vault_roots` no report has yet named as a path that stands.
+    /// Those of `vault_roots` carried at a name a report said is gone.
     ///
-    /// Retirement is what a batch is still accumulating rather than a fact it
-    /// carries, which is why it is not part of a batch's identity and does not
-    /// survive a fold: [`Batch::merge`] takes the other batch's roots as live,
-    /// and a delivered batch is never read for this again.
+    /// [`Batch::close`] reads it, which is the whole of why it is kept: a root
+    /// nothing has spelled live answers for its range the way a removal does,
+    /// and that covers a root whose own report also said the path is gone. It
+    /// does not cover one that says a path *stands* — such a report is later
+    /// evidence that something under the retired name is there, and the name
+    /// the covering root carries is the one that died.
     ///
-    /// It is kept because coverage reads it. A root nothing has spelled live
-    /// answers for its range the way a removal does, and that covers a root
-    /// whose own report also said the path is gone. It does not cover one that
-    /// says a path *stands*: such a report is later evidence that something
-    /// under the retired name is there, and the name the covering root carries
-    /// is the one that died.
+    /// It crosses a fold, because the fold is where coverage is decided again.
+    /// It is not part of a batch's identity: two batches carrying the same
+    /// roots carry the same facts, whatever the reports behind the spellings
+    /// were.
     retired: BTreeSet<NormalizedPath>,
     schema_dirty: bool,
     rescans: BTreeSet<RescanScope>,
@@ -240,23 +240,11 @@ impl Batch {
     /// The identity is recorded exactly once either way: a re-spelling is not a
     /// second place to walk.
     ///
-    /// **A root covered by one already standing is not recorded, and the roots
-    /// an arriving one covers are dropped.** Coverage is
-    /// [`NormalizedPath::starts_with`] — the vault's own fold identity, whole
-    /// components only — so what a covering root subsumes is exactly what a
-    /// consumer reading it reaches. This is where a directory case rename stops
-    /// being two answers: the directory's report carries the rendered spelling,
-    /// a descendant's report carries the retired one, and a set holding both
-    /// would have a consumer derive the same identity twice at two names.
-    ///
-    /// **A root nothing has spelled live covers only what also died.** A
-    /// covering root answers for its whole range either way — one reading
-    /// enumerates the subtree, the other says there is nothing in it — but the
-    /// *spelling* it answers at is only worth deriving from where a report said
-    /// that path stands. So a retired root covers a retired one, and a report
-    /// that a path under it stands is later evidence about the live name: both
-    /// roots are kept, and the one carrying the rendered spelling is what the
-    /// consumer reaches the identity through.
+    /// **Coverage is no part of this.** Whether a root is one another speaks
+    /// for is [`Batch::close`]'s answer, taken over the whole batch once no
+    /// further report belongs to it. What this records for it is the standing
+    /// the answer turns on: whether the name the set ends up carrying for an
+    /// identity is one a report said is gone.
     fn note_vault_root(&mut self, root: NormalizedPath, spelling: Spelling) {
         match spelling {
             // A live name the set is not already carrying as a dead one is a
@@ -3450,8 +3438,7 @@ mod tests {
                 ),
             );
         }
-        let mut locked = state.lock().unwrap();
-        let batch = &locked.pending.as_mut().unwrap().batch;
+        let batch = settled(&state);
         let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
         assert_eq!(paths, [Path::new("FOLDER"), Path::new("folder/note.md")]);
     }
