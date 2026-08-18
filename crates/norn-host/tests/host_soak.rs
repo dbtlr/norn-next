@@ -72,7 +72,7 @@ use norn_fs::ContentHash;
 use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
-use norn_testkit::wait::{Budget, Observed, wait_until};
+use norn_testkit::wait::{Budget, FailureKind, Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 /// The variable that puts this binary in harness mode, carrying the root the
@@ -524,9 +524,13 @@ fn recovered(
         let lease = host
             .retry(name, AttachMode::Durable)
             .expect("re-requesting the attachment");
-        // A bound reached here is one attempt spent rather than the run failing:
-        // the panic below is what says every attempt is gone, so the wait's own
-        // failure is read as the answer to this attempt and discarded.
+        // The work bound elapsing here is one attempt spent rather than the run
+        // failing: the panic below is what says every attempt is gone, so that
+        // one failure is read as the answer to this attempt. A probe that
+        // overran is the other reading, and it is not an attempt spent: it says
+        // one `state` call cost more than a look at a published label may, and
+        // no number of fresh demands answers that. It ends the run where it is
+        // found, carrying the wait's own diagnosis.
         let came_back = wait_until(
             &format!("the entry under `{name}` to serve the vault again"),
             attach::state_budget(RECOVERY_LIMIT),
@@ -542,8 +546,10 @@ fn recovered(
                 Observed::pending(format!("the state is {last:?}"))
             },
         );
-        if came_back.is_ok() {
-            return lease;
+        match came_back {
+            Ok(()) => return lease,
+            Err(failure) if failure.kind == FailureKind::Elapsed => {}
+            Err(failure) => panic!("{failure}"),
         }
     }
     panic!(
