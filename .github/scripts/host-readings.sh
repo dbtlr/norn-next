@@ -40,8 +40,11 @@ esac
 # is comparable on years later, where a float is a rendering choice.
 busy=""
 if [ -r /proc/stat ]; then
+  # Settled first, so the window is the machine rather than the tail of the
+  # checkout that just finished on it.
+  sleep 2
   first=$(awk '$1 == "cpu" { $1 = ""; print; exit }' /proc/stat)
-  sleep 1
+  sleep 2
   second=$(awk '$1 == "cpu" { $1 = ""; print; exit }' /proc/stat)
   busy=$(awk -v a="$first" -v b="$second" '
     BEGIN {
@@ -59,8 +62,9 @@ if [ -r /proc/stat ]; then
     }')
 elif command -v top >/dev/null 2>&1; then
   # `CPU usage: 5.12% user, 8.20% sys, 86.67% idle`. The first line top prints
-  # is since boot and the last is the window, which is the one read.
-  busy=$(top -l 2 -n 0 -s 1 2>/dev/null | awk '
+  # is since boot, and the last is a window that opened two samples in — the
+  # settle and the window in one invocation.
+  busy=$(top -l 3 -n 0 -s 2 2>/dev/null | awk '
     /^CPU usage:/ { last = $0 }
     END {
       if (last == "") exit

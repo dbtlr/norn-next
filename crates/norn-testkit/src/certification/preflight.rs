@@ -92,15 +92,19 @@ pub const CLASSIFIER: &str = "cargo test --locked -p norn-testkit --lib certific
 /// **How much of the machine may already be spoken for and still leave the work
 /// bounds meaning what they were authored to mean.**
 ///
-/// Half. A machine half taken still has half its processors for the suites, and
-/// the bounds were authored with headroom of that order — the slowest case they
-/// cover runs in under two thirds of its bound on a quiet machine. Past half,
-/// what a fifteen-second work bound measures is increasingly the queue.
+/// Three quarters, and the number follows from where the reading is taken. A
+/// lane reads its host at the top of the job, which is a runner still finishing
+/// its own checkout: a `macos-15` runner samples in the fifties there while
+/// having nothing else on it at all. So what this separates is a machine that
+/// is *saturated* — nothing free, work queueing behind work — from one that is
+/// merely finishing something, and that is the starvation the ledger records:
+/// the collection workstation reads a hundred percent with other checkouts
+/// building beside it.
 ///
 /// A share rather than a ratio to the core count: the suites' work is what is
-/// left over, and half of two processors and half of twelve are both half a
-/// machine.
-pub const BUSY_BOUND: f64 = 50.0;
+/// left over, and a quarter of two processors and a quarter of twelve are both
+/// a quarter of a machine.
+pub const BUSY_BOUND: f64 = 75.0;
 
 /// **The fewest processors a host can run these suites on and have the bounds
 /// mean anything.**
@@ -193,8 +197,8 @@ impl Refusal {
                 format!("{what} could not be measured, so this host was not checked")
             }
             Refusal::Busy { busy_deci_percent } => format!(
-                "{}.{}% of the machine already busy, past {BUSY_BOUND:.0}%: the work bounds would \
-                 measure the queue",
+                "{}.{}% of the machine already busy, past {BUSY_BOUND:.0}%: work here queues \
+                 behind work, and the work bounds would measure the queue",
                 busy_deci_percent / 10,
                 busy_deci_percent % 10
             ),
@@ -423,10 +427,13 @@ pub fn detail(reading: &Reading, verdict: &Verdict) -> String {
 /// dependency in the graph the architecture gate holds.
 ///
 /// A window is what makes the reading a reading. An instant is one scheduler
-/// tick and says nothing; a second of accounting is the machine.
+/// tick and says nothing; seconds of accounting are the machine. The window
+/// opens after a settle, so what a lane reads at the top of a job is the
+/// machine rather than the tail of its own checkout.
 #[cfg(target_os = "linux")]
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: this host's own processor accounting.
 fn busy_share_deci_percent() -> Option<u64> {
+    std::thread::sleep(SETTLE);
     let first = processor_ticks()?;
     std::thread::sleep(SAMPLE_WINDOW);
     let second = processor_ticks()?;
@@ -452,11 +459,12 @@ fn processor_ticks() -> Option<(u64, u64)> {
     (fields.len() >= 5).then(|| (fields.iter().sum(), fields[3] + fields[4]))
 }
 
-/// The Darwin spelling, off `top`'s own two-sample accounting: the first line
-/// it prints is since boot and the last is the window, which is the one read.
+/// The Darwin spelling, off `top`'s own sampling: the first line it prints is
+/// since boot, and the last is a window that opened two samples in — the settle
+/// and the window in one invocation.
 #[cfg(target_os = "macos")]
 fn busy_share_deci_percent() -> Option<u64> {
-    let sampled = command("top", &["-l", "2", "-n", "0", "-s", "1"])?;
+    let sampled = command("top", &["-l", "3", "-n", "0", "-s", "2"])?;
     // `CPU usage: 5.12% user, 8.20% sys, 86.67% idle`
     let last = sampled
         .lines()
@@ -475,10 +483,15 @@ fn busy_share_deci_percent() -> Option<u64> {
     None
 }
 
-/// How long the processor share is sampled over. One second of accounting is
+/// How long the machine is left alone before the window opens, so the reading
+/// is of the machine rather than of the checkout that just finished on it.
+#[cfg(target_os = "linux")]
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long the processor share is sampled over. Seconds of accounting are
 /// enough to be a reading and short enough that a lane pays it without noticing.
 #[cfg(target_os = "linux")]
-const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A decimal reading in thousandths, so a reading is an integer a record can be
 /// compared on.
@@ -581,14 +594,15 @@ mod tests {
         );
     }
 
-    /// **A machine exactly half taken is still admitted**, and the first tenth
-    /// of a percent past it is not. The bound is where less than half the
-    /// machine is left for the work the bounds were authored over.
+    /// **A machine three quarters taken is still admitted**, and the first
+    /// tenth of a percent past it is not. The bound is where a machine stops
+    /// having a quarter of itself free for the work the bounds were authored
+    /// over.
     #[test]
-    fn the_share_bound_admits_a_half_taken_machine_and_refuses_the_first_step_past_it() {
+    fn the_share_bound_admits_a_three_quarters_taken_machine_and_refuses_the_first_step_past_it() {
         assert_eq!(
             Reading {
-                busy_deci_percent: Some(500),
+                busy_deci_percent: Some(750),
                 ..healthy()
             }
             .verdict(),
@@ -596,12 +610,12 @@ mod tests {
         );
         assert_eq!(
             Reading {
-                busy_deci_percent: Some(501),
+                busy_deci_percent: Some(751),
                 ..healthy()
             }
             .verdict(),
             Verdict::Refused(vec![Refusal::Busy {
-                busy_deci_percent: 501
+                busy_deci_percent: 751
             }])
         );
     }
@@ -626,20 +640,20 @@ mod tests {
         assert_eq!(verdict.spelling(), "refused");
     }
 
-    /// **A runner idling with a high load average is admitted.** The reading
-    /// this probe started with was the load average, and a `macos-15` runner
-    /// hands the lane three cores reading 11.6 while sitting idle: history from
-    /// its own boot, not work competing with the suites. The share is of the
-    /// machine the suites are about to get.
+    /// **A runner finishing its own checkout is admitted.** This is the shape
+    /// the reading is taken in, and it is the shape the bound is placed
+    /// against: a `macos-15` runner hands the lane three cores that sample in
+    /// the fifties at the top of the job with nothing else on the machine, and
+    /// a bound that refused it would refuse every scheduled run there is.
     #[test]
     fn a_freshly_handed_over_runner_is_admitted() {
         assert_eq!(
             Reading {
                 cores: Some(3),
-                busy_deci_percent: Some(80),
+                busy_deci_percent: Some(575),
                 fseventsd: Fseventsd::Running {
-                    cpu_deci_percent: 9,
-                    resident_kib: 8_160,
+                    cpu_deci_percent: 0,
+                    resident_kib: 10_176,
                 },
             }
             .verdict(),
