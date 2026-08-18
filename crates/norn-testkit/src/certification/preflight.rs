@@ -497,7 +497,7 @@ const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A decimal reading in thousandths, so a reading is an integer a record can be
 /// compared on.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn milli(reported: &str) -> Option<u64> {
     let (whole, fraction) = reported.split_once('.').unwrap_or((reported, "0"));
     let fraction: String = fraction.chars().take(3).collect();
