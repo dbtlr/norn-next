@@ -584,29 +584,22 @@ fn fold_onto(sensitivity: CaseSensitivity, key: &mut Vec<u8>, bytes: &[u8]) {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
-    use std::sync::atomic::AtomicU64;
+
+    use norn_testkit::scratch::Scratch;
 
     fn normalizer(sensitivity: CaseSensitivity) -> PathNormalizer {
         PathNormalizer::for_sensitivity(sensitivity)
     }
 
-    /// Distinguishes two scratch roots taken in the same process. A clock
-    /// reading does not: two cases running on two threads read the same
-    /// nanosecond often enough to collide, and the loser meets a directory that
-    /// already exists. A run that reuses a process id meets whatever the
-    /// previous one left behind, which is why the name is cleared first.
-    static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: creating the root under inspection.
-    fn scratch() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "norn-path-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir(&path).expect("scratch directory");
-        path
+    /// The tree a case that reaches the filesystem works in.
+    ///
+    /// It is held for the length of the case rather than removed at the end of
+    /// one: a case here revokes a directory's permissions and asserts before
+    /// putting them back, so a failing assertion would otherwise leave the
+    /// tree — and, on a host where the assertion fails, every rerun's tree —
+    /// on the machine.
+    fn scratch() -> Scratch {
+        Scratch::new("norn-path")
     }
 
     #[test]
@@ -751,7 +744,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
     fn detection_uses_an_existing_entry_and_matches_lookup_behavior() {
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("CaseProbe"), b"").expect("probe entry");
@@ -768,22 +762,21 @@ mod tests {
                 CaseSensitivity::Sensitive
             }
         );
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
     fn detection_uses_the_empty_root_entry_as_case_evidence() {
-        let root = scratch();
+        let tree = scratch();
+        let root = tree.root();
         let parent = root.parent().expect("scratch parent");
         let name = root.file_name().expect("scratch name");
         let expected =
             probe_case_behavior(parent, name, |alternate| listing_holds(parent, alternate))
                 .expect("case-bearing root entry");
 
-        let detected = PathNormalizer::detect(&root).expect("detectable empty root");
+        let detected = PathNormalizer::detect(root).expect("detectable empty root");
         assert_eq!(detected.case_sensitivity(), expected);
-        fs::remove_dir_all(root).expect("remove scratch");
     }
 
     /// What detection read while `work` ran on this thread.
@@ -849,14 +842,14 @@ mod tests {
     fn detection_reads_a_hardlink_ambiguous_root_once() {
         const ALIASES: u64 = 32;
         const ENTRIES: u64 = 2 * ALIASES;
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         for index in 0..ALIASES {
             let spelling = root.join(format!("Probe{index}"));
             fs::write(&spelling, b"").expect("probe entry");
             if !linked_alias(&spelling, &root.join(format!("probe{index}"))) {
-                fs::remove_dir_all(parent).expect("remove scratch");
                 return;
             }
         }
@@ -871,7 +864,6 @@ mod tests {
         assert_eq!(reads.scans, 1, "{reads:?}");
         assert_eq!(reads.dirents, ENTRIES, "{reads:?}");
         assert!(reads.name_tests <= 2 * ENTRIES, "{reads:?}");
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     /// **Detection reads no further than the entry that settles it.** Which
@@ -885,7 +877,8 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
     fn detection_reads_no_further_than_the_entry_that_settles_it() {
         const ENTRIES: u64 = 6;
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         for index in 0..ENTRIES {
@@ -915,18 +908,17 @@ mod tests {
                 name_tests: if alternate_resolves { ENTRIES } else { 0 },
             }
         );
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging hardlink aliases.
     fn hardlinked_alternate_spellings_do_not_prove_insensitivity() {
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("CaseProbe"), b"").expect("probe entry");
         if !linked_alias(&root.join("CaseProbe"), &root.join("caseProbe")) {
-            fs::remove_dir_all(parent).expect("remove scratch");
             return;
         }
 
@@ -934,7 +926,6 @@ mod tests {
             PathNormalizer::detect(&root),
             Err(NormalizerError::Indeterminate { .. })
         ));
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     /// A root the process cannot enumerate is not an indeterminate root: the
@@ -943,7 +934,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: naming a root that is not there.
     fn detection_refuses_a_root_it_cannot_enumerate() {
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         let refusal = PathNormalizer::detect(&root).expect_err("an absent root");
         assert!(
@@ -951,7 +943,6 @@ mod tests {
                 if named == &root && source.kind() == io::ErrorKind::NotFound),
             "{refusal:?}"
         );
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     /// **A directory that cannot be listed answers no membership question, and
@@ -974,7 +965,8 @@ mod tests {
     fn an_unlistable_directory_answers_no_membership_question() {
         use std::os::unix::fs::PermissionsExt;
 
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let holder = parent.join("holder");
         fs::create_dir(&holder).expect("holder directory");
         let root = holder.join("Case");
@@ -990,7 +982,6 @@ mod tests {
         let detected = PathNormalizer::detect(&root).map(|paths| paths.case_sensitivity());
 
         fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).expect("restore read");
-        fs::remove_dir_all(parent).expect("remove scratch");
 
         if listable {
             eprintln!("skipped: this process lists a directory it holds no read permission on");
@@ -1013,7 +1004,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a root without case evidence.
     fn detection_refuses_when_the_root_has_no_case_evidence() {
-        let parent = scratch();
+        let tree = scratch();
+        let parent = tree.root();
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("123"), b"").expect("uncased entry");
@@ -1021,15 +1013,13 @@ mod tests {
             PathNormalizer::detect(&root),
             Err(NormalizerError::Indeterminate { .. })
         ));
-        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: cleaning up the probe root.
     fn mount_probe_guard_compares_device_identity() {
-        let root = scratch();
-        assert!(same_device(&root, &root));
-        assert!(!same_device(&root.join("missing"), &root));
-        fs::remove_dir(root).expect("remove scratch directory");
+        let tree = scratch();
+        let root = tree.root();
+        assert!(same_device(root, root));
+        assert!(!same_device(&root.join("missing"), root));
     }
 }

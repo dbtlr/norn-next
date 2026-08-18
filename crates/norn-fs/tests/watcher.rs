@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -15,9 +14,8 @@ use norn_fs::{
     Batch, CaseSensitivity, PathNormalizer, RescanScope, Subscription, WatchError, watch,
 };
 use norn_testkit::isolation::{self, Lease};
+use norn_testkit::scratch;
 use norn_testkit::wait::{Budget, Observed, wait_until};
-
-static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The wait a case gives coverage to cross its backend synchronization
 /// boundary.
@@ -47,37 +45,30 @@ fn lease_budget() -> Budget {
     isolation::acquisition_budget(budget())
 }
 
+/// A vault root and a schema source outside it, for the length of one case.
+///
+/// The naming and the removal are [`scratch::Scratch`]'s; what this adds is
+/// the two paths a watched entry is established over.
 struct Scratch {
-    root: PathBuf,
+    tree: scratch::Scratch,
 }
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "norn-fs-watcher-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("vault")).expect("a vault root");
-        std::fs::create_dir_all(root.join("schema")).expect("a schema directory");
-        std::fs::write(root.join("schema/schema.toml"), b"version = 1\n")
+        let tree = scratch::Scratch::new(&format!("norn-fs-watcher-{label}"));
+        std::fs::create_dir_all(tree.join("vault")).expect("a vault root");
+        std::fs::create_dir_all(tree.join("schema")).expect("a schema directory");
+        std::fs::write(tree.join("schema/schema.toml"), b"version = 1\n")
             .expect("an external schema");
-        Self { root }
+        Self { tree }
     }
 
     fn vault(&self) -> PathBuf {
-        self.root.join("vault")
+        self.tree.join("vault")
     }
 
     fn schema(&self) -> PathBuf {
-        self.root.join("schema/schema.toml")
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
+        self.tree.join("schema/schema.toml")
     }
 }
 
@@ -363,7 +354,7 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
     };
     let mut collector = Collector::start(&scratch.vault(), &watched_schema);
 
-    let replacement = scratch.root.join("schema/.schema.toml.new");
+    let replacement = scratch.tree.join("schema/.schema.toml.new");
     std::fs::write(&replacement, b"version = 2\n").expect("a replacement schema");
     std::fs::rename(&replacement, scratch.schema()).expect("the schema replacement");
     collector.wait_for("the external schema replacement to be reported", |seen| {
@@ -508,7 +499,7 @@ impl Volume {
             device: device.clone(),
             mount: PathBuf::new(),
         };
-        let name = format!("norn-{label}-{}", std::process::id());
+        let name = scratch::unique_name(&format!("norn-{label}"));
         command("diskutil", &["eraseVolume", "HFS+", &name, &device])?;
         volume.mount = command("diskutil", &["info", &device])?
             .lines()

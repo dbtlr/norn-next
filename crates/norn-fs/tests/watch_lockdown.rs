@@ -31,7 +31,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)] // Acceptance fixture: arranging and judging a tree.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use norn_fs::{RescanScope, SubscriptionState, WatchError};
@@ -304,9 +303,6 @@ fn an_arm_that_cannot_record_itself_ends_the_process() {
 // The tree
 // ---------------------------------------------------------------------------
 
-/// Distinguishes two trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
 /// A vault, its schema source, and the record file the arm and the child share.
 struct Tree {
     sandbox: Sandbox,
@@ -317,11 +313,7 @@ impl Tree {
     fn new(label: &str) -> Tree {
         let sandbox = Sandbox::new(
             Path::new(env!("CARGO_TARGET_TMPDIR")),
-            &format!(
-                "watch-lockdown-{label}-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ),
+            &format!("watch-lockdown-{label}"),
         )
         .expect("a sandbox");
         let root = sandbox.work_dir();

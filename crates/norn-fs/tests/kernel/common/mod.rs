@@ -7,12 +7,9 @@
 //! and the one a case should be exercising.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_fs::{ContentHash, MaintainershipKey, Placement, ShadowHome};
-
-/// Distinguishes two scratch trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
+use norn_testkit::scratch;
 
 /// The maintainership one scratch tree's shadow home is keyed by.
 pub fn key() -> MaintainershipKey {
@@ -20,24 +17,22 @@ pub fn key() -> MaintainershipKey {
 }
 
 /// A vault and its shadow home, for the length of one case.
+///
+/// The naming and the removal are [`scratch::Scratch`]'s; what this adds is
+/// the vault root and the resolved shadow home a case works over.
 pub struct Scratch {
-    root: PathBuf,
+    tree: scratch::Scratch,
     shadows: ShadowHome,
 }
 
 impl Scratch {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this case works over.
     pub fn new(label: &str) -> Scratch {
-        let root = std::env::temp_dir().join(format!(
-            "norn-fs-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("vault")).expect("a vault root");
+        let tree = scratch::Scratch::new(&format!("norn-fs-{label}"));
+        std::fs::create_dir_all(tree.join("vault")).expect("a vault root");
         let shadows = ShadowHome::resolve(
-            &root.join("vault"),
-            &root.join("data/vaults/notes/tmp"),
+            &tree.join("vault"),
+            &tree.join("data/vaults/notes/tmp"),
             &key(),
         )
         .expect("a shadow home");
@@ -47,7 +42,7 @@ impl Scratch {
             "the scratch tree straddles two filesystems, so no case here is \
              exercising the placement the contract wants"
         );
-        Scratch { root, shadows }
+        Scratch { tree, shadows }
     }
 
     pub fn shadows(&self) -> &ShadowHome {
@@ -56,7 +51,7 @@ impl Scratch {
 
     /// The vault root.
     pub fn vault(&self) -> PathBuf {
-        self.root.join("vault")
+        self.tree.join("vault")
     }
 
     /// A path inside the vault. Nothing is created.
@@ -99,31 +94,6 @@ impl Scratch {
             .collect();
         names.sort();
         names
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this case made.
-    fn drop(&mut self) {
-        // A case that made a directory unwritable to reach a refusal would
-        // otherwise leave the tree behind it.
-        restore_modes(&self.root);
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-/// Put every directory under `root` back to something removable.
-#[allow(clippy::disallowed_methods)] // Harness scaffolding: undoing what a case arranged.
-fn restore_modes(root: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755));
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            restore_modes(&entry.path());
-        }
     }
 }
 

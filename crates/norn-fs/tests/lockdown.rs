@@ -32,7 +32,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)] // Acceptance fixture: arranging and judging a tree.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use norn_fs::{
@@ -391,9 +390,6 @@ enum Staged {
     Holding(&'static [u8]),
 }
 
-/// Distinguishes two trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
 /// A vault, its shadow home, and the record file its arms share.
 struct Tree {
     sandbox: Sandbox,
@@ -404,11 +400,7 @@ impl Tree {
     fn new(label: &str) -> Tree {
         let sandbox = Sandbox::new(
             Path::new(env!("CARGO_TARGET_TMPDIR")),
-            &format!(
-                "lockdown-{label}-{}-{}",
-                std::process::id(),
-                SERIAL.fetch_add(1, Ordering::Relaxed)
-            ),
+            &format!("lockdown-{label}"),
         )
         .expect("a sandbox");
         let root = sandbox.work_dir();
