@@ -137,9 +137,9 @@ pub const SOAK_FD_GROWTH_ALLOWANCE: usize = 4;
 /// is 1.07, so the bar keeps 0.15 over 1.00 — a little over twice the 0.07 that
 /// reading stands above it. Against the hour-long load that allowance is 150
 /// times the 0.001 four nightlies actually show, which is the price of one bar
-/// over both durations — and it is still
-/// tight enough to fail a load paying for each reconciliation, because a leak
-/// at that scale compounds over an hour rather than levelling off.
+/// over both durations — and it is still tight enough to fail a load paying for
+/// each reconciliation, because a leak at that scale compounds over an hour
+/// rather than levelling off.
 pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 
 /// Peak resident set the host may reach under the long mixed load at the ≥5k

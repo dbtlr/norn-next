@@ -247,6 +247,7 @@ fn is_claimed(package: &str, target: &Target) -> bool {
 /// is assembled from inside the same binary as the test that assembles it, and
 /// nothing orders two tests in one binary. So naming both is refused here
 /// rather than left to produce a record that depends on which test ran first.
+///
 /// **A variable set to nothing names nothing.** A lane sets the log directory
 /// for the job and clears it on the step that assembles the record, and an
 /// empty value there has to read as "this step names no logs" rather than as a
