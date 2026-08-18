@@ -45,10 +45,13 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 /// one. This is for the callers that only need the name — a mount point, a
 /// volume label, a path handed to something else to create.
 ///
-/// **`label` is a name, not a path, and one that is not is a panic.** What a
-/// [`Scratch`] does with the name is remove everything under it, so a label
-/// carrying a separator or a parent component would have a caller name a tree
-/// outside the base it asked for and delete that instead.
+/// **`label` is a name, not a path, and one that is not is a panic.** What
+/// this returns is one path component and nothing more: a caller joins it onto
+/// a base and gets a child of that base, or hands it over as a single name a
+/// mount point or a volume can be called. A label carrying a separator, a
+/// root, or a parent component returns a string neither holds — one that
+/// resolves somewhere else when joined, and that is malformed where a single
+/// name is what was asked for.
 pub fn unique_name(label: &str) -> String {
     assert!(
         is_one_component(label),
