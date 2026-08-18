@@ -47,9 +47,12 @@ on:
   schedule:
     # Nightly, 04:00 UTC.
     #
-    # Schedules and manual dispatch take effect only from the default branch:
-    # nothing in this file is exercisable on the pull request that adds it, and
-    # verifying that the lane runs at all is post-merge work.
+    # A schedule takes effect only from the default branch, so nothing about the
+    # cron above is exercisable on a pull request and whether the nightly fires
+    # is post-merge evidence. Dispatch is not the same: `workflow_dispatch` is
+    # already on the default branch, so a manual run may name any ref and runs
+    # that ref's copy of this file — which is how a change to a job here is
+    # tried before it merges.
     #
     # GitHub also disables schedules on repositories with no activity for 60
     # days, so this lane running is a thing to check rather than assume.
@@ -99,8 +102,18 @@ jobs:
   # are read off that child's output only once it has ended. A job killed while
   # the child is still running loses every sample of the run, so the timeout
   # leaves the worst-case child room to reach its own deadline and still
-  # report: 120 minutes covers checkout, a cold debug build, the three fixtures
-  # steps, and that 70 minutes with headroom over the lot.
+  # report.
+  #
+  # **120 minutes covers everything the job holds, not the load alone**:
+  # checkout, a cold debug build, the four measurement steps, that worst-case 70
+  # minutes of load, and then the eight certification targets — two of which
+  # rebuild `norn-host` and its dependents behind `induced-failure` and back —
+  # plus the two runs of the `norn` certification binary that collect the
+  # outcomes and write the record. The measured shape is a wide margin: the four
+  # nightlies whose readings ground the bars ran 61 minutes end to end, and the
+  # certification steps of the macOS lane below run in under three including
+  # their own cold build.
+  #
   # It remains a runaway guard and not a bar on speed: nothing in this job fails
   # because it took longer, and the load itself is a declared duration rather
   # than a measured one.
@@ -137,6 +150,24 @@ jobs:
       # step, and the run counts toward no lockdown.
       - name: Frontmatter parse cost against key count
         run: .github/scripts/lane-suite.sh norn-text frontmatter_cost --nocapture --test-threads=1
+      # The hour is this step's alone: the duration is declared here rather than
+      # in the suite, so a local run of the same case is a short one and the
+      # nightly one is the load lockdown counts.
+      #
+      # **The load runs before the certification steps, not after them.** Two
+      # reasons, and both are about what the readings are of. The bars it is
+      # judged against were authored on runs that started the load within a
+      # minute of checkout, so a load placed after a quarter-hour of host suites
+      # would be measured on a runner in a different state from the one the
+      # numbers came off. And this step is the lane's measurement product: the
+      # certification steps below each carry `!cancelled()` and therefore run
+      # whatever this one did, where a load placed after them would be skipped
+      # outright by one flaking case and cost the night its slope, its
+      # descriptor delta and its peak.
+      - name: Host mixed load
+        run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
+        env:
+          NORN_SOAK_DURATION_SECS: "3600"
       # The certification cases, one step per cargo target.
       #
       # Every step runs whatever happened before it. A case that failed is
@@ -186,13 +217,6 @@ jobs:
       - name: Case outcomes from the certification logs
         if: ${{ !cancelled() }}
         run: cargo test --locked -p norn --test certification -- --nocapture
-      # The hour is this step's alone: the duration is declared here rather than
-      # in the suite, so a local run of the same case is a short one and the
-      # nightly one is the load lockdown counts.
-      - name: Host mixed load
-        run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
-        env:
-          NORN_SOAK_DURATION_SECS: "3600"
       # What a run's result is worth depends on which suite produced it, so the
       # digest over the lanes, the toolchain, the lockfile, the inventory, the
       # qualification rules, the comparator, the fault seams, the certification
@@ -221,6 +245,14 @@ jobs:
       # collected above, and a step that named the logs and the record sink at
       # once would collect and assemble in one binary, in whichever order the
       # harness happened to run them.
+      #
+      # **The sink is workspace-absolute because the writer's directory is not
+      # the workspace.** `ledger::emit` writes the path it is given from the
+      # process's own working directory, and cargo runs an integration test of
+      # `norn` from `crates/norn` — while the upload below resolves a relative
+      # path against the workspace. A relative sink therefore names two
+      # different files, and the upload finds neither. The pairing is held to
+      # by `norn --test certification`.
       - name: Suite manifest digest and qualification record
         if: always()
         # The outcomes file is ensured before the record reads it: a collection
@@ -233,7 +265,7 @@ jobs:
           cargo test --locked -p norn --test certification -- --nocapture
         env:
           NORN_CERTIFICATION_LOGS: ''
-          NORN_QUALIFICATION_LEDGER: qualification-record.json
+          NORN_QUALIFICATION_LEDGER: ${{ github.workspace }}/qualification-record.json
           NORN_QUALIFICATION_OUTCOMES: ${{ github.workspace }}/certification-logs/outcomes.txt
           NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
           NORN_QUALIFICATION_RUNNER: ubuntu-latest
@@ -244,6 +276,12 @@ jobs:
       # is one nothing can say that about. It is named for the lane, because a
       # run of this workflow uploads one record per lane and a campaign reads
       # both.
+      #
+      # **A missing file fails the step rather than warning.** The campaign reads
+      # a scheduled run with no record as a timeout kill, so an upload that
+      # quietly matched nothing would manufacture that signal out of a green run.
+      # The only run that legitimately leaves no record is the one this step
+      # never reaches.
       #
       # **This lane's records carry real case outcomes and are still
       # non-qualifying**: the environmental preflight the record has a slot for
@@ -257,8 +295,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qualification-record-ubuntu-latest
-          path: qualification-record.json
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/qualification-record.json
+          if-no-files-found: error
 
   # The FSEvents leg of backend-deciding coverage.
   #
@@ -275,9 +313,9 @@ jobs:
   # through FSEvents: `crates/norn-fs/src/watch.rs` builds notify's
   # `FsEventWatcher` on macOS and refuses a polling substitute outright, and the
   # cases below attach production hosts, so the coverage the label names is
-  # coverage the run installed. The per-PR certification suite holds each lane's
-  # label against its runner, so a job moved to another image fails there rather
-  # than recording a backend it never ran.
+  # coverage the run installed. The per-PR certification suite reads this job's
+  # own `runs-on:` and holds the two labels to it, so a job moved to another
+  # image fails there rather than recording a backend it never ran.
   #
   # This job runs the certification cases and no measurement: the bars in
   # `tests/baselines/` are authored against `ubuntu-latest`, and a second
@@ -285,9 +323,10 @@ jobs:
   # What it shares with the lane above is the suite, which is what a backend
   # answer has to be the same suite's for two records to cover one obligation.
   #
-  # The timeout is a runaway guard set so a cold macOS build has room: the cases
-  # themselves are minutes, and the build ahead of them is what the number
-  # covers.
+  # The timeout is a runaway guard set so a cold macOS build has room. What the
+  # job costs is measured rather than guessed: a dispatch of this file ran every
+  # step here green in 2m55s from a cold cache, so 60 minutes is the runaway
+  # bound and nothing near the working time.
   certification-macos:
     name: certification (macOS FSEvents)
     runs-on: macos-15
@@ -301,7 +340,15 @@ jobs:
       # Pinned image and asserted architecture, the same way ci.yml's platform
       # job does it: a runner-label migration that changed the machine under
       # this lane would otherwise record a backend answer from somewhere else.
+      #
+      # **This one is a stop rather than a report.** Every step below carries
+      # `!cancelled()`, which is true after a failure — so a case that flakes
+      # does not silence the cases after it. That is the wrong reading of a
+      # machine that is not the one the record names, so the certification steps
+      # name this step's outcome as well and a failed assertion leaves them all
+      # skipped. The record step still runs, and says the run failed.
       - name: Assert architecture
+        id: architecture
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
       # The library target is one of them: five of the trust-transition cases
@@ -310,31 +357,31 @@ jobs:
       # log holds every unit test the crate has, and the collector reads the
       # ones the inventory names.
       - name: Host lifecycle certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host lib
       - name: Churn certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host churn
       - name: Coverage certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host coverage
       - name: Equivalence certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host equivalence
       - name: Host induced-failure certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host lockdown induced-failure
       - name: Crash-recovery certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host kill_recovery induced-failure
       - name: Filesystem certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-fs lockdown
       - name: Store environment certification cases
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-store environment
       - name: Case outcomes from the certification logs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: cargo test --locked -p norn --test certification -- --nocapture
       # The volume's answer about case is probed by the record rather than
       # stated here, and on this runner it is the folding one: APFS folds case
@@ -352,7 +399,7 @@ jobs:
           cargo test --locked -p norn --test certification -- --nocapture
         env:
           NORN_CERTIFICATION_LOGS: ''
-          NORN_QUALIFICATION_LEDGER: qualification-record.json
+          NORN_QUALIFICATION_LEDGER: ${{ github.workspace }}/qualification-record.json
           NORN_QUALIFICATION_OUTCOMES: ${{ github.workspace }}/certification-logs/outcomes.txt
           NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
           NORN_QUALIFICATION_RUNNER: macos-15
@@ -362,5 +409,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: qualification-record-macos-15
-          path: qualification-record.json
-          if-no-files-found: warn
+          path: ${{ github.workspace }}/qualification-record.json
+          if-no-files-found: error

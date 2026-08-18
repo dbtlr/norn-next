@@ -13,3 +13,6 @@
 
 # The scheduled lanes write their certification suite logs here.
 certification-logs/
+
+# The qualification record a lane emits, where a local run names a sink.
+qualification-record.json

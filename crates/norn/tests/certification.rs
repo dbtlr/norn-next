@@ -371,30 +371,46 @@ fn a_lanes_suite_logs_become_an_outcome_for_every_required_case() {
         REQUIRED_CASES.len(),
         "the outcomes carry a line the inventory does not require: {lines:?}"
     );
+}
 
-    // A run that names the logs writes them where the ledger reads them; a run
-    // outside a lane names none and this does nothing.
+/// **The lane's collection step.** Where a run named a directory of logs, the
+/// outcomes they hold are written beside them.
+///
+/// Its own entry point rather than a tail on the case above: that one asserts
+/// over logs it synthesizes, and a fixture regression there would panic before
+/// reaching this — leaving a real lane's outcomes file empty, every case
+/// `not-run` and the record classified a suite change while every certification
+/// suite in the same job ran green. This does one thing, so the only way it
+/// collects nothing is that nothing named logs.
+#[test]
+fn the_lanes_case_outcomes_are_collected_where_a_lane_names_logs() {
     match lane::collect().expect("collecting the lane's outcomes") {
         Some(path) => eprintln!("wrote the lane's case outcomes to {}", path.display()),
         None => eprintln!("no {} was named, so this run collected none", lane::LOGS),
     }
 }
 
-/// **Every lane that writes a record ran the cases, and labels what ran.**
+/// **Every lane that writes a record ran the cases, labels what ran, and leaves
+/// the record where the run can be read off it.**
 ///
-/// Two claims about the lane files, and each is a way a record can be sound and
-/// still wrong about the run behind it. A lane that skipped a required target
-/// leaves those cases with no line, which reaches the record as a suite change
-/// rather than as the lane gap it is. And a lane's watcher-backend label is a
-/// field the workflow sets rather than something the process observes, so a
-/// label paired with a runner that installs a different backend would certify
-/// the backend-deciding case on a machine that never ran it.
+/// Three claims about the lane files, and each is a way a record can be sound
+/// and still wrong about the run behind it. A lane that skipped a required
+/// target leaves those cases with no line, which reaches the record as a suite
+/// change rather than as the lane gap it is. A lane's watcher-backend label is
+/// a field the workflow sets rather than something the process observes, so a
+/// label paired with a machine that installs a different backend would certify
+/// the backend-deciding case on a runner that never ran it. And the record's
+/// own plumbing is four independent strings — the log directory, the outcomes
+/// file, the sink and the upload path — that name each other by convention and
+/// nothing else, where every mismatch is silent: an outcomes file the record
+/// does not find is 42 cases `not-run`, and a sink the upload does not find is
+/// a run the campaign reads as killed for time.
 ///
 /// The subject is every job that names a record sink, in any workflow: a job
 /// that writes a qualification record is a lane whatever it is called. Read off
-/// the text rather than off parsed YAML, and the two labels are held together
-/// by adjacency because they are set one line apart in the block that sets
-/// them.
+/// the text rather than off parsed YAML, and the runner and backend labels are
+/// held together by adjacency because they are set one line apart in the block
+/// that sets them.
 #[test]
 fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
     let workflows = workspace_root().join(".github/workflows");
@@ -430,50 +446,68 @@ fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
             );
         }
         assert_backend_label_matches_the_runner(lane, body);
+        assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane, body);
     }
 }
 
-/// Each job of one workflow, as its name and the text under it.
+/// Every non-comment line of a job body that sets `key`, as the value it sets.
 ///
-/// A job's own key is the only thing at two spaces of indentation under `jobs:`;
-/// everything a job holds is deeper, and a comment at that depth belongs to the
-/// job below it rather than naming one.
-fn jobs(workflow: &str) -> Vec<(String, String)> {
-    let mut jobs: Vec<(String, String)> = Vec::new();
-    let mut reached_the_jobs = false;
-    for line in workflow.lines() {
-        if line.trim_end() == "jobs:" {
-            reached_the_jobs = true;
-            continue;
-        }
-        if !reached_the_jobs {
-            continue;
-        }
-        let names_a_job = line.starts_with("  ")
-            && !line.starts_with("   ")
-            && !line.trim_start().starts_with('#')
-            && line.trim_end().ends_with(':');
-        if names_a_job {
-            jobs.push((line.trim().trim_end_matches(':').to_string(), String::new()));
-        } else if let Some((_, body)) = jobs.last_mut() {
-            body.push_str(line);
-            body.push('\n');
-        }
-    }
-    jobs
+/// A comment is not a setting: a job's own preamble is attributed to the job
+/// above it — nothing at a job key's indentation is a job but the key — so a
+/// paragraph describing one lane is read while another lane's body is.
+fn settings<'a>(body: &'a str, key: &str) -> Vec<&'a str> {
+    let prefix = format!("{key}: ");
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .map(str::trim)
+        .collect()
 }
 
-/// The backend a lane labels its records with is the one its runner installs.
+/// The one value a job sets `key` to, refusing a job that sets it twice over or
+/// not at all.
+fn one_setting<'a>(lane: &str, body: &'a str, key: &str) -> &'a str {
+    let set = settings(body, key);
+    assert_eq!(
+        set.len(),
+        1,
+        "`{lane}` sets `{key}` {} times, and this reads the one value it names: {set:?}",
+        set.len()
+    );
+    set[0]
+}
+
+/// The backend a lane labels its records with is the one its runner installs,
+/// and the runner it names is the machine the job runs on.
 ///
-/// The runner and the backend are set one line apart, which is what ties a
-/// label to a machine: a label alone says nothing about where it was produced.
-/// Which backend a platform installs is decided in `crates/norn-fs/src/watch.rs`
-/// — FSEvents on macOS, the recommended native watcher on Linux, which is
-/// inotify, and a polling substitute refused outright.
+/// **The chain is three links and all three are checked.** `runs-on:` is the
+/// machine; [`ledger::RUNNER`] is what the record calls it; and
+/// [`ledger::WATCHER_BACKEND`] is what the record says that machine watches
+/// through. A label alone says nothing about where it was produced, and two
+/// labels agreeing with each other say nothing either — what makes them
+/// truthful is that they are derived from the job's own image. Which backend a
+/// platform installs is decided in `crates/norn-fs/src/watch.rs` — FSEvents on
+/// macOS, the recommended native watcher on Linux, which is inotify, and a
+/// polling substitute refused outright.
 fn assert_backend_label_matches_the_runner(lane: &str, body: &str) {
+    let machine = one_setting(lane, body, "runs-on");
+    let installed = match machine {
+        image if image.starts_with("ubuntu-") => "inotify",
+        image if image.starts_with("macos-") => "fsevents",
+        other => panic!(
+            "`{lane}` runs on `{other}`, which is a runner this workspace states no watcher \
+             backend for; what a platform installs is decided in crates/norn-fs/src/watch.rs"
+        ),
+    };
+
     let runner = format!("{}: ", ledger::RUNNER);
     let backend = format!("{}: ", ledger::WATCHER_BACKEND);
-    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
     let labelled: Vec<usize> = lines
         .iter()
         .enumerate()
@@ -500,20 +534,107 @@ fn assert_backend_label_matches_the_runner(lane: &str, body: &str) {
                 )
             })
             .trim();
-        let installed = match named_runner {
-            image if image.starts_with("ubuntu-") => "inotify",
-            image if image.starts_with("macos-") => "fsevents",
-            other => panic!(
-                "`{other}` is a runner this workspace states no watcher backend for; what a \
-                 platform installs is decided in crates/norn-fs/src/watch.rs"
-            ),
-        };
+        assert_eq!(
+            named_runner, machine,
+            "`{lane}` runs on `{machine}` and labels its records `{named_runner}`"
+        );
         assert_eq!(
             declared, installed,
-            "`{lane}` labels its records `{declared}` and hosts on `{named_runner}` install \
+            "`{lane}` labels its records `{declared}` and hosts on `{machine}` install \
              `{installed}`"
         );
     }
+}
+
+/// A lane collects its outcomes where the collector writes them, and uploads
+/// the record where the emitter writes it.
+///
+/// **Both sinks are written by a process whose directory is not the
+/// workspace's.** Cargo runs an integration test of `norn` from `crates/norn`,
+/// so a relative path in a lane names one file to the writer and another to
+/// `actions/upload-artifact`, which resolves against the workspace. The record
+/// is required to be workspace-absolute for that reason, and the upload is
+/// required to name the same path.
+///
+/// The outcomes file has the same shape of hazard without the path confusion:
+/// [`lane::collect`] writes [`lane::OUTCOMES_FILE`] inside the directory
+/// [`lane::LOGS`] names, and the record step points [`ledger::OUTCOMES`] at it
+/// by spelling the pairing out a second time. A record step that reads
+/// elsewhere finds no outcomes and records every case `not-run`.
+fn assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane: &str, body: &str) {
+    assert_eq!(
+        body.matches(lane::CERTIFICATION_BINARY).count(),
+        2,
+        "`{lane}` runs `{}` other than twice. A lane runs it once to collect the outcomes off \
+         its logs and once to assemble the record from them, and a lane missing the collection \
+         records every case not-run.",
+        lane::CERTIFICATION_BINARY
+    );
+
+    let logs: Vec<&str> = settings(body, lane::LOGS)
+        .into_iter()
+        .filter(|value| !value.is_empty() && *value != "''")
+        .collect();
+    assert_eq!(
+        logs.len(),
+        1,
+        "`{lane}` names {} log directories, and the outcomes are collected into one: {logs:?}",
+        logs.len()
+    );
+    let expected = format!("{}/{}", logs[0], lane::OUTCOMES_FILE);
+    for named in settings(body, ledger::OUTCOMES) {
+        assert_eq!(
+            named, expected,
+            "`{lane}` reads its outcomes from `{named}` and the collector writes them to \
+             `{expected}`"
+        );
+    }
+
+    let workspace = "${{ github.workspace }}/";
+    let sink = one_setting(lane, body, ledger::SINK);
+    assert!(
+        sink.starts_with(workspace),
+        "`{lane}` writes its record to `{sink}`, which the emitter resolves against \
+         `crates/norn` and the upload resolves against the workspace, so the two name different \
+         files and the artifact is never found"
+    );
+    assert!(
+        settings(body, "path").contains(&sink),
+        "`{lane}` writes its record to `{sink}` and uploads none of the paths it names: {:?}",
+        settings(body, "path")
+    );
+}
+
+/// Each job of one workflow, as its name and the text under it.
+///
+/// A job's own key is the only thing at two spaces of indentation under `jobs:`
+/// that names a job: everything a job holds is deeper, and a comment at that
+/// depth is prose about the job below it. Prose is not a key, so it falls into
+/// the preceding job's text — which is why a reader of these bodies drops
+/// comment lines before reading a setting off one.
+fn jobs(workflow: &str) -> Vec<(String, String)> {
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    let mut reached_the_jobs = false;
+    for line in workflow.lines() {
+        if line.trim_end() == "jobs:" {
+            reached_the_jobs = true;
+            continue;
+        }
+        if !reached_the_jobs {
+            continue;
+        }
+        let names_a_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.trim_start().starts_with('#')
+            && line.trim_end().ends_with(':');
+        if names_a_job {
+            jobs.push((line.trim().trim_end_matches(':').to_string(), String::new()));
+        } else if let Some((_, body)) = jobs.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    jobs
 }
 
 /// The inventory says how many obligations each suite carries and which lanes a

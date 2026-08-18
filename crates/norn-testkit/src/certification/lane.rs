@@ -63,6 +63,17 @@ pub const LOGS: &str = "NORN_CERTIFICATION_LOGS";
 /// same directory reads the logs and not its own previous answer.
 pub const OUTCOMES_FILE: &str = "outcomes.txt";
 
+/// The command a lane runs the collector and the emitter with.
+///
+/// **One binary holds both, and a lane invokes it twice.** The test that writes
+/// the outcomes off the logs and the test that assembles a record from them are
+/// two tests of one integration target, and nothing orders two tests in one
+/// binary — so which of the two a step performs is decided by the variables the
+/// step sets, and a lane that ran the binary once would either collect nothing
+/// or record nothing. Named here so the lane files and the gate that reads them
+/// agree on one string.
+pub const CERTIFICATION_BINARY: &str = "cargo test --locked -p norn --test certification";
+
 /// The extension the script writes and this module reads.
 const LOG_EXTENSION: &str = "log";
 
@@ -113,25 +124,39 @@ impl Invocation {
         }
     }
 
-    /// The log this invocation's output belongs in, under `dir`.
-    pub fn log(&self, dir: &Path) -> PathBuf {
-        dir.join(format!(
+    /// What this invocation's log is called: the package and target pair a
+    /// reader splits back out of it.
+    pub fn log_name(&self) -> String {
+        format!(
             "{}{NAME_SEPARATOR}{}.{LOG_EXTENSION}",
             self.package,
             self.target_name()
-        ))
+        )
+    }
+
+    /// The log this invocation's output belongs in, under `dir`.
+    pub fn log(&self, dir: &Path) -> PathBuf {
+        dir.join(self.log_name())
     }
 
     /// Whether the invocations named here name distinct logs.
     ///
-    /// One name per target is what makes a log readable back into the target it
-    /// came from, and the one collision available is an integration target
-    /// called `lib`. It is a rule about the inventory rather than about this
-    /// module, so it is answered here and asserted by this crate's own suite.
+    /// **A second invocation writing one log loses the first one's cases
+    /// silently.** The script truncates the log it writes, so the cases only
+    /// the overwritten build compiled reach the record as `not-run` with
+    /// nothing having failed. Two ways into it, and the answer is one
+    /// uniqueness check over the names rather than a rule per way: an
+    /// integration target called `lib`, which would share the library's name,
+    /// and one target required under two features, which is a distinct
+    /// invocation carrying the same name.
+    ///
+    /// It is a rule about the inventory rather than about this module, so it is
+    /// answered here and asserted by this crate's own suite.
     pub fn names_are_unambiguous(invocations: &BTreeSet<Invocation>) -> bool {
-        !invocations
+        let mut names = BTreeSet::new();
+        invocations
             .iter()
-            .any(|invocation| invocation.target == Target::Integration(LIBRARY.to_string()))
+            .all(|invocation| names.insert(invocation.log_name()))
     }
 }
 
@@ -483,6 +508,43 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out
             3,
             "the summary line and the suite's own output are not results: {results:?}"
         );
+    }
+
+    #[test]
+    fn two_invocations_that_would_share_a_log_are_ambiguous() {
+        let under_a_feature = Invocation {
+            package: "norn-host".to_string(),
+            target: Target::Integration("lockdown".to_string()),
+            feature: Some("induced-failure".to_string()),
+        };
+        let bare = Invocation {
+            feature: None,
+            ..under_a_feature.clone()
+        };
+        assert_eq!(under_a_feature.log_name(), bare.log_name());
+        assert!(
+            !Invocation::names_are_unambiguous(&BTreeSet::from([
+                under_a_feature.clone(),
+                bare.clone()
+            ])),
+            "one target required under two features is two invocations writing one log, and the \
+             second truncates the first"
+        );
+        assert!(Invocation::names_are_unambiguous(&BTreeSet::from([bare])));
+
+        let library = Invocation {
+            package: "norn-host".to_string(),
+            target: Target::Lib,
+            feature: None,
+        };
+        let impostor = Invocation {
+            target: Target::Integration(LIBRARY.to_string()),
+            ..library.clone()
+        };
+        assert_eq!(library.log_name(), impostor.log_name());
+        assert!(!Invocation::names_are_unambiguous(&BTreeSet::from([
+            library, impostor
+        ])));
     }
 
     #[test]
