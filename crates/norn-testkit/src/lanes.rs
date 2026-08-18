@@ -24,6 +24,14 @@
 //! the walk above. Both directions fail, so a suite joins a lane in one diff or
 //! not at all.
 //!
+//! A package with no lane table of its own would be invisible to that pairing —
+//! nothing calls the guard for it, so neither direction has a caller — and its
+//! ignored cases would be adopted wholesale with no prefix check at all. So
+//! every package a step names is held against [`LANE_PREFIXES_BY_PACKAGE`] by
+//! whichever guard reads the workflows: a package new to the lanes fails the
+//! guards that already run until it is named there, which is what makes it
+//! write the table its own guard then reads.
+//!
 //! Adoption **by kind** is what the pairing reads: `.github/scripts/lane-suite.sh`
 //! is the one spelling that runs a target's ignored cases wholesale, so a step
 //! invoking it is a step that adopts whatever `#[ignore]` that target holds. A
@@ -317,14 +325,37 @@ fn workflows_directory(manifest_dir: &Path) -> PathBuf {
         })
 }
 
-/// **The pairing.** The targets CI adopts `package`'s ignored cases from are
-/// exactly the file stems its lane table names.
+/// The packages a step adopts ignored cases from that
+/// [`LANE_PREFIXES_BY_PACKAGE`] names no row for.
 ///
-/// Two hazards close together here. A step naming a target the table does not
+/// A package with no row has no lane table either — the two land together —
+/// so its adopted suites are checked by nothing. Reported by every guard that
+/// reads the workflows rather than by the row's own package, because the
+/// package that is missing is the one with no guard running.
+fn packages_outside_the_rows(adopting: &BTreeSet<String>) -> Vec<String> {
+    adopting
+        .iter()
+        .filter(|named| {
+            !LANE_PREFIXES_BY_PACKAGE
+                .iter()
+                .any(|(package, _)| package == *named)
+        })
+        .cloned()
+        .collect()
+}
+
+/// **The pairing.** The targets CI adopts `package`'s ignored cases from are
+/// exactly the file stems its lane table names, and every package CI adopts
+/// ignored cases from is a package the lanes account for.
+///
+/// Three hazards close together here. A step naming a target the table does not
 /// cover adopts that suite's `#[ignore]`s under a lane the walk above never
 /// checked them against. A stem the table names and no step runs is a lane
 /// that measures nothing — the ignored cases under it never execute, and the
-/// pass-count assertion inside the script never gets the chance to say so.
+/// pass-count assertion inside the script never gets the chance to say so. And
+/// a step naming a package the rows do not know adopts a whole suite that no
+/// guard reads at all, which is the first two hazards with nothing standing
+/// where they would be caught.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files.
 pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&str, &str)]) {
     let directory = workflows_directory(manifest_dir);
@@ -333,6 +364,7 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
 
     let mut workflows = 0usize;
     let mut adopted: BTreeSet<String> = BTreeSet::new();
+    let mut adopting: BTreeSet<String> = BTreeSet::new();
     for entry in entries {
         let path = entry.expect("a directory entry").path();
         if !path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
@@ -345,12 +377,22 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
             if named == package {
                 adopted.insert(target);
             }
+            adopting.insert(named);
         }
     }
     assert!(
         workflows > 0,
         "{} holds no workflow, so nothing was read",
         directory.display()
+    );
+
+    let unaccounted = packages_outside_the_rows(&adopting);
+    assert!(
+        unaccounted.is_empty(),
+        "CI runs `{LANE_SCRIPT}` for {unaccounted:?}, and LANE_PREFIXES_BY_PACKAGE names no row \
+         for them. A package with no row has no lane table, so nothing checks the `#[ignore]` \
+         reasons the step adopts wholesale. The row and the package's own `tests/lanes.rs` land \
+         with the step that adopts it."
     );
 
     let tabled: BTreeSet<String> = lanes.iter().map(|(stem, _)| (*stem).to_string()).collect();
@@ -367,8 +409,8 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
 #[cfg(test)]
 mod tests {
     use super::{
-        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, ignore_attributes, lane_steps, reason,
-        unrecognized_ignore_attribute_lines,
+        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, ignore_attributes, lane_steps,
+        packages_outside_the_rows, reason, unrecognized_ignore_attribute_lines,
     };
     use crate::regression::LANE_IGNORE_PREFIXES;
     use std::collections::BTreeSet;
@@ -390,6 +432,31 @@ mod tests {
             .collect();
         let recognized: BTreeSet<&str> = LANE_IGNORE_PREFIXES.iter().copied().collect();
         assert_eq!(bound, recognized);
+    }
+
+    /// **A package new to the lanes is caught by the guards already running.**
+    /// A step adopting a package the rows do not name is the one adoption no
+    /// per-package guard can see: that package has no `tests/lanes.rs`, so
+    /// neither direction of the pairing has a caller for it.
+    #[test]
+    fn a_package_no_row_names_is_reported_as_unaccounted() {
+        let adopting = ["norn-host", "norn-store"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            packages_outside_the_rows(&adopting),
+            vec!["norn-store".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_packages_the_rows_name_are_accounted_for() {
+        let adopting = LANE_PREFIXES_BY_PACKAGE
+            .iter()
+            .map(|(package, _)| (*package).to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(packages_outside_the_rows(&adopting).is_empty());
     }
 
     #[test]
