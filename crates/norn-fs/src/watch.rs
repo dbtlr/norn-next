@@ -256,6 +256,15 @@ impl Batch {
     /// roots are kept, and the one carrying the rendered spelling is what the
     /// consumer reaches the identity through.
     fn note_vault_root(&mut self, root: NormalizedPath, spelling: Spelling) {
+        // **A death is news about the name it spells even where the range is
+        // already answered for.** A root standing under a covering one is a
+        // root a later report can still be about, and whether the name it
+        // carries is dead decides what it may go on to subsume. Reading that
+        // ahead of coverage is what keeps the two answers from depending on
+        // which of the reports arrived first.
+        if spelling == Spelling::Retired && self.carries_the_dead_name(&root) {
+            self.retired.insert(root.clone());
+        }
         if self.is_covered(&root, spelling) {
             return;
         }
@@ -268,23 +277,28 @@ impl Batch {
                 self.retired.remove(&root);
                 self.vault_roots.replace(root);
             }
-            // **What a death retires is the name it spells.** Where the set is
-            // carrying that very name, what it carries is a dead one. Where it
-            // is carrying another name for the identity, that name is the one a
-            // rename moved *to* and this report is the half that moved away
-            // from — the spelling rule already keeps the live one, and the live
-            // one still speaks for everything under it.
+            // An identity nothing has spelled at all is one this report is the
+            // whole of, so what the set will carry for it is a dead name.
             Spelling::Retired => {
-                let carries_the_dead_name = self
-                    .vault_roots
-                    .get(&root)
-                    .is_none_or(|standing| standing.as_path() == root.as_path());
-                if carries_the_dead_name {
+                if !self.vault_roots.contains(&root) {
                     self.retired.insert(root.clone());
                 }
                 self.vault_roots.insert(root);
             }
         }
+    }
+
+    /// Whether the set carries this identity at the very name a death spells.
+    ///
+    /// **What a death retires is the name it spells.** Where the set carries
+    /// another name for the identity, that name is the one a rename moved *to*
+    /// and this report is the half that moved away from — which is the order
+    /// the poll backend reports a case flip in — so the spelling rule keeps the
+    /// live name and the live name goes on speaking for everything under it.
+    fn carries_the_dead_name(&self, root: &NormalizedPath) -> bool {
+        self.vault_roots
+            .get(root)
+            .is_some_and(|standing| standing.as_path() == root.as_path())
     }
 
     /// Whether a root already standing covers `root` and speaks for it.
@@ -3317,6 +3331,43 @@ mod tests {
         let batch = &locked.pending.as_mut().unwrap().batch;
         let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
         assert_eq!(paths, [Path::new("FOLDER")]);
+    }
+
+    /// **A death reaches a root a covering one already answers for.** A
+    /// directory and something inside it can both be renamed away in one
+    /// window, and the report for the inner one arrives where the outer root
+    /// already covers its whole range. Nothing more is owed at that path — but
+    /// whether the name it carries is dead is still news, because a later
+    /// report that something under *it* stands is the only root that will name
+    /// that identity at a name the tree renders.
+    ///
+    /// The forbidden shape is that later report being subsumed by a root whose
+    /// death arrived while a cover was standing over it.
+    #[test]
+    fn a_death_under_a_covering_root_still_retires_the_name_it_spells() {
+        let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+        for (kind, path) in [
+            (EventKind::Modify(ModifyKind::Any), "/vault/a/b"),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                "/vault/a",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                "/vault/a/b",
+            ),
+            (EventKind::Modify(ModifyKind::Any), "/vault/A/B/note.md"),
+        ] {
+            ingest(&state, Ok(Event::new(kind).add_path(path.into())));
+        }
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(
+            paths,
+            [Path::new("a"), Path::new("a/b"), Path::new("A/B/note.md")],
+            "the one root naming the identity at a rendered spelling was dropped"
+        );
     }
 
     /// **Coverage is the vault's own case behavior.** Where two spellings are
