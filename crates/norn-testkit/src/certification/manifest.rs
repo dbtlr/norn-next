@@ -135,6 +135,12 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               same run",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/certification/preflight.rs",
+        why: "which machines count as evidence sources: the measurements taken, the bounds they \
+              are held to, and the closed set of reasons a host is refused. A run admitted under \
+              a looser host bound certified the candidate on a machine the previous rule excluded",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/regression.rs",
         why: "the reconciliation engine the inventory is walked by — how cargo is asked what \
               compiled, and what a reference is held to resolve to",

@@ -28,7 +28,7 @@ use norn_testkit::certification::{
     inventory::{self, Lane, REQUIRED_CASES, Suite, UNREACHED_ARMS},
     lane,
     ledger::{self, CaseOutcome, Classification, Outcome, Platform, Preflight, Record, RunResult},
-    manifest,
+    manifest, preflight,
 };
 use norn_testkit::process::Sandbox;
 use norn_testkit::regression::TestRef;
@@ -170,6 +170,7 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/certification/lane.rs",
         "crates/norn-testkit/src/certification/ledger.rs",
         "crates/norn-testkit/src/certification/manifest.rs",
+        "crates/norn-testkit/src/certification/preflight.rs",
         "crates/norn-testkit/src/regression.rs",
         // The instruments a verdict is read off.
         "crates/norn-testkit/src/equivalence.rs",
@@ -447,7 +448,72 @@ fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
         }
         assert_backend_label_matches_the_runner(lane, body);
         assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane, body);
+        assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane, body);
     }
+}
+
+/// **A lane reads its host before it builds, classifies the reading, and the
+/// verdict is in the environment the record is assembled from.**
+///
+/// Three links, and each is a way the slot silently empties. A reading taken
+/// after a cold cargo build is a reading of that build — every lane would
+/// refuse itself, and every record would be non-qualifying for a reason about
+/// this run rather than about the machine. A reading nobody classifies leaves
+/// the record with no verdict, which
+/// [`ledger::NonQualifying::Environment`](norn_testkit::certification::ledger::NonQualifying)
+/// reads as a host nobody checked. And a verdict written after the record is
+/// assembled reaches nothing: `$GITHUB_ENV` applies to later steps only.
+///
+/// The order is read off line positions in the job body because that is what
+/// decides it — steps run top to bottom — and the strings are the preflight
+/// module's own constants rather than transcriptions, so a renamed script or
+/// invocation fails here instead of leaving a lane calling nothing.
+fn assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane: &str, body: &str) {
+    let at = |needle: &str| {
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .position(|line| line.contains(needle))
+    };
+
+    let reading = at(preflight::READINGS_SCRIPT).unwrap_or_else(|| {
+        panic!(
+            "`{lane}` writes a qualification record and never runs `{}`, so its record carries no \
+             host-health verdict and classifies as a host nobody checked",
+            preflight::READINGS_SCRIPT
+        )
+    });
+    let first_build = at("cargo ").unwrap_or_else(|| {
+        panic!("`{lane}` writes a qualification record and runs no cargo command")
+    });
+    assert!(
+        reading < first_build,
+        "`{lane}` takes its host-health reading after it starts building. A cold build is minutes \
+         of every core, so the load average it would read is this run's own compile and the lane \
+         would refuse itself"
+    );
+
+    let classified = at(preflight::CLASSIFIER).unwrap_or_else(|| {
+        panic!(
+            "`{lane}` takes a host-health reading and never runs `{}`, so nothing turns it into \
+             the verdict the record's preflight slot carries",
+            preflight::CLASSIFIER
+        )
+    });
+    let record = at(ledger::SINK).expect("a lane that writes a record names the sink");
+    assert!(
+        classified < record,
+        "`{lane}` classifies its host after it assembles the record. A verdict appended to \
+         `$GITHUB_ENV` reaches later steps only, so the record would be assembled without one"
+    );
+
+    let sink = one_setting(lane, body, preflight::SINK);
+    let appended = format!("cat \"${}\" >> \"$GITHUB_ENV\"", preflight::SINK);
+    assert!(
+        body.contains(&appended),
+        "`{lane}` writes its preflight verdict to `{sink}` and never appends it to the job \
+         environment with `{appended}`, so the record is assembled without a verdict"
+    );
 }
 
 /// Every non-comment line of a job body that sets `key`, as the value it sets.

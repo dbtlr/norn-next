@@ -19,6 +19,11 @@
 //!   harness output: one log per target, turned into the case lines the record
 //!   carries. A lane that runs the certification suites and reports nothing
 //!   leaves a record that cannot be told from one that ran none of them.
+//! - [`preflight`] — **whether the machine a run landed on is an evidence
+//!   source**: load per core, and on Darwin the health of the event daemon the
+//!   real-watcher cases subscribe to. The suites' work bounds stand; a host
+//!   that would starve them is refused instead, and the verdict is what fills
+//!   the record's preflight slot.
 //! - [`ledger`] — **what one run was**, as a record a campaign counts rather
 //!   than a check somebody remembers: the candidate, the manifest digest, the
 //!   platform, the preflight verdict, an outcome per required case, and a
@@ -32,3 +37,4 @@ pub mod inventory;
 pub mod lane;
 pub mod ledger;
 pub mod manifest;
+pub mod preflight;
