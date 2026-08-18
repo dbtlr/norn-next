@@ -268,6 +268,17 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: None,
     },
     Case {
+        id: "churn-case-renamed-parent-over-a-save",
+        suite: Suite::Churn,
+        lane: Lane::RealWatcherVolumeFoldingDecides,
+        states: "a save and the case rename of the directory holding it, settled in one account of \
+                 the tree, leave one row at the identity the volume resolves it to, spelled the \
+                 way the renamed directory renders it",
+        carrier: "crates/norn-host/tests/churn.rs::\
+                  a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero",
+        feature: None,
+    },
+    Case {
         id: "churn-burst-and-coalescing",
         suite: Suite::Churn,
         lane: Lane::RealWatcher,

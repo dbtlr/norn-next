@@ -7832,6 +7832,284 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **A batch naming a case-renamed directory and a descendant of it
+    /// converges at the spelling the directory renders.**
+    ///
+    /// A directory rename reports the directory and nothing under it, so a
+    /// descendant that is separately dirty in the same window arrives spelled
+    /// through the ancestor's *pre-rename* name. The forbidden shape is that
+    /// stale spelling reaching the store: the directory's own leg walks the
+    /// subtree and lands the row at the rendered name, and a descendant leg
+    /// running after it would prune that row as a fold-alias and re-land it at
+    /// a name no directory entry holds.
+    ///
+    /// The batch seam is what the case drives, in both arrival orders, because
+    /// the dirty set is what a batch settled rather than what a caller listed.
+    #[test]
+    fn a_batch_of_a_case_renamed_directory_and_its_descendant_lands_the_rendered_spelling() {
+        for order in [["FOLDER", "folder/note.md"], ["folder/note.md", "FOLDER"]] {
+            let f = Fixture::new("case-only-directory-rename-with-descendant");
+            if norn_fs::PathNormalizer::detect(&f.vault())
+                .unwrap()
+                .case_sensitivity()
+                != norn_fs::CaseSensitivity::Insensitive
+            {
+                return;
+            }
+            fs::create_dir(f.vault().join("folder")).unwrap();
+            fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+            let (ops, name) = f.ops(2);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
+
+            let batch = dirty_batch(f.vault().as_path(), &order);
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                batch.vault_roots(),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                ["FOLDER/note.md"],
+                "reports arriving as {order:?}"
+            );
+            ops.detach(&name, attachment);
+        }
+    }
+
+    /// **A batch whose only spelling of a directory is the one that died
+    /// carries the reported descendant to the name the tree renders.**
+    ///
+    /// A backend can report a directory's old name gone without reporting the
+    /// new one, and a change under the directory then arrives spelled through
+    /// the name it now renders. A heal rooted at the dead spelling walks at that
+    /// spelling, so the descendant's own root is what reaches a name a
+    /// directory entry holds — and the batch seam keeps that pair standing
+    /// through the fold a delivery crosses so this leg can read it.
+    ///
+    /// **The bound this states is per reported root.** A heal rooted at a dead
+    /// spelling stores every row under it that way, and only the roots the
+    /// batch names are re-spelled after it: the sibling below is a document no
+    /// report named, and it is left at the dead spelling until a walk rooted
+    /// somewhere the tree renders reaches it. That is the reading of a dead
+    /// root, not of subsumption — the same rows land for the same reason when
+    /// no root covers another.
+    #[test]
+    fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_descendants_own() {
+        let f = Fixture::new("dead-directory-spelling-with-descendant");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        fs::create_dir(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+        fs::write(
+            f.vault().join("folder/other.md"),
+            "a sibling no report names",
+        )
+        .unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
+        fs::write(f.vault().join("FOLDER/note.md"), "revised body").unwrap();
+
+        // Folded the way a delivery is: the host drains each settled batch into
+        // one pending batch, so both roots reach this leg through that fold.
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        batch.merge(norn_fs::Batch::vault_removal(
+            normalizer.normalize(Path::new("folder")).unwrap(),
+        ));
+        batch.merge(norn_fs::Batch::vault_change(
+            normalizer.normalize(Path::new("FOLDER/note.md")).unwrap(),
+        ));
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            batch.vault_roots(),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["FOLDER/note.md", "folder/other.md"],
+            "the reported descendant did not reach the name the tree renders"
+        );
+
+        // And a walk rooted where the tree renders takes the sibling with it.
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["FOLDER/note.md", "FOLDER/other.md"]
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **A covering root answers for a place the walk reads nothing through.**
+    ///
+    /// Subsumption stands on the covering root's leg reaching everything the
+    /// covered root named, so the bar is the boundary of what that leg reads:
+    /// a name the vault walk refuses to enter — a shadow name here — is a name
+    /// under which the walk yields nothing and the store therefore holds
+    /// nothing. The covering root reaches the same answer, which is the answer
+    /// a build from zero gives.
+    ///
+    /// **The place is reachable through its own root**, which is what says the
+    /// case is stated over a real boundary rather than an empty one: a dirty
+    /// path spelled through the refused name opens the file component by
+    /// component and derives a row there, and that row is one no walk of this
+    /// vault yields. The covering root is what withdraws it. The lone-root leg
+    /// asserted below is that divergence held still, not a contract: it is a
+    /// row the next attach heal prunes.
+    #[test]
+    fn a_covering_root_answers_for_a_place_the_walk_reads_nothing_through() {
+        let f = Fixture::new("covering-root-unwalked-place");
+        fs::create_dir_all(f.vault().join("dir/norn-shadow-7-2")).unwrap();
+        fs::write(f.vault().join("dir/norn-shadow-7-2/note.md"), "body").unwrap();
+        fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["dir/plain.md"],
+            "the walk read through a name it refuses to enter"
+        );
+        let increment = |store: &mut Store, dirty: &_| {
+            scoped_increment(
+                store,
+                f.vault().as_path(),
+                dirty,
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+        };
+
+        increment(
+            &mut attachment.store,
+            &dirty_path(f.vault().as_path(), "dir/norn-shadow-7-2/note.md"),
+        );
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["dir/norn-shadow-7-2/note.md", "dir/plain.md"],
+            "a root spelled through the refused name reached nothing at all"
+        );
+
+        let batch = dirty_batch(f.vault().as_path(), &["dir", "dir/norn-shadow-7-2/note.md"]);
+        increment(&mut attachment.store, batch.vault_roots());
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["dir/plain.md"],
+            "the covering root left a row standing where the walk yields none"
+        );
+        ops.detach(&name, attachment);
+    }
+
+    /// **The walk's other refusals are answered by a covering root the same
+    /// way.** A shadow name is one of four things the walk will not read
+    /// through; the rest are a symbolic link, an entry that is neither file nor
+    /// directory, and an exclusion. Each row below stands a dirty root at one
+    /// of them beside a covering directory root, and what the store holds
+    /// afterwards is what a build from zero holds.
+    ///
+    /// **None of the three is a place a covered root reads anything at
+    /// either**, which is the first assertion in each row and the difference
+    /// from the shadow name: a path spelled through a link reads as a regular
+    /// file to a stat that follows it and is then refused by the open that does
+    /// not; a pipe is not a file at all; and an exclusion is read by
+    /// [`scoped_increment`] itself, one leg at a time, before any of them opens
+    /// anything. So each root's own leg derives nothing and the covering root
+    /// withdraws nothing that was there. The shadow name is the one refusal
+    /// where the two legs genuinely differ.
+    ///
+    /// The exclusion row is the one the two readings disagree about: the
+    /// watcher admits every path outside the mechanism root, so a host root
+    /// reaches a dirty set as an ordinary path, and it is the increment's own
+    /// reading of the walk's exclusion set that answers for it.
+    ///
+    /// The subtree behind the link is reached under its own name rather than
+    /// through it, which is what keeps the row about the refusal: `elsewhere`
+    /// holds a document either way, and only the spelling `dir/link/note.md` is
+    /// the one no walk of this vault yields.
+    #[cfg(unix)]
+    #[test]
+    fn a_covering_root_answers_for_the_other_names_the_walk_refuses() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("covering-root-refused-names");
+        fs::create_dir_all(f.vault().join("dir")).unwrap();
+        fs::create_dir_all(f.vault().join("elsewhere")).unwrap();
+        fs::write(f.vault().join("elsewhere/note.md"), "body").unwrap();
+        symlink(f.vault().join("elsewhere"), f.vault().join("dir/link")).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(f.vault().join("dir/pipe.md"))
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo failed");
+        fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
+
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let from_zero = stored_paths(&mut attachment.store);
+        assert_eq!(
+            from_zero,
+            ["dir/plain.md", "elsewhere/note.md"],
+            "the walk read through a name it refuses to enter"
+        );
+
+        let increment = |store: &mut Store, dirty: &_| {
+            scoped_increment(
+                store,
+                f.vault().as_path(),
+                dirty,
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+        };
+        for (cover, refused) in [
+            ("dir", "dir/link/note.md"),
+            ("dir", "dir/pipe.md"),
+            (".norn", IN_VAULT_SCHEMA_PATH),
+        ] {
+            increment(
+                &mut attachment.store,
+                &dirty_path(f.vault().as_path(), refused),
+            );
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "a root spelled through {refused} derived a row of its own"
+            );
+
+            let batch = dirty_batch(f.vault().as_path(), &[cover, refused]);
+            increment(&mut attachment.store, batch.vault_roots());
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "the covering root did not answer for {refused}"
+            );
+        }
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn attach_indexes_only_markdown_and_ignores_binary_clutter() {
         let f = Fixture::new("markdown-only");
@@ -9103,5 +9381,23 @@ mod tests {
         [normalizer.normalize(Path::new(relative)).unwrap()]
             .into_iter()
             .collect()
+    }
+
+    /// The dirty set one settled batch carries, folded through the batch seam
+    /// in the order `relatives` names.
+    ///
+    /// A case reaching for this is asking what a *batch* says rather than what
+    /// a set literal says: the seam decides which roots a report leaves
+    /// standing, and a set built beside it would answer a question no watcher
+    /// asks.
+    fn dirty_batch(root: &Path, relatives: &[&str]) -> norn_fs::Batch {
+        let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        for relative in relatives {
+            batch.merge(norn_fs::Batch::vault_change(
+                normalizer.normalize(Path::new(relative)).unwrap(),
+            ));
+        }
+        batch
     }
 }

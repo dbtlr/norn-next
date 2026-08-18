@@ -39,8 +39,9 @@
 //! Five constructors build the workload families a churn suite runs, and each
 //! is data rather than a procedure: a suite may apply one whole, apply it a step
 //! at a time around its own waits, or interleave two. They are
-//! [`ordinary_editing`], [`atomic_replacement`] with [`case_flip`] beside it,
-//! [`burst`], [`validity_transitions`] and [`external_tools`].
+//! [`ordinary_editing`], [`atomic_replacement`] with [`case_flip`] and
+//! [`case_rename_parent`] beside it, [`burst`], [`validity_transitions`] and
+//! [`external_tools`].
 //!
 //! Each of them is a [`Phased`] pair rather than one script, because an edit is
 //! only an edit against a row a host already holds — see that type for why a
@@ -776,6 +777,78 @@ pub fn case_flip(seed: u64, folding: Folding) -> Phased {
                 Act::AtomicReplace {
                     at: FLIPPED_TO.to_string(),
                     bytes: ink.document("flipping, revised"),
+                },
+            ),
+        ],
+    );
+    Phased::new(opening, changing)
+}
+
+/// The directory the parent rename starts at.
+pub const RENAMED_PARENT_FROM: &str = "churn/renaming";
+
+/// The directory the parent rename leaves on disk.
+pub const RENAMED_PARENT_TO: &str = "churn/RENAMING";
+
+/// The document held under the directory whose case is renamed.
+pub const RENAMED_PARENT_DOCUMENT: &str = "churn/RENAMING/held.md";
+
+/// **Family 2's other normalized-identity half: a save, then the parent
+/// directory's case renamed on top of it.**
+///
+/// The two acts are one workload rather than two because what this family is
+/// about is what they are *together*. A save names the document; a directory
+/// rename names the directory and nothing under it. Land them close enough and
+/// a host coalescing changes holds both at once — the document at the spelling
+/// it had before the rename, and the directory at the spelling it has after —
+/// which is one identity arriving under two names in one settled account of the
+/// tree.
+///
+/// What a flip means is still the volume's own answer, and the sentences say
+/// which it is. Where two spellings are two places the rename moves the
+/// document to a directory nothing stood in; where they are one place it
+/// re-spells the directory the document is already in, and the document ends up
+/// at [`RENAMED_PARENT_DOCUMENT`] either way.
+///
+/// The save is the changing phase's first act, so the bytes it writes are a
+/// rewrite of a row the host holds rather than the arrival of a document
+/// nothing has seen.
+pub fn case_rename_parent(seed: u64, folding: Folding) -> Phased {
+    let mut ink = Ink::new(seed);
+    let opening = Script::new(
+        format!("a parent directory's case renamed on {folding}: the document it holds"),
+        vec![Step::new(
+            "write the document whose parent directory is about to be renamed",
+            Act::Write {
+                at: format!("{RENAMED_PARENT_FROM}/held.md"),
+                bytes: ink.document("held under a directory about to be renamed"),
+            },
+        )],
+    );
+    let changing = Script::new(
+        format!("a parent directory's case renamed on {folding}"),
+        vec![
+            Step::new(
+                "rewrite the standing row's document under the name its parent still holds",
+                Act::Write {
+                    at: format!("{RENAMED_PARENT_FROM}/held.md"),
+                    bytes: ink.document("held, revised just before the parent is renamed"),
+                },
+            ),
+            Step::new(
+                match folding {
+                    Folding::Distinct => {
+                        "rename the parent directory's case, which moves the document into a \
+                         second directory on this volume"
+                    }
+                    Folding::Folded => {
+                        "rename the parent directory's case, which re-spells the one directory \
+                         the document is in on this volume"
+                    }
+                },
+                Act::Rename {
+                    from: RENAMED_PARENT_FROM.to_string(),
+                    to: RENAMED_PARENT_TO.to_string(),
                 },
             ),
         ],
