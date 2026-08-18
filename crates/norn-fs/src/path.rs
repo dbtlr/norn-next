@@ -192,6 +192,52 @@ impl PathNormalizer {
     }
 }
 
+/// The comparison keys of one directory's children, taken a name at a time.
+///
+/// The key this hands back for `name` is the key [`PathNormalizer::normalize`]
+/// produces for the same child path, and
+/// `a_child_key_is_the_key_normalization_produces` holds the two together. It
+/// exists because a caller enumerating a directory asks for far more keys than
+/// it keeps paths: the parent's own bytes are folded once here and only the
+/// child's are rewritten after them, so a name the caller discards costs one
+/// fold into a buffer it already owns rather than a [`NormalizedPath`].
+pub(crate) struct ChildKeys {
+    sensitivity: CaseSensitivity,
+    /// The parent's key, a separator where the parent is not the root, and
+    /// whichever child name was asked for last.
+    key: Vec<u8>,
+    /// How much of `key` is the parent's and stays across names.
+    parent: usize,
+}
+
+impl ChildKeys {
+    /// Keys under `parent`, a normalized vault-relative directory spelling —
+    /// empty for the vault root, whose children are named by one component.
+    pub(crate) fn under(normalizer: &PathNormalizer, parent: &Path) -> ChildKeys {
+        let sensitivity = normalizer.sensitivity;
+        let mut key = Vec::new();
+        fold_onto(sensitivity, &mut key, parent.as_os_str().as_bytes());
+        if !key.is_empty() {
+            key.push(b'/');
+        }
+        ChildKeys {
+            sensitivity,
+            parent: key.len(),
+            key,
+        }
+    }
+
+    /// The comparison key of this directory's child `name`.
+    ///
+    /// The returned slice is the buffer this holds, so it stands until the next
+    /// name is asked for.
+    pub(crate) fn of(&mut self, name: &[u8]) -> &[u8] {
+        self.key.truncate(self.parent);
+        fold_onto(self.sensitivity, &mut self.key, name);
+        &self.key
+    }
+}
+
 /// A vault-relative path with separate access spelling and comparison identity.
 #[derive(Clone, Debug)]
 pub struct NormalizedPath {
@@ -307,6 +353,14 @@ fn ascii_fold(path: &OsStr) -> OsString {
     OsString::from_vec(path.as_bytes().iter().map(u8::to_ascii_lowercase).collect())
 }
 
+/// The one fold both key producers here spell, appended to `key`.
+fn fold_onto(sensitivity: CaseSensitivity, key: &mut Vec<u8>, bytes: &[u8]) {
+    match sensitivity {
+        CaseSensitivity::Sensitive => key.extend_from_slice(bytes),
+        CaseSensitivity::Insensitive => key.extend(bytes.iter().map(u8::to_ascii_lowercase)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +424,42 @@ mod tests {
             .expect("ordinary unix path");
         assert_eq!(path.as_path().as_os_str().as_bytes(), b"Notes/\xffTODAY.md");
         assert_eq!(path.comparison_key().as_bytes(), b"notes/\xfftoday.md");
+    }
+
+    /// **A child key is the key normalization produces, or it is a second
+    /// identity.** The two are separate code because one of them is asked for
+    /// far more often than a whole path is kept, and this is what holds them to
+    /// the same answer — over both case behaviors, a root parent and a nested
+    /// one, and names that are not UTF-8.
+    #[test]
+    fn a_child_key_is_the_key_normalization_produces() {
+        let parents: [&Path; 3] = [
+            Path::new(""),
+            Path::new("Notes"),
+            Path::new("Notes/Daily Log"),
+        ];
+        let names: [&OsStr; 4] = [
+            OsStr::new("TODAY.md"),
+            OsStr::new("today.md"),
+            OsStr::new(".hidden"),
+            OsStr::from_bytes(b"\xffRaw Bytes.md"),
+        ];
+        for sensitivity in [CaseSensitivity::Sensitive, CaseSensitivity::Insensitive] {
+            let paths = normalizer(sensitivity);
+            for parent in parents {
+                let mut keys = ChildKeys::under(&paths, parent);
+                for name in names {
+                    let whole = paths
+                        .normalize(&parent.join(name))
+                        .expect("a vault-relative child path");
+                    assert_eq!(
+                        keys.of(name.as_bytes()),
+                        whole.comparison_key().as_bytes(),
+                        "{sensitivity:?} key of {name:?} under {parent:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
