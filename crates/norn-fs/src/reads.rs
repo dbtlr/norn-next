@@ -99,10 +99,12 @@ impl ReadWindow {
     /// refused: two windows over one thread are two answers to "what did this
     /// thread read", and only one of them could be right.
     ///
-    /// `norn_host::JobEvidence::attributing` is the one caller in the tree that
-    /// opens a window, so the whole of the bookkeeping lives in one place; a
-    /// second opener elsewhere turns a bookkeeping conflict into a panic on the
-    /// worker thread that hits it.
+    /// `norn_host::JobEvidence::attributing` is the one caller in production
+    /// that opens a window, so the whole of that bookkeeping lives in one place.
+    /// A suite measuring its own reads opens one too, on the thread the case
+    /// runs on and around work that opens none. Anywhere a second window could
+    /// stand inside a first, the assertion below turns the bookkeeping conflict
+    /// into a panic on the thread that hits it rather than into two answers.
     ///
     /// The six `norn_host::EntryOps` entry points that open a window do not
     /// nest, and the assertion below is what makes that a runtime invariant of

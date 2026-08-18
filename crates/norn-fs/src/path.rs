@@ -184,11 +184,12 @@ impl PathNormalizer {
             return Err(PathError::Empty);
         }
 
-        let key = match self.sensitivity {
-            CaseSensitivity::Sensitive => access.as_os_str().to_owned(),
-            CaseSensitivity::Insensitive => ascii_fold(access.as_os_str()),
-        };
-        Ok(NormalizedPath { access, key })
+        let mut key = Vec::new();
+        fold_onto(self.sensitivity, &mut key, access.as_os_str().as_bytes());
+        Ok(NormalizedPath {
+            access,
+            key: OsString::from_vec(key),
+        })
     }
 }
 
@@ -349,11 +350,9 @@ fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
     Some(OsString::from_vec(bytes))
 }
 
-fn ascii_fold(path: &OsStr) -> OsString {
-    OsString::from_vec(path.as_bytes().iter().map(u8::to_ascii_lowercase).collect())
-}
-
-/// The one fold both key producers here spell, appended to `key`.
+/// The one fold every comparison key in this module is built by, appended to
+/// `key`. A whole path and a child name reach it by different routes and get
+/// the same bytes, which is what lets a caller compare one against the other.
 fn fold_onto(sensitivity: CaseSensitivity, key: &mut Vec<u8>, bytes: &[u8]) {
     match sensitivity {
         CaseSensitivity::Sensitive => key.extend_from_slice(bytes),

@@ -60,7 +60,9 @@ use crate::shadow::is_shadow_name;
 ///
 /// Construction proves the root's case behavior, validates every exclusion,
 /// and opens only the first directory frontier. Later directory failures arrive
-/// from the iterator at their deterministic position.
+/// from the iterator at their deterministic position. The one failure whose
+/// position the listing order moves is a refusing stat on a filesystem whose
+/// listing carries no entry type, and the page states it.
 pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
     let mut walk = open_vault(root, exclusions)?;
     let first = DirectoryFrontier::new(walk.root_fd.clone(), Path::new(""));
@@ -696,6 +698,17 @@ fn can_sort_past(key: &[u8], cursor: &[u8]) -> bool {
         || (cursor.starts_with(key) && cursor.get(key.len()).is_none_or(|byte| *byte < b'/'))
 }
 
+/// Whether a listed name whose comparison key is `key` is worth an identity.
+///
+/// Two rejections are settled on the key alone, before the name has cost
+/// anything else: a name that cannot sort past `cursor` is one an earlier page
+/// already handed out, and a name `run` cannot reach is one this page is already
+/// full past. Neither can enter the page, so what this answers is what the page
+/// spends, never what it holds.
+fn worth_identifying(run: &Run, cursor: Option<&[u8]>, key: &[u8]) -> bool {
+    cursor.is_none_or(|cursor| can_sort_past(key, cursor)) && run.reaches(key)
+}
+
 struct DirectoryFrontier {
     fd: Arc<OwnedFd>,
     relative: PathBuf,
@@ -821,12 +834,34 @@ struct Page {
 ///
 /// A directory stream returns names in no order, so a page that yields the
 /// lowest keys the directory still holds has to read every name to find them.
-/// Reading fewer would mean carrying names forward between pages, and the
-/// frontier's memory bound forbids that: a walk's memory is a function of depth
+/// Carrying names forward in memory is what would read fewer, and the
+/// frontier's memory bound forbids it: a walk's memory is a function of depth
 /// and the fixed page size, never of one directory's fan-out. **The listing cost
 /// of a wide directory is therefore quadratic in its width, and that is accepted
 /// rather than overlooked**: the bar it is accepted up to is authored in this
-/// module's own suite, at a stated width, over the dirents a walk reads.
+/// module's own suite, at a stated width, over the dirents a walk reads — and so
+/// is the width past which the shape has to change instead.
+///
+/// **A sorted listing spilled to a file and paged back from would read each name
+/// once and keep the memory bound too, so the bound is not what rules it out.**
+/// Two properties of a walk are. The first is that a walk takes nothing on the
+/// vault: it opens, lists, stats and reads, and writes nowhere. A spill needs a
+/// writable place — the vault, which puts the walk's own bookkeeping inside the
+/// tree it is inventorying and into the changes the watcher delivers back, or
+/// the mechanism root, which makes an inventory refuse on a vault the process
+/// may read and may not write beside. A read that can fail for want of write
+/// access is a failure class this path does not have. The second is that a
+/// spilled listing is one observation replayed: today the names a page acts on
+/// came off a stream that page drained itself, so the window between a listing
+/// and the stats that answer it is one page wide, and every later page lists the
+/// directory as it stands then. A replayed spill widens that window to the whole
+/// walk of the directory. The doctrine above still converges every name in it,
+/// but the number of names standing in the window goes from one page's worth to
+/// the directory's width, and the walk reports reading nothing at names that
+/// were there when it looked.
+///
+/// Those costs are worth paying at a width the rescan cannot serve, which is why
+/// the bar states one. They are not worth paying at the width the bar accepts.
 ///
 /// What the listing must not also cost is the *identity* of every name it
 /// returns. A name at or below the cursor is one an earlier page already handed
@@ -836,6 +871,15 @@ struct Page {
 /// path, the stat a type-less listing owes it, and the sort key those decide.
 /// On a filesystem whose listing carries no entry type, that stat is the whole
 /// per-name cost, so what bounds the identities bounds the stats too.
+///
+/// That stat is also where such a filesystem meets a machine failure, and which
+/// page meets it is the listing order's to decide: a refusing stat is reached by
+/// the first page whose run still admits the name's key, which is the opening
+/// page for whichever names the stream returns first and a later page for the
+/// rest. The walk refuses either way and yields nothing at that name or after
+/// it; what the order moves is how many facts the consumer already took when the
+/// refusal arrives. A listing that carries entry types owes no such stat and has
+/// no such spread.
 ///
 /// # What resumes a directory is a key, not a kernel offset
 ///
@@ -848,11 +892,30 @@ struct Page {
 /// edit, and neither answer is load-bearing here.
 ///
 /// So a directory edited between two pages is answered by the key ordering
-/// alone, identically on both. A name created above the cursor is listed by a
-/// later page and walked; a name created at or below it is not seen by this
-/// walk, and reaches derived state through the watcher delivery its creation
-/// raises or the next heal. A name removed between pages is simply not listed
-/// again. What a single listing owes under a concurrent edit is the platform's
+/// alone, identically on both, and there are four answers. A name created above
+/// the cursor is listed by a later page and walked; a name created at or below
+/// it is not seen by this walk, and reaches derived state through the watcher
+/// delivery its creation raises or the next heal. A name removed between pages
+/// is simply not listed again.
+///
+/// **The fourth is a name replaced in place by an entry of another kind, and it
+/// is the one a single walk can report twice.** A page cannot reject a name
+/// whose key runs *into* the cursor rather than past it — the cursor's own name,
+/// or a name the cursor extends with a byte below the separator — since a
+/// directory of that name sorts above the cursor where the bare name does not.
+/// So a name an earlier page handed out as a document, standing as a directory
+/// the walk descends into when a later page lists it, is listed again and sorts
+/// above the cursor this time: the same walk yields the document at that name
+/// and then the documents under it. Both are things this walk read: it read a
+/// file there, and it read a tree there afterwards. Nothing prunes either on that
+/// account, because the walk accounted for the name; the pair converges through
+/// the watcher delivery the replacement raises or the next heal, the same way the
+/// three above do. The replacement running the other way — a directory a page
+/// descended into, standing as a document when the next page lists it — sorts
+/// the survivor at or below the cursor the separator left, so that name is not
+/// listed again and the walk reports it once.
+///
+/// What a single listing owes under a concurrent edit is the platform's
 /// own — a name added or removed while one stream is being drained may or may
 /// not appear — and that is the same window a walk of any shape stands in.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
@@ -880,14 +943,8 @@ fn directory_page(
             continue;
         }
         crate::reads::count_dirents(1);
-        // The two rejections a name's own comparison key settles, before the
-        // name has cost anything else: one an earlier page already handed out,
-        // and one this page's run has already filled past.
         let key = keys.of(listed_name);
-        if cursor.is_some_and(|cursor| !can_sort_past(key, cursor)) {
-            continue;
-        }
-        if !run.reaches(key) {
+        if !worth_identifying(&run, cursor, key) {
             continue;
         }
         #[cfg(test)]
@@ -1226,6 +1283,7 @@ fn environment(operation: &'static str, path: &Path, source: io::Error) -> WalkE
 mod tests {
     use super::faults::{Answer, Stage};
     use super::*;
+    use crate::path::CaseSensitivity;
     use crate::scratch::Scratch;
     use std::io::{Cursor, Read};
 
@@ -1869,12 +1927,132 @@ mod tests {
         assert_eq!(paths(walk(&scratch.at(""), &[]).expect("walk")), expected);
     }
 
-    /// The width the two paging bars below are stated at.
+    /// **A page stops identifying a name its run is already full past, and this
+    /// is where that rejection is held.**
+    ///
+    /// What the rejection saves is a function of the order a filesystem returns
+    /// names in — everything past one page's worth where the stream runs low
+    /// keys first, nothing at all where it runs them last — so no bar over a
+    /// walk's own counts can gate it, and the identity bar below states that it
+    /// does not. The decision carries no such order, so it is asked here
+    /// directly: a run holding a full page and its lookahead at lower keys takes
+    /// no name above them, a run with room takes any name, and the cursor
+    /// rejects underneath both.
+    #[test]
+    fn a_page_stops_identifying_a_name_its_run_is_already_full_past() {
+        let paths = PathNormalizer::for_sensitivity(CaseSensitivity::Sensitive);
+        let candidate = |name: &str| {
+            let path = paths
+                .normalize(Path::new(name))
+                .expect("a vault-relative name");
+            let sort_key = path.comparison_key().as_bytes().to_vec();
+            Candidate {
+                name: OsString::from(name),
+                path,
+                listed: Some(EntryKind::File),
+                sort_key,
+            }
+        };
+
+        let mut run = Run::new();
+        for index in 0..Run::CAPACITY {
+            let name = format!("{index:05}.md");
+            assert!(
+                worth_identifying(&run, None, name.as_bytes()),
+                "a run with room refused {name}"
+            );
+            run.offer(candidate(&name));
+        }
+
+        assert!(
+            !worth_identifying(&run, None, b"99999.md"),
+            "a full run identified a name above every key it holds"
+        );
+        assert!(
+            worth_identifying(&run, None, b"00100.md"),
+            "a full run refused a name below the key it would drop"
+        );
+        assert!(
+            !worth_identifying(&run, Some(b"00100.md"), b"00099.md"),
+            "a name an earlier page handed out was identified again"
+        );
+        assert!(
+            worth_identifying(&run, Some(b"00100.md"), b"00100.md"),
+            "the cursor's own name is the one a key alone cannot settle"
+        );
+    }
+
+    /// **A name replaced in place between two pages is reported at both kinds:
+    /// one walk yields the document and then the tree that took its name.**
+    ///
+    /// The cursor a page leaves is a sort key, and a directory sorts under a
+    /// separator its own name does not carry — so the names a later page cannot
+    /// reject on the key alone are the ones the cursor runs into, its own
+    /// included. A document handed out under that name, standing as a directory
+    /// when the next page lists it, is listed a second time and sorts above the
+    /// cursor this time. Both readings are things this walk read, so the pair
+    /// stands rather than one of them pruning the other.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: replacing a paged name.
+    fn a_name_replaced_between_two_pages_is_reported_as_both_a_document_and_a_directory() {
+        let scratch = Scratch::new("walk-page-boundary-replacement");
+        for index in 0..FRONTIER_PAGE {
+            scratch.place(&format!("{index:05}.md"), b"x");
+        }
+        scratch.place("zzzzz.md", b"past the first page");
+        let boundary = format!("{:05}.md", FRONTIER_PAGE - 1);
+
+        let mut walk = walk(&scratch.at(""), &[]).expect("walk");
+        let first_page: Vec<PathBuf> = walk
+            .by_ref()
+            .take(FRONTIER_PAGE)
+            .map(|fact| match fact.expect("walk fact") {
+                WalkFact::File(file) => file.path().as_path().to_owned(),
+                WalkFact::Skipped(skip) => {
+                    panic!("unexpected skip at {}", skip.path().as_path().display())
+                }
+            })
+            .collect();
+        assert_eq!(
+            first_page.last().map(PathBuf::as_path),
+            Some(Path::new(&boundary)),
+            "the fixture's first page does not end at the name the case replaces"
+        );
+
+        fs::remove_file(scratch.at(&boundary)).expect("remove the paged document");
+        scratch.directory(&format!("vault/{boundary}"));
+        scratch.place(
+            &format!("{boundary}/inner.md"),
+            b"under the name the page handed out",
+        );
+
+        let rest: Vec<(PathBuf, Option<SkipReason>)> = paths(walk);
+        assert_eq!(
+            rest,
+            vec![
+                (PathBuf::from(format!("{boundary}/inner.md")), None),
+                (PathBuf::from("zzzzz.md"), None),
+            ],
+            "the replaced name's new tree is not walked after the document at it"
+        );
+    }
+
+    /// The width the two paging bars below are stated at, and the width the
+    /// paging shape is accepted at.
     ///
     /// Ten thousand entries in one directory is past what a vault of notes
     /// usually holds and inside what an attachment volume, a clipping inbox or
     /// a generated export reaches, so it is the width where the paging shape's
     /// cost is worth an authored number rather than an estimate.
+    ///
+    /// **It is also where the acceptance stops.** The listing cost is
+    /// `width * ceil(width / FRONTIER_PAGE)`, so ten times the width is a
+    /// hundred times the reads, and the same shapes that reach ten thousand
+    /// reach a hundred thousand. At that width one directory pages through
+    /// 39,100,000 dirents and takes tens of seconds of a release build's walk,
+    /// on every heal that reaches it — a number this shape is not argued for and
+    /// no bar here accepts. What answers a directory that wide is the spilled
+    /// sorted listing [`directory_page`] states the price of, not a wider bar.
     const WIDE_BAR_WIDTH: usize = 10_000;
 
     /// **The listing cost this paging shape accepts, gated.**
@@ -1882,7 +2060,7 @@ mod tests {
     /// A page must know the lowest keys the directory still holds, and a
     /// directory stream hands its names back in no order at all — so a page
     /// that retains one page's worth of names has to read every name to find
-    /// them. Retaining more is the only thing that would read fewer, and the
+    /// them. Retaining more in memory is what would read fewer, and the
     /// frontier's memory bound is what forbids that: a walk's memory is a
     /// function of depth and the fixed page size and never of one directory's
     /// fan-out. The listing cost is therefore `width * pages`, quadratic in the
@@ -1890,6 +2068,13 @@ mod tests {
     /// each of `ceil(10000 / 256) = 40` pages. Nothing but the width and the
     /// page size moves it — no host, filesystem or listing order does — so the
     /// bar is the figure itself with no headroom.
+    ///
+    /// A spill would keep the memory bound and read each name once, so the bound
+    /// is not the whole of the grounds; the rest is that it makes a read of the
+    /// vault need a writable place and widens the listing-to-stat window to the
+    /// whole walk of the directory, which [`directory_page`] states. That price
+    /// buys nothing at this width and is what a directory an order of magnitude
+    /// wider has to pay — [`WIDE_BAR_WIDTH`] says where the line is.
     ///
     /// It is spelled out rather than derived from [`FRONTIER_PAGE`], because a
     /// bar computed from the constant it is gating would move with it and gate
@@ -1923,7 +2108,11 @@ mod tests {
     /// hand holds. That one saves whatever the listing order lets it: everything
     /// past the first page's worth where the stream runs low keys first, and
     /// nothing at all where it runs them last. A bar over an order no filesystem
-    /// promises would be a bar over the filesystem.
+    /// promises would be a bar over the filesystem, so that rejection is held
+    /// where no order enters it:
+    /// `a_page_stops_identifying_a_name_its_run_is_already_full_past` asks the
+    /// decision directly, and removing it from the page leaves this bar's own
+    /// count sitting exactly on the bar.
     const WIDE_BAR_IDENTITIES: u64 = 200_359;
 
     /// **A wide directory's paging costs what its bars accept.**
