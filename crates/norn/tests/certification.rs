@@ -874,6 +874,7 @@ fn ledger_entries(ledger: &str) -> Vec<Vec<(&str, &str)>> {
 }
 
 /// One ledger field, by key.
+#[cfg(unix)]
 fn ledger_field<'a>(fields: &[(&'a str, &'a str)], key: &str) -> &'a str {
     fields
         .iter()
