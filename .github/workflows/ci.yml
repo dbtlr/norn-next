@@ -16,6 +16,24 @@
 # Performance clocks — the bars that fail when a number drifts — live in
 # soak.yml.
 #
+# **Every suite here runs through the flake tripwire.** This is the lane a
+# failure gets rerun on, and a rerun of a failure this workspace has already
+# ruled on leaves nothing behind. `.github/scripts/flake-tripwire.sh` runs the
+# suite, matches a failing run's output against the entries in
+# `.github/flake-ledger`, and writes each match into the run as an annotation
+# and a job-summary block naming the ruling. It changes no verdict and retries
+# nothing: the suite's own exit status is the step's.
+#
+# A step that reaches its suite through another script is wrapped on the
+# outside of it. `lane-suite.sh` runs `cargo test -- --ignored` and fails a step
+# that ran no case, so it is a suite step like any other and its output — the
+# suite's, and the script's own error — is what the tripwire scans.
+#
+# The scheduled tier does not wrap its steps the same way. Every one of its
+# suite logs is kept and its record is a typed artifact, so a recurrence there
+# is already written down; what the wrapper removes is the quiet rerun, which
+# is this lane's hazard.
+#
 # A job whose name carries a "(placeholder — ...)" suffix is structure only:
 # it passes trivially so the lane exists, triggers, and is reviewable before
 # it has teeth, and it is filled by whatever its comment names — a task where
@@ -81,7 +99,7 @@ jobs:
       - name: Lint the induced-failure targets
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
       - name: Test
-        run: cargo test --locked --workspace
+        run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace
       # Three crates declare an `induced-failure` feature, and the workspace test
       # above reaches two of them. norn-fs and norn-store each turn their own on
       # through a self dev-dependency, so those crates' lockdown and environment
@@ -90,7 +108,7 @@ jobs:
       # its lockdown suite are whole files behind it and compile to zero tests
       # there. This step is scoped to that crate for that reason.
       - name: Induced-failure recovery
-        run: cargo test --locked -p norn-host --features induced-failure
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
   # A targeted second-architecture gate. The default build already runs the
   # full workspace on Linux x86_64; this job holds the contracts whose
@@ -119,11 +137,11 @@ jobs:
         run: test "$(uname -m)" = arm64
       - uses: Swatinem/rust-cache@v2
       - name: Embedding determinism
-        run: cargo test --locked -p norn-embed --test determinism
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-embed --test determinism
       - name: Filesystem contracts
-        run: cargo test --locked -p norn-fs
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-fs
       - name: Host filesystem contracts
-        run: cargo test --locked -p norn-host --features induced-failure
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 
   # The architecture gate: it reads `cargo metadata` once per entry in the
   # pinned feature matrix and asserts the workspace normal-dependency graph
@@ -142,7 +160,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Gate
-        run: cargo test --locked -p norn-testkit --test architecture
+        run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-testkit --test architecture
 
   # The counter half is a real gate, over the path a request really takes: a
   # generated vault tree on disk, a production attachment that walked it, and
@@ -176,7 +194,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Counter bars
-        run: .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
 
   # A real gate. Each subject runs as a child under the testkit's process
   # harness, and what is read is the peak resident set the kernel accounted to
@@ -215,8 +233,8 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Memory bars
-        run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
-        run: .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
       - name: Attach memory bars
-        run: .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

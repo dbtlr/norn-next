@@ -84,6 +84,11 @@ pub const RUNNER: &str = "NORN_QUALIFICATION_RUNNER";
 /// The preflight's verdict, as `admitted` or `refused`. Absent where none ran.
 pub const PREFLIGHT: &str = "NORN_QUALIFICATION_PREFLIGHT";
 
+/// What the preflight said, in whatever vocabulary it owns — one line, because
+/// a job environment is line-oriented. Read as prose here and never parsed: the
+/// verdict is [`PREFLIGHT`], and this is the reason beside it.
+pub const PREFLIGHT_DETAIL: &str = "NORN_QUALIFICATION_PREFLIGHT_DETAIL";
+
 /// The watcher backend the lane's host installs coverage through.
 ///
 /// The workflow's, like [`RUNNER`], and for the same reason: the backend is a
@@ -625,13 +630,16 @@ pub fn from_environment(workspace_root: &Path) -> Result<Record, String> {
             Some("admitted") => Preflight {
                 ran: true,
                 admitted: Some(true),
-                detail: None,
+                detail: environment(PREFLIGHT_DETAIL),
             },
             Some("refused") => Preflight {
                 ran: true,
                 admitted: Some(false),
-                detail: None,
+                detail: environment(PREFLIGHT_DETAIL),
             },
+            // A verdict this does not recognise is no verdict: a preflight
+            // whose spelling changed is a host nobody checked, which is what
+            // the absent record says.
             _ => Preflight::absent(),
         },
         cases: REQUIRED_CASES
@@ -927,18 +935,34 @@ mod tests {
     /// A run nobody checked the machine for cannot qualify, and the reason is
     /// the environment rather than the product: nothing was concluded about the
     /// candidate.
+    ///
+    /// **A refused host reads the same way, and a green suite does not rescue
+    /// it.** Every case here passes: what the refusal says is that the machine
+    /// those passes were taken on is not one the layer counts, so the record
+    /// carries the outcomes and counts toward nothing.
     #[test]
-    fn a_run_with_no_preflight_is_environmental() {
+    fn a_run_with_no_admitted_preflight_is_environmental() {
         let root = workspace_root();
-        let mut record = qualifying_at(&root);
-        record.preflight = Preflight::absent();
-        record.classification = record.implied_classification();
-        assert_eq!(
-            record.classification,
-            Classification::NonQualifying {
-                reason: NonQualifying::Environment
-            }
-        );
+        for preflight in [
+            Preflight::absent(),
+            Preflight {
+                ran: true,
+                admitted: Some(false),
+                detail: Some("refused: 3.992 runnable per core".to_string()),
+            },
+        ] {
+            let mut record = qualifying_at(&root);
+            record.preflight = preflight.clone();
+            record.classification = record.implied_classification();
+            assert_eq!(
+                record.classification,
+                Classification::NonQualifying {
+                    reason: NonQualifying::Environment
+                },
+                "{preflight:?}"
+            );
+            assert!(!record.qualifies(&root), "{preflight:?}");
+        }
     }
 
     /// A run that never finished says nothing about the suite, so its reason is

@@ -14,6 +14,14 @@
 # cases those are, and `crates/norn-fs/src/watch.rs` is what decides the backend
 # each platform installs.
 #
+# **Each lane reads its own host before it builds anything.** A record is
+# qualifying only where a preflight admitted the machine, and the reading that
+# verdict turns on is how busy the machine was when the lane landed on it — so
+# it is taken at the top of the job, and classified at the end by
+# `norn_testkit::certification::preflight`. The suites' work bounds are not
+# widened for a loaded runner; the run is recorded as evidence about the
+# machine instead.
+#
 # **A scheduled run advances the count only where both records qualify.** The
 # five consecutive runs Layer 2 exits on are runs of this workflow, not of one
 # job in it: a night on which the macOS lane failed and the Linux lane passed
@@ -133,6 +141,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # Taken before anything is built, because the reading is of the machine
+      # this lane landed on and a cold cargo build is minutes of every core.
+      # The classification happens at the end of the job, off this line.
+      - name: Host-health reading
+        run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Determinism at the soak profile
         run: .github/scripts/lane-suite.sh norn-fixtures determinism
@@ -217,6 +230,29 @@ jobs:
       - name: Case outcomes from the certification logs
         if: ${{ !cancelled() }}
         run: cargo test --locked -p norn --test certification -- --nocapture
+      # **Whether this machine is an evidence source**, classified off the
+      # reading taken at the top of the job. The suites' work bounds are sized
+      # for a host with a core free for the work it is given; a host that would
+      # starve them is refused here rather than the bounds being widened, and
+      # the record then classifies as `environment` — nothing concluded, about
+      # a candidate or against one.
+      #
+      # It runs whatever the suites did. A refused machine is the reading a
+      # campaign most needs beside a failed case, and a record with no verdict
+      # is a host nobody checked, which is the same non-qualifying reason for a
+      # different fact.
+      #
+      # The verdict goes where `NORN_PREFLIGHT_SINK` names and is appended to
+      # the job environment, so the record step below reads it out of the
+      # environment like every other field: this file states no verdict of its
+      # own.
+      - name: Host-health preflight
+        if: always()
+        run: |
+          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
+          cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
+        env:
+          NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
       # What a run's result is worth depends on which suite produced it, so the
       # digest over the lanes, the toolchain, the lockfile, the inventory, the
       # qualification rules, the comparator, the fault seams, the certification
@@ -283,13 +319,6 @@ jobs:
       # The only run that legitimately leaves no record is the one this step
       # never reaches.
       #
-      # **This lane's records carry real case outcomes and are still
-      # non-qualifying**: the environmental preflight the record has a slot for
-      # does not exist yet, so every record classifies as `environment` until it
-      # lands. What changed with the certification steps above is what the
-      # reason says — a run that did not execute the cases and a run whose
-      # machine nobody checked are different facts, and the record now
-      # distinguishes them.
       - name: Upload the qualification record
         if: always()
         uses: actions/upload-artifact@v4
@@ -350,6 +379,11 @@ jobs:
       - name: Assert architecture
         id: architecture
         run: test "$(uname -m)" = arm64
+      # Taken before anything is built, for the reason the Linux lane above
+      # states. On this runner it also reads fseventsd, which is the service
+      # every real-watcher case here subscribes to.
+      - name: Host-health reading
+        run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       # The library target is one of them: five of the trust-transition cases
       # are unit tests of the host's lifecycle rather than integration suites,
@@ -383,6 +417,17 @@ jobs:
       - name: Case outcomes from the certification logs
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: cargo test --locked -p norn --test certification -- --nocapture
+      # The same classification the Linux lane runs, and on this runner it also
+      # reads fseventsd: a saturated or bloated event daemon delivers five to
+      # forty seconds late, which spends a real-watcher case's whole work bound
+      # with nothing wrong in the watcher.
+      - name: Host-health preflight
+        if: always()
+        run: |
+          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
+          cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
+        env:
+          NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
       # The volume's answer about case is probed by the record rather than
       # stated here, and on this runner it is the folding one: APFS folds case
       # by default, which is the other half of the platform coverage this job

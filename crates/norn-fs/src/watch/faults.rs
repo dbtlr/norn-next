@@ -382,6 +382,22 @@ pub(crate) struct WatchFaults {
     /// The file a fired arm records itself in, where anything named one.
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<PathBuf>,
+    /// The file the stream arm notes each delivery it **stood past** in, where
+    /// a case named one.
+    ///
+    /// A delivery the watcher folds into no batch reaches no consumer, so a
+    /// case stating that the arm stands past one has nothing in the
+    /// subscription to wait on: no batch carries it, and a wait for the absence
+    /// of an effect is a wall clock. This is what such a case waits on instead
+    /// — the arm's own note that it saw the delivery, while owed and past both
+    /// gates, and did not answer it.
+    ///
+    /// It is this crate's own suite's, which is why nothing outside a test
+    /// build carries it: an arm reached from a harness is read through its
+    /// firings, and a note per declined delivery would be one line per access
+    /// event a heal produced.
+    #[cfg(test)]
+    stood_past: Option<PathBuf>,
     /// Whether the barrier arm has already recorded itself. Shared across the
     /// clones one establishment makes, so a subscription waited on twice
     /// records one firing.
@@ -413,6 +429,19 @@ impl WatchFaults {
         }
     }
 
+    /// The same arm, additionally noting in `stood_past` every delivery the
+    /// stream arm met while owed and declined to answer.
+    ///
+    /// **What a case gets from it is an ordering it can observe.** A delivery
+    /// the watcher folds into no batch produces nothing a subscription reports,
+    /// so a case that has to put one at the arm before the change it *is* about
+    /// would otherwise sleep and hope. With this it waits for the note.
+    #[cfg(test)]
+    pub(crate) fn noting_deliveries_stood_past(mut self, stood_past: PathBuf) -> WatchFaults {
+        self.stood_past = Some(stood_past);
+        self
+    }
+
     /// What watch establishment passes.
     ///
     /// Without the `induced-failure` feature this is an empty arm and each
@@ -426,6 +455,8 @@ impl WatchFaults {
                 armed: armed::stages(),
                 hits: crate::faults::armed_hits().cloned(),
                 barrier_recorded: Arc::default(),
+                #[cfg(test)]
+                stood_past: None,
             }
         }
         #[cfg(not(feature = "induced-failure"))]
@@ -516,6 +547,8 @@ impl WatchFaults {
             heal,
             #[cfg(any(test, feature = "induced-failure"))]
             hits: self.hits.clone(),
+            #[cfg(test)]
+            stood_past: self.stood_past.clone(),
         }
     }
 
@@ -541,6 +574,8 @@ pub(crate) struct StreamArm {
     heal: HealWindow,
     #[cfg(any(test, feature = "induced-failure"))]
     hits: Option<PathBuf>,
+    #[cfg(test)]
+    stood_past: Option<PathBuf>,
 }
 
 impl StreamArm {
@@ -578,6 +613,8 @@ impl StreamArm {
         // spent on one of those would report a stream that failed or overflowed
         // over a delivery no consumer ever hears about.
         if !folds_into_a_batch(&event) {
+            #[cfg(test)]
+            note_stood_past(self.stood_past.as_deref(), &event);
             return Ok(event);
         }
         let Some(answer) = self.owed.take() else {
@@ -610,6 +647,44 @@ impl StreamArm {
 #[cfg(any(test, feature = "induced-failure"))]
 fn record(hits: Option<&Path>, stage: Stage, answer: Answer) {
     crate::faults::record_or_abort(hits, SEAM, stage.name(), answer.name());
+}
+
+/// Append one line naming a delivery the stream arm met while owed and stood
+/// past, as `stood-past <path> <path>…`.
+///
+/// A delivery with no path to name writes the bare keyword, which is what a
+/// pathless report is: the arm stood past something the watcher folds into no
+/// batch, and there is no place to say where.
+///
+/// **A note this cannot write is not fatal**, which parts it from
+/// [`record`]. A firing nobody recorded is a boundary a harness would read as
+/// never reached; a note is an ordering a case waits on, so a note that never
+/// lands ends that case at its own budget, naming what it was waiting for.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Test observation: this case's own note file, outside every watched tree.
+fn note_stood_past(stood_past: Option<&Path>, event: &Event) {
+    use std::io::Write as _;
+
+    let Some(stood_past) = stood_past else {
+        return;
+    };
+    let mut line = String::from("stood-past");
+    for path in &event.paths {
+        line.push(' ');
+        line.push_str(&path.display().to_string());
+    }
+    line.push('\n');
+    let noted = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stood_past)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(problem) = noted {
+        eprintln!(
+            "norn-fs: the stream arm could not note a delivery it stood past in {}: {problem}",
+            stood_past.display()
+        );
+    }
 }
 
 /// The arm this process was started under.

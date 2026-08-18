@@ -2119,8 +2119,20 @@ mod tests {
         (subscription, lease)
     }
 
+    /// The change a heal window is deliberately opened across, so that the
+    /// window closes on an observed delivery rather than on a guess.
+    ///
+    /// **A directory, because one write is not one delivery on every backend.**
+    /// inotify reports creating a document, writing it and closing it
+    /// separately, so a document here would leave reports still to come when
+    /// the window closes on the first of them — and the next one past the
+    /// window spends the arm every case in this family is about to state
+    /// something over. Creating a directory is one report everywhere.
+    const TAKEN_UP: &str = "taken-up";
+
     /// Take up the coverage the way a consumer does: open a heal window over
-    /// it and close it again.
+    /// it, make a change across it, wait for the window to take that change
+    /// up, and close it again.
     ///
     /// **This is the other half of what makes a stream arm eligible.** A
     /// consumer heals the tree under the watch it just installed and takes
@@ -2128,11 +2140,190 @@ mod tests {
     /// own batch, so the first delivery it meets as a change is the one after
     /// the window closes. Nothing is read out of the heal here: what the cases
     /// below are about is what happens *after* it.
-    fn taken_up_by_a_heal(subscription: &Subscription) {
-        subscription.begin_heal();
+    ///
+    /// **The observed delivery is what makes "after" a fact.** Establishment
+    /// delivers too — a native backend replays event history into the handler
+    /// — and a replayed delivery can arrive after the boundary the marker
+    /// publishes, because fseventsd numbers an event when it processes it. A
+    /// window closed without waiting for anything therefore closes at an
+    /// unknown point in the backend's own sequence, and an establishment
+    /// delivery landing just after it spends the arm every case below is about
+    /// to state something over. Waiting for a change made *after* establishment
+    /// to reach the handler puts the whole of establishment behind the window,
+    /// because a backend delivers in order.
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path, hits: &Path) {
+        let already_reported = open_a_heal_window(subscription);
+        std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change the heal window is open across");
+        wait_for_the_window_to_take_up(label, subscription, hits, TAKEN_UP, &already_reported);
         subscription
             .finish_heal()
             .expect("the heal window closes over live coverage");
+    }
+
+    /// Open a heal window, and hand back the rescans its accumulation already
+    /// holds.
+    ///
+    /// **The reading is what tells a companion rescan from an earlier one.** A
+    /// rescan says the backend lost the path set, so one that arrives with or
+    /// after a change stands in place of the report that would have named it and
+    /// ends the wait below. One that was already here stands in place of
+    /// nothing — it belongs to something earlier, an establishment replay that
+    /// dropped events among it — and closing the window on it leaves the
+    /// change's own report still to come, past the window, with the arm owed and
+    /// eligible. Read once, before the change is made, so the wait can require a
+    /// rescan it did not already have.
+    fn open_a_heal_window(subscription: &Subscription) -> BTreeSet<RescanScope> {
+        subscription.begin_heal();
+        let state = subscription.state.lock().expect("watch state poisoned");
+        state
+            .pending
+            .as_ref()
+            .map(|pending| pending.batch.rescans().clone())
+            .unwrap_or_default()
+    }
+
+    /// Wait for the heal window a caller has open to take up a delivery naming
+    /// `named`, or a rescan it did not open holding.
+    ///
+    /// **An open heal window is where a delivery is observable without a batch
+    /// being emitted.** The coalescer parks while a heal is open and ingest
+    /// keeps folding deliveries into the accumulation
+    /// [`Subscription::finish_heal`] hands back, so what the backend has
+    /// delivered so far is readable in the pending batch. That is what lets a
+    /// case here order itself against the backend's own delivery instead of
+    /// against elapsed time.
+    ///
+    /// **A rescan the window did not open holding ends the wait too.** A report
+    /// that the path set is lost names no path and stands in place of the one
+    /// that would have named this change, so the window has taken a delivery up
+    /// either way. Waiting past it for a name that is not coming would end the
+    /// case at its budget instead of at whatever it went on to assert about the
+    /// accumulation. `already_reported` is what keeps that from admitting a
+    /// rescan belonging to something earlier — see [`open_a_heal_window`].
+    ///
+    /// **A firing while the wait is open ends it at once.** Every caller is
+    /// about to state something over an arm that is still owed, so a record in
+    /// `hits` here is the answer that case was going to look for, given inside
+    /// the window rather than after it. Read in the loop, because a wait that
+    /// found out afterwards would spend its whole work bound first and report a
+    /// spent arm as a host too slow to deliver — which is the one diagnosis this
+    /// workspace has already ruled is not what a bound expiry means.
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
+    fn wait_for_the_window_to_take_up(
+        label: &str,
+        subscription: &Subscription,
+        hits: &Path,
+        named: &str,
+        already_reported: &BTreeSet<RescanScope>,
+    ) {
+        norn_testkit::wait::wait_until(
+            &format!("the open heal window to take up `{named}`"),
+            watch_budget(),
+            || {
+                assert!(
+                    std::fs::metadata(hits).is_err(),
+                    "{label}: the arm answered a delivery the heal window was open across, so it \
+                     was spent inside the window rather than past it: {}",
+                    recorded(hits)
+                );
+                let state = subscription.state.lock().expect("watch state poisoned");
+                let Some(pending) = state.pending.as_ref() else {
+                    return norn_testkit::wait::Observed::Pending("nothing taken up".to_string());
+                };
+                let taken: Vec<String> = pending
+                    .batch
+                    .vault_roots()
+                    .iter()
+                    .map(|root| root.as_path().display().to_string())
+                    .collect();
+                let lost_the_path_set = pending
+                    .batch
+                    .rescans()
+                    .difference(already_reported)
+                    .next()
+                    .is_some();
+                if taken.iter().any(|root| root == named) || lost_the_path_set {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::Pending(format!(
+                        "{taken:?}, rescans {:?}",
+                        pending.batch.rescans()
+                    ))
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+    }
+
+    /// Wait for the arm to note that it met a delivery naming `named` while
+    /// owed, and stood past it.
+    ///
+    /// The seam's note is the only observation of such a delivery there is: it
+    /// reaches no batch, so nothing a subscription reports carries it. A case
+    /// that needs one at the arm *before* the change it is really about waits
+    /// here.
+    ///
+    /// **A firing while the wait is open ends it at once.** The arm holds one
+    /// answer, so a record appearing in `hits` before the note does says the
+    /// arm answered something — and on this path the only candidate is a
+    /// delivery it was supposed to stand past. Read here rather than after the
+    /// wait, because after the wait the whole budget has already been spent on
+    /// a note that was never coming.
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record and note files.
+    fn wait_for_the_arm_to_stand_past(label: &str, hits: &Path, notes: &Path, named: &str) {
+        norn_testkit::wait::wait_until(
+            &format!("the arm to stand past a delivery naming `{named}`"),
+            watch_budget(),
+            || {
+                assert!(
+                    std::fs::metadata(hits).is_err(),
+                    "{label}: the arm answered a delivery it stands past, so it was spent on a \
+                     change no consumer ever hears about: {}",
+                    recorded(hits)
+                );
+                let noted = std::fs::read_to_string(notes).unwrap_or_default();
+                if noted.lines().any(|line| line.contains(named)) {
+                    norn_testkit::wait::Observed::Met(())
+                } else {
+                    norn_testkit::wait::Observed::Pending(noted)
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+    }
+
+    /// Wait for a batch naming `named` among its vault roots, and hand back
+    /// every batch seen on the way to it, in order.
+    ///
+    /// **This is how a case here bounds a negative.** "No batch ever reports
+    /// this path" is a claim about the future, and elapsed time is not what
+    /// ends it: a backend delivers in order, so a change made after the one
+    /// under assertion, once its report has arrived, puts every earlier report
+    /// in the batches already drained.
+    fn batches_up_to(label: &str, subscription: &Subscription, named: &str) -> Vec<Batch> {
+        let mut drained: Vec<Batch> = Vec::new();
+        norn_testkit::wait::wait_until(
+            &format!("a batch naming `{named}`, and every batch before it"),
+            watch_budget(),
+            || match subscription.try_recv() {
+                Ok(Some(batch)) => {
+                    let reached = batch
+                        .vault_roots()
+                        .iter()
+                        .any(|root| root.as_path() == Path::new(named));
+                    drained.push(batch);
+                    if reached {
+                        norn_testkit::wait::Observed::Met(())
+                    } else {
+                        norn_testkit::wait::Observed::Pending(format!("{drained:?}"))
+                    }
+                }
+                other => norn_testkit::wait::Observed::Pending(format!("{other:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+        drained
     }
 
     /// The two backends a stream case runs over, and what a failure calls each.
@@ -2150,6 +2341,11 @@ mod tests {
     /// attach — establishment failing, not a live subscription failing — while
     /// writing the same record a legitimate firing writes, so a case reading
     /// that record would pass over the wrong condition entirely.
+    ///
+    /// **The negative is read at an observed point in the backend's sequence.**
+    /// The heal window closes on a delivery made after establishment and seen
+    /// to arrive, so "nothing recorded" is read with the whole of establishment
+    /// behind it rather than at whatever moment the case reached the assertion.
     #[test]
     #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
     fn an_armed_stream_answers_nothing_while_the_backend_establishes_itself() {
@@ -2164,7 +2360,7 @@ mod tests {
             );
 
             assert_eq!(subscription.state(), SubscriptionState::Live, "{label}");
-            taken_up_by_a_heal(&subscription);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
             assert!(
                 std::fs::metadata(&hits).is_err(),
                 "{label}: the stream arm answered a delivery from before a consumer met one"
@@ -2192,26 +2388,36 @@ mod tests {
     /// and closing it separately, so a displaced create would leave the rest to
     /// name the path anyway. Creating a directory is one report everywhere.
     ///
-    /// The settle before the vault is touched is ordering rather than proof: it
-    /// puts the sibling's delivery at the handler first, so an arm that answers
-    /// on paths it should discard answers on that one.
+    /// **The sibling is put at the arm before the vault is touched, and that is
+    /// observed rather than waited out.** A delivery the watcher folds into no
+    /// batch reaches no consumer, so the arm's own note of the deliveries it
+    /// stood past is the only place it surfaces — and the ordering is the whole
+    /// discriminator here. An arm spent on the vault's change because the
+    /// sibling had not arrived yet passes this case while proving nothing.
+    ///
+    /// **The closing negative is bounded by a later change, not by a clock.** A
+    /// backend delivers in order, so once the report of a change made after the
+    /// vault's own change has arrived, every earlier report is in the batches
+    /// already drained.
     #[test]
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn an_armed_stream_answers_nothing_for_a_delivery_that_reaches_no_batch() {
         for (label, poll) in BACKENDS {
             let (scratch, vault, schema, hits) =
                 armed_tree(&format!("watch-stream-discarded-{label}"));
+            let notes = hits.with_file_name("stood-past");
             let (subscription, _lease) = established_past_the_boundary(
                 &vault,
                 &schema,
                 poll,
-                WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
+                WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone())
+                    .noting_deliveries_stood_past(notes.clone()),
             );
-            taken_up_by_a_heal(&subscription);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::create_dir(scratch.path("beside-the-vault"))
                 .expect("a directory beside the tree, under the parent edge");
-            std::thread::sleep(DELIVERED_BY_NOW);
+            wait_for_the_arm_to_stand_past(label, &hits, &notes, "beside-the-vault");
             std::fs::create_dir(vault.join("inside")).expect("a real change under a real watch");
 
             let widened = norn_testkit::wait::wait_until(
@@ -2229,9 +2435,12 @@ mod tests {
 
             // The arm stood in place of the vault's own delivery, so nothing
             // reports that place by path. A batch that names it is an arm that
-            // was spent on the sibling directory instead.
-            std::thread::sleep(DELIVERED_BY_NOW);
-            while let Ok(Some(batch)) = subscription.try_recv() {
+            // was spent on the sibling directory instead. The change below is
+            // what says the stream has carried past the delivery in question:
+            // it is reported by path, because the arm is spent.
+            std::fs::write(vault.join("after.md"), b"after\n")
+                .expect("a change after the arm was spent");
+            for batch in batches_up_to(label, &subscription, "after.md") {
                 assert!(
                     !batch
                         .vault_roots()
@@ -2258,6 +2467,19 @@ mod tests {
     /// The forbidden shape is the arm answering inside the window. The heal
     /// absorbs whatever it answered with, and the case that armed it then waits
     /// for a transition that already happened where nobody was looking.
+    ///
+    /// **The window is closed on the delivery, not on a clock.** What makes the
+    /// negative mean anything is that the change really did reach the handler
+    /// while the window was open, and the accumulation the heal is about to
+    /// hand back is where that is readable: a window closed before the delivery
+    /// arrived would state the case over an empty window.
+    ///
+    /// **The change is a directory, for [`TAKEN_UP`]'s reason.** One write is
+    /// not one delivery on every backend — inotify reports creating a document,
+    /// writing it and closing it separately — so a document here would let the
+    /// window close on the first of its reports with the rest still to come, and
+    /// the next one past the window would spend the arm this case is about to
+    /// say was never spent.
     #[test]
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn an_armed_stream_answers_nothing_inside_the_first_heal_window() {
@@ -2271,10 +2493,16 @@ mod tests {
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
             );
 
-            subscription.begin_heal();
-            std::fs::write(vault.join("healed.md"), b"healed\n")
+            let already_reported = open_a_heal_window(&subscription);
+            std::fs::create_dir(vault.join("healed"))
                 .expect("a change the heal window is open across");
-            std::thread::sleep(DELIVERED_BY_NOW);
+            wait_for_the_window_to_take_up(
+                label,
+                &subscription,
+                &hits,
+                "healed",
+                &already_reported,
+            );
             let observed = subscription
                 .finish_heal()
                 .expect("the heal window closes over live coverage");
@@ -2311,15 +2539,6 @@ mod tests {
         }
     }
 
-    /// How long a case waits before it says a delivery that was going to arrive
-    /// has arrived.
-    ///
-    /// Four polling intervals, which is the slower of the two backends by a
-    /// wide margin: a native stream is built with no latency at all. It orders
-    /// two deliveries against each other rather than proving a negative — every
-    /// case here reads its verdict off a positive signal that follows.
-    const DELIVERED_BY_NOW: Duration = Duration::from_secs(1);
-
     /// **An armed stream failure is the last thing the subscription carries.**
     /// It stands in place of a delivery the backend really made, and what
     /// follows is what follows a backend that failed on its own: a terminal
@@ -2342,7 +2561,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone()),
             );
-            taken_up_by_a_heal(&subscription);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
@@ -2398,7 +2617,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
             );
-            taken_up_by_a_heal(&subscription);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
@@ -2467,11 +2686,11 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn a_settled_batch_names_a_case_flip_at_the_spelling_the_tree_renders() {
         for (label, poll) in BACKENDS {
-            let (_scratch, vault, schema, _hits) = armed_tree(&format!("watch-case-flip-{label}"));
+            let (_scratch, vault, schema, hits) = armed_tree(&format!("watch-case-flip-{label}"));
             std::fs::write(vault.join("flipping.md"), b"before\n").expect("the file to flip");
             let (subscription, _lease) =
                 established_past_the_boundary(&vault, &schema, poll, WatchFaults::default());
-            taken_up_by_a_heal(&subscription);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
             let folding = subscription
                 .state
                 .lock()
@@ -2482,18 +2701,33 @@ mod tests {
 
             std::fs::rename(vault.join("flipping.md"), vault.join("FLIPPING.md"))
                 .expect("a rename that only flips case");
+            // A change after the rename, and one report of it on every backend.
+            // It is what closes the fold: a backend delivers in order, so a
+            // report naming this directory says every report the rename
+            // produced is already in the fold — both spellings of a backend
+            // that split it, in whichever order it split them.
+            std::fs::create_dir(vault.join(PAST_THE_FLIP)).expect("a change after the rename");
 
             // The host folds the batches it drains in arrival order, so the
             // case reads what that fold produces rather than any one delivery.
+            //
+            // **The fold is held open past the whole rename.** A backend that
+            // splits it reports the two spellings in either order, and the
+            // answer this case pins is which spelling survives the fold — which
+            // a fold closed at the first report of the pair cannot state. A fold
+            // closed at the *rendered* spelling cannot either: on the polling
+            // backend the arrival of the new name is reported before the
+            // disappearance of the old one, so the retired spelling would still
+            // be in flight, and the shape this case forbids would go unobserved.
             let mut settled = Batch::default();
             norn_testkit::wait::wait_until(
-                "a settled batch naming the flipped file",
+                &format!("a settled batch naming `{PAST_THE_FLIP}`, with the rename behind it"),
                 watch_budget(),
                 || {
                     while let Ok(Some(batch)) = subscription.try_recv() {
                         settled.merge(batch);
                     }
-                    if names_the_flip(&settled) {
+                    if names(&settled, PAST_THE_FLIP) {
                         norn_testkit::wait::Observed::Met(())
                     } else {
                         norn_testkit::wait::Observed::Pending(format!("{settled:?}"))
@@ -2501,12 +2735,11 @@ mod tests {
                 },
             )
             .unwrap_or_else(|failure| panic!("{label}: {failure}"));
-            // A backend that splits the rename across batches has the rest of
-            // it delivered by now, and the fold takes those too.
-            std::thread::sleep(DELIVERED_BY_NOW);
-            while let Ok(Some(batch)) = subscription.try_recv() {
-                settled.merge(batch);
-            }
+            assert!(
+                names_the_rendered_spelling(&settled),
+                "{label}: the fold carried past the rename and never named the spelling the tree \
+                 renders: {settled:?}"
+            );
 
             let named: Vec<_> = settled
                 .vault_roots()
@@ -2528,12 +2761,23 @@ mod tests {
         }
     }
 
-    /// Whether a folded batch names either spelling of the flipped file.
-    fn names_the_flip(batch: &Batch) -> bool {
+    /// The change made after the case flip, whose report closes the fold the
+    /// flip is read out of. A directory, because one write is not one delivery
+    /// on every backend — the reason [`TAKEN_UP`] is one.
+    const PAST_THE_FLIP: &str = "past-the-flip";
+
+    /// Whether a folded batch names the flipped file at the spelling the tree
+    /// renders after the rename.
+    fn names_the_rendered_spelling(batch: &Batch) -> bool {
+        names(batch, "FLIPPING.md")
+    }
+
+    /// Whether a folded batch names `path` among its vault roots.
+    fn names(batch: &Batch, path: &str) -> bool {
         batch
             .vault_roots()
             .iter()
-            .any(|root| root.as_path().to_string_lossy().to_ascii_lowercase() == "flipping.md")
+            .any(|root| root.as_path() == Path::new(path))
     }
 
     #[test]

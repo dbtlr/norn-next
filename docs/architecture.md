@@ -194,11 +194,20 @@ run's harness output, and reads the case lines off those logs rather than off a 
 verdict of the suite. A scheduled run is one entry in the five, and it counts when every
 record that run uploaded qualifies.
 
-**No run today can qualify, and the machinery says so rather than implying otherwise.** What
-is missing is the environmental preflight: nothing classifies the host, so every record
-carries a preflight that did not run and classifies as `environment` however the cases went.
-That is the one remaining term, and the record already carries the slot its verdict lands
-in. What is built is everything else that makes a run's claim checkable.
+**The host-health preflight decides which machines are evidence sources.** The suites'
+authored work bounds are bounds on work, sized for a machine with a core free for the work it
+is given; a machine that does not have one measures its own queue at the bound, and a run
+that ends there leaves the case's claim unproven rather than failed. The bounds stand and the
+evidence is gated instead: each lane reads its host before it builds anything — how much of
+the machine is already busy, sampled over a window rather than read off a decayed load
+average, and on Darwin the processor share and resident set of the event daemon every
+real-watcher case subscribes to — classifies the reading against a closed set of refusal
+reasons, and the verdict is what fills the record's preflight slot. A refused host is
+non-qualifying for the environment however green the cases went, and the same probe run
+locally is what classifies a local suite failure as noise rather than signal:
+`cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture`,
+run on its own after the failing suite rather than beside it, because a probe sampling the
+machine while a suite runs on it reads that suite.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle
@@ -1242,11 +1251,16 @@ Two contracts inside that flow carry weight:
   tier, and that tier's two jobs — the Linux measurement lane and the macOS certification
   lane — each run the certification cases and emit the qualification record they leave
   behind. The job comments are the in-repo marker for which gate is filled and which is
-  still a placeholder.
+  still a placeholder. Every per-PR suite step runs through
+  `.github/scripts/flake-tripwire.sh`, which matches a failing run's output against the
+  ruled-on entries in `.github/flake-ledger` and writes each match into the run as an
+  annotation and a job-summary block. It changes no verdict and retries nothing: what it
+  removes is the rerun that leaves a second occurrence unrecorded.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
   inventory of required cases and the table of trust-transition arms nothing reaches at the
   production path — empty as it stands, and kept as the shape the next one arrives in — the
-  suite-manifest digest, the reader that turns a lane's suite logs into case lines, and the
+  suite-manifest digest, the reader that turns a lane's suite logs into case lines, the
+  host-health preflight that decides whether a machine is an evidence source, and the
   qualification record with the validator a campaign counts through. What makes a run qualifying is stated there in code; the suite that holds
   the inventory to the built suites, prints the unreached arms, and pins what the digest
   covers is `crates/norn/tests/certification.rs`.
