@@ -585,6 +585,23 @@ mod tests {
         fs::remove_dir_all(parent).expect("remove scratch");
     }
 
+    /// A root the process cannot enumerate is not an indeterminate root: the
+    /// two refusals name different situations, and only this one carries the
+    /// error the filesystem gave.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: naming a root that is not there.
+    fn detection_refuses_a_root_it_cannot_enumerate() {
+        let parent = scratch();
+        let root = parent.join("123");
+        let refusal = PathNormalizer::detect(&root).expect_err("an absent root");
+        assert!(
+            matches!(&refusal, NormalizerError::ReadRoot { root: named, source }
+                if named == &root && source.kind() == io::ErrorKind::NotFound),
+            "{refusal:?}"
+        );
+        fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a root without case evidence.
     fn detection_refuses_when_the_root_has_no_case_evidence() {
