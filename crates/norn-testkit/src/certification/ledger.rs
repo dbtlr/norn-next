@@ -70,6 +70,9 @@ pub const SINK: &str = "NORN_QUALIFICATION_LEDGER";
 /// A case with no line is [`Outcome::NotRun`], which is what a lane that never
 /// reached it produced — and what makes the record of a lane that ran no
 /// certification suite at all read as the suite change it is.
+///
+/// A lane writes it through [`super::lane::collect`], off the harness output
+/// its suite steps kept.
 pub const OUTCOMES: &str = "NORN_QUALIFICATION_OUTCOMES";
 
 /// How the run ended, as the workflow saw its own job.
