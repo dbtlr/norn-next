@@ -76,6 +76,14 @@
 //! bars that use them land with the subjects they measure, because a bar is
 //! authored against one subject and moves only by a reviewed edit.
 //!
+//! [`scratch`] is the one spelling of a temporary directory a case owns: the
+//! name that cannot collide with a concurrent binary's or with a second tree
+//! in this one, and the removal that survives a case which made a directory
+//! unsearchable. It carries the naming and the lifecycle and nothing else,
+//! because what a suite arranges inside its tree differs per suite while the
+//! way a tree is named and taken away does not. [`process::Sandbox`] is that
+//! lifecycle plus one arrangement — the environment bases a child run reads.
+//!
 //! [`isolation`] holds the suites apart where the machine has one of
 //! something. Its leases are cross-process, because the runner's own
 //! parallelism spans processes: a case holding a real platform watcher
@@ -122,5 +130,6 @@ pub mod process;
 pub mod readings;
 pub mod regression;
 pub mod scale;
+pub mod scratch;
 pub mod wait;
 pub mod work;

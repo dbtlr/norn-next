@@ -64,6 +64,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::poll;
+use crate::scratch::Scratch;
 
 /// The environment variables a run is given, beyond `PATH`. Each points into
 /// the sandbox, so a run's machine-local state is its own.
@@ -80,11 +81,13 @@ pub const ISOLATED_VARIABLES: &[&str] = &[
 /// kilobytes.
 const MAX_RSS_IN_BYTES: bool = cfg!(any(target_os = "macos", target_os = "ios"));
 
-static NEXT_SANDBOX: AtomicU64 = AtomicU64::new(0);
-
 /// A private directory tree that one run owns and that is removed with it.
+///
+/// The naming and the lifecycle are [`crate::scratch::Scratch`]'s; what this
+/// adds is the arrangement a child run reads — one directory per isolated
+/// environment variable.
 pub struct Sandbox {
-    root: PathBuf,
+    tree: Scratch,
     runs: AtomicU64,
 }
 
@@ -95,27 +98,25 @@ impl Sandbox {
     /// concurrent tests — in one process or several — never collide.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the sandbox is this crate's to build.
     pub fn new(base: &Path, label: &str) -> io::Result<Sandbox> {
-        let serial = NEXT_SANDBOX.fetch_add(1, Ordering::Relaxed);
-        let root = base.join(format!("{label}-{}-{serial}", std::process::id()));
-        std::fs::remove_dir_all(&root).or_else(ignore_missing)?;
+        let tree = Scratch::under(base, label)?;
         for directory in [
             "home", "tmp", "config", "data", "cache", "state", "bin", "work",
         ] {
-            std::fs::create_dir_all(root.join(directory))?;
+            std::fs::create_dir_all(tree.join(directory))?;
         }
         Ok(Sandbox {
-            root,
+            tree,
             runs: AtomicU64::new(0),
         })
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        self.tree.root()
     }
 
     /// The directory a run starts in.
     pub fn work_dir(&self) -> PathBuf {
-        self.root.join("work")
+        self.tree.join("work")
     }
 
     /// The environment a run is given: the allowlist, pointed inside this
@@ -130,15 +131,15 @@ impl Sandbox {
     /// root is what makes a child's real watcher queue behind its parent's.
     pub fn environment(&self) -> BTreeMap<String, OsString> {
         let mut environment: BTreeMap<String, OsString> = BTreeMap::new();
-        environment.insert("HOME".to_string(), self.root.join("home").into());
-        environment.insert("TMPDIR".to_string(), self.root.join("tmp").into());
-        environment.insert("XDG_CACHE_HOME".to_string(), self.root.join("cache").into());
+        environment.insert("HOME".to_string(), self.tree.join("home").into());
+        environment.insert("TMPDIR".to_string(), self.tree.join("tmp").into());
+        environment.insert("XDG_CACHE_HOME".to_string(), self.tree.join("cache").into());
         environment.insert(
             "XDG_CONFIG_HOME".to_string(),
-            self.root.join("config").into(),
+            self.tree.join("config").into(),
         );
-        environment.insert("XDG_DATA_HOME".to_string(), self.root.join("data").into());
-        environment.insert("XDG_STATE_HOME".to_string(), self.root.join("state").into());
+        environment.insert("XDG_DATA_HOME".to_string(), self.tree.join("data").into());
+        environment.insert("XDG_STATE_HOME".to_string(), self.tree.join("state").into());
         environment.insert(
             crate::isolation::ISOLATION_ROOT.to_string(),
             crate::isolation::root().into(),
@@ -163,7 +164,7 @@ impl Sandbox {
                 format!("{} names no file", source.display()),
             )
         })?;
-        let installed = self.root.join("bin").join(name);
+        let installed = self.tree.join("bin").join(name);
         std::fs::copy(source, &installed)?;
         #[cfg(unix)]
         {
@@ -175,13 +176,6 @@ impl Sandbox {
 
     fn next_run(&self) -> u64 {
         self.runs.fetch_add(1, Ordering::Relaxed)
-    }
-}
-
-impl Drop for Sandbox {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: a sandbox outlives nothing.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -266,8 +260,8 @@ impl<'a> Run<'a> {
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: the run's own output files.
     pub fn wait(self) -> io::Result<Outcome> {
         let serial = self.sandbox.next_run();
-        let out_path = self.sandbox.root.join(format!("run-{serial}.stdout"));
-        let err_path = self.sandbox.root.join(format!("run-{serial}.stderr"));
+        let out_path = self.sandbox.tree.join(format!("run-{serial}.stdout"));
+        let err_path = self.sandbox.tree.join(format!("run-{serial}.stderr"));
 
         // Output goes to files rather than pipes: a pipe nobody is reading
         // fills and stops the child, and the harness has to wait on the child
@@ -544,14 +538,6 @@ pub fn open_fd_count() -> io::Result<usize> {
             "{FD_DIRECTORY} listed nothing, so the iterator's own descriptor is not in its listing"
         ))
     })
-}
-
-fn ignore_missing(error: io::Error) -> io::Result<()> {
-    if error.kind() == io::ErrorKind::NotFound {
-        Ok(())
-    } else {
-        Err(error)
-    }
 }
 
 #[cfg(test)]

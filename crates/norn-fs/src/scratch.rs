@@ -6,12 +6,8 @@
 //! in which paths they asked for, which is a method rather than a type.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shadow::{MaintainershipKey, Placement, ShadowHome};
-
-/// Distinguishes two scratch trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
 
 /// The maintainership one scratch tree's home is keyed by. One key per tree is
 /// all a case needs; the cases about two keys spell their own.
@@ -20,8 +16,11 @@ pub(crate) fn key() -> MaintainershipKey {
 }
 
 /// A tree under the system temporary directory, removed when this is dropped.
+///
+/// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
+/// this adds is the vault root and the resolved shadow home a case works over.
 pub(crate) struct Scratch {
-    root: PathBuf,
+    tree: norn_testkit::scratch::Scratch,
     shadows: ShadowHome,
 }
 
@@ -33,16 +32,11 @@ impl Scratch {
     /// contract wants and the one a case should be exercising.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this test works over.
     pub(crate) fn new(label: &str) -> Scratch {
-        let root = std::env::temp_dir().join(format!(
-            "norn-fs-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("vault")).expect("a vault root");
+        let tree = norn_testkit::scratch::Scratch::new(&format!("norn-fs-{label}"));
+        std::fs::create_dir_all(tree.join("vault")).expect("a vault root");
         let shadows = ShadowHome::resolve(
-            &root.join("vault"),
-            &root.join("data/vaults/notes/tmp"),
+            &tree.join("vault"),
+            &tree.join("data/vaults/notes/tmp"),
             &key(),
         )
         .expect("a shadow home");
@@ -52,7 +46,7 @@ impl Scratch {
             "the scratch tree straddles two filesystems, so no case here is \
              exercising the placement the contract wants"
         );
-        Scratch { root, shadows }
+        Scratch { tree, shadows }
     }
 
     /// The shadow home writes in this tree stage into.
@@ -62,12 +56,12 @@ impl Scratch {
 
     /// A path anywhere under the tree. Nothing is created.
     pub(crate) fn path(&self, relative: &str) -> PathBuf {
-        self.root.join(relative)
+        self.tree.join(relative)
     }
 
     /// A path inside the vault. Nothing is created.
     pub(crate) fn at(&self, relative: &str) -> PathBuf {
-        self.root.join("vault").join(relative)
+        self.tree.join("vault").join(relative)
     }
 
     /// A directory under the tree.
@@ -133,12 +127,5 @@ impl Scratch {
             .collect();
         names.sort();
         names
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this test made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }

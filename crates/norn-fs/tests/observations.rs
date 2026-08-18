@@ -4,51 +4,43 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use norn_fs::{ContentHash, Refusal, path_identity, read_and_hash, read_optional_and_hash};
-
-/// Distinguishes two scratch trees taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
+use norn_testkit::scratch;
 
 /// Long enough that a machine under load does not fail the case, short enough
 /// that a read waiting on a writer that will never come is reported instead of
 /// hanging the suite.
 const ANSWER_BUDGET: Duration = Duration::from_secs(20);
 
-struct Scratch(PathBuf);
+/// The tree one case reads from, with the one entry kind a plain write cannot
+/// make.
+struct Scratch(scratch::Scratch);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "norn-fs-observations-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir(&path).expect("scratch directory");
-        Self(path)
+        Self(scratch::Scratch::new(&format!(
+            "norn-fs-observations-{label}"
+        )))
     }
 
     fn anchor(&self) -> &Path {
-        &self.0
+        self.0.root()
     }
 
+    fn at(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
+
+    /// A named pipe, which is what a read that never returns is arranged over.
     fn fifo(&self, name: &str) {
         let status = std::process::Command::new("mkfifo")
             .arg(self.0.join(name))
             .status()
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo failed");
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -70,7 +62,7 @@ fn within_budget<T: Send + 'static>(
 #[test]
 fn configured_file_bytes_and_fingerprint_are_one_observation() {
     let scratch = Scratch::new("schema");
-    let schema = scratch.0.join("schema.toml");
+    let schema = scratch.at("schema.toml");
     fs::write(&schema, b"version = 1\n").expect("schema bytes");
 
     let observed =
@@ -93,11 +85,11 @@ fn configured_file_bytes_and_fingerprint_are_one_observation() {
 #[test]
 fn a_missing_name_and_a_linked_name_are_distinct_refusals() {
     let scratch = Scratch::new("missing-schema");
-    let missing = scratch.0.join("missing.toml");
-    let dangling = scratch.0.join("dangling.toml");
-    let resolving = scratch.0.join("resolving.toml");
+    let missing = scratch.at("missing.toml");
+    let dangling = scratch.at("dangling.toml");
+    let resolving = scratch.at("resolving.toml");
     symlink(&missing, &dangling).expect("dangling schema name");
-    fs::write(scratch.0.join("target.toml"), b"version = 1\n").expect("link target");
+    fs::write(scratch.at("target.toml"), b"version = 1\n").expect("link target");
     symlink("target.toml", &resolving).expect("resolving schema name");
 
     let Refusal::Environment {
@@ -138,9 +130,9 @@ fn a_missing_name_and_a_linked_name_are_distinct_refusals() {
 #[test]
 fn no_component_below_the_anchor_is_followed_through_a_link() {
     let scratch = Scratch::new("linked-ancestor");
-    fs::create_dir_all(scratch.0.join("real/sub")).expect("real subtree");
-    fs::write(scratch.0.join("real/sub/doc.md"), b"body").expect("document bytes");
-    symlink("real", scratch.0.join("link")).expect("ancestor link");
+    fs::create_dir_all(scratch.at("real/sub")).expect("real subtree");
+    fs::write(scratch.at("real/sub/doc.md"), b"body").expect("document bytes");
+    symlink("real", scratch.at("link")).expect("ancestor link");
 
     assert_eq!(
         read_optional_and_hash(scratch.anchor(), Path::new("real/sub/doc.md"))
@@ -176,10 +168,10 @@ fn no_component_below_the_anchor_is_followed_through_a_link() {
 #[test]
 fn a_name_that_leaves_the_anchor_is_refused_rather_than_resolved() {
     let scratch = Scratch::new("uncontained");
-    let anchor = scratch.0.join("vault");
+    let anchor = scratch.at("vault");
     fs::create_dir(&anchor).expect("anchor directory");
-    fs::write(scratch.0.join("outside.md"), b"outside").expect("outside canary");
-    let absolute = scratch.0.join("outside.md");
+    fs::write(scratch.at("outside.md"), b"outside").expect("outside canary");
+    let absolute = scratch.at("outside.md");
 
     for relative in [Path::new("../outside.md"), absolute.as_path()] {
         let refusal = read_optional_and_hash(&anchor, relative)
@@ -231,7 +223,7 @@ fn a_pipe_at_a_name_is_refused_without_waiting_for_a_writer() {
 #[test]
 fn a_directory_cannot_masquerade_as_configured_file_bytes() {
     let scratch = Scratch::new("directory-schema");
-    fs::create_dir(scratch.0.join("folder")).expect("directory");
+    fs::create_dir(scratch.at("folder")).expect("directory");
     let refusal =
         read_and_hash(scratch.anchor(), Path::new("folder")).expect_err("a directory must refuse");
     assert!(
@@ -252,7 +244,7 @@ fn a_directory_cannot_masquerade_as_configured_file_bytes() {
 #[test]
 fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
     let scratch = Scratch::new("socket-schema");
-    let socket = scratch.0.join("sock.md");
+    let socket = scratch.at("sock.md");
     let listener = std::os::unix::net::UnixListener::bind(&socket).expect("a bound socket");
 
     assert!(
@@ -286,7 +278,7 @@ fn a_socket_and_an_unnameable_length_are_answers_rather_than_faults() {
 #[test]
 fn unreadable_configured_file_is_an_environmental_refusal() {
     let scratch = Scratch::new("unreadable-schema");
-    let schema = scratch.0.join("schema.toml");
+    let schema = scratch.at("schema.toml");
     fs::write(&schema, b"secret").expect("schema bytes");
     fs::set_permissions(&schema, fs::Permissions::from_mode(0o000)).expect("remove access");
 
@@ -314,8 +306,8 @@ fn unreadable_configured_file_is_an_environmental_refusal() {
 #[test]
 fn root_identity_detects_dot_and_symbolic_link_aliases() {
     let scratch = Scratch::new("root-aliases");
-    let vault = scratch.0.join("vault");
-    let alias = scratch.0.join("alias");
+    let vault = scratch.at("vault");
+    let alias = scratch.at("alias");
     fs::create_dir(&vault).expect("vault root");
     symlink(&vault, &alias).expect("root alias");
 
@@ -327,8 +319,8 @@ fn root_identity_detects_dot_and_symbolic_link_aliases() {
 #[test]
 fn absent_and_dangling_roots_have_no_identity() {
     let scratch = Scratch::new("missing-root");
-    let missing = scratch.0.join("missing");
-    let dangling = scratch.0.join("dangling");
+    let missing = scratch.at("missing");
+    let dangling = scratch.at("dangling");
     symlink(&missing, &dangling).expect("dangling root name");
 
     assert_eq!(path_identity(&missing).unwrap(), None);

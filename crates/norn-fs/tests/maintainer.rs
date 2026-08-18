@@ -16,7 +16,7 @@
 //! the render seam's business for no gain.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use norn_fs::{
@@ -24,6 +24,7 @@ use norn_fs::{
     ShadowHome, move_document, try_acquire, vacate, write,
 };
 use norn_testkit::process::{Run, RunStatus, Sandbox};
+use norn_testkit::scratch;
 use norn_testkit::wait::{Budget, Observed, wait_until};
 
 /// Which part the child plays.
@@ -68,22 +69,17 @@ fn spawn_budget() -> Budget {
     )
 }
 
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
 /// A scratch data directory for the length of one case.
-struct Scratch(PathBuf);
+///
+/// The naming and the removal are [`scratch::Scratch`]'s; what this adds is
+/// where a vault's lock file sits under it.
+struct Scratch(scratch::Scratch);
 
 impl Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree this case works over.
     fn new(label: &str) -> Scratch {
-        let root = std::env::temp_dir().join(format!(
-            "norn-fs-maintainer-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
-        Scratch(root)
+        Scratch(scratch::Scratch::new(&format!(
+            "norn-fs-maintainer-{label}"
+        )))
     }
 
     fn path(&self, relative: &str) -> PathBuf {
@@ -94,13 +90,6 @@ impl Scratch {
     /// the vault, with no same-filesystem constraint on it at all.
     fn lock(&self) -> PathBuf {
         self.path("vaults/notes/maintainer.lock")
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this case made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

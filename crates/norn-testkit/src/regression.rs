@@ -1407,9 +1407,9 @@ mod tests {
         MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_test,
         ignore_reason, is_identifier, is_kebab_case, opens_fn,
     };
+    use crate::scratch::Scratch;
     use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::path::Path;
 
     /// The one integration target the synthetic workspace holds, and the three
     /// carriers in it: a plain test, a test an ignore-lane adopts, and a test
@@ -1438,14 +1438,11 @@ fn a_name_in_prose() {
 ";
 
     /// A scratch workspace holding `crates/demo/tests/suite.rs`, unique to the
-    /// caller so tests running beside each other never share one.
+    /// caller so tests running beside each other never share one, and gone
+    /// when the caller drops it.
     #[allow(clippy::disallowed_methods)] // Builds the tree the reference resolver is tested against.
-    fn scratch() -> PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("norn-regression-{}-{serial}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+    fn scratch() -> Scratch {
+        let root = Scratch::new("norn-regression");
         let tests = root.join("crates/demo/tests");
         std::fs::create_dir_all(&tests).expect("a scratch workspace");
         std::fs::write(tests.join("suite.rs"), CARRIER_SOURCE).expect("a carrier source");
@@ -1563,7 +1560,7 @@ fn a_name_in_prose() {
         let root = scratch();
         let mut registry = sound();
         mutate(&mut registry);
-        registry.audit(&root, &index())
+        registry.audit(root.root(), &index())
     }
 
     /// A mutation the audit refuses, naming what it said.
@@ -2114,9 +2111,9 @@ fn a_name_in_prose() {
         // is what puts the refusal on the only remaining check.
         let root = scratch();
         let reference = TestRef::parse("crates/demo/tests/suite.rs::a_carrier").expect("a pair");
-        let refused = TestIndex::from_cargo(&root, [reference.target().expect("a target")]);
+        let refused = TestIndex::from_cargo(root.root(), [reference.target().expect("a target")]);
         let registry = sound();
-        let found = registry.audit(&root, &refused);
+        let found = registry.audit(root.root(), &refused);
         assert!(
             found
                 .iter()
@@ -2125,7 +2122,7 @@ fn a_name_in_prose() {
         );
         // And the same registry against a listing that was collected has
         // nothing wrong with it, so the refusal is what the audit reported.
-        assert_eq!(registry.audit(&root, &index()), Vec::<String>::new());
+        assert_eq!(registry.audit(root.root(), &index()), Vec::<String>::new());
     }
 
     #[test]
