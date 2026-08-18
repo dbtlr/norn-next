@@ -230,32 +230,6 @@ impl NormalizedPath {
         let (path, prefix) = (self.key.as_bytes(), root.key.as_bytes());
         path.starts_with(prefix) && matches!(path.get(prefix.len()), None | Some(b'/'))
     }
-
-    /// The directory this path sits in, or `None` for a name directly under the
-    /// vault root.
-    ///
-    /// **This truncates and never re-spells.** Both halves are this path's own
-    /// leading bytes: the spelling is the one this value already carries, and
-    /// the key is that spelling's own fold, cut at the same place because the
-    /// fold is byte-for-byte. So walking up from a path yields the identities
-    /// the vault would resolve those directories to, and no identity this path
-    /// did not already contain.
-    ///
-    /// In-crate: this answers *which* root reaches a path where
-    /// [`Self::starts_with`] answers whether one does, and the watcher's batch
-    /// is its caller — a dirty root's ancestors are a short walk, where finding
-    /// the covering root by reading the dirty set is a walk of the batch.
-    pub(crate) fn parent(&self) -> Option<Self> {
-        let access = self.access.parent()?;
-        if access.as_os_str().is_empty() {
-            return None;
-        }
-        let key = OsString::from_vec(self.key.as_bytes()[..access.as_os_str().len()].to_vec());
-        Some(Self {
-            access: access.to_owned(),
-            key,
-        })
-    }
 }
 
 impl PartialEq for NormalizedPath {
@@ -543,43 +517,5 @@ mod tests {
         assert!(same_device(&root, &root));
         assert!(!same_device(&root.join("missing"), &root));
         fs::remove_dir(root).expect("remove scratch directory");
-    }
-
-    /// **Walking up a path yields that path's own directories.** Each step
-    /// truncates: the spelling comes back as the path already held it, the
-    /// comparison key stays that spelling's own fold, and the walk stops at the
-    /// vault root rather than naming it. That is what lets a caller ask which
-    /// of a set of roots reaches a path by asking the path.
-    #[test]
-    fn a_path_walks_up_through_the_directories_it_holds() {
-        for sensitivity in [CaseSensitivity::Sensitive, CaseSensitivity::Insensitive] {
-            let paths = normalizer(sensitivity);
-            let deep = paths
-                .normalize(Path::new("Notes/Inner/Note.md"))
-                .expect("a vault-relative path");
-
-            let mut walked = Vec::new();
-            let mut ancestor = deep.parent();
-            while let Some(candidate) = ancestor {
-                walked.push(candidate.as_path().to_owned());
-                ancestor = candidate.parent();
-            }
-            assert_eq!(
-                walked,
-                [PathBuf::from("Notes/Inner"), PathBuf::from("Notes")],
-                "{sensitivity:?}"
-            );
-
-            // Each step is an identity the vault resolves the same way it
-            // resolves one normalized from that spelling outright.
-            let inner = deep.parent().expect("a directory above the document");
-            assert_eq!(inner, paths.normalize(Path::new("Notes/Inner")).unwrap());
-            assert_eq!(
-                inner == paths.normalize(Path::new("notes/inner")).unwrap(),
-                sensitivity == CaseSensitivity::Insensitive,
-                "{sensitivity:?}"
-            );
-            assert!(deep.starts_with(&inner));
-        }
     }
 }

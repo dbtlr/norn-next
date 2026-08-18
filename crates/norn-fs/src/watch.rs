@@ -9,7 +9,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::ops::Bound;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -194,8 +193,6 @@ impl Batch {
     /// rename; the covering root is what the consumer derives at, and it
     /// carries the name the directory renders now.
     ///
-    /// The set holds the covering root whichever order the two arrived in.
-    ///
     /// **A root nothing has spelled live covers only what also died.** Every
     /// covering root answers for its whole range — one reading enumerates the
     /// subtree, the other says there is nothing in it — but only a name a
@@ -203,8 +200,13 @@ impl Batch {
     /// spelling rule above turns on. So a root reported gone subsumes a
     /// descendant reported gone, and a descendant reported to stand is kept
     /// beside it: that report is later evidence that something under the
-    /// retired name is there, and dropping it would leave the identity reachable
-    /// only through the name that died.
+    /// retired name is there, and dropping it would leave the identity
+    /// reachable only through the name that died.
+    ///
+    /// **The set is the same whatever order the reports arrived in.** Coverage
+    /// is decided over the whole batch once no further report belongs to it,
+    /// because what a root speaks for turns on whether its own name was
+    /// reported gone — and that can be the last thing a window carries.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
     }
@@ -256,31 +258,24 @@ impl Batch {
     /// roots are kept, and the one carrying the rendered spelling is what the
     /// consumer reaches the identity through.
     fn note_vault_root(&mut self, root: NormalizedPath, spelling: Spelling) {
-        // **A death is news about the name it spells even where the range is
-        // already answered for.** A root standing under a covering one is a
-        // root a later report can still be about, and whether the name it
-        // carries is dead decides what it may go on to subsume. Reading that
-        // ahead of coverage is what keeps the two answers from depending on
-        // which of the reports arrived first.
-        if spelling == Spelling::Retired && self.carries_the_dead_name(&root) {
-            self.retired.insert(root.clone());
-        }
-        if self.is_covered(&root, spelling) {
-            return;
-        }
-        for standing in self.covers(&root, spelling) {
-            self.vault_roots.remove(&standing);
-            self.retired.remove(&standing);
-        }
         match spelling {
+            // A live name the set is not already carrying as a dead one is a
+            // second name for the identity, and taking it is what withdraws
+            // the death recorded against the first. A live report *of the dead
+            // name itself* withdraws nothing: something said that name is gone,
+            // and a batch that let it speak for the live paths under it would
+            // be reading one of two reports about it.
             Spelling::Rendered => {
-                self.retired.remove(&root);
+                if !self.carries_the_dead_name(&root) {
+                    self.retired.remove(&root);
+                }
                 self.vault_roots.replace(root);
             }
-            // An identity nothing has spelled at all is one this report is the
-            // whole of, so what the set will carry for it is a dead name.
+            // A death is news about the name it spells: where the set carries
+            // that very name, or carries nothing for the identity yet, what it
+            // will carry is a dead name.
             Spelling::Retired => {
-                if !self.vault_roots.contains(&root) {
+                if self.carries_the_dead_name(&root) || !self.vault_roots.contains(&root) {
                     self.retired.insert(root.clone());
                 }
                 self.vault_roots.insert(root);
@@ -290,62 +285,67 @@ impl Batch {
 
     /// Whether the set carries this identity at the very name a death spells.
     ///
-    /// **What a death retires is the name it spells.** Where the set carries
-    /// another name for the identity, that name is the one a rename moved *to*
-    /// and this report is the half that moved away from — which is the order
-    /// the poll backend reports a case flip in — so the spelling rule keeps the
-    /// live name and the live name goes on speaking for everything under it.
+    /// Where the set carries another name for the identity, that name is the
+    /// one a rename moved *to* and this report is the half that moved away
+    /// from — which is the order the poll backend reports a case flip in — so
+    /// the spelling rule keeps the live name and the live name goes on speaking
+    /// for everything under it.
     fn carries_the_dead_name(&self, root: &NormalizedPath) -> bool {
         self.vault_roots
             .get(root)
             .is_some_and(|standing| standing.as_path() == root.as_path())
     }
 
-    /// Whether a root already standing covers `root` and speaks for it.
+    /// Decide coverage over the whole batch, which is what closes it.
     ///
-    /// A root's covering roots are its own ancestors, so the walk up from
-    /// `root` reaches every one of them and reads nothing else — and it reads
-    /// them nearest first, which is what makes one answer enough. The set can
-    /// hold a covered root, but only the retained shape: a root carrying a dead
-    /// name with a live descendant beneath it. Reading upwards reaches the live
-    /// descendant before the dead name above it, so a cover that speaks is
-    /// never masked by one that does not.
-    fn is_covered(&self, root: &NormalizedPath, spelling: Spelling) -> bool {
-        let Some(cover) = self.covering(root) else {
-            return false;
-        };
-        spelling == Spelling::Retired || !self.retired.contains(cover)
-    }
-
-    /// The nearest root already standing that covers `root` without being it.
-    fn covering(&self, root: &NormalizedPath) -> Option<&NormalizedPath> {
-        let mut ancestor = root.parent();
-        while let Some(candidate) = ancestor {
-            if let Some(standing) = self.vault_roots.get(&candidate) {
-                return Some(standing);
-            }
-            ancestor = candidate.parent();
+    /// A root covers its own entry and everything under it, so a root another
+    /// one speaks for is a second name for work the first already carries and
+    /// the batch drops it. **Deciding it here rather than as each report lands
+    /// is what makes the answer the batch's own.** A root can be reported live
+    /// and then reported gone inside one window, and what a root speaks for
+    /// turns on which of those it ends at — so a decision taken at arrival
+    /// would be a decision taken on half the reports, and the two halves of a
+    /// rename would settle differently depending on which reached the watcher
+    /// first.
+    ///
+    /// The order is the comparison key with a separator carried on it, because
+    /// the key alone does not put a root's descendants directly after it: a
+    /// sibling whose next byte sorts below the separator lands between the two.
+    /// Under the carried separator they nest, so one stack of covering roots
+    /// reads the whole set in a single pass.
+    fn close(&mut self) {
+        if self.vault_roots.len() < 2 {
+            return;
         }
-        None
-    }
+        let mut ordered: Vec<(Vec<u8>, NormalizedPath)> = std::mem::take(&mut self.vault_roots)
+            .into_iter()
+            .map(|root| {
+                let mut key = root.comparison_key().as_bytes().to_vec();
+                key.push(b'/');
+                (key, root)
+            })
+            .collect();
+        ordered.sort_by(|left, right| left.0.cmp(&right.0));
 
-    /// The roots already standing that `root` covers and speaks for.
-    ///
-    /// Everything `root` covers opens with `root`'s own comparison key, and
-    /// identities that open with one run of bytes are one unbroken stretch of
-    /// the order — so the walk stops at the first identity that does not,
-    /// rather than reading the rest of the set. Opening with the key is the
-    /// bound on the stretch and not the answer inside it: coverage is whole
-    /// components, which is what the filter asks.
-    fn covers(&self, root: &NormalizedPath, spelling: Spelling) -> Vec<NormalizedPath> {
-        let key = root.comparison_key().as_bytes();
-        self.vault_roots
-            .range((Bound::Excluded(root), Bound::Unbounded))
-            .take_while(|standing| standing.comparison_key().as_bytes().starts_with(key))
-            .filter(|standing| standing.starts_with(root))
-            .filter(|standing| spelling == Spelling::Rendered || self.retired.contains(*standing))
-            .cloned()
-            .collect()
+        let mut covers: Vec<NormalizedPath> = Vec::new();
+        for (_, root) in ordered {
+            while covers.last().is_some_and(|cover| !root.starts_with(cover)) {
+                covers.pop();
+            }
+            // A root nothing has spelled live speaks only for what also died. A
+            // report that a path under it stands is later evidence about the
+            // live name, and it is the only root that would name the identity
+            // at a name the tree renders.
+            let spoken_for = covers
+                .last()
+                .is_some_and(|cover| !self.retired.contains(cover) || self.retired.contains(&root));
+            if spoken_for {
+                self.retired.remove(&root);
+                continue;
+            }
+            self.vault_roots.insert(root.clone());
+            covers.push(root);
+        }
     }
 
     /// Forget every dirty root, which is what a widening to a rescan leaves.
@@ -376,6 +376,7 @@ impl Batch {
             };
             self.note_vault_root(root, spelling);
         }
+        self.close();
         self.schema_dirty |= other.schema_dirty;
         self.rescans.extend(other.rescans);
         if self.vault_roots.len() > DIRTY_ROOT_CAP {
@@ -517,7 +518,7 @@ impl Subscription {
             state
                 .pending
                 .take()
-                .map(|pending| (root, ledger, pending.batch))
+                .map(|pending| (root, ledger, pending.into_batch()))
         };
         let _ = self
             .wake
@@ -1162,6 +1163,18 @@ struct Pending {
     first: Instant,
     last: Instant,
 }
+
+impl Pending {
+    /// The batch this accumulation settles into.
+    ///
+    /// Taking the accumulation is what says no further report belongs to it,
+    /// which is the one moment coverage can be decided over the whole of it.
+    fn into_batch(self) -> Batch {
+        let mut batch = self.batch;
+        batch.close();
+        batch
+    }
+}
 struct State {
     root: PathBuf,
     normalizer: PathNormalizer,
@@ -1514,7 +1527,7 @@ fn run_coalescer(
                 Ok(locked
                     .pending
                     .take()
-                    .map(|pending| (root, ledger, pending.batch)))
+                    .map(|pending| (root, ledger, pending.into_batch())))
             }
         };
         // Filesystem observation for suppression is deliberately outside both
@@ -1653,6 +1666,21 @@ mod tests {
             SchemaLocation::InVault(normalizer.normalize(Path::new(schema)).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
         )))
+    }
+
+    /// The batch a delivery takes, closed the way the coalescer closes it.
+    ///
+    /// Coverage is the whole batch's answer rather than each report's, so a
+    /// case about which roots survive reads what a consumer is handed and not
+    /// what the accumulation was holding part-way through.
+    fn settled(state: &Arc<Mutex<State>>) -> Batch {
+        state
+            .lock()
+            .expect("watch state poisoned")
+            .pending
+            .take()
+            .expect("a pending batch")
+            .into_batch()
     }
 
     /// Every kind that names only a watched directory entry, and one of each
@@ -3224,8 +3252,7 @@ mod tests {
             for path in reports {
                 ingest(&state, Ok(Event::new(flipped).add_path(path.into())));
             }
-            let mut locked = state.lock().unwrap();
-            let batch = &locked.pending.as_mut().unwrap().batch;
+            let batch = settled(&state);
             let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
             let expected: Vec<_> = kept.iter().map(Path::new).collect();
             assert_eq!(paths, expected, "{label}");
@@ -3257,8 +3284,7 @@ mod tests {
             for path in reports {
                 ingest(&state, Ok(Event::new(removed).add_path(path.into())));
             }
-            let mut locked = state.lock().unwrap();
-            let batch = &locked.pending.as_mut().unwrap().batch;
+            let batch = settled(&state);
             let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
             assert_eq!(paths, [Path::new("folder")], "{label}");
         }
@@ -3301,8 +3327,7 @@ mod tests {
             for (kind, path) in reports {
                 ingest(&state, Ok(Event::new(kind).add_path(path.into())));
             }
-            let mut locked = state.lock().unwrap();
-            let batch = &locked.pending.as_mut().unwrap().batch;
+            let batch = settled(&state);
             let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
             assert_eq!(
                 paths,
@@ -3327,8 +3352,7 @@ mod tests {
         ] {
             ingest(&state, Ok(Event::new(kind).add_path(path.into())));
         }
-        let mut locked = state.lock().unwrap();
-        let batch = &locked.pending.as_mut().unwrap().batch;
+        let batch = settled(&state);
         let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
         assert_eq!(paths, [Path::new("FOLDER")]);
     }
@@ -3360,14 +3384,54 @@ mod tests {
         ] {
             ingest(&state, Ok(Event::new(kind).add_path(path.into())));
         }
-        let mut locked = state.lock().unwrap();
-        let batch = &locked.pending.as_mut().unwrap().batch;
+        let batch = settled(&state);
         let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
         assert_eq!(
             paths,
-            [Path::new("a"), Path::new("a/b"), Path::new("A/B/note.md")],
+            [Path::new("a"), Path::new("A/B/note.md")],
             "the one root naming the identity at a rendered spelling was dropped"
         );
+    }
+
+    /// **A covering root's death reaches the batch however late it lands.**
+    ///
+    /// Coverage is the closed batch's answer, so the reports behind it may
+    /// arrive in any order: the directory reported live, a change under its new
+    /// name, and the death of the old name can reach the watcher in any of the
+    /// six orders, and the batch a delivery carries is the same one. A decision
+    /// taken as each report landed would be a decision taken on part of them —
+    /// and the drop it made could not be taken back.
+    #[test]
+    fn a_covering_roots_death_reaches_the_batch_however_late_it_lands() {
+        let reports = [
+            (EventKind::Modify(ModifyKind::Any), "/vault/folder"),
+            (EventKind::Modify(ModifyKind::Any), "/vault/FOLDER/note.md"),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+                "/vault/folder",
+            ),
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+            for index in order {
+                let (kind, path) = reports[index];
+                ingest(&state, Ok(Event::new(kind).add_path(path.into())));
+            }
+            let batch = settled(&state);
+            let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(
+                paths,
+                [Path::new("folder"), Path::new("FOLDER/note.md")],
+                "reports arriving as {order:?}"
+            );
+        }
     }
 
     /// **Coverage is the vault's own case behavior.** Where two spellings are
@@ -3405,8 +3469,7 @@ mod tests {
                 Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.into())),
             );
         }
-        let mut locked = state.lock().unwrap();
-        let batch = &locked.pending.as_mut().unwrap().batch;
+        let batch = settled(&state);
         let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
         assert_eq!(paths, [Path::new("config")]);
         assert!(batch.schema_dirty);
