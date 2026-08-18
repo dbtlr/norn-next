@@ -8020,6 +8020,87 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
+    /// **The walk's other refusals are answered by a covering root the same
+    /// way.** A shadow name is one of four names the walk will not read
+    /// through; the rest are a symbolic link, an entry that is neither file nor
+    /// directory, and — closed downwards, so never below a covering root that
+    /// stands — an exclusion. Each row below stands a dirty root through one of
+    /// those names beside a covering directory root, and what the store holds
+    /// afterwards is what a build from zero holds.
+    ///
+    /// **Neither of these two is a place a covered root reads anything at
+    /// either**, which is the second assertion in each row and the difference
+    /// from the shadow name: a path spelled through a link reads as a regular
+    /// file to a stat that follows it and is then refused by the open that does
+    /// not, and a pipe is not a file at all — so each root's own leg prunes its
+    /// range and derives nothing, and the covering root withdraws nothing that
+    /// was there. The shadow name is the one refusal where the two legs
+    /// genuinely differ.
+    ///
+    /// The subtree behind the link is reached under its own name rather than
+    /// through it, which is what keeps the row about the refusal: `elsewhere`
+    /// holds a document either way, and only the spelling `dir/link/note.md` is
+    /// the one no walk of this vault yields.
+    #[cfg(unix)]
+    #[test]
+    fn a_covering_root_answers_for_the_other_names_the_walk_refuses() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("covering-root-refused-names");
+        fs::create_dir_all(f.vault().join("dir")).unwrap();
+        fs::create_dir_all(f.vault().join("elsewhere")).unwrap();
+        fs::write(f.vault().join("elsewhere/note.md"), "body").unwrap();
+        symlink(f.vault().join("elsewhere"), f.vault().join("dir/link")).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(f.vault().join("dir/pipe.md"))
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo failed");
+        fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
+
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let from_zero = stored_paths(&mut attachment.store);
+        assert_eq!(
+            from_zero,
+            ["dir/plain.md", "elsewhere/note.md"],
+            "the walk read through a name it refuses to enter"
+        );
+
+        let mut increment = |store: &mut Store, dirty: &_| {
+            scoped_increment(
+                store,
+                f.vault().as_path(),
+                dirty,
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+        };
+        for refused in ["dir/link/note.md", "dir/pipe.md"] {
+            increment(
+                &mut attachment.store,
+                &dirty_path(f.vault().as_path(), refused),
+            );
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "a root spelled through {refused} derived a row of its own"
+            );
+
+            let batch = dirty_batch(f.vault().as_path(), &["dir", refused]);
+            increment(&mut attachment.store, batch.vault_roots());
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "the covering root did not answer for {refused}"
+            );
+        }
+        ops.detach(&name, attachment);
+    }
+
     #[test]
     fn attach_indexes_only_markdown_and_ignores_binary_clutter() {
         let f = Fixture::new("markdown-only");
