@@ -2152,17 +2152,39 @@ mod tests {
     /// to reach the handler puts the whole of establishment behind the window,
     /// because a backend delivers in order.
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
-    fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path) {
-        subscription.begin_heal();
+    fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path, hits: &Path) {
+        let already_reported = open_a_heal_window(subscription);
         std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change the heal window is open across");
-        wait_for_the_window_to_take_up(label, subscription, TAKEN_UP);
+        wait_for_the_window_to_take_up(label, subscription, hits, TAKEN_UP, &already_reported);
         subscription
             .finish_heal()
             .expect("the heal window closes over live coverage");
     }
 
+    /// Open a heal window, and hand back the rescans its accumulation already
+    /// holds.
+    ///
+    /// **The reading is what tells a companion rescan from an earlier one.** A
+    /// rescan says the backend lost the path set, so one that arrives with or
+    /// after a change stands in place of the report that would have named it and
+    /// ends the wait below. One that was already here stands in place of
+    /// nothing — it belongs to something earlier, an establishment replay that
+    /// dropped events among it — and closing the window on it leaves the
+    /// change's own report still to come, past the window, with the arm owed and
+    /// eligible. Read once, before the change is made, so the wait can require a
+    /// rescan it did not already have.
+    fn open_a_heal_window(subscription: &Subscription) -> BTreeSet<RescanScope> {
+        subscription.begin_heal();
+        let state = subscription.state.lock().expect("watch state poisoned");
+        state
+            .pending
+            .as_ref()
+            .map(|pending| pending.batch.rescans().clone())
+            .unwrap_or_default()
+    }
+
     /// Wait for the heal window a caller has open to take up a delivery naming
-    /// `named`.
+    /// `named`, or a rescan it did not open holding.
     ///
     /// **An open heal window is where a delivery is observable without a batch
     /// being emitted.** The coalescer parks while a heal is open and ingest
@@ -2172,17 +2194,39 @@ mod tests {
     /// case here order itself against the backend's own delivery instead of
     /// against elapsed time.
     ///
-    /// **A rescan in the accumulation ends the wait too.** A report that the
-    /// path set is lost names no path and stands in place of the one that would
-    /// have named this change, so the window has taken a delivery up either
-    /// way. Waiting past it for a name that is not coming would end the case at
-    /// its budget instead of at whatever it went on to assert about the
-    /// accumulation.
-    fn wait_for_the_window_to_take_up(label: &str, subscription: &Subscription, named: &str) {
+    /// **A rescan the window did not open holding ends the wait too.** A report
+    /// that the path set is lost names no path and stands in place of the one
+    /// that would have named this change, so the window has taken a delivery up
+    /// either way. Waiting past it for a name that is not coming would end the
+    /// case at its budget instead of at whatever it went on to assert about the
+    /// accumulation. `already_reported` is what keeps that from admitting a
+    /// rescan belonging to something earlier — see [`open_a_heal_window`].
+    ///
+    /// **A firing while the wait is open ends it at once.** Every caller is
+    /// about to state something over an arm that is still owed, so a record in
+    /// `hits` here is the answer that case was going to look for, given inside
+    /// the window rather than after it. Read in the loop, because a wait that
+    /// found out afterwards would spend its whole work bound first and report a
+    /// spent arm as a host too slow to deliver — which is the one diagnosis this
+    /// workspace has already ruled is not what a bound expiry means.
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record file.
+    fn wait_for_the_window_to_take_up(
+        label: &str,
+        subscription: &Subscription,
+        hits: &Path,
+        named: &str,
+        already_reported: &BTreeSet<RescanScope>,
+    ) {
         norn_testkit::wait::wait_until(
             &format!("the open heal window to take up `{named}`"),
             watch_budget(),
             || {
+                assert!(
+                    std::fs::metadata(hits).is_err(),
+                    "{label}: the arm answered a delivery the heal window was open across, so it \
+                     was spent inside the window rather than past it: {}",
+                    recorded(hits)
+                );
                 let state = subscription.state.lock().expect("watch state poisoned");
                 let Some(pending) = state.pending.as_ref() else {
                     return norn_testkit::wait::Observed::Pending("nothing taken up".to_string());
@@ -2193,7 +2237,13 @@ mod tests {
                     .iter()
                     .map(|root| root.as_path().display().to_string())
                     .collect();
-                if taken.iter().any(|root| root == named) || !pending.batch.rescans().is_empty() {
+                let lost_the_path_set = pending
+                    .batch
+                    .rescans()
+                    .difference(already_reported)
+                    .next()
+                    .is_some();
+                if taken.iter().any(|root| root == named) || lost_the_path_set {
                     norn_testkit::wait::Observed::Met(())
                 } else {
                     norn_testkit::wait::Observed::Pending(format!(
@@ -2310,7 +2360,7 @@ mod tests {
             );
 
             assert_eq!(subscription.state(), SubscriptionState::Live, "{label}");
-            taken_up_by_a_heal(label, &subscription, &vault);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
             assert!(
                 std::fs::metadata(&hits).is_err(),
                 "{label}: the stream arm answered a delivery from before a consumer met one"
@@ -2363,7 +2413,7 @@ mod tests {
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone())
                     .noting_deliveries_stood_past(notes.clone()),
             );
-            taken_up_by_a_heal(label, &subscription, &vault);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::create_dir(scratch.path("beside-the-vault"))
                 .expect("a directory beside the tree, under the parent edge");
@@ -2423,6 +2473,13 @@ mod tests {
     /// while the window was open, and the accumulation the heal is about to
     /// hand back is where that is readable: a window closed before the delivery
     /// arrived would state the case over an empty window.
+    ///
+    /// **The change is a directory, for [`TAKEN_UP`]'s reason.** One write is
+    /// not one delivery on every backend — inotify reports creating a document,
+    /// writing it and closing it separately — so a document here would let the
+    /// window close on the first of its reports with the rest still to come, and
+    /// the next one past the window would spend the arm this case is about to
+    /// say was never spent.
     #[test]
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn an_armed_stream_answers_nothing_inside_the_first_heal_window() {
@@ -2436,10 +2493,16 @@ mod tests {
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
             );
 
-            subscription.begin_heal();
-            std::fs::write(vault.join("healed.md"), b"healed\n")
+            let already_reported = open_a_heal_window(&subscription);
+            std::fs::create_dir(vault.join("healed"))
                 .expect("a change the heal window is open across");
-            wait_for_the_window_to_take_up(label, &subscription, "healed.md");
+            wait_for_the_window_to_take_up(
+                label,
+                &subscription,
+                &hits,
+                "healed",
+                &already_reported,
+            );
             let observed = subscription
                 .finish_heal()
                 .expect("the heal window closes over live coverage");
@@ -2498,7 +2561,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Fails)], hits.clone()),
             );
-            taken_up_by_a_heal(label, &subscription, &vault);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
@@ -2554,7 +2617,7 @@ mod tests {
                 poll,
                 WatchFaults::recording_at(&[(Stage::Stream, Answer::Rescans)], hits.clone()),
             );
-            taken_up_by_a_heal(label, &subscription, &vault);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
 
             std::fs::write(vault.join("one.md"), b"one\n")
                 .expect("a real change under a real watch");
@@ -2623,11 +2686,11 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn a_settled_batch_names_a_case_flip_at_the_spelling_the_tree_renders() {
         for (label, poll) in BACKENDS {
-            let (_scratch, vault, schema, _hits) = armed_tree(&format!("watch-case-flip-{label}"));
+            let (_scratch, vault, schema, hits) = armed_tree(&format!("watch-case-flip-{label}"));
             std::fs::write(vault.join("flipping.md"), b"before\n").expect("the file to flip");
             let (subscription, _lease) =
                 established_past_the_boundary(&vault, &schema, poll, WatchFaults::default());
-            taken_up_by_a_heal(label, &subscription, &vault);
+            taken_up_by_a_heal(label, &subscription, &vault, &hits);
             let folding = subscription
                 .state
                 .lock()
@@ -2638,25 +2701,33 @@ mod tests {
 
             std::fs::rename(vault.join("flipping.md"), vault.join("FLIPPING.md"))
                 .expect("a rename that only flips case");
+            // A change after the rename, and one report of it on every backend.
+            // It is what closes the fold: a backend delivers in order, so a
+            // report naming this directory says every report the rename
+            // produced is already in the fold — both spellings of a backend
+            // that split it, in whichever order it split them.
+            std::fs::create_dir(vault.join(PAST_THE_FLIP)).expect("a change after the rename");
 
             // The host folds the batches it drains in arrival order, so the
             // case reads what that fold produces rather than any one delivery.
             //
-            // **The fold is held open until the rendered spelling is in it.** A
-            // backend that splits the rename reports the two spellings in
-            // either order, so a fold read at the first of them would be read
-            // before the half this case is about had arrived — and the answer
-            // this case pins is which spelling survives the fold, which is not
-            // answerable until the rendered one has reached it.
+            // **The fold is held open past the whole rename.** A backend that
+            // splits it reports the two spellings in either order, and the
+            // answer this case pins is which spelling survives the fold — which
+            // a fold closed at the first report of the pair cannot state. A fold
+            // closed at the *rendered* spelling cannot either: on the polling
+            // backend the arrival of the new name is reported before the
+            // disappearance of the old one, so the retired spelling would still
+            // be in flight, and the shape this case forbids would go unobserved.
             let mut settled = Batch::default();
             norn_testkit::wait::wait_until(
-                "a settled batch naming the file at the spelling the tree renders",
+                &format!("a settled batch naming `{PAST_THE_FLIP}`, with the rename behind it"),
                 watch_budget(),
                 || {
                     while let Ok(Some(batch)) = subscription.try_recv() {
                         settled.merge(batch);
                     }
-                    if names_the_rendered_spelling(&settled) {
+                    if names(&settled, PAST_THE_FLIP) {
                         norn_testkit::wait::Observed::Met(())
                     } else {
                         norn_testkit::wait::Observed::Pending(format!("{settled:?}"))
@@ -2664,6 +2735,11 @@ mod tests {
                 },
             )
             .unwrap_or_else(|failure| panic!("{label}: {failure}"));
+            assert!(
+                names_the_rendered_spelling(&settled),
+                "{label}: the fold carried past the rename and never named the spelling the tree \
+                 renders: {settled:?}"
+            );
 
             let named: Vec<_> = settled
                 .vault_roots()
@@ -2685,13 +2761,23 @@ mod tests {
         }
     }
 
+    /// The change made after the case flip, whose report closes the fold the
+    /// flip is read out of. A directory, because one write is not one delivery
+    /// on every backend — the reason [`TAKEN_UP`] is one.
+    const PAST_THE_FLIP: &str = "past-the-flip";
+
     /// Whether a folded batch names the flipped file at the spelling the tree
     /// renders after the rename.
     fn names_the_rendered_spelling(batch: &Batch) -> bool {
+        names(batch, "FLIPPING.md")
+    }
+
+    /// Whether a folded batch names `path` among its vault roots.
+    fn names(batch: &Batch, path: &str) -> bool {
         batch
             .vault_roots()
             .iter()
-            .any(|root| root.as_path() == Path::new("FLIPPING.md"))
+            .any(|root| root.as_path() == Path::new(path))
     }
 
     #[test]
