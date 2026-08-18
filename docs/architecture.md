@@ -1247,7 +1247,11 @@ Two contracts inside that flow carry weight:
   tier, and that tier's two jobs — the Linux measurement lane and the macOS certification
   lane — each run the certification cases and emit the qualification record they leave
   behind. The job comments are the in-repo marker for which gate is filled and which is
-  still a placeholder.
+  still a placeholder. Every per-PR suite step runs through
+  `.github/scripts/flake-tripwire.sh`, which matches a failing run's output against the
+  ruled-on entries in `.github/flake-ledger` and writes each match into the run as an
+  annotation and a job-summary block. It changes no verdict and retries nothing: what it
+  removes is the rerun that leaves a second occurrence unrecorded.
 - `crates/norn-testkit/src/certification/` — the Layer 2 certification machinery: the
   inventory of required cases and the table of trust-transition arms nothing reaches at the
   production path — empty as it stands, and kept as the shape the next one arrives in — the

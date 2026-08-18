@@ -671,6 +671,76 @@ fn assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane: &str, body:
     );
 }
 
+/// **Every per-PR suite runs through the flake tripwire, and every ledger
+/// entry can match something.**
+///
+/// The bar the tripwire carries is that a second occurrence of a ledgered
+/// failure surfaces as a record rather than as a quiet rerun, and it has two
+/// silent holes. A suite step that stops going through the wrapper is scanned
+/// against nothing; an entry missing a field is an entry the matcher skips, so
+/// the class it was opened for stops being watched while the file still shows
+/// it. Both are read off the files themselves rather than off a memory of how
+/// they were wired.
+///
+/// The per-PR lane is the whole subject. The scheduled tier keeps every suite
+/// log and leaves a typed record, so a recurrence there is written down
+/// already; what a rerun erases is a per-PR failure nobody kept.
+#[test]
+fn every_per_pr_suite_runs_through_the_tripwire_and_every_ledger_entry_can_match() {
+    let root = workspace_root();
+    let wrapper = ".github/scripts/flake-tripwire.sh";
+    let gate = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect("reading the per-PR lane");
+    let unwrapped: Vec<&str> = gate
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.starts_with("run: cargo test"))
+        .collect();
+    assert!(
+        unwrapped.is_empty(),
+        "the per-PR lane runs {} suite step(s) outside `{wrapper}`, so a ledgered failure there \
+         is matched against nothing and a rerun leaves no record: {unwrapped:?}",
+        unwrapped.len()
+    );
+    assert!(
+        gate.contains(wrapper),
+        "the per-PR lane runs no suite through `{wrapper}`"
+    );
+
+    let ledger =
+        std::fs::read_to_string(root.join(".github/flake-ledger")).expect("reading the ledger");
+    let required = ["id", "signature", "class", "first-seen", "disposition"];
+    let mut entries = 0;
+    for block in ledger.split("\n\n") {
+        let fields: Vec<(&str, &str)> = block
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split_once(": "))
+            .collect();
+        if fields.is_empty() {
+            continue;
+        }
+        entries += 1;
+        for key in required {
+            let value = fields
+                .iter()
+                .find(|(named, _)| *named == key)
+                .map(|(_, value)| value.trim());
+            assert!(
+                value.is_some_and(|value| !value.is_empty()),
+                "a flake-ledger entry names no `{key}`, and the matcher skips an entry it cannot \
+                 read whole — so the class it was opened for stops being watched: {fields:?}"
+            );
+        }
+    }
+    assert!(
+        entries > 0,
+        "the flake ledger holds no entry, so the tripwire matches every failure against nothing"
+    );
+    eprintln!("flake ledger: {entries} entries the per-PR lane is scanned against");
+}
+
 /// Each job of one workflow, as its name and the text under it.
 ///
 /// A job's own key is the only thing at two spaces of indentation under `jobs:`

@@ -1,0 +1,66 @@
+# The flake ledger: failures this workspace has already seen, ruled on, and
+# does not want to meet again quietly.
+#
+# **What it is for.** A ledgered failure that recurs is the one CI event that
+# reads as noise to whoever is looking at it — the reflex is a rerun, and a
+# rerun leaves nothing behind. So every entry here carries the ruling that was
+# made about it, and `.github/scripts/flake-tripwire.sh` matches a failing
+# suite's output against these signatures and writes the recurrence into the
+# run: an annotation and a block in the job summary, naming the entry and what
+# was decided. Nothing here retries anything and nothing here turns a red run
+# green. What it removes is the quiet rerun.
+#
+# **A match is a second occurrence by construction.** An entry exists because
+# the failure already happened at least once and was ruled on; `first-seen`
+# says when. So the tripwire has no counting to do — matching is the event.
+#
+# **Format.** One entry per block, `key: value` per line, blocks separated by a
+# blank line. Lines starting with `#` are comments. Five keys, all required:
+#
+#   id           a stable slug, used in the annotation title
+#   signature    a fixed substring matched against the failing suite's output.
+#                A test name where the class is one test; the assertion's own
+#                text where the class is one condition across several.
+#   class        which of the ledger's classes this belongs to
+#   first-seen   the date of the occurrence the entry was opened for
+#   disposition  the ruling: what was decided, and what a recurrence means now
+#
+# **Removing an entry** is saying the class can no longer recur — the condition
+# was removed rather than judged. An entry whose disposition has been overtaken
+# is edited rather than deleted, so the recurrence still surfaces.
+
+id: class-a-recovery-handoff
+signature: recovery_handoff_reconciles_an_event_observed_during_the_heal
+class: wall-clock starvation
+first-seen: 2026-08-09
+disposition: Ruled 2026-08-17. The 15s work bound stands and is not widened or load-scaled; the host-health preflight gates the evidence instead, so a starved host is a non-qualifying evidence source. A recurrence in CI is not a starved workstation and reopens that ruling.
+
+id: class-a-directory-roots
+signature: directory_roots_merge_add_remove_and_rename_without_touching_siblings
+class: wall-clock starvation
+first-seen: 2026-08-09
+disposition: Ruled 2026-08-17, with class-a-recovery-handoff and on the same terms. A recurrence in CI reopens the ruling.
+
+id: class-a-watcher-canary
+signature: the backend reported no event for the canary itself
+class: wall-clock starvation
+first-seen: 2026-08-09
+disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI reopens the ruling.
+
+id: class-b-armed-stream-discarded-delivery
+signature: the arm was spent on a delivery the watcher folds into no batch
+class: real-FSEvents armed stream
+first-seen: 2026-08-16
+disposition: Restructured 2026-08-17. The fixed-sleep ordering was replaced across the armed-stream family by sync points on observed deliveries, so this assertion no longer rides a wall clock. A recurrence is the restructure failing to hold, and is a defect rather than a flake.
+
+id: class-b-armed-stream-heal-window
+signature: the arm answered inside the heal window
+class: real-FSEvents armed stream
+first-seen: 2026-08-16
+disposition: Restructured 2026-08-17, with class-b-armed-stream-discarded-delivery. The heal window is now closed on a delivery observed in the accumulation it hands back. A recurrence is a defect rather than a flake.
+
+id: class-b-armed-stream-establishment
+signature: the stream arm answered a delivery from before a consumer met one
+class: real-FSEvents armed stream
+first-seen: 2026-08-16
+disposition: Restructured 2026-08-17, with class-b-armed-stream-discarded-delivery. The heal window that makes the arm eligible now closes on a change made after establishment and seen to arrive, so the whole of establishment is behind the assertion. A recurrence is a defect rather than a flake.
