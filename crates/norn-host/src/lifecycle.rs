@@ -2048,6 +2048,11 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
             (attachment, epoch)
         };
         let result = shared.ops.poll(name, &mut attachment);
+        // The clock this reads runs whether or not the watcher has anything to
+        // say, so the question is asked on every poll the coverage survived and
+        // both arms below act on the answer. Maintenance a poll only scheduled
+        // where the watcher reported nothing would be maintenance an entry
+        // under sustained traffic never runs.
         let maintenance_due = result.is_ok() && shared.ops.maintenance_due(name, &attachment);
         let mut schedule = None;
         let mut stale = None;
@@ -2084,11 +2089,25 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                         }
                         state.coverage.park_by(epoch, attachment);
                         if !state.owes_a_rung() {
-                            schedule = Some(
-                                state
-                                    .claim
-                                    .schedule(|epoch| Job::Reconcile(name.clone(), epoch)),
-                            );
+                            // Due maintenance takes the claim ahead of the
+                            // reconcile, and the facts this poll carried wait
+                            // for it in the pending set: the maintenance leg
+                            // reads that set when it ends and hands the
+                            // reconcile on. One claim carries both, so a poll
+                            // that carried facts schedules the maintenance it
+                            // found due rather than dropping the verdict. The
+                            // polls that never see the entry at all — the ones
+                            // a held claim skips — are answered by the
+                            // reconcile leg, which reads the same clocks on
+                            // every turn it takes.
+                            let due = maintenance_due;
+                            schedule = Some(state.claim.schedule(|epoch| {
+                                if due {
+                                    Job::Maintenance(name.clone(), epoch)
+                                } else {
+                                    Job::Reconcile(name.clone(), epoch)
+                                }
+                            }));
                         }
                     }
                     Err(JobFailure::LostMaintainership) => {
@@ -2789,6 +2808,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     Err(error) => result = Err(error),
                 }
             }
+            // Asked off the gate, like the watcher poll asks it, and asked on
+            // every turn of this loop: a vault whose facts never stop arriving
+            // keeps this leg turning under a claim no watcher poll can look
+            // past, so this is the only place its clocks are read.
+            let maintenance_due = result.is_ok() && shared.ops.maintenance_due(&name, &attachment);
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin();
             if !state.claim.stands_at(epoch) {
@@ -2812,6 +2836,20 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                         if let Some(job) = next {
                             dispatch_handoff(shared, entry, epoch, job);
                         }
+                        break None;
+                    } else if maintenance_due && !state.owes_a_rung() {
+                        // Due maintenance takes the claim ahead of another
+                        // reconcile turn, and the facts this turn observed wait
+                        // for it in the pending set: the maintenance leg reads
+                        // that set when it ends and hands the reconcile on. The
+                        // maintenance an entry owes is therefore bounded by one
+                        // reconcile turn rather than by the arrival of a quiet
+                        // moment the entry may never get.
+                        let next = state
+                            .claim
+                            .hand_on(|epoch| Job::Maintenance(name.clone(), epoch));
+                        drop(state);
+                        dispatch_handoff(shared, entry, epoch, next);
                         break None;
                     } else if handoff_saturated {
                         let next = state
@@ -2945,6 +2983,13 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                                 .claim
                                 .hand_on(|epoch| Job::Reconcile(name.clone(), epoch)),
                         );
+                    } else if !state.owes_a_rung() {
+                        // The claim this leg took can be the one a watcher's
+                        // facts arrived under, so the label those facts warmed
+                        // the entry to is one this leg ends: a maintenance that
+                        // left nothing to derive is an entry serving the vault,
+                        // and no leg follows to say so.
+                        state.trust = TrustState::Ready;
                     }
                 }
                 Err(JobFailure::LostMaintainership) => {
@@ -10687,6 +10732,121 @@ mod tests {
                 "the two demand sites answered an entry with {shape} differently"
             );
         }
+    }
+
+    /// **A vault that never stops reporting facts still runs its maintenance.**
+    /// The clock maintenance is due on is the wall clock, and the poll that
+    /// reads it carries a watcher's facts as readily as it carries none: an
+    /// entry under sustained traffic answers every poll with a batch, so a
+    /// maintenance the poll only schedules where it found nothing is a
+    /// maintenance a busy vault never runs.
+    ///
+    /// The facts the poll carried are not spent by the maintenance that took
+    /// the claim ahead of them: they stay in the entry's pending set, and the
+    /// maintenance leg hands the reconcile on.
+    #[test]
+    fn a_poll_carrying_facts_runs_the_maintenance_it_found_due() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+
+        // One poll that answers with facts and finds maintenance due — the
+        // busy vault's poll, driven rather than waited for.
+        ops.off_thread_rescan_poll_batches
+            .store(1, Ordering::SeqCst);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+
+        wait_for_maintenance(&ops);
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert!(
+            ops.reconciles.load(Ordering::SeqCst) > reconciles,
+            "the facts the poll carried were dropped by the maintenance beside them"
+        );
+        drop(lease);
+    }
+
+    /// A maintenance that took the claim a poll's facts arrived under is the
+    /// leg that ends the label those facts warmed the entry to: nothing is
+    /// pending behind it, so no reconcile follows to publish `Ready`.
+    #[test]
+    fn maintenance_that_derived_nothing_publishes_ready() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        ops.off_thread_poll_batches.store(1, Ordering::SeqCst);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        poll_watchers(&host.shared);
+
+        wait_for_maintenance(&ops);
+        wait_for_state(&host, &name, TrustState::Ready);
+        drop(lease);
+    }
+
+    /// **A reconcile that keeps finding facts gives the claim to due
+    /// maintenance rather than taking another turn.** The reconcile leg loops
+    /// while its own handoff drain keeps observing facts, and it holds the
+    /// entry's claim across every turn — the watcher poll that reads the
+    /// maintenance clocks skips a held entry, so an entry whose facts never
+    /// stop arriving is one no poll ever looks at. The leg reads those clocks
+    /// itself, so the maintenance an entry owes waits for one reconcile turn
+    /// rather than for a quiet moment a busy vault never has.
+    ///
+    /// The clocks come due while the leg is running, which is the case the poll
+    /// cannot cover: the poll that scheduled this reconcile found nothing due.
+    #[test]
+    fn a_reconcile_that_keeps_finding_facts_yields_to_due_maintenance() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let reconciles = ops.reconciles.load(Ordering::SeqCst);
+
+        // The reconcile leg's own drain observes a fact short of saturating,
+        // which is the shape that sends the leg around the loop again holding
+        // the claim. Its own batch source, so the driven poll below cannot
+        // spend the batch the drain depends on.
+        ops.handoff_rescan_poll_batches.store(1, Ordering::SeqCst);
+        ops.block_reconcile_at
+            .store(reconciles + 1, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &name, &ops.off_thread_poll_batches);
+
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+        ops.maintenance_due.store(true, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(
+            ops.maintenances.load(Ordering::SeqCst),
+            1,
+            "the reconcile turned again under a claim the maintenance clocks were due behind"
+        );
+        assert!(
+            ops.reconciles.load(Ordering::SeqCst) > reconciles + 1,
+            "the facts the yielding turn observed were dropped by the maintenance beside them"
+        );
+        drop(lease);
+    }
+
+    /// Wait for one maintenance leg to have run.
+    fn wait_for_maintenance(ops: &Arc<FakeOps>) {
+        wait_until(
+            "the maintenance a poll found due to run",
+            lifecycle_wait_budget(),
+            || {
+                let ran = ops.maintenances.load(Ordering::SeqCst);
+                if ran > 0 {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("no maintenance has run")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
     }
 
     #[test]

@@ -24,13 +24,26 @@
 //! directory cannot be created at all, so a name this crate accepts and a
 //! machine refuses would be a name that crosses and then serves nothing.
 //!
-//! The grammar is deliberately **stricter than `norn-text`'s
-//! protocol-identifier grammar**, which admits `_`, and the two are not to be
-//! aligned: a protocol identifier is read out of a document and has to accept
-//! what documents contain, while a vault name is minted by a person
-//! registering a vault and becomes a directory name and a URL component.
-//! Widening this to match the reader would put an underscore into paths and
-//! addresses that a scheme cannot carry.
+//! **The character grammar is RFC 3986's scheme production**, `[a-z][a-z0-9+.-]*`
+//! — the production `norn-text` recognizes a protocol prefix by, spelled again
+//! here. What this crate adds to it is the length bound above; the characters
+//! are the same set, and neither definition is derived from the other.
+//!
+//! Their agreeing is not a coupling. A protocol identifier is read out of a
+//! document, and a vault name is minted by a person registering a vault and
+//! becomes a directory component and an address authority, so each is held to
+//! its own consumers: a reader widened to accept more of what documents
+//! contain widens nothing here, because an underscore that a scheme cannot
+//! carry is one this grammar refuses whatever a document spells.
+//!
+//! ```
+//! use norn_wire::VaultName;
+//!
+//! assert_eq!(VaultName::PATTERN, "^[a-z][a-z0-9+.-]*$");
+//! assert!(VaultName::new("notes").is_ok());
+//! assert!(VaultName::new("norn+notes.2-b").is_ok());
+//! assert!(VaultName::new("norn_notes").is_err());
+//! ```
 
 use std::borrow::Cow;
 use std::fmt;
@@ -238,10 +251,10 @@ mod tests {
     }
 
     /// Each refusal with the reason it carries. The underscore case is the one
-    /// that matters most: `norn-text`'s protocol-identifier grammar admits `_`,
-    /// this one does not, and the two are deliberately different — a protocol
-    /// identifier is read out of a document, a vault name becomes a directory
-    /// and a URL component.
+    /// that matters most: it is the character a person coming from a tag or a
+    /// heading reaches for first, and a vault name becomes a directory
+    /// component and an address authority, so RFC 3986's scheme production is
+    /// what it is held to and an underscore is outside it.
     #[test]
     fn the_names_the_grammar_refuses() {
         for (text, needle) in [

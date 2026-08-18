@@ -23,8 +23,9 @@
 ///
 /// An ignored case in a new test file means adding that file's stem here, in
 /// the same diff: a stem this table does not name is an error, not a case with
-/// no lane to check against. Whether a workflow step runs the file is a pairing
-/// this guard does not read and a reviewer does.
+/// no lane to check against. The pairing runs the other way too — a stem here
+/// that no CI step runs is a lane measuring nothing — and both directions are
+/// checked below against the workflows themselves.
 const LANE_BY_FILE_STEM: &[(&str, &str)] = &[
     ("memory", "memory-lane case:"),
     ("memory_soak", "soak-lane case:"),
@@ -43,4 +44,13 @@ fn every_ignored_case_names_the_lane_that_adopts_it() {
 #[test]
 fn lane_prefixes_agree_with_testkit() {
     norn_testkit::lanes::assert_lane_prefixes_agree(env!("CARGO_PKG_NAME"), LANE_BY_FILE_STEM);
+}
+
+#[test]
+fn the_lane_steps_ci_runs_are_the_stems_this_table_names() {
+    norn_testkit::lanes::assert_lane_steps_agree(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_NAME"),
+        LANE_BY_FILE_STEM,
+    );
 }

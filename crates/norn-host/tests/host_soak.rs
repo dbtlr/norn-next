@@ -72,6 +72,7 @@ use norn_fs::ContentHash;
 use norn_host::{AttachMode, DemandLease, Host, ProductionEntryOps};
 use norn_store::{DocumentPath, ExplainedStatement, Store, StoredPathOrder, class_probe};
 use norn_testkit::process::{Run, Sandbox, open_fd_count};
+use norn_testkit::wait::{Budget, FailureKind, Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 /// The variable that puts this binary in harness mode, carrying the root the
@@ -98,6 +99,13 @@ const DEFAULT_DURATION: Duration = Duration::from_secs(90);
 
 /// How often the child takes a sample of itself.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long one read of the derived store may take.
+///
+/// A look that opens a read request costs more than a label read, and this is
+/// what separates a database that has stopped answering from a reconcile that
+/// has not landed.
+const STORE_READ_PROBE: Duration = Duration::from_secs(5);
 
 /// How often a sample is preceded by a warm read-only request, in samples.
 const COUNTER_CHECK_EVERY: u64 = 5;
@@ -475,6 +483,9 @@ fn run_load(root: &Path) {
             println!("{RECOVERY_LINE_PREFIX}ticks={tick} recoveries={recoveries}");
             return;
         }
+        // Semantic: the interval is the sampling cadence. What the run
+        // measures is a slope over samples taken at a fixed spacing, so this
+        // sleep is the spacing itself and no condition ends it early.
         std::thread::sleep(SAMPLE_INTERVAL);
         tick += 1;
     }
@@ -513,20 +524,32 @@ fn recovered(
         let lease = host
             .retry(name, AttachMode::Durable)
             .expect("re-requesting the attachment");
-        let deadline = Instant::now() + RECOVERY_LIMIT;
-        loop {
-            last = host.state(name);
-            if last == Ok(TrustState::Ready) {
-                return lease;
-            }
-            assert!(
-                !names_no_vault(&last),
-                "the host serves no vault under `{name}`: {last:?}"
-            );
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        // The work bound elapsing here is one attempt spent rather than the run
+        // failing: the panic below is what says every attempt is gone, so that
+        // one failure is read as the answer to this attempt. A probe that
+        // overran is the other reading, and it is not an attempt spent: it says
+        // one `state` call cost more than a look at a published label may, and
+        // no number of fresh demands answers that. It ends the run where it is
+        // found, carrying the wait's own diagnosis.
+        let came_back = wait_until(
+            &format!("the entry under `{name}` to serve the vault again"),
+            attach::state_budget(RECOVERY_LIMIT),
+            || {
+                last = host.state(name);
+                if last == Ok(TrustState::Ready) {
+                    return Observed::Met(());
+                }
+                assert!(
+                    !names_no_vault(&last),
+                    "the host serves no vault under `{name}`: {last:?}"
+                );
+                Observed::pending(format!("the state is {last:?}"))
+            },
+        );
+        match came_back {
+            Ok(()) => return lease,
+            Err(failure) if failure.kind == FailureKind::Elapsed => {}
+            Err(failure) => panic!("{failure}"),
         }
     }
     panic!(
@@ -557,25 +580,32 @@ fn names_no_vault(observed: &Result<TrustState, ErrorEnvelope>) -> bool {
 /// reconcile lands is a clock this suite does not read.
 fn assert_the_churn_reached_the_store(store: &mut Store, written: &Written) {
     let expected = ContentHash::of(written.content.as_bytes()).to_hex();
-    let deadline = Instant::now() + RECONCILE_LIMIT;
-    loop {
-        let derived = store
-            .begin_request()
-            .stored_document(&written.path)
-            .expect("reading a document")
-            .map(|document| document.content_hash);
-        if derived.as_deref() == Some(expected.as_str()) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the churn last wrote {} and no reconcile derived those bytes inside \
-             {RECONCILE_LIMIT:?}, so the load ran against a host that saw nothing: the store holds \
-             {derived:?} against the {expected} that write hashes to",
+    wait_until(
+        &format!(
+            "a reconcile to derive the bytes the churn last wrote to {}",
             written.path.as_str()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+        ),
+        // One look opens a read request against the derived store, which is
+        // more than a label read and is bounded as such.
+        Budget::new(RECONCILE_LIMIT, STORE_READ_PROBE),
+        || {
+            let derived = store
+                .begin_request()
+                .stored_document(&written.path)
+                .expect("reading a document")
+                .map(|document| document.content_hash);
+            if derived.as_deref() == Some(expected.as_str()) {
+                Observed::Met(())
+            } else {
+                Observed::pending(format!(
+                    "the store holds {derived:?} against the {expected} that write hashes to"
+                ))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!("the load ran against a host that saw nothing: {failure}");
+    });
 }
 
 /// **The counter-violation term.** A request that only reads derives nothing,
