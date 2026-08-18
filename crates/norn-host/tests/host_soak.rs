@@ -349,17 +349,6 @@ fn reported_recoveries(report: &str) -> u32 {
         .unwrap_or_else(|| panic!("`{line}` does not carry a recovery count"))
 }
 
-/// The mean resident set of one quarter of the series, indexed from zero.
-///
-/// Quartile means rather than endpoints: one sample taken while a changeset
-/// commits is a spike, and a comparison of two single readings would let it
-/// decide the run.
-///
-/// The last quartile ends at the last sample rather than at a multiple of the
-/// quarter's width. A series whose length is not a multiple of four otherwise
-/// leaves its final one to three samples out of the slope while the descriptor
-/// bar reads the last of them, and the two bars judge different windows of the
-/// same run.
 /// The highest resident set the series holds.
 ///
 /// **The peak term of the memory invariant at this profile.** The slope reads
@@ -380,6 +369,17 @@ fn peak_resident_set(samples: &[Sample]) -> u64 {
         .expect("a series judged here holds samples")
 }
 
+/// The mean resident set of one quarter of the series, indexed from zero.
+///
+/// Quartile means rather than endpoints: one sample taken while a changeset
+/// commits is a spike, and a comparison of two single readings would let it
+/// decide the run.
+///
+/// The last quartile ends at the last sample rather than at a multiple of the
+/// quarter's width. A series whose length is not a multiple of four otherwise
+/// leaves its final one to three samples out of the slope while the descriptor
+/// bar reads the last of them, and the two bars judge different windows of the
+/// same run.
 fn quartile_mean(samples: &[Sample], quartile: usize) -> u64 {
     let size = samples.len() / 4;
     let start = if quartile == 3 {
