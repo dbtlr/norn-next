@@ -1904,21 +1904,27 @@ mod tests {
     /// carry, and the sort key those decide. A page owes that only for names its
     /// cursor has not already covered, so the ceiling is the sum over pages of
     /// the run still ahead of each cursor — under half the listing count above,
-    /// and a smaller share of it the wider the directory gets. The bar is that
-    /// sum, and it holds in whatever order the directory stream returns names:
-    /// every name identified is one the cursor left. The fixture's names are all
-    /// the same width, so no name's key is a prefix of another's and none of
-    /// them reaches the one case a key alone cannot settle against a cursor.
+    /// and a smaller share of it the wider the directory gets. That sum is
+    /// `400,000 - 256 * (0 + 1 + ... + 39) = 200,320`.
+    ///
+    /// One name per cursor is admitted past it: the name whose key spells the
+    /// cursor exactly, which is the previous page's own last entry. A key alone
+    /// cannot tell that name from a directory of the same name, whose separator
+    /// would sort it above — so it is identified and then dropped by the exact
+    /// test. Thirty-nine of this width's forty pages carry a cursor, and the bar
+    /// is `200,320 + 39`. No other name reaches that case here: the fixture's
+    /// names are all one width, so no key is a proper prefix of another.
+    ///
+    /// The bar holds in whatever order the directory stream returns names, since
+    /// both terms count names rather than orderings. It is spelled out rather
+    /// than derived, for the reason the listing bar above is.
     ///
     /// It does not gate the second rejection — a name above every key the run in
     /// hand holds. That one saves whatever the listing order lets it: everything
     /// past the first page's worth where the stream runs low keys first, and
     /// nothing at all where it runs them last. A bar over an order no filesystem
     /// promises would be a bar over the filesystem.
-    ///
-    /// The figure is `400,000 - 256 * (0 + 1 + ... + 39) = 400,000 - 199,680`,
-    /// and it is spelled out for the reason the listing bar above is.
-    const WIDE_BAR_IDENTITIES: u64 = 200_320;
+    const WIDE_BAR_IDENTITIES: u64 = 200_359;
 
     /// **A wide directory's paging costs what its bars accept.**
     ///
