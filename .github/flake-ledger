@@ -25,6 +25,15 @@
 #   first-seen   the date of the occurrence the entry was opened for
 #   disposition  the ruling: what was decided, and what a recurrence means now
 #
+# **What a signature is matched against** is every line of the run except the
+# status lines libtest prints for a test that passed or was skipped. That is
+# what makes a test name a usable signature: the name is in the output of every
+# run of the suite that holds it, and only a failing run puts it on a `...
+# FAILED` line, in the `failures:` list, or in panic text. An entry whose class
+# is one test therefore names the test, and stays honest through a restructure
+# that moves which of the test's assertions trips first; an entry whose class is
+# one condition spread across several tests names the condition's own words.
+#
 # **Removing an entry** is saying the class can no longer recur — the condition
 # was removed rather than judged. An entry whose disposition has been overtaken
 # is edited rather than deleted, so the recurrence still surfaces.
@@ -48,19 +57,19 @@ first-seen: 2026-08-09
 disposition: Ruled 2026-08-17, with the two class-A entries above. The case that fails differs per run, so the signature is the assertion rather than a test name. A recurrence in CI reopens the ruling.
 
 id: class-b-armed-stream-discarded-delivery
-signature: the arm was spent on a delivery the watcher folds into no batch
+signature: an_armed_stream_answers_nothing_for_a_delivery_that_reaches_no_batch
 class: real-FSEvents armed stream
 first-seen: 2026-08-16
 disposition: Restructured 2026-08-17. The fixed-sleep ordering was replaced across the armed-stream family by sync points on observed deliveries, so this assertion no longer rides a wall clock. A recurrence is the restructure failing to hold, and is a defect rather than a flake.
 
 id: class-b-armed-stream-heal-window
-signature: the arm answered inside the heal window
+signature: an_armed_stream_answers_nothing_inside_the_first_heal_window
 class: real-FSEvents armed stream
 first-seen: 2026-08-16
 disposition: Restructured 2026-08-17, with class-b-armed-stream-discarded-delivery. The heal window is now closed on a delivery observed in the accumulation it hands back. A recurrence is a defect rather than a flake.
 
 id: class-b-armed-stream-establishment
-signature: the stream arm answered a delivery from before a consumer met one
+signature: an_armed_stream_answers_nothing_while_the_backend_establishes_itself
 class: real-FSEvents armed stream
 first-seen: 2026-08-16
 disposition: Restructured 2026-08-17, with class-b-armed-stream-discarded-delivery. The heal window that makes the arm eligible now closes on a change made after establishment and seen to arrive, so the whole of establishment is behind the assertion. A recurrence is a defect rather than a flake.

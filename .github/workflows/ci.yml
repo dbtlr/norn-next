@@ -24,6 +24,11 @@
 # and a job-summary block naming the ruling. It changes no verdict and retries
 # nothing: the suite's own exit status is the step's.
 #
+# A step that reaches its suite through another script is wrapped on the
+# outside of it. `lane-suite.sh` runs `cargo test -- --ignored` and fails a step
+# that ran no case, so it is a suite step like any other and its output — the
+# suite's, and the script's own error — is what the tripwire scans.
+#
 # The scheduled tier does not wrap its steps the same way. Every one of its
 # suite logs is kept and its record is a typed artifact, so a recurrence there
 # is already written down; what the wrapper removes is the quiet rerun, which
@@ -189,7 +194,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Counter bars
-        run: .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host counter_gate --nocapture --test-threads=1
 
   # A real gate. Each subject runs as a child under the testkit's process
   # harness, and what is read is the peak resident set the kernel accounted to
@@ -228,8 +233,8 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@v2
       - name: Memory bars
-        run: .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fixtures memory --nocapture --test-threads=1
       - name: Walker memory bars
-        run: .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-fs walk_memory --nocapture --test-threads=1
       - name: Attach memory bars
-        run: .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1
+        run: .github/scripts/flake-tripwire.sh .github/scripts/lane-suite.sh norn-host memory --nocapture --test-threads=1

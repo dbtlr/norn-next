@@ -483,14 +483,24 @@ fn assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane: 
             preflight::READINGS_SCRIPT
         )
     });
-    let first_build = at("cargo ").unwrap_or_else(|| {
-        panic!("`{lane}` writes a qualification record and runs no cargo command")
-    });
+    // The first step that does work, by whatever spelling it reaches cargo
+    // with. Keying on the literal `cargo ` alone would read the lanes' own
+    // suite steps as something other than a build — every one of them runs
+    // through a script — and place the reading behind an hour of soak load
+    // while still passing.
+    let first_build = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .position(|line| line.contains("cargo ") || reaches_a_suite(line))
+        .unwrap_or_else(|| {
+            panic!("`{lane}` writes a qualification record and runs no suite and no cargo command")
+        });
     assert!(
         reading < first_build,
-        "`{lane}` takes its host-health reading after it starts building. A cold build is minutes \
-         of every core, so the load average it would read is this run's own compile and the lane \
-         would refuse itself"
+        "`{lane}` takes its host-health reading after it starts working. A cold build is minutes \
+         of every core and a soak step is an hour of them, so the share it would read is this \
+         run's own work and the lane would refuse itself"
     );
 
     let classified = at(preflight::CLASSIFIER).unwrap_or_else(|| {
@@ -688,41 +698,35 @@ fn assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane: &str, body:
 #[test]
 fn every_per_pr_suite_runs_through_the_tripwire_and_every_ledger_entry_can_match() {
     let root = workspace_root();
-    let wrapper = ".github/scripts/flake-tripwire.sh";
     let gate = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
         .expect("reading the per-PR lane");
     let unwrapped: Vec<&str> = gate
         .lines()
         .map(str::trim)
         .filter(|line| !line.starts_with('#'))
-        .filter(|line| line.starts_with("run: cargo test"))
+        .filter(|line| reaches_a_suite(line))
+        .filter(|line| !line.contains(TRIPWIRE))
         .collect();
     assert!(
         unwrapped.is_empty(),
-        "the per-PR lane runs {} suite step(s) outside `{wrapper}`, so a ledgered failure there \
+        "the per-PR lane runs {} suite step(s) outside `{TRIPWIRE}`, so a ledgered failure there \
          is matched against nothing and a rerun leaves no record: {unwrapped:?}",
         unwrapped.len()
     );
     assert!(
-        gate.contains(wrapper),
-        "the per-PR lane runs no suite through `{wrapper}`"
+        gate.contains(TRIPWIRE),
+        "the per-PR lane runs no suite through `{TRIPWIRE}`"
     );
 
     let ledger =
         std::fs::read_to_string(root.join(".github/flake-ledger")).expect("reading the ledger");
-    let required = ["id", "signature", "class", "first-seen", "disposition"];
-    let mut entries = 0;
-    for block in ledger.split("\n\n") {
-        let fields: Vec<(&str, &str)> = block
-            .lines()
-            .filter(|line| !line.starts_with('#'))
-            .filter_map(|line| line.split_once(": "))
-            .collect();
-        if fields.is_empty() {
-            continue;
-        }
-        entries += 1;
-        for key in required {
+    let entries = ledger_entries(&ledger);
+    assert!(
+        !entries.is_empty(),
+        "the flake ledger holds no entry, so the tripwire matches every failure against nothing"
+    );
+    for fields in &entries {
+        for key in ["id", "signature", "class", "first-seen", "disposition"] {
             let value = fields
                 .iter()
                 .find(|(named, _)| *named == key)
@@ -734,11 +738,170 @@ fn every_per_pr_suite_runs_through_the_tripwire_and_every_ledger_entry_can_match
             );
         }
     }
-    assert!(
-        entries > 0,
-        "the flake ledger holds no entry, so the tripwire matches every failure against nothing"
+    eprintln!(
+        "flake ledger: {} entries the per-PR lane is scanned against",
+        entries.len()
     );
-    eprintln!("flake ledger: {entries} entries the per-PR lane is scanned against");
+}
+
+/// The wrapper every per-PR suite step is run through.
+const TRIPWIRE: &str = ".github/scripts/flake-tripwire.sh";
+
+/// Whether a workflow line runs a suite — directly, or through one of the
+/// scripts that runs one.
+///
+/// **Reaching cargo is what makes a step a suite step, not the spelling it
+/// reaches it with.** A step that runs `lane-suite.sh` runs
+/// `cargo test -- --ignored`, and a rule written over the literal `cargo test`
+/// passes over it while the claim it enforces says otherwise. The scripts are
+/// named here so a step wrapped in one is still seen.
+fn reaches_a_suite(line: &str) -> bool {
+    ["cargo test", "lane-suite.sh", "certification-suite.sh"]
+        .iter()
+        .any(|runner| line.contains(runner))
+}
+
+/// Each entry of the flake ledger, as the `key`/`value` pairs its block holds.
+fn ledger_entries(ledger: &str) -> Vec<Vec<(&str, &str)>> {
+    ledger
+        .split("\n\n")
+        .map(|block| {
+            block
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .filter_map(|line| line.split_once(": "))
+                .collect::<Vec<(&str, &str)>>()
+        })
+        .filter(|fields| !fields.is_empty())
+        .collect()
+}
+
+/// One ledger field, by key.
+fn ledger_field<'a>(fields: &[(&'a str, &'a str)], key: &str) -> &'a str {
+    fields
+        .iter()
+        .find(|(named, _)| *named == key)
+        .map(|(_, value)| value.trim())
+        .unwrap_or_else(|| panic!("a flake-ledger entry names no `{key}`: {fields:?}"))
+}
+
+/// **A ledgered signature is matched against a failure and never against a run
+/// where the test it names passed.**
+///
+/// The discrimination is the whole of the mechanism. libtest prints
+/// `test <name> ... ok` for every test that passes, so a signature naming a
+/// test is in the output of every green run of the suite that holds it — and a
+/// matcher that scanned the whole log would report the class as having recurred
+/// the first time anything else in that suite went red. The record would then
+/// be identical whether the ledgered failure happened or not, which is the bar
+/// this exists for inverted: the correct reflex would become ignoring it.
+///
+/// Both directions are read off the real script and the real ledger, over
+/// synthesized suite output, so an entry added to the file is covered by the
+/// same two claims without being named here.
+#[test]
+#[cfg(unix)]
+fn a_ledgered_signature_matches_a_failure_and_never_a_run_that_passed_it() {
+    let root = workspace_root();
+    let ledger =
+        std::fs::read_to_string(root.join(".github/flake-ledger")).expect("reading the ledger");
+    let entries = ledger_entries(&ledger);
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "flake-tripwire")
+        .expect("a sandbox for the tripwire");
+
+    // Every ledgered signature on a status line reporting a test that passed,
+    // beside one unrelated failure. This is the shape of an ordinary red run in
+    // a suite that holds the ledgered cases, and nothing in the ledger is what
+    // failed.
+    let mut passed = String::from("running tests\n");
+    for fields in &entries {
+        passed.push_str(&format!(
+            "test suite::{} ... ok\n",
+            ledger_field(fields, "signature")
+        ));
+    }
+    passed.push_str(
+        "test suite::something_else ... FAILED\n\nfailures:\n\n---- suite::something_else stdout \
+         ----\nthread 'suite::something_else' panicked at src/lib.rs:1:1:\nassertion \
+         failed\n\nfailures:\n    suite::something_else\n\ntest result: FAILED. 1 failed\n",
+    );
+    let (status, summary, annotations) = tripwire_over(&sandbox, &root, "passed", &passed);
+    assert_eq!(
+        status,
+        norn_testkit::process::RunStatus::Exited(101),
+        "the tripwire changed the suite's own verdict"
+    );
+    assert!(
+        summary.contains("no ledgered signature matched"),
+        "a failure of no ledgered class was recorded as a recurrence: {summary}"
+    );
+    for fields in &entries {
+        let id = ledger_field(fields, "id");
+        assert!(
+            !annotations.contains(id),
+            "`{id}` was reported as recurring by a run in which its own test passed, so the \
+             entry cannot tell a recurrence from any other red run: {annotations}"
+        );
+    }
+
+    // The same entries, each in a run that really did fail on it.
+    for fields in &entries {
+        let (id, signature) = (
+            ledger_field(fields, "id"),
+            ledger_field(fields, "signature"),
+        );
+        let failed = format!(
+            "running 1 test\ntest suite::a_case ... FAILED\n\nfailures:\n\n---- suite::a_case \
+             stdout ----\nthread 'suite::a_case' panicked at src/lib.rs:1:1:\n{signature}\n\ntest \
+             result: FAILED. 1 failed\n"
+        );
+        let (status, summary, annotations) = tripwire_over(&sandbox, &root, id, &failed);
+        assert_eq!(
+            status,
+            norn_testkit::process::RunStatus::Exited(101),
+            "the tripwire changed the suite's own verdict"
+        );
+        assert!(
+            annotations.contains(&format!("Ledgered flake recurred: {id}")),
+            "`{id}` recurred and the run carries no annotation naming it: {annotations}"
+        );
+        assert!(
+            summary.contains(ledger_field(fields, "disposition")),
+            "`{id}` recurred and the job summary carries no disposition to read: {summary}"
+        );
+    }
+}
+
+/// Run the tripwire over `output` as a failing suite's own output, and hand
+/// back what the run left: its exit status, the job summary and the
+/// annotations.
+#[cfg(unix)]
+fn tripwire_over(
+    sandbox: &Sandbox,
+    root: &Path,
+    label: &str,
+    output: &str,
+) -> (norn_testkit::process::RunStatus, String, String) {
+    let fixture = sandbox.work_dir().join(format!("{label}.log"));
+    std::fs::write(&fixture, output).expect("writing the synthesized suite output");
+    let summary = sandbox.work_dir().join(format!("{label}.summary"));
+    std::fs::write(&summary, "").expect("an empty job summary");
+
+    // 101 is what libtest exits with, and it is what the run's own status has
+    // to still be on the far side of the wrapper.
+    let outcome = norn_testkit::process::Run::new(sandbox, root.join(TRIPWIRE))
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(format!("cat {}; exit 101", fixture.display()))
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .wait()
+        .expect("running the flake tripwire");
+    let written = std::fs::read_to_string(&summary).expect("reading the job summary");
+    (
+        outcome.status,
+        written,
+        format!("{}{}", outcome.stdout_text(), outcome.stderr_text()),
+    )
 }
 
 /// Each job of one workflow, as its name and the text under it.

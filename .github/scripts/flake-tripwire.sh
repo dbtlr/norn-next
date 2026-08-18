@@ -57,11 +57,25 @@ summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 # entry as a block in the job summary. The awk program owns the parsing so the
 # block format is read in one place; it prints one `field<TAB>value` stream per
 # match, and the shell renders it.
+#
+# **A signature is matched against the lines a failure can be in, and no
+# others.** libtest prints one status line per test it ran whatever the outcome,
+# so a signature naming a test is in the output of a run where that test passed
+# exactly as it is in a run where it failed — and a whole-log scan would report
+# every ledgered class as recurring the first time anything else in the same
+# suite went red. A line reporting a pass or a skip is therefore not scanned.
+# Everything else is: the `... FAILED` status lines, the `failures:` list at the
+# end, the panic text a signature naming an assertion lives in, and whatever
+# else the run printed.
 matches=$(awk -v output="$log" '
+  function reports_a_test_that_did_not_fail(line) {
+    return line ~ /^[ \t]*test .+ [.][.][.] (ok|ignored)/
+  }
   function flush() {
     if (id != "" && signature != "") {
       matched = ""
       while ((getline line < output) > 0) {
+        if (reports_a_test_that_did_not_fail(line)) continue
         if (index(line, signature) > 0) { matched = line; break }
       }
       close(output)
