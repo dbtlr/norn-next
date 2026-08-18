@@ -92,19 +92,21 @@ pub const CLASSIFIER: &str = "cargo test --locked -p norn-testkit --lib certific
 /// **How much of the machine may already be spoken for and still leave the work
 /// bounds meaning what they were authored to mean.**
 ///
-/// Three quarters, and the number follows from where the reading is taken. A
-/// lane reads its host at the top of the job, which is a runner still finishing
-/// its own checkout: a `macos-15` runner samples in the fifties there while
-/// having nothing else on it at all. So what this separates is a machine that
-/// is *saturated* — nothing free, work queueing behind work — from one that is
-/// merely finishing something, and that is the starvation the ledger records:
-/// the collection workstation reads a hundred percent with other checkouts
-/// building beside it.
+/// Half, and it sits between two measured shapes rather than between two
+/// arguments. A `macos-15` runner reads under three percent at the top of a
+/// job — the window opens after a settle, so what it samples is the machine and
+/// not the tail of the job's own checkout — while the collection workstation
+/// reads a hundred with other checkouts building beside it. Half is the middle
+/// of that gap and is twenty times what a healthy runner produces.
+///
+/// What it means is the thing the bounds turn on: a machine half taken still
+/// has half its processors for the suites, and past half the work bounds are
+/// increasingly measuring the queue.
 ///
 /// A share rather than a ratio to the core count: the suites' work is what is
-/// left over, and a quarter of two processors and a quarter of twelve are both
-/// a quarter of a machine.
-pub const BUSY_BOUND: f64 = 75.0;
+/// left over, and half of two processors and half of twelve are both half a
+/// machine.
+pub const BUSY_BOUND: f64 = 50.0;
 
 /// **The fewest processors a host can run these suites on and have the bounds
 /// mean anything.**
@@ -594,15 +596,14 @@ mod tests {
         );
     }
 
-    /// **A machine three quarters taken is still admitted**, and the first
-    /// tenth of a percent past it is not. The bound is where a machine stops
-    /// having a quarter of itself free for the work the bounds were authored
-    /// over.
+    /// **A machine exactly half taken is still admitted**, and the first tenth
+    /// of a percent past it is not. The bound is where a machine stops having
+    /// half of itself free for the work the bounds were authored over.
     #[test]
-    fn the_share_bound_admits_a_three_quarters_taken_machine_and_refuses_the_first_step_past_it() {
+    fn the_share_bound_admits_a_half_taken_machine_and_refuses_the_first_step_past_it() {
         assert_eq!(
             Reading {
-                busy_deci_percent: Some(750),
+                busy_deci_percent: Some(500),
                 ..healthy()
             }
             .verdict(),
@@ -610,12 +611,12 @@ mod tests {
         );
         assert_eq!(
             Reading {
-                busy_deci_percent: Some(751),
+                busy_deci_percent: Some(501),
                 ..healthy()
             }
             .verdict(),
             Verdict::Refused(vec![Refusal::Busy {
-                busy_deci_percent: 751
+                busy_deci_percent: 501
             }])
         );
     }
@@ -640,20 +641,24 @@ mod tests {
         assert_eq!(verdict.spelling(), "refused");
     }
 
-    /// **A runner finishing its own checkout is admitted.** This is the shape
-    /// the reading is taken in, and it is the shape the bound is placed
-    /// against: a `macos-15` runner hands the lane three cores that sample in
-    /// the fifties at the top of the job with nothing else on the machine, and
-    /// a bound that refused it would refuse every scheduled run there is.
+    /// **A freshly handed-over runner is admitted**, and this is the shape the
+    /// bound is placed against: a `macos-15` runner hands the lane three cores
+    /// reading under three percent at the top of a job, and a bound that
+    /// refused it would refuse every scheduled run there is.
+    ///
+    /// The margin between this and the bound is what the settle bought. Sampled
+    /// without one, the same runner reads in the fifties — the window opens on
+    /// the tail of the job's own checkout — and the bound would be placed
+    /// against the checkout rather than against the machine.
     #[test]
     fn a_freshly_handed_over_runner_is_admitted() {
         assert_eq!(
             Reading {
                 cores: Some(3),
-                busy_deci_percent: Some(575),
+                busy_deci_percent: Some(26),
                 fseventsd: Fseventsd::Running {
                     cpu_deci_percent: 0,
-                    resident_kib: 10_176,
+                    resident_kib: 11_584,
                 },
             }
             .verdict(),
