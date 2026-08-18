@@ -8068,7 +8068,7 @@ mod tests {
             "the walk read through a name it refuses to enter"
         );
 
-        let mut increment = |store: &mut Store, dirty: &_| {
+        let increment = |store: &mut Store, dirty: &_| {
             scoped_increment(
                 store,
                 f.vault().as_path(),

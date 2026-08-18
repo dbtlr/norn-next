@@ -199,6 +199,15 @@ impl Batch {
     /// rename; the covering root is what the consumer derives at, and it
     /// carries the name the directory renders now.
     ///
+    /// **That name is as good as the reports behind it.** Where a backend
+    /// reports the half a rename moved away from as a path that stands, and
+    /// reports it last, the covering root carries a spelling the tree no longer
+    /// renders and everything it speaks for is derived through it. Nothing here
+    /// tells that apart from the same rename the other way round: both are two
+    /// roots disagreeing about a shared ancestor's spelling, with no report
+    /// saying which name a directory entry holds. What resolves it is a reading
+    /// of the tree, and this is a reading of reports.
+    ///
     /// **A root nothing has spelled live covers only what also died.** Every
     /// covering root answers for its whole range — one reading enumerates the
     /// subtree, the other says there is nothing in it — but only a name a
@@ -3318,6 +3327,40 @@ mod tests {
             let expected: Vec<_> = kept.iter().map(Path::new).collect();
             assert_eq!(paths, expected, "{label}");
         }
+    }
+
+    /// **A covering root carries the name its last live report spelled, and
+    /// that is the name everything it speaks for is derived through.**
+    ///
+    /// This is the bound on subsumption, stated over the shape that reaches it.
+    /// A backend which cannot say which half of a rename a path was reports
+    /// both halves as paths that stand, and the set reads them the only way a
+    /// set of reports can be read: a name a report calls live is live, so the
+    /// last of them is the one the root carries. Where that last one is the
+    /// half the rename moved away from, the covering root carries a spelling
+    /// the tree no longer renders, and the descendant it subsumes was the one
+    /// root naming the identity at a spelling the tree does render.
+    ///
+    /// Nothing in a batch tells that apart from the same rename the other way
+    /// round: two roots, one covering the other, disagreeing about how their
+    /// shared ancestor is spelled, and no report saying which of the two names
+    /// a directory entry holds. What resolves it is a reading of the tree, and
+    /// a batch is a reading of reports.
+    #[test]
+    fn a_covering_root_carries_the_name_its_last_live_report_spelled() {
+        let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+        for (kind, path) in [
+            (EventKind::Modify(ModifyKind::Any), "/vault/FOLDER/note.md"),
+            (
+                EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+                "/vault/folder",
+            ),
+        ] {
+            ingest(&state, Ok(Event::new(kind).add_path(path.into())));
+        }
+        let batch = settled(&state);
+        let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("folder")]);
     }
 
     /// **A root that is gone covers what also died.** A removal names one path
