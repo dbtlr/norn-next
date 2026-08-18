@@ -41,10 +41,21 @@
 //!
 //! The load's *duration* is a clock, which is why this case is the scheduled
 //! lane's and not the per-PR lane's. Nothing here asserts on it: the bars are a
-//! descriptor count and a ratio between two means of a sampled series, and both
-//! say the same thing on a slow runner as on a fast one. `NORN_SOAK_DURATION_SECS`
-//! is how long the load runs, defaulting low enough that a local `--ignored`
-//! run is usable; the workflow passes an hour.
+//! descriptor count, a ratio between two means of a sampled series, and — where
+//! one is authored — a ceiling on the highest sample the series holds, and each
+//! says the same thing on a slow runner as on a fast one.
+//! `NORN_SOAK_DURATION_SECS` is how long the load runs, defaulting low enough
+//! that a local `--ignored` run is usable; the workflow passes an hour.
+//!
+//! **The peak resident set is recorded every run and barred only where a
+//! ceiling is authored.** [`baselines::SOAK_PEAK_RSS_CEILING_BYTES`] is `None`
+//! until calibration runs of the scheduled lane produce readings to author one
+//! from, and the reading lands in the run's table meanwhile — a recorded
+//! measurement with no bar over it, which is the state a bar is authored out
+//! of. It is the peak of the *load*: the child samples itself from inside the
+//! churn loop, which it reaches once the attachment is ready, so the attach and
+//! the heal over the ≥5k tree are ahead of the first sample and outside the
+//! series.
 //!
 //! Running this needs `/proc` or its BSD equivalent, so the case is present on
 //! Linux and macOS and absent elsewhere. The scheduled lane runs it on Linux.
@@ -205,6 +216,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
     let head = quartile_mean(&samples, 0);
     let tail = quartile_mean(&samples, 3);
     let slope = baselines::per_mille(tail, head);
+    let peak = peak_resident_set(&samples);
     let descriptor_growth = last.open_fds.saturating_sub(first.open_fds);
 
     baselines::record(
@@ -220,6 +232,14 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
             (
                 "last quartile mean resident set (MiB)",
                 baselines::mebibytes(tail),
+            ),
+            ("peak resident set (MiB)", baselines::mebibytes(peak)),
+            (
+                "peak ceiling (MiB)",
+                match baselines::SOAK_PEAK_RSS_CEILING_BYTES {
+                    Some(ceiling) => baselines::mebibytes(ceiling),
+                    None => "unauthored".to_string(),
+                },
             ),
             ("observed slope", baselines::multiple(slope)),
             (
@@ -247,6 +267,16 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         head > 0,
         "the load reported no resident set at all, so the slope compares nothing"
     );
+    if let Some(ceiling) = baselines::SOAK_PEAK_RSS_CEILING_BYTES {
+        assert!(
+            peak <= ceiling,
+            "the load's resident set peaked at {} MiB, past the {} MiB ceiling, over {} samples \
+             at the ≥5k profile",
+            baselines::mebibytes(peak),
+            baselines::mebibytes(ceiling),
+            samples.len()
+        );
+    }
     assert!(
         slope <= baselines::SOAK_RSS_SLOPE_PER_MILLE,
         "the resident set rose by {}x across the load, past the {}x bar: the first quartile \
@@ -320,6 +350,30 @@ fn reported_recoveries(report: &str) -> u32 {
     field(line, "recoveries=")
         .and_then(|value| value.parse().ok())
         .unwrap_or_else(|| panic!("`{line}` does not carry a recovery count"))
+}
+
+/// The highest resident set the series holds.
+///
+/// **The peak term of the memory invariant at this profile.** The slope reads
+/// the series' trend and the quartile means it compares hide a spike between
+/// them, so the height the load ever reached is a separate reading — and it is
+/// the maximum of samples already taken rather than a second instrument.
+///
+/// Two things it is not, and both are about what the series covers. The samples
+/// are of the current resident set on a one-second cadence, so this is the
+/// highest sampled value and not the kernel's high-water mark: an allocation
+/// that lands and is released between two ticks is not in it. And the series
+/// begins once the attachment reads ready — the churn loop takes the first
+/// sample — so the attach and the heal walk over the ≥5k tree are before it,
+/// and a cost paid there and released is outside every reading. What this
+/// answers for is the load's own sustained peak; the attach's peak is barred at
+/// the 2k profile by the per-PR lane and is unmeasured at this one.
+fn peak_resident_set(samples: &[Sample]) -> u64 {
+    samples
+        .iter()
+        .map(|sample| sample.rss_bytes)
+        .max()
+        .expect("a series judged here holds samples")
 }
 
 /// The mean resident set of one quarter of the series, indexed from zero.

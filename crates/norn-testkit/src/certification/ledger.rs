@@ -70,6 +70,9 @@ pub const SINK: &str = "NORN_QUALIFICATION_LEDGER";
 /// A case with no line is [`Outcome::NotRun`], which is what a lane that never
 /// reached it produced — and what makes the record of a lane that ran no
 /// certification suite at all read as the suite change it is.
+///
+/// A lane writes it through [`super::lane::collect`], off the harness output
+/// its suite steps kept.
 pub const OUTCOMES: &str = "NORN_QUALIFICATION_OUTCOMES";
 
 /// How the run ended, as the workflow saw its own job.
@@ -897,13 +900,15 @@ mod tests {
         );
     }
 
-    /// A run nobody checked the machine for cannot qualify, and the reason is
-    /// the environment rather than the product: nothing was concluded about the
-    /// candidate.
     /// A run that never attempted the required cases did not run the required
-    /// suite, whatever else it did. This is the classification today's
-    /// scheduled soak lane earns: it runs the measurement suites and none of
-    /// the certification cases.
+    /// suite, whatever else it did.
+    ///
+    /// **It is a lane regression rather than a steady state.** Both scheduled
+    /// lanes run every certification target and read an outcome per case off
+    /// the harness's own output, so a record whose cases are all `not-run` is
+    /// a lane whose collection came apart — logs written where the collector
+    /// does not read, or an outcomes file the record step does not find — and
+    /// this classification is how it says so instead of passing quietly.
     #[test]
     fn a_run_that_attempted_no_required_case_is_a_suite_change() {
         let root = workspace_root();
@@ -919,6 +924,9 @@ mod tests {
         assert_eq!(record.problems(&root), Vec::<String>::new());
     }
 
+    /// A run nobody checked the machine for cannot qualify, and the reason is
+    /// the environment rather than the product: nothing was concluded about the
+    /// candidate.
     #[test]
     fn a_run_with_no_preflight_is_environmental() {
         let root = workspace_root();

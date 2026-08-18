@@ -123,6 +123,12 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               self-reference terminate rather than recur",
     },
     ManifestFile {
+        path: "crates/norn-testkit/src/certification/lane.rs",
+        why: "how a lane's suite logs become the record's case lines: which targets a lane owes, \
+              how a harness line is read, and which strays reach the record. A run whose outcomes \
+              were transcribed by a different rule reports a different suite",
+    },
+    ManifestFile {
         path: "crates/norn-testkit/src/certification/ledger.rs",
         why: "what makes a record qualifying: the classification a run's contents imply and the \
               validator a campaign counts through. A run counted under a looser rule is not the \

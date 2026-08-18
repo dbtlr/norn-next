@@ -15,6 +15,10 @@
 //!   certification suites and the authored bounds. Two runs of a suite that
 //!   changed underneath them are two suites, and this is the value that says
 //!   so.
+//! - [`lane`] — **what a scheduled lane ran**, read off the suites' own
+//!   harness output: one log per target, turned into the case lines the record
+//!   carries. A lane that runs the certification suites and reports nothing
+//!   leaves a record that cannot be told from one that ran none of them.
 //! - [`ledger`] — **what one run was**, as a record a campaign counts rather
 //!   than a check somebody remembers: the candidate, the manifest digest, the
 //!   platform, the preflight verdict, an outcome per required case, and a
@@ -25,5 +29,6 @@
 //! What is here is what makes any one of its runs mean something.
 
 pub mod inventory;
+pub mod lane;
 pub mod ledger;
 pub mod manifest;

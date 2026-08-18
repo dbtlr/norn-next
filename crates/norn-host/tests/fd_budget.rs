@@ -18,6 +18,29 @@ use norn_testkit::wait::Budget;
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
+
+/// How many descriptors one served attachment may hold.
+///
+/// **An authored threshold, and it moves only by a reviewed edit with grounds**
+/// — the same discipline the bands in `tests/baselines/mod.rs` carry, under
+/// [ADR 0007](../../../docs/decisions/0007-authored-measurement-thresholds.md).
+/// It sits here rather than in that module because its subject is this file's
+/// probe: a count of this process's own descriptors, which no other suite
+/// takes.
+///
+/// The count is taken after the attachment reaches `Ready`, so what it bounds
+/// is the steady-state cost of a served attachment rather than the high-water
+/// mark of the heal walk that got there. Observed on macos-arm64 over two
+/// consecutive runs, identical in both: **4 descriptors per attachment at 1
+/// document and 4 at 2000** — the readings this file records through
+/// `norn_testkit::readings::record` below. The budget is 12, three times the
+/// measured cost, so a subject that starts holding one more handle per
+/// subscription or per store file is caught while a run whose runner hands the
+/// process an extra descriptor at the sampling instant is not.
+///
+/// The bar the vault-size claim rests on is not this ceiling: the two deltas
+/// are asserted **equal**, which fails the moment the cost starts moving with
+/// the vault at any height under the budget.
 const FD_BUDGET: usize = 12;
 const LARGE_VAULT_DOCUMENTS: usize = 2_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
