@@ -2119,13 +2119,20 @@ mod tests {
         (subscription, lease)
     }
 
-    /// The document a heal window is deliberately opened across, so that the
+    /// The change a heal window is deliberately opened across, so that the
     /// window closes on an observed delivery rather than on a guess.
-    const TAKEN_UP: &str = "taken-up.md";
+    ///
+    /// **A directory, because one write is not one delivery on every backend.**
+    /// inotify reports creating a document, writing it and closing it
+    /// separately, so a document here would leave reports still to come when
+    /// the window closes on the first of them — and the next one past the
+    /// window spends the arm every case in this family is about to state
+    /// something over. Creating a directory is one report everywhere.
+    const TAKEN_UP: &str = "taken-up";
 
     /// Take up the coverage the way a consumer does: open a heal window over
-    /// it, write a document across it, wait for the window to take that
-    /// document up, and close it again.
+    /// it, make a change across it, wait for the window to take that change
+    /// up, and close it again.
     ///
     /// **This is the other half of what makes a stream arm eligible.** A
     /// consumer heals the tree under the watch it just installed and takes
@@ -2147,8 +2154,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
     fn taken_up_by_a_heal(label: &str, subscription: &Subscription, vault: &Path) {
         subscription.begin_heal();
-        std::fs::write(vault.join(TAKEN_UP), b"taken up\n")
-            .expect("a change the heal window is open across");
+        std::fs::create_dir(vault.join(TAKEN_UP)).expect("a change the heal window is open across");
         wait_for_the_window_to_take_up(label, subscription, TAKEN_UP);
         subscription
             .finish_heal()
@@ -2207,12 +2213,25 @@ mod tests {
     /// reaches no batch, so nothing a subscription reports carries it. A case
     /// that needs one at the arm *before* the change it is really about waits
     /// here.
-    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own note file.
-    fn wait_for_the_arm_to_stand_past(label: &str, notes: &Path, named: &str) {
+    ///
+    /// **A firing while the wait is open ends it at once.** The arm holds one
+    /// answer, so a record appearing in `hits` before the note does says the
+    /// arm answered something — and on this path the only candidate is a
+    /// delivery it was supposed to stand past. Read here rather than after the
+    /// wait, because after the wait the whole budget has already been spent on
+    /// a note that was never coming.
+    #[allow(clippy::disallowed_methods)] // Test observation of the arm's own record and note files.
+    fn wait_for_the_arm_to_stand_past(label: &str, hits: &Path, notes: &Path, named: &str) {
         norn_testkit::wait::wait_until(
             &format!("the arm to stand past a delivery naming `{named}`"),
             watch_budget(),
             || {
+                assert!(
+                    std::fs::metadata(hits).is_err(),
+                    "{label}: the arm answered a delivery it stands past, so it was spent on a \
+                     change no consumer ever hears about: {}",
+                    recorded(hits)
+                );
                 let noted = std::fs::read_to_string(notes).unwrap_or_default();
                 if noted.lines().any(|line| line.contains(named)) {
                     norn_testkit::wait::Observed::Met(())
@@ -2348,15 +2367,7 @@ mod tests {
 
             std::fs::create_dir(scratch.path("beside-the-vault"))
                 .expect("a directory beside the tree, under the parent edge");
-            wait_for_the_arm_to_stand_past(label, &notes, "beside-the-vault");
-            // Read at the one moment it is decisive: the arm has met that
-            // delivery and let it through, so an arm that answers on paths it
-            // should discard has already fired and recorded itself.
-            assert!(
-                std::fs::metadata(&hits).is_err(),
-                "{label}: the arm answered a delivery it stood past, so it was spent on a change \
-                 no consumer ever hears about"
-            );
+            wait_for_the_arm_to_stand_past(label, &hits, &notes, "beside-the-vault");
             std::fs::create_dir(vault.join("inside")).expect("a real change under a real watch");
 
             let widened = norn_testkit::wait::wait_until(

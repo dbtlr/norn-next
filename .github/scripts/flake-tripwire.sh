@@ -28,7 +28,14 @@ fi
 
 here=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 ledger="${here}/.github/flake-ledger"
-log=$(mktemp -t norn-flake-tripwire)
+# The template is explicit: `mktemp -t <name>` without X's is a BSD spelling
+# that GNU coreutils refuses, and a script that took an empty path here would
+# scan nothing and say so.
+log=$(mktemp "${TMPDIR:-/tmp}/norn-flake-tripwire.XXXXXX")
+if [ -z "$log" ]; then
+  echo "::warning::the flake tripwire could not make a scratch log, so this run was matched against nothing."
+  exec "$@"
+fi
 trap 'rm -f "$log"' EXIT
 
 "$@" 2>&1 | tee "$log"
