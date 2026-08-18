@@ -526,6 +526,85 @@ fn assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane: 
     );
 }
 
+/// **The line the lane's reading script writes is the line the classifier
+/// reads**, key for key.
+///
+/// The measurement exists twice on purpose — a lane's reading is taken before
+/// the toolchain is built, which is before any Rust of ours can run — and two
+/// spellings of one rule drift, invisibly. The drift is silent in the worst
+/// direction: a key renamed on one side leaves the field unmeasured on the
+/// other, every scheduled run records `environment`, both lanes stay green, and
+/// the count a campaign is waiting on never advances.
+///
+/// The script is run, not read. What binds the two spellings is that the line
+/// it emits survives [`preflight::Reading::parse`] and comes back out of
+/// `render` unchanged: a key only one side knows is dropped by the parse and
+/// missing from the re-render.
+///
+/// The verdict is not the subject and is not asserted. A machine running this
+/// suite is a machine under load, and what is being checked is that every field
+/// was *measured* — which is what the classifier refuses on when the spellings
+/// have parted.
+#[test]
+#[cfg(unix)]
+fn a_lanes_reading_script_writes_the_line_the_classifier_reads() {
+    let root = workspace_root();
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "host-readings")
+        .expect("a sandbox for the readings script");
+    let outcome = norn_testkit::process::Run::new(&sandbox, root.join(preflight::READINGS_SCRIPT))
+        .wait()
+        .expect("running the host-readings script");
+    outcome.assert_success();
+
+    let written = outcome.stdout_text();
+    let written = written.trim_end_matches('\n');
+    assert!(
+        !written.contains('\n'),
+        "`{}` writes more than the one assignment a job environment carries: {written:?}",
+        preflight::READINGS_SCRIPT
+    );
+    let line = written
+        .strip_prefix(&format!("{}=", preflight::READING))
+        .unwrap_or_else(|| {
+            panic!(
+                "`{}` writes {written:?}, which assigns nothing to `{}` — so the lane's reading \
+                 never reaches the job environment and every record classifies as a host nobody \
+                 checked",
+                preflight::READINGS_SCRIPT,
+                preflight::READING
+            )
+        });
+
+    let reading = preflight::Reading::parse(line);
+    assert_eq!(
+        reading.render(),
+        line,
+        "`{}` and `Reading::parse`/`render` have parted: a pair one side writes and the other \
+         cannot read leaves its field unmeasured, and every scheduled run then records the \
+         environment rather than the candidate",
+        preflight::READINGS_SCRIPT
+    );
+    assert!(
+        reading.cores.is_some(),
+        "`{}` measured no core count: {line:?}",
+        preflight::READINGS_SCRIPT
+    );
+    assert!(
+        reading.busy_deci_percent.is_some(),
+        "`{}` measured no processor share: {line:?}",
+        preflight::READINGS_SCRIPT
+    );
+    let daemon_is_read = reading.fseventsd != preflight::Fseventsd::NotApplicable;
+    assert_eq!(
+        daemon_is_read,
+        cfg!(target_os = "macos"),
+        "`{}` and the classifier disagree about whether this platform runs an event daemon: \
+         {line:?}",
+        preflight::READINGS_SCRIPT
+    );
+    eprintln!("host-health reading: {line}");
+}
+
 /// Every non-comment line of a job body that sets `key`, as the value it sets.
 ///
 /// A comment is not a setting: a job's own preamble is attributed to the job

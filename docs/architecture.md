@@ -204,7 +204,10 @@ average, and on Darwin the processor share and resident set of the event daemon 
 real-watcher case subscribes to — classifies the reading against a closed set of refusal
 reasons, and the verdict is what fills the record's preflight slot. A refused host is
 non-qualifying for the environment however green the cases went, and the same probe run
-locally is what classifies a local suite failure as noise rather than signal.
+locally is what classifies a local suite failure as noise rather than signal:
+`cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture`,
+run on its own after the failing suite rather than beside it, because a probe sampling the
+machine while a suite runs on it reads that suite.
 
 Rung 1 is the **churn suite**'s — bursts, atomic replaces, branch flips, mid-mutation
 edits — whose bar is convergence-to-equivalence with a from-scratch build and a settle

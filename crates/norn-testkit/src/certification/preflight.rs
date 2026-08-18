@@ -70,6 +70,20 @@
 //! [`Reading::observed`] prefers it — because a processor share sampled during
 //! a cold cargo build is a reading of this run's own compile rather than of the
 //! machine it landed on.
+//!
+//! # How it is run
+//!
+//! [`CLASSIFIER`] is the command, in a lane and locally alike, and locally it
+//! is run with `--nocapture` and on its own:
+//!
+//! ```text
+//! cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
+//! ```
+//!
+//! **On its own is part of the instruction.** The classifier samples the
+//! machine, so a run of it beside another suite reads that suite's load and
+//! refuses a host nothing was wrong with. Run it after the failure it is
+//! classifying, not during.
 
 use std::fmt::Write as _;
 
@@ -86,8 +100,19 @@ pub const SINK: &str = "NORN_PREFLIGHT_SINK";
 /// The script that takes a lane's reading before the lane builds anything.
 pub const READINGS_SCRIPT: &str = ".github/scripts/host-readings.sh";
 
-/// What a lane runs to turn a reading into the verdict its record carries.
-pub const CLASSIFIER: &str = "cargo test --locked -p norn-testkit --lib certification::preflight";
+/// **What a lane runs to turn a reading into the verdict its record carries,
+/// and what a person runs to classify a local suite failure.**
+///
+/// It asks for an ignored case, because the classifier is a measurement and a
+/// measurement running beside every other test measures those tests too. Left
+/// unignored it would open its sample window inside `cargo test --workspace`,
+/// across a machine cargo has running on every core, and refuse a quiet
+/// workstation for load the suite it is classifying put there.
+///
+/// Run it with `--nocapture` to read the verdict: a passing case's output is
+/// captured, and the verdict is the whole point of the run.
+pub const CLASSIFIER: &str =
+    "cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored";
 
 /// **How much of the machine may already be spoken for and still leave the work
 /// bounds meaning what they were authored to mean.**
@@ -365,13 +390,21 @@ impl Reading {
     /// machine's own answer right now.
     ///
     /// The preference is the whole point of the variable. A lane's cold build
-    /// is minutes of every core, so a load average read after it is a reading
-    /// of this run's compile rather than of the host it landed on.
+    /// is minutes of every core, so a share read after it is a reading of this
+    /// run's compile rather than of the host it landed on.
+    ///
+    /// **A variable that is set and empty is a lane that measured nothing**, and
+    /// it is read as exactly that. [`READINGS_SCRIPT`] writes the assignment
+    /// whatever it managed to read, so the empty value is the one case where the
+    /// host is known to have gone unmeasured — and sampling here instead would
+    /// take the reading at the one moment this module says means nothing, after
+    /// the work the reading is supposed to precede. [`Reading::parse`] answers
+    /// with nothing measured, which the verdict refuses on.
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the reading a lane took before it built.
     pub fn observed() -> Reading {
         match std::env::var(READING) {
-            Ok(line) if !line.trim().is_empty() => Reading::parse(&line),
-            _ => Reading::from_host(),
+            Ok(line) => Reading::parse(&line),
+            Err(_) => Reading::from_host(),
         }
     }
 
@@ -755,6 +788,17 @@ mod tests {
         }
     }
 
+    /// **A line carrying no measurement is a host nobody read, and refuses.**
+    /// [`READINGS_SCRIPT`] writes its assignment whatever it managed to read, so
+    /// an empty value is the one place the classifier is told the measuring
+    /// failed — and [`Reading::observed`] reads it rather than sampling the
+    /// machine at the moment the reading was taken early to avoid.
+    #[test]
+    fn a_line_carrying_no_measurement_refuses() {
+        assert_eq!(Reading::parse(""), Reading::default());
+        assert!(!Reading::parse("").verdict().admitted());
+    }
+
     /// A reading survives the job environment it travels through: rendered to
     /// one line and read back, it is the same reading and therefore the same
     /// verdict.
@@ -823,7 +867,16 @@ mod tests {
     /// signal. In a lane it is also the writer: the verdict goes where
     /// [`SINK`] names, and the lane appends that file to the job environment
     /// the record is assembled from.
+    ///
+    /// **Ignored, because it measures the machine.** With no lane reading in
+    /// the environment it samples the host itself, and a sample taken inside
+    /// `cargo test --workspace` is taken across a machine cargo is running the
+    /// rest of the workspace on — the reading would be of the suite it is
+    /// classifying, and a quiet workstation would refuse itself. It is run on
+    /// purpose instead, by [`CLASSIFIER`], which is what the lanes run and what
+    /// a person runs against a local failure.
     #[test]
+    #[ignore = "host-health classifier: measures the machine, so it is run on purpose rather than beside the suite it would measure — see CLASSIFIER"]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: writes the verdict where the lane named it.
     fn this_host_is_read_and_classified() {
         let reading = Reading::observed();

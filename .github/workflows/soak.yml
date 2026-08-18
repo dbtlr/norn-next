@@ -249,7 +249,7 @@ jobs:
       - name: Host-health preflight
         if: always()
         run: |
-          cargo test --locked -p norn-testkit --lib certification::preflight -- --nocapture
+          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
           cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
         env:
           NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
@@ -424,7 +424,7 @@ jobs:
       - name: Host-health preflight
         if: always()
         run: |
-          cargo test --locked -p norn-testkit --lib certification::preflight -- --nocapture
+          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
           cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
         env:
           NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
