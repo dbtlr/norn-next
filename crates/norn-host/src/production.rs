@@ -8644,9 +8644,18 @@ mod tests {
         attachment.heal_observed = norn_fs::Batch::default();
 
         fs::write(f.vault().join("settled-before.md"), "body").unwrap();
-        // The coalescer settles on a quiet window two orders of magnitude
-        // shorter than this wait, so the batch is in the delivery slot before
-        // the heal below opens its window.
+        // **The one wait here that a condition cannot replace.** What this case
+        // needs is the batch sitting in the delivery slot *before* the window
+        // opens, and the slot has no look that leaves what it holds behind:
+        // `try_recv` takes the batch, which is the residue the heal below is
+        // supposed to take. So the margin is spent as time rather than observed,
+        // sized two orders of magnitude above the quiet window the coalescer
+        // settles on.
+        //
+        // A margin this size is spent by every run and the failure it can still
+        // meet is stated: a host loaded enough to leave the write undelivered
+        // for a second fails the first assertion below, which prints the batch
+        // the heal did take.
         std::thread::sleep(Duration::from_secs(1));
 
         ops.heal_under_coverage(&mut attachment, &progress).unwrap();
