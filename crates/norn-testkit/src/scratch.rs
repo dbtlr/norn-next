@@ -30,8 +30,9 @@
 //! not go is left behind rather than panicking a case that has already
 //! reported its verdict.
 
+use std::ffi::OsStr;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Distinguishes two scratch roots taken in the same process.
@@ -43,12 +44,31 @@ static SERIAL: AtomicU64 = AtomicU64::new(0);
 /// Callers that own a directory want [`Scratch`], which creates and removes
 /// one. This is for the callers that only need the name — a mount point, a
 /// volume label, a path handed to something else to create.
+///
+/// **`label` is a name, not a path, and one that is not is a panic.** What a
+/// [`Scratch`] does with the name is remove everything under it, so a label
+/// carrying a separator or a parent component would have a caller name a tree
+/// outside the base it asked for and delete that instead.
 pub fn unique_name(label: &str) -> String {
+    assert!(
+        is_one_component(label),
+        "a scratch label is one path component, and {label:?} is not"
+    );
     format!(
         "{label}-{}-{}",
         std::process::id(),
         SERIAL.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+/// Whether `label` spells exactly one ordinary path component and nothing
+/// else — no separator, no root, no `.` or `..`, and not empty.
+fn is_one_component(label: &str) -> bool {
+    let mut components = Path::new(label).components();
+    let Some(Component::Normal(only)) = components.next() else {
+        return false;
+    };
+    only == OsStr::new(label) && components.next().is_none()
 }
 
 /// A directory one case owns, removed when this is dropped.
@@ -185,6 +205,40 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(&root).is_err(),
             "an unsearchable directory kept the tree alive"
+        );
+    }
+
+    /// **A label that is not one path component is refused.** The name
+    /// decides what the drop removes, so a label spelling its way out of the
+    /// base — absolutely, through a parent, or by carrying a separator at all
+    /// — would have a tree nobody named removed instead of the one that was.
+    #[test]
+    fn a_label_that_is_not_one_component_is_refused() {
+        for label in [
+            "",
+            ".",
+            "..",
+            "/tmp/external",
+            "../external",
+            "nested/../external",
+            "nested/child",
+            "nested/",
+            "/",
+        ] {
+            assert!(
+                !is_one_component(label),
+                "the label {label:?} was taken for one path component"
+            );
+        }
+        for label in ["safe", "norn-fs-watcher-burst", "one.two"] {
+            assert!(
+                is_one_component(label),
+                "the label {label:?} was refused as a path component"
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| unique_name("../external")).is_err(),
+            "a label that leaves the base was accepted as a scratch name"
         );
     }
 
