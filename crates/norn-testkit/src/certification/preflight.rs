@@ -93,11 +93,11 @@ pub const CLASSIFIER: &str = "cargo test --locked -p norn-testkit --lib certific
 /// bounds meaning what they were authored to mean.**
 ///
 /// Half, and it sits between two measured shapes rather than between two
-/// arguments. A `macos-15` runner reads under three percent at the top of a
-/// job — the window opens after a settle, so what it samples is the machine and
-/// not the tail of the job's own checkout — while the collection workstation
-/// reads a hundred with other checkouts building beside it. Half is the middle
-/// of that gap and is twenty times what a healthy runner produces.
+/// arguments. A `macos-15` runner reads between three and twenty-three percent
+/// at the top of a job — the window opens after a settle, so what it samples is
+/// the machine and not the tail of the job's own checkout — while the
+/// collection workstation reads a hundred with other checkouts building beside
+/// it. Half is inside that gap with margin on both sides.
 ///
 /// What it means is the thing the bounds turn on: a machine half taken still
 /// has half its processors for the suites, and past half the work bounds are
@@ -643,8 +643,9 @@ mod tests {
 
     /// **A freshly handed-over runner is admitted**, and this is the shape the
     /// bound is placed against: a `macos-15` runner hands the lane three cores
-    /// reading under three percent at the top of a job, and a bound that
-    /// refused it would refuse every scheduled run there is.
+    /// reading in the low tens of a percent at the top of a job — the busiest
+    /// of the readings taken is here — and a bound that refused it would refuse
+    /// every scheduled run there is.
     ///
     /// The margin between this and the bound is what the settle bought. Sampled
     /// without one, the same runner reads in the fifties — the window opens on
@@ -655,10 +656,10 @@ mod tests {
         assert_eq!(
             Reading {
                 cores: Some(3),
-                busy_deci_percent: Some(26),
+                busy_deci_percent: Some(226),
                 fseventsd: Fseventsd::Running {
                     cpu_deci_percent: 0,
-                    resident_kib: 11_584,
+                    resident_kib: 11_024,
                 },
             }
             .verdict(),
