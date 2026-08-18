@@ -268,8 +268,18 @@ impl Batch {
                 self.retired.remove(&root);
                 self.vault_roots.replace(root);
             }
+            // **What a death retires is the name it spells.** Where the set is
+            // carrying that very name, what it carries is a dead one. Where it
+            // is carrying another name for the identity, that name is the one a
+            // rename moved *to* and this report is the half that moved away
+            // from — the spelling rule already keeps the live one, and the live
+            // one still speaks for everything under it.
             Spelling::Retired => {
-                if !self.vault_roots.contains(&root) {
+                let carries_the_dead_name = self
+                    .vault_roots
+                    .get(&root)
+                    .is_none_or(|standing| standing.as_path() == root.as_path());
+                if carries_the_dead_name {
                     self.retired.insert(root.clone());
                 }
                 self.vault_roots.insert(root);
@@ -280,9 +290,12 @@ impl Batch {
     /// Whether a root already standing covers `root` and speaks for it.
     ///
     /// A root's covering roots are its own ancestors, so the walk up from
-    /// `root` reaches every one of them and reads nothing else. At most one of
-    /// them stands: the set holds no covered root, so two would cover each
-    /// other.
+    /// `root` reaches every one of them and reads nothing else — and it reads
+    /// them nearest first, which is what makes one answer enough. The set can
+    /// hold a covered root, but only the retained shape: a root carrying a dead
+    /// name with a live descendant beneath it. Reading upwards reaches the live
+    /// descendant before the dead name above it, so a cover that speaks is
+    /// never masked by one that does not.
     fn is_covered(&self, root: &NormalizedPath, spelling: Spelling) -> bool {
         let Some(cover) = self.covering(root) else {
             return false;
@@ -290,7 +303,7 @@ impl Batch {
         spelling == Spelling::Retired || !self.retired.contains(cover)
     }
 
-    /// The root already standing that covers `root` without being it.
+    /// The nearest root already standing that covers `root` without being it.
     fn covering(&self, root: &NormalizedPath) -> Option<&NormalizedPath> {
         let mut ancestor = root.parent();
         while let Some(candidate) = ancestor {
@@ -3416,6 +3429,46 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// **A death of the name a fold is carrying retires it.** A batch can name
+    /// a directory live and a later batch report that same name gone, and the
+    /// fold that took the first one has no reason left to let it speak for what
+    /// is under it. The live descendant delivered beside the death is what
+    /// carries the identity to a name the tree renders.
+    ///
+    /// The row below is the pair the host really folds: one delivery names the
+    /// directory, the next names its death and a change under its new name.
+    #[test]
+    fn a_fold_retires_a_standing_root_whose_own_name_is_reported_gone() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = |spelling| normalizer.normalize(Path::new(spelling)).unwrap();
+        let mut later = Batch::vault_removal(path("folder"));
+        later.merge(Batch::vault_change(path("FOLDER/note.md")));
+
+        let mut folded = Batch::vault_change(path("folder"));
+        folded.merge(later);
+
+        let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("folder"), Path::new("FOLDER/note.md")]);
+    }
+
+    /// **A death of a name the fold is not carrying retires nothing.** The poll
+    /// backend diffs its own scan and reports a case flip as the new name
+    /// arriving before the old one disappears, so the death that follows names
+    /// the spelling the rename moved away from. The set is carrying the other
+    /// one, which is the name the tree renders — and it still speaks for
+    /// everything under it.
+    #[test]
+    fn a_fold_keeps_a_covering_root_whose_other_name_is_reported_gone() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = |spelling| normalizer.normalize(Path::new(spelling)).unwrap();
+        let mut folded = Batch::vault_change(path("FOLDER"));
+        folded.merge(Batch::vault_removal(path("folder")));
+        folded.merge(Batch::vault_change(path("folder/note.md")));
+
+        let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("FOLDER")]);
     }
 
     /// **A fold keeps a live spelling over a dead one.** A batch naming an

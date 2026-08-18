@@ -7884,15 +7884,22 @@ mod tests {
     }
 
     /// **A batch whose only spelling of a directory is the one that died
-    /// converges through the descendant that stands.**
+    /// carries the reported descendant to the name the tree renders.**
     ///
     /// A backend can report a directory's old name gone without reporting the
     /// new one, and a change under the directory then arrives spelled through
     /// the name it now renders. A heal rooted at the dead spelling walks at that
-    /// spelling and stores every row under it that way, so the descendant is
-    /// what has to reach the store: it is the only root naming the identity at
-    /// a name a directory entry holds. The batch seam keeps that pair standing
-    /// through the fold a delivery crosses, and this is the leg that reads it.
+    /// spelling, so the descendant's own root is what reaches a name a
+    /// directory entry holds — and the batch seam keeps that pair standing
+    /// through the fold a delivery crosses so this leg can read it.
+    ///
+    /// **The bound this states is per reported root.** A heal rooted at a dead
+    /// spelling stores every row under it that way, and only the roots the
+    /// batch names are re-spelled after it: the sibling below is a document no
+    /// report named, and it is left at the dead spelling until a walk rooted
+    /// somewhere the tree renders reaches it. That is the reading of a dead
+    /// root, not of subsumption — the same rows land for the same reason when
+    /// no root covers another.
     #[test]
     fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_descendants_own() {
         let f = Fixture::new("dead-directory-spelling-with-descendant");
@@ -7905,6 +7912,11 @@ mod tests {
         }
         fs::create_dir(f.vault().join("folder")).unwrap();
         fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+        fs::write(
+            f.vault().join("folder/other.md"),
+            "a sibling no report names",
+        )
+        .unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
@@ -7931,7 +7943,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(stored_paths(&mut attachment.store), ["FOLDER/note.md"]);
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["FOLDER/note.md", "folder/other.md"],
+            "the reported descendant did not reach the name the tree renders"
+        );
+
+        // And a walk rooted where the tree renders takes the sibling with it.
+        heal_the_vault(&ops, &name, &mut attachment, &progress);
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["FOLDER/note.md", "FOLDER/other.md"]
+        );
         ops.detach(&name, attachment);
     }
 
