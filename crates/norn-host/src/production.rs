@@ -7883,6 +7883,48 @@ mod tests {
         }
     }
 
+    /// **A dirty set whose only spelling of a directory is the one that died
+    /// converges through the descendant that stands.**
+    ///
+    /// A backend can report a directory's old name gone without reporting the
+    /// new one, and a change under the directory then arrives spelled through
+    /// the name it now renders. A heal rooted at the dead spelling walks at that
+    /// spelling and stores every row under it that way, so the descendant is
+    /// what has to reach the store: it is the only root naming the identity at
+    /// a name a directory entry holds. The batch seam keeps that pair standing
+    /// for exactly this reason, and this is the leg that reads it.
+    #[test]
+    fn a_dirty_set_holding_a_dead_directory_spelling_lands_the_descendants_own() {
+        let f = Fixture::new("dead-directory-spelling-with-descendant");
+        if norn_fs::PathNormalizer::detect(&f.vault())
+            .unwrap()
+            .case_sensitivity()
+            != norn_fs::CaseSensitivity::Insensitive
+        {
+            return;
+        }
+        fs::create_dir(f.vault().join("folder")).unwrap();
+        fs::write(f.vault().join("folder/note.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
+        fs::write(f.vault().join("FOLDER/note.md"), "revised body").unwrap();
+
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_paths(f.vault().as_path(), &["folder", "FOLDER/note.md"]),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &exclusions(&attachment.registration, &attachment._shadows),
+        )
+        .unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["FOLDER/note.md"]);
+        ops.detach(&name, attachment);
+    }
+
     /// **A covering root answers for a place the walk reads nothing through.**
     ///
     /// Subsumption stands on the covering root's leg reaching everything the
@@ -9225,6 +9267,17 @@ mod tests {
     /// a set literal says: the seam decides which roots a report leaves
     /// standing, and a set built beside it would answer a question no watcher
     /// asks.
+    fn dirty_paths(
+        root: &Path,
+        relatives: &[&str],
+    ) -> std::collections::BTreeSet<norn_fs::NormalizedPath> {
+        let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
+        relatives
+            .iter()
+            .map(|relative| normalizer.normalize(Path::new(relative)).unwrap())
+            .collect()
+    }
+
     fn dirty_batch(root: &Path, relatives: &[&str]) -> norn_fs::Batch {
         let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
         let mut batch = norn_fs::Batch::default();
