@@ -399,13 +399,11 @@ fn load_average_milli() -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn load_average_milli() -> Option<u64> {
-    // `{ 1.23 4.56 7.89 }`, oldest last.
+    // `{ 1.23 4.56 7.89 }`, most recent first.
     let reported = command("sysctl", &["-n", "vm.loadavg"])?;
     milli(
         reported
-            .trim()
-            .trim_start_matches('{')
-            .trim()
+            .trim_matches(['{', '}', ' ', '\n'])
             .split_whitespace()
             .next()?,
     )
