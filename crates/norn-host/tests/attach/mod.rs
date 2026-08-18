@@ -67,14 +67,20 @@ pub const READY_LIMIT: Duration = Duration::from_secs(240);
 /// stopped answering from a condition that has not arrived: the work bound each
 /// caller passes says how long a condition may take, and this says nothing
 /// about that.
+///
+/// The cost of that look is a fact about the host, not about any one suite, so
+/// it is stated once for the whole crate: a bound that turns out too tight
+/// under load moves in one place and every suite relaxes with it.
 const STATE_PROBE: Duration = Duration::from_millis(250);
 
 /// The budget a wait on an entry's published state obeys, under the caller's
 /// own runaway bound.
 ///
-/// Every such wait here is one shape — ask the host what the entry publishes,
-/// stop when it says what the case is about — so the pair of bounds is composed
-/// once and the call sites differ only in the bound they declare.
+/// Every such wait in this crate's suites is one shape — ask the host what the
+/// entry publishes, stop when it says what the case is about — so the pair of
+/// bounds is composed once here and the call sites differ only in the runaway
+/// bound they declare. The suites that reach it for this alone compile the
+/// module for it; nothing else about them is shared.
 pub fn state_budget(limit: Duration) -> Budget {
     Budget::new(limit, STATE_PROBE)
 }

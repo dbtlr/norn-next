@@ -1,6 +1,11 @@
 #![cfg(feature = "induced-failure")]
 #![allow(clippy::disallowed_methods)] // subprocess and filesystem acceptance fixture.
 
+// Compiled for one item: the budget every wait on a published label obeys. How
+// long one such look may take is a fact about this crate's host and not about
+// this suite, so it is composed where the other suites read it from.
+mod attach;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,19 +20,12 @@ use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
 use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::{Budget, Observed, wait_until};
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
-
-/// How long one look at what the host publishes may take.
-///
-/// A look is a lock and a label, so this separates a machine that has stopped
-/// answering from a state that has not arrived — which is [`WAIT_LIMIT`]'s
-/// question and not this one's.
-const STATE_PROBE: Duration = Duration::from_millis(250);
 
 #[test]
 fn next_attach_converges_after_process_death_mid_increment() {
@@ -144,7 +142,7 @@ fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
         .expect("request production attachment");
     wait_until(
         &format!("the entry under `{name}` to serve the vault"),
-        Budget::new(WAIT_LIMIT, STATE_PROBE),
+        attach::state_budget(WAIT_LIMIT),
         || {
             let observed = host.state(name);
             if observed == Ok(TrustState::Ready) {
@@ -197,7 +195,7 @@ impl Fixture {
     fn new() -> Self {
         let lease = Lease::hold(
             isolation::REAL_WATCHER,
-            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, STATE_PROBE)),
+            isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
         );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
