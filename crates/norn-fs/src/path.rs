@@ -13,14 +13,17 @@
 //! promises.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::mem;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 use crate::identity::identity_of;
 
@@ -124,30 +127,38 @@ impl PathNormalizer {
     /// entry; this prevents hardlink aliases from masquerading as insensitive
     /// lookup. A missing alternate spelling or a different identity proves
     /// sensitivity. If no entry can supply safe evidence, construction refuses.
-    #[allow(clippy::disallowed_methods)] // The vault filesystem seam: this crate owns path identity detection.
+    ///
+    /// The root's own entries are read once for the whole call: the walk over
+    /// them and the hardlink question every candidate among them asks are
+    /// served by [`DirNames`] from one scan, so a wide root full of alternate
+    /// spellings costs one listing rather than one per candidate. The probe
+    /// against the root's entry in its parent asks the parent one question per
+    /// call, so that one streams through [`listing_holds`] and keeps nothing.
     pub fn detect(root: &Path) -> Result<Self, NormalizerError> {
         if let (Some(parent), Some(name)) = (root.parent(), root.file_name())
             && same_device(root, parent)
-            && let Some(sensitivity) = probe_case_behavior(parent, name)
+            && let Some(sensitivity) =
+                probe_case_behavior(parent, name, |alternate| listing_holds(parent, alternate))
         {
             return Ok(Self { sensitivity });
         }
 
-        let entries = fs::read_dir(root).map_err(|source| NormalizerError::ReadRoot {
+        let mut entries = DirNames::opened(root).map_err(|source| NormalizerError::ReadRoot {
             root: root.to_owned(),
             source,
         })?;
 
-        for entry in entries {
-            let entry = entry.map_err(|source| NormalizerError::ReadRoot {
+        while let Some(name) = entries.next_name() {
+            let name = name.map_err(|source| NormalizerError::ReadRoot {
                 root: root.to_owned(),
                 source,
             })?;
-            let name = entry.file_name();
             if alternate_ascii_case(&name).is_none() {
                 continue;
             }
-            if let Some(sensitivity) = probe_case_behavior(root, &name) {
+            if let Some(sensitivity) =
+                probe_case_behavior(root, &name, |alternate| Some(entries.contains(alternate)))
+            {
                 return Ok(Self { sensitivity });
             }
         }
@@ -317,26 +328,235 @@ fn same_device(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
-fn probe_case_behavior(parent: &Path, name: &OsStr) -> Option<CaseSensitivity> {
-    let alternate = alternate_ascii_case(name)?;
-    let actual_metadata = fs::symlink_metadata(parent.join(name)).ok()?;
+/// One directory's entry names, produced by a single scan that every question
+/// the walk over that directory asks is answered from.
+///
+/// Detection asks two kinds of that directory. The walk takes names one at a
+/// time looking for a case-bearing candidate, and every candidate whose
+/// alternate spelling exists with the same identity asks whether that spelling
+/// is itself an entry. The second question is an absence proof over the whole
+/// directory, and a root where many entries ask it — hardlink aliases, which is
+/// exactly where the question cannot be skipped — would pay a listing per
+/// asking entry. Here the first asking takes the rest of the scan the walk is
+/// already partway through, and every later one is answered from the names in
+/// hand, by lookup rather than by searching them: a root of N alias entries
+/// costs one listing and work linear in N, not a listing per entry nor a search
+/// of the listing per entry.
+///
+/// Names are pulled only as they are asked for, so a root whose first candidate
+/// settles the case behavior still never lists the rest of itself. What is held
+/// is the names one scan has produced, held for the length of the
+/// [`PathNormalizer::detect`] call that asked and dropped when it returns; a
+/// root that settles on its first entry holds one name, and a root holds its
+/// whole width only where a membership question drains the scan, which is where
+/// the absence proof is the whole listing. Each held name is one allocation the
+/// ordered names and the lookup index share.
+///
+/// The probe against the root's entry in its parent does not use this. It asks
+/// that parent one question per detect call, so there is no later question to
+/// answer from held names and nothing is held: it streams through
+/// [`listing_holds`].
+struct DirNames {
+    scan: Scan,
+    /// The names the scan produced, in the order it produced them. An entry the
+    /// scan could not read holds its place as the error it produced.
+    names: Vec<io::Result<Rc<OsStr>>>,
+    /// The same names as a membership question asks for them — by value rather
+    /// than in order — so an answer costs a lookup rather than a search.
+    index: HashSet<Rc<OsStr>>,
+    /// How many of `names` the walk has taken.
+    walked: usize,
+}
 
-    match fs::symlink_metadata(parent.join(&alternate)) {
+/// Where a directory's one scan stands.
+enum Scan {
+    /// Open, with names it has not produced yet.
+    Reading(fs::ReadDir),
+    /// Spent: every name it produced is held.
+    Spent,
+}
+
+impl DirNames {
+    /// Names of a directory opened now, so a caller that owes a refusal for a
+    /// root it cannot enumerate has the error before it asks for a name.
+    #[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
+    fn opened(dir: &Path) -> io::Result<Self> {
+        let scan = fs::read_dir(dir)?;
+        #[cfg(test)]
+        count_scan();
+        Ok(Self {
+            scan: Scan::Reading(scan),
+            names: Vec::new(),
+            index: HashSet::new(),
+            walked: 0,
+        })
+    }
+
+    /// The next name the walk has not taken, or the error the scan produced in
+    /// its place. `None` once the walk has taken every name.
+    fn next_name(&mut self) -> Option<io::Result<Rc<OsStr>>> {
+        if self.walked == self.names.len() && !self.pull() {
+            return None;
+        }
+        let slot = self.names.get_mut(self.walked)?;
+        self.walked += 1;
+        Some(match slot {
+            Ok(name) => Ok(Rc::clone(name)),
+            // The error is handed over and its place is kept, because a
+            // membership question passes over an unreadable entry either way.
+            failed => mem::replace(failed, Err(io::ErrorKind::Other.into())),
+        })
+    }
+
+    /// Whether `name` is one of this directory's entries.
+    ///
+    /// The scan runs on only as far as the name: an answer of yes costs the
+    /// names up to it, and only an answer of no costs the whole listing, which
+    /// is what establishing an absence costs. Names already produced are
+    /// answered by lookup, so a question about a directory the scan has been
+    /// drained for costs no reading and no search.
+    fn contains(&mut self, name: &OsStr) -> bool {
+        loop {
+            #[cfg(test)]
+            count_name_test();
+            if self.index.contains(name) {
+                return true;
+            }
+            if !self.pull() {
+                return false;
+            }
+        }
+    }
+
+    /// Takes one more name off the scan. Reports whether a name was added; a
+    /// spent scan adds nothing and stays spent.
+    fn pull(&mut self) -> bool {
+        let Scan::Reading(scan) = &mut self.scan else {
+            return false;
+        };
+        let Some(entry) = scan.next() else {
+            self.scan = Scan::Spent;
+            return false;
+        };
+        #[cfg(test)]
+        count_dirent();
+        match entry {
+            Ok(entry) => {
+                let name: Rc<OsStr> = Rc::from(entry.file_name().as_os_str());
+                self.index.insert(Rc::clone(&name));
+                self.names.push(Ok(name));
+            }
+            Err(error) => self.names.push(Err(error)),
+        }
+        true
+    }
+}
+
+/// Whether `dir` holds an entry spelled exactly `name`, or `None` where `dir`
+/// cannot be read.
+///
+/// The scan is taken as a stream and nothing it produces is kept, which is the
+/// trade for a caller that asks one question: a second question about the same
+/// directory would open a second scan. [`DirNames`] is the other side of it,
+/// for the caller that asks a question per entry.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
+fn listing_holds(dir: &Path, name: &OsStr) -> Option<bool> {
+    let scan = fs::read_dir(dir).ok()?;
+    #[cfg(test)]
+    count_scan();
+    for entry in scan {
+        #[cfg(test)]
+        count_dirent();
+        // An entry the scan could not read is passed over: it names no spelling
+        // to match, and it is not this question's to refuse on.
+        if entry.is_ok_and(|entry| entry.file_name() == name) {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+/// The case behavior `name`'s entry in `dir` proves, where it proves one.
+///
+/// `holds` answers the hardlink question — is the alternate spelling itself an
+/// entry of `dir`? — and is the caller's because what answering it costs is the
+/// caller's: a walk over `dir`'s entries has a scan of it in hand, and a single
+/// probe against `dir` has no second question to keep names for. An answer of
+/// `None` is a directory that could not be read, which proves nothing.
+#[allow(clippy::disallowed_methods)] // The vault filesystem seam: read-only case detection.
+fn probe_case_behavior(
+    dir: &Path,
+    name: &OsStr,
+    holds: impl FnOnce(&OsStr) -> Option<bool>,
+) -> Option<CaseSensitivity> {
+    let alternate = alternate_ascii_case(name)?;
+    let actual_metadata = fs::symlink_metadata(dir.join(name)).ok()?;
+
+    match fs::symlink_metadata(dir.join(&alternate)) {
         Ok(other) if !same_identity(&actual_metadata, &other) => Some(CaseSensitivity::Sensitive),
         Ok(_) => {
             // If both spellings are actual entries, they may merely be hardlink
             // aliases. Only lookup of a spelling absent from the directory can
             // positively demonstrate case-insensitive name resolution.
-            let alternate_is_entry = fs::read_dir(parent)
-                .ok()?
-                .filter_map(Result::ok)
-                .any(|entry| entry.file_name() == alternate);
-            (!alternate_is_entry).then_some(CaseSensitivity::Insensitive)
+            (!holds(&alternate)?).then_some(CaseSensitivity::Insensitive)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(CaseSensitivity::Sensitive),
         Err(_) => None,
     }
+}
+
+/// What detection asked of the directories it read and of the names it held,
+/// counted for this module's own suite.
+///
+/// A detect call hands back a case behavior and says nothing about how many
+/// times it read a directory, nor about how much of what it read it goes over
+/// again; both are the subject of the entry cache above, and neither has any
+/// other observable. The counts are thread-local for the reason
+/// [`crate::reads`]'s are: what a case reads is what its own thread did, rather
+/// than a shared number the cases running beside it also move.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DetectionReads {
+    /// Directory scans opened.
+    scans: u64,
+    /// Entries pulled off those scans, an entry the scan could not read
+    /// included.
+    dirents: u64,
+    /// Membership lookups against the names one scan holds. A question costs
+    /// one for each name it waits for and one for its answer, so every question
+    /// a directory of N entries can ask costs on the order of N of them
+    /// together; searching the held names per question would cost N each.
+    name_tests: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DETECTION_READS: std::cell::Cell<DetectionReads> =
+        const { std::cell::Cell::new(DetectionReads { scans: 0, dirents: 0, name_tests: 0 }) };
+}
+
+#[cfg(test)]
+fn count_scan() {
+    count(|reads| reads.scans += 1);
+}
+
+#[cfg(test)]
+fn count_dirent() {
+    count(|reads| reads.dirents += 1);
+}
+
+#[cfg(test)]
+fn count_name_test() {
+    count(|reads| reads.name_tests += 1);
+}
+
+#[cfg(test)]
+fn count(tally: impl FnOnce(&mut DetectionReads)) {
+    DETECTION_READS.with(|counts| {
+        let mut reads = counts.get();
+        tally(&mut reads);
+        counts.set(reads);
+    });
 }
 
 fn alternate_ascii_case(name: &OsStr) -> Option<OsString> {
@@ -557,11 +777,145 @@ mod tests {
         let root = scratch();
         let parent = root.parent().expect("scratch parent");
         let name = root.file_name().expect("scratch name");
-        let expected = probe_case_behavior(parent, name).expect("case-bearing root entry");
+        let expected =
+            probe_case_behavior(parent, name, |alternate| listing_holds(parent, alternate))
+                .expect("case-bearing root entry");
 
         let detected = PathNormalizer::detect(&root).expect("detectable empty root");
         assert_eq!(detected.case_sensitivity(), expected);
         fs::remove_dir_all(root).expect("remove scratch");
+    }
+
+    /// What detection read while `work` ran on this thread.
+    fn detection_reads(work: impl FnOnce()) -> DetectionReads {
+        DETECTION_READS.set(DetectionReads::default());
+        work();
+        DETECTION_READS.get()
+    }
+
+    /// Gives `spelling` a second name at `alias`, reporting whether this host
+    /// can hold both at once.
+    ///
+    /// A host that cannot is a host that folds case, so the two spellings are
+    /// one entry there and a case wanting them apart has no shape to run on it.
+    /// That the host folds is asserted here rather than read off the failed
+    /// link: a link that failed for any other reason is a broken arrangement,
+    /// and a case may not pass by calling that a skip. The skip says so on
+    /// standard error, so a run watching its output sees the case stand down.
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging hardlink aliases.
+    fn linked_alias(spelling: &Path, alias: &Path) -> bool {
+        if fs::hard_link(spelling, alias).is_ok() {
+            return true;
+        }
+        let folded = fs::symlink_metadata(spelling)
+            .ok()
+            .zip(fs::symlink_metadata(alias).ok())
+            .is_some_and(|(spelled, aliased)| same_identity(&spelled, &aliased));
+        assert!(
+            folded,
+            "{} could not be linked at {}, on a host that keeps the two spellings apart",
+            spelling.display(),
+            alias.display()
+        );
+        eprintln!(
+            "skipped: this host folds case, so {} is already {}",
+            alias.display(),
+            spelling.display()
+        );
+        false
+    }
+
+    /// **One detect call reads the root's entries once, and answers every
+    /// question about them by lookup.** Every entry holding a same-identity
+    /// alternate spelling asks the hardlink question, and each question is
+    /// answered from the scan the walk over those entries is already taking —
+    /// so a root where many entries ask costs the same one scan, and the same
+    /// one listing, as a root where one does.
+    ///
+    /// The dirent count is exact: no entry here proves anything, so the walk
+    /// takes every name, and one scan of the root is what that costs.
+    ///
+    /// The name tests are a bar, because which names the scan produces first
+    /// decides how long the first question waits. Every order stays under two
+    /// per entry — the pulls one question waits through are names no later
+    /// question waits for again — where answering a question by searching the
+    /// names in hand costs the width of the listing per asking entry, which
+    /// this root has enough entries to tell apart from the bar.
+    ///
+    /// A case-insensitive host cannot hold the distinct spellings the repeated
+    /// question needs, and skips.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging hardlink aliases.
+    fn detection_reads_a_hardlink_ambiguous_root_once() {
+        const ALIASES: u64 = 32;
+        const ENTRIES: u64 = 2 * ALIASES;
+        let parent = scratch();
+        let root = parent.join("123");
+        fs::create_dir(&root).expect("uncased root");
+        for index in 0..ALIASES {
+            let spelling = root.join(format!("Probe{index}"));
+            fs::write(&spelling, b"").expect("probe entry");
+            if !linked_alias(&spelling, &root.join(format!("probe{index}"))) {
+                fs::remove_dir_all(parent).expect("remove scratch");
+                return;
+            }
+        }
+
+        let mut detected = None;
+        let reads = detection_reads(|| detected = Some(PathNormalizer::detect(&root)));
+
+        assert!(
+            matches!(detected, Some(Err(NormalizerError::Indeterminate { .. }))),
+            "a root proving nothing but hardlink aliases is indeterminate"
+        );
+        assert_eq!(reads.scans, 1, "{reads:?}");
+        assert_eq!(reads.dirents, ENTRIES, "{reads:?}");
+        assert!(reads.name_tests <= 2 * ENTRIES, "{reads:?}");
+        fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
+    /// **Detection reads no further than the entry that settles it.** Which
+    /// entry that is depends on the host: where an alternate spelling does not
+    /// resolve, the first entry the scan produces settles the root and the rest
+    /// are never read, and no membership question is ever asked; where it
+    /// resolves to the same file, settling it means establishing that the
+    /// directory does not hold that spelling, which is the whole listing — one
+    /// scan of it, and one name test for each name that scan waits on.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: observing the host filesystem's case behavior.
+    fn detection_reads_no_further_than_the_entry_that_settles_it() {
+        const ENTRIES: u64 = 6;
+        let parent = scratch();
+        let root = parent.join("123");
+        fs::create_dir(&root).expect("uncased root");
+        for index in 0..ENTRIES {
+            fs::write(root.join(format!("Probe{index}")), b"").expect("probe entry");
+        }
+        let alternate_resolves = fs::symlink_metadata(root.join("probe0")).is_ok();
+
+        let mut detected = None;
+        let reads = detection_reads(|| detected = Some(PathNormalizer::detect(&root)));
+
+        assert_eq!(
+            detected
+                .expect("detection ran")
+                .expect("a case-bearing root")
+                .case_sensitivity(),
+            if alternate_resolves {
+                CaseSensitivity::Insensitive
+            } else {
+                CaseSensitivity::Sensitive
+            }
+        );
+        assert_eq!(
+            reads,
+            DetectionReads {
+                scans: 1,
+                dirents: if alternate_resolves { ENTRIES } else { 1 },
+                name_tests: if alternate_resolves { ENTRIES } else { 0 },
+            }
+        );
+        fs::remove_dir_all(parent).expect("remove scratch");
     }
 
     #[test]
@@ -571,9 +925,7 @@ mod tests {
         let root = parent.join("123");
         fs::create_dir(&root).expect("uncased root");
         fs::write(root.join("CaseProbe"), b"").expect("probe entry");
-        if fs::hard_link(root.join("CaseProbe"), root.join("caseProbe")).is_err() {
-            // A case-insensitive host cannot contain the distinct spellings
-            // needed to exercise the sensitive-filesystem hardlink case.
+        if !linked_alias(&root.join("CaseProbe"), &root.join("caseProbe")) {
             fs::remove_dir_all(parent).expect("remove scratch");
             return;
         }
@@ -583,6 +935,79 @@ mod tests {
             Err(NormalizerError::Indeterminate { .. })
         ));
         fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
+    /// A root the process cannot enumerate is not an indeterminate root: the
+    /// two refusals name different situations, and only this one carries the
+    /// error the filesystem gave.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: naming a root that is not there.
+    fn detection_refuses_a_root_it_cannot_enumerate() {
+        let parent = scratch();
+        let root = parent.join("123");
+        let refusal = PathNormalizer::detect(&root).expect_err("an absent root");
+        assert!(
+            matches!(&refusal, NormalizerError::ReadRoot { root: named, source }
+                if named == &root && source.kind() == io::ErrorKind::NotFound),
+            "{refusal:?}"
+        );
+        fs::remove_dir_all(parent).expect("remove scratch");
+    }
+
+    /// **A directory that cannot be listed answers no membership question, and
+    /// an unanswered question proves nothing.** The hardlink guard is all that
+    /// stands between two spellings resolving to one file and the conclusion
+    /// that the root folds case, so a listing this process may not read has to
+    /// leave the probe unsettled rather than report the alternate spelling
+    /// absent.
+    ///
+    /// The probe against the root's own entry reads the one directory the vault
+    /// does not own — its parent — so it is the probe that meets this. Where
+    /// the host folds case the whole shape runs: the alternate spelling of the
+    /// root's name resolves to the root, the guard asks the unlistable parent,
+    /// and detection falls through to the root's own entries, which prove
+    /// nothing. Where it does not fold, the alternate spelling is absent and
+    /// the probe settles before reaching the question — so the answer of the
+    /// unlistable listing is pinned directly as well, on every host.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: revoking a directory's read permission.
+    fn an_unlistable_directory_answers_no_membership_question() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = scratch();
+        let holder = parent.join("holder");
+        fs::create_dir(&holder).expect("holder directory");
+        let root = holder.join("Case");
+        fs::create_dir(&root).expect("empty root");
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o111)).expect("revoke read");
+        let listable = fs::read_dir(&holder).is_ok();
+
+        let answer = listing_holds(&holder, OsStr::new("case"));
+        let folds = fs::symlink_metadata(holder.join("case"))
+            .ok()
+            .zip(fs::symlink_metadata(&root).ok())
+            .is_some_and(|(alternate, root)| same_identity(&alternate, &root));
+        let detected = PathNormalizer::detect(&root).map(|paths| paths.case_sensitivity());
+
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).expect("restore read");
+        fs::remove_dir_all(parent).expect("remove scratch");
+
+        if listable {
+            eprintln!("skipped: this process lists a directory it holds no read permission on");
+            return;
+        }
+        assert_eq!(answer, None, "an unlistable directory holds no known name");
+        if folds {
+            assert!(
+                matches!(detected, Err(NormalizerError::Indeterminate { .. })),
+                "an unanswered hardlink guard settles nothing: {detected:?}"
+            );
+        } else {
+            assert!(
+                matches!(detected, Ok(CaseSensitivity::Sensitive)),
+                "an absent alternate spelling settles the root before the guard: {detected:?}"
+            );
+        }
     }
 
     #[test]
