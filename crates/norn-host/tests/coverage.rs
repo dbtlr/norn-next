@@ -57,10 +57,11 @@
 mod attach;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid, tombstones};
 use norn_testkit::process::Sandbox;
+use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{UntrustedReason, VaultName, WatcherLossCause};
 
 use attach::{Vault, assert_stands_across, attach_and_wait, derived_documents, untrusted_reason};
@@ -301,31 +302,31 @@ fn wait_for_coverage_loss(
     host: &norn_host::Host<norn_host::ProductionEntryOps>,
     name: &VaultName,
 ) -> UntrustedReason {
-    let deadline = Instant::now() + WITHDRAWN_LIMIT;
-    loop {
-        let observed = host.state(name);
-        match untrusted_reason(&observed) {
-            Some(
-                reason @ UntrustedReason::WatcherLost {
-                    cause: WatcherLossCause::CoverageLost,
-                    ..
-                },
-            ) => return reason,
-            // The reread the overflow stands for runs under coverage the entry
-            // still holds, so the loss is still ahead of it.
-            Some(UntrustedReason::WatcherOverflow) => {}
-            Some(other) => {
-                panic!("the removed root withdrew trust under something else: {other:?}")
+    wait_until(
+        "the entry to publish the coverage the removed root lost",
+        attach::state_budget(WITHDRAWN_LIMIT),
+        || {
+            let observed = host.state(name);
+            match untrusted_reason(&observed) {
+                Some(
+                    reason @ UntrustedReason::WatcherLost {
+                        cause: WatcherLossCause::CoverageLost,
+                        ..
+                    },
+                ) => Observed::Met(reason),
+                // The reread the overflow stands for runs under coverage the
+                // entry still holds, so the loss is still ahead of it.
+                Some(UntrustedReason::WatcherOverflow) => {
+                    Observed::pending("the entry is rereading the vault under an overflow")
+                }
+                Some(other) => {
+                    panic!("the removed root withdrew trust under something else: {other:?}")
+                }
+                None => Observed::pending(format!("the state is {observed:?}")),
             }
-            None => {}
-        }
-        assert!(
-            Instant::now() < deadline,
-            "trust was not withdrawn for the lost root inside {WITHDRAWN_LIMIT:?}; observed \
-             {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// Compare what this vault's store holds against a derivation built from zero

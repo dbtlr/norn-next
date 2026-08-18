@@ -4,7 +4,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use norn_config::ConfigDirs;
@@ -14,7 +13,7 @@ use norn_host::{
     RegistryRead,
 };
 use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::Budget;
+use norn_testkit::wait::{Budget, Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
@@ -44,6 +43,13 @@ const PROBE_ENV: &str = "NORN_HOST_FD_BUDGET_PROBE";
 const FD_BUDGET: usize = 12;
 const LARGE_VAULT_DOCUMENTS: usize = 2_000;
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long one look at what the host publishes may take.
+///
+/// A look is a lock and a label, so this separates a machine that has stopped
+/// answering from a state that has not arrived — which is [`WAIT_LIMIT`]'s
+/// question and not this one's.
+const STATE_PROBE: Duration = Duration::from_millis(250);
 
 /// The line the probe prints its measurement on, which the parent records.
 ///
@@ -230,22 +236,22 @@ fn wait_for_state(host: &Host<ProductionEntryOps>, name: &VaultName, expected: T
         expected.refusal().is_none(),
         "{expected:?} crosses as a refusal, so no label ever equals it"
     );
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let observed = host.state(name);
-        if observed.as_ref() == Ok(&expected) {
-            return;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {expected:?}; observed {observed:?}"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(
+        &format!("the entry under `{name}` to publish {expected:?}"),
+        Budget::new(WAIT_LIMIT, STATE_PROBE),
+        || {
+            let observed = host.state(name);
+            if observed.as_ref() == Ok(&expected) {
+                return Observed::Met(());
+            }
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
+            );
+            Observed::pending(format!("the state is {observed:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under
@@ -280,7 +286,7 @@ impl Fixture {
     fn new() -> Self {
         let lease = Lease::hold(
             isolation::REAL_WATCHER,
-            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, Duration::from_millis(250))),
+            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, STATE_PROBE)),
         );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

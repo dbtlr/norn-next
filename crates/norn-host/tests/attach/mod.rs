@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "induced-failure")]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
@@ -39,7 +39,7 @@ use norn_host::{
 use norn_host::{EvidenceReading, JobEvidence};
 use norn_store::{DocumentPath, Store, StoredDocument, StoredPathOrder};
 use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::Budget;
+use norn_testkit::wait::{Budget, Observed, wait_until};
 use norn_wire::{ErrorDetail, ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName};
 
 /// The seed every generated tree is drawn at. One value, so two readings
@@ -60,6 +60,24 @@ pub const SCHEMA: &[u8] = b"version: 1\n";
 /// attaches, so a stuck attach fails here — naming the state it was last seen
 /// in — rather than being killed from outside with nothing to say.
 pub const READY_LIMIT: Duration = Duration::from_secs(240);
+
+/// How long one look at an entry's published state may take.
+///
+/// A look is a lock and a label, so this bound separates a machine that has
+/// stopped answering from a condition that has not arrived: the work bound each
+/// caller passes says how long a condition may take, and this says nothing
+/// about that.
+const STATE_PROBE: Duration = Duration::from_millis(250);
+
+/// The budget a wait on an entry's published state obeys, under the caller's
+/// own runaway bound.
+///
+/// Every such wait here is one shape — ask the host what the entry publishes,
+/// stop when it says what the case is about — so the pair of bounds is composed
+/// once and the call sites differ only in the bound they declare.
+pub fn state_budget(limit: Duration) -> Budget {
+    Budget::new(limit, STATE_PROBE)
+}
 
 /// How long an entry nothing demands may sit attached before the host reaps it.
 ///
@@ -274,9 +292,10 @@ impl Vault {
 /// The hold window is a whole attachment rather than one wait: the lease is
 /// taken before the host is built and let go when it drops, and what happens
 /// in between is [`READY_LIMIT`] at its widest. One look at the lock is a
-/// syscall, so the probe bound is the syscall's and not the attachment's.
+/// syscall, so the probe bound is the syscall's and not the attachment's — the
+/// same separation [`state_budget`] draws, over the same two bounds.
 fn lease_budget() -> Budget {
-    isolation::acquisition_budget(Budget::new(READY_LIMIT, Duration::from_millis(250)))
+    isolation::acquisition_budget(state_budget(READY_LIMIT))
 }
 
 /// A host, and the real-watcher lease that covers the watcher it installs.
@@ -342,22 +361,22 @@ pub fn attach_and_wait(
     let lease = host
         .demand(name, AttachMode::Durable)
         .expect("request attachment");
-    let deadline = Instant::now() + READY_LIMIT;
-    loop {
-        let observed = host.state(name);
-        if observed == Ok(TrustState::Ready) {
-            return lease;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "attach did not converge inside {READY_LIMIT:?}; observed {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        &format!("the entry under `{name}` to serve the vault"),
+        state_budget(READY_LIMIT),
+        || match host.state(name) {
+            Ok(TrustState::Ready) => Observed::Met(()),
+            observed => {
+                assert!(
+                    !names_no_vault(&observed),
+                    "the host serves no vault under `{name}`: {observed:?}"
+                );
+                Observed::pending(format!("the state is {observed:?}"))
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    lease
 }
 
 /// Whether what the host answered is the refusal a name it holds no entry under
@@ -413,22 +432,24 @@ pub fn wait_for_withdrawn_trust(
     name: &VaultName,
     limit: Duration,
 ) -> UntrustedReason {
-    let deadline = Instant::now() + limit;
-    loop {
-        let observed = host.state(name);
-        if let Some(reason) = untrusted_reason(&observed) {
-            return reason;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "trust was not withdrawn inside {limit:?}; observed {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        &format!("trust to be withdrawn from the entry under `{name}`"),
+        state_budget(limit),
+        || {
+            let observed = host.state(name);
+            match untrusted_reason(&observed) {
+                Some(reason) => Observed::Met(reason),
+                None => {
+                    assert!(
+                        !names_no_vault(&observed),
+                        "the host serves no vault under `{name}`: {observed:?}"
+                    );
+                    Observed::pending(format!("the state is {observed:?}"))
+                }
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// How long a settle waits between two looks at an entry.
@@ -462,6 +483,10 @@ pub fn assert_stands_across(
     subject: &str,
 ) {
     for _ in 0..looks {
+        // Semantic: the passage of time is the subject. This states that the
+        // entry did *not* move across a stretch of dispatch intervals, so the
+        // stretch is spent rather than waited out — there is no condition whose
+        // arrival could end it early.
         std::thread::sleep(SETTLE_LOOK);
         let observed = host.state(name);
         let standing = untrusted_reason(&observed).unwrap_or_else(|| {

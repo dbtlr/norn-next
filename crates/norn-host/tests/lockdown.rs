@@ -122,13 +122,14 @@ use norn_testkit::attestation::{Attestation, SEAM};
 use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid, tombstones};
 use norn_testkit::isolation::{self, Lease};
 use norn_testkit::process::{Run, RunStatus, Sandbox};
-use norn_testkit::wait::Budget;
+use norn_testkit::wait::{Budget, Observed, wait_until};
 use norn_wire::{
     ErrorEnvelope, ReasonCode, TrustState, UntrustedReason, VaultName, WatcherLossCause,
 };
 
 use attach::{
-    assert_stands_across, untrusted_reason, wait_for_withdrawn_trust as withdrawn_trust_inside,
+    assert_stands_across, state_budget, untrusted_reason,
+    wait_for_withdrawn_trust as withdrawn_trust_inside,
 };
 
 /// The variable that puts a run in the child role, naming the tree it serves.
@@ -2041,28 +2042,29 @@ fn serve_or_report_the_refusal(
     let lease = serving
         .demand(name, AttachMode::Durable)
         .expect("request the attachment");
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let observed = serving.state(name);
-        if observed == Ok(TrustState::Ready) {
-            return lease;
-        }
-        if let Some(reason) = untrusted_reason(&observed) {
-            panic!(
-                "the heal refused over an edit another writer made inside one of its own \
-                 windows: {reason:?}"
+    wait_until(
+        &format!("the entry under `{name}` to serve the vault"),
+        state_budget(WAIT_LIMIT),
+        || {
+            let observed = serving.state(name);
+            if observed == Ok(TrustState::Ready) {
+                return Observed::Met(());
+            }
+            if let Some(reason) = untrusted_reason(&observed) {
+                panic!(
+                    "the heal refused over an edit another writer made inside one of its own \
+                     windows: {reason:?}"
+                );
+            }
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
             );
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "the attach did not converge inside {WAIT_LIMIT:?}; observed {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+            Observed::pending(format!("the state is {observed:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    lease
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,22 +2147,22 @@ fn attach_and_wait(
 /// on there is the same convergence, reached from a state a fresh demand never
 /// stands in.
 fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName) {
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let observed = host.state(name);
-        if observed == Ok(TrustState::Ready) {
-            return;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "the attach did not converge inside {WAIT_LIMIT:?}; observed {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        &format!("the entry under `{name}` to serve the vault"),
+        state_budget(WAIT_LIMIT),
+        || {
+            let observed = host.state(name);
+            if observed == Ok(TrustState::Ready) {
+                return Observed::Met(());
+            }
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
+            );
+            Observed::pending(format!("the state is {observed:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// Wait until the work that followed `opening` wrote a derived row and the
@@ -2173,24 +2175,23 @@ fn wait_for_ready(host: &Host<ProductionEntryOps>, name: &VaultName) {
 /// and it is cumulative, so the reading is taken against one from before the
 /// edit rather than sampled.
 fn wait_for_derived(serving: &Serving, name: &VaultName, opening: EvidenceReading, subject: &str) {
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let spent = serving.evidence().since(opening);
-        let observed = serving.state(name);
-        if spent.documents_upserted > 0 && observed == Ok(TrustState::Ready) {
-            return;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "{subject}: nothing derived it inside {WAIT_LIMIT:?}; observed {observed:?} having \
-             spent {spent:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        &format!("{subject} to be derived and the entry to serve the vault again"),
+        state_budget(WAIT_LIMIT),
+        || {
+            let spent = serving.evidence().since(opening);
+            let observed = serving.state(name);
+            if spent.documents_upserted > 0 && observed == Ok(TrustState::Ready) {
+                return Observed::Met(());
+            }
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
+            );
+            Observed::pending(format!("the state is {observed:?}, having spent {spent:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 /// Wait until the entry is untrusted, and hand back the reason it names.
@@ -2209,26 +2210,26 @@ fn wait_for_derived(serving: &Serving, name: &VaultName, opening: EvidenceReadin
 /// states is a failure at the match rather than a substring that happened not to
 /// appear.
 fn wait_for_untrusted(host: &Host<ProductionEntryOps>, name: &VaultName) -> UntrustedReason {
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let observed = host.state(name);
-        if let Some(reason) = untrusted_reason(&observed) {
-            return reason;
-        }
-        assert!(
-            observed != Ok(TrustState::Ready),
-            "the entry reached `Ready` under a condition it was required to refuse"
-        );
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "the entry did not refuse inside {WAIT_LIMIT:?}; observed {observed:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        &format!("the entry under `{name}` to refuse"),
+        state_budget(WAIT_LIMIT),
+        || {
+            let observed = host.state(name);
+            if let Some(reason) = untrusted_reason(&observed) {
+                return Observed::Met(reason);
+            }
+            assert!(
+                observed != Ok(TrustState::Ready),
+                "the entry reached `Ready` under a condition it was required to refuse"
+            );
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
+            );
+            Observed::pending(format!("the state is {observed:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"))
 }
 
 /// Wait until trust is withdrawn from an entry that is already serving, under

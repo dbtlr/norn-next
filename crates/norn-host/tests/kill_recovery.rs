@@ -4,8 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
@@ -16,12 +15,19 @@ use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoredPathOrder,
 };
 use norn_testkit::isolation::{self, Lease};
-use norn_testkit::wait::Budget;
+use norn_testkit::wait::{Budget, Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
 const CHILD_ENV: &str = "NORN_HOST_TORN_INCREMENT_CHILD";
 const DATABASE_ENV: &str = "NORN_HOST_TORN_INCREMENT_DATABASE";
 const WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long one look at what the host publishes may take.
+///
+/// A look is a lock and a label, so this separates a machine that has stopped
+/// answering from a state that has not arrived — which is [`WAIT_LIMIT`]'s
+/// question and not this one's.
+const STATE_PROBE: Duration = Duration::from_millis(250);
 
 #[test]
 fn next_attach_converges_after_process_death_mid_increment() {
@@ -136,22 +142,22 @@ fn tear_increment() -> ! {
 fn attach_and_wait(host: Host<ProductionEntryOps>, name: &VaultName) {
     host.demand(name, AttachMode::Durable)
         .expect("request production attachment");
-    let deadline = Instant::now() + WAIT_LIMIT;
-    loop {
-        let observed = host.state(name);
-        if observed == Ok(TrustState::Ready) {
-            break;
-        }
-        assert!(
-            !names_no_vault(&observed),
-            "the host serves no vault under `{name}`: {observed:?}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "attach did not converge: {observed:?}"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    wait_until(
+        &format!("the entry under `{name}` to serve the vault"),
+        Budget::new(WAIT_LIMIT, STATE_PROBE),
+        || {
+            let observed = host.state(name);
+            if observed == Ok(TrustState::Ready) {
+                return Observed::Met(());
+            }
+            assert!(
+                !names_no_vault(&observed),
+                "the host serves no vault under `{name}`: {observed:?}"
+            );
+            Observed::pending(format!("the state is {observed:?}"))
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}"));
     drop(host);
 }
 
@@ -191,7 +197,7 @@ impl Fixture {
     fn new() -> Self {
         let lease = Lease::hold(
             isolation::REAL_WATCHER,
-            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, Duration::from_millis(250))),
+            isolation::acquisition_budget(Budget::new(WAIT_LIMIT, STATE_PROBE)),
         );
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
