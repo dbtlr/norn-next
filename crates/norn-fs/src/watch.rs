@@ -85,10 +85,13 @@ enum Spelling {
 
 /// One settled, backend-independent set of filesystem facts.
 ///
-/// Two batches are the same where they carry the same facts, and every field
-/// is one: what a root speaks for turns on whether the name it carries was
-/// reported gone, so equality that read past `retired` would call two batches
-/// the same when folding a third into each settles a different set.
+/// Equality compares every field, but reads each at its own identity:
+/// `NormalizedPath` compares by fold key, so two batches carrying different
+/// spellings of one identity are equal — the retained spelling is a
+/// derivation input, not an equality fact. `retired` is compared in full:
+/// what a root speaks for turns on whether the name it carries was reported
+/// gone, so equality that read past it would call two batches the same when
+/// folding a third into each settles a different set.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Batch {
     vault_roots: BTreeSet<NormalizedPath>,
