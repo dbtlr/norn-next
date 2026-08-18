@@ -518,15 +518,22 @@ fn busy_share_deci_percent() -> Option<u64> {
     None
 }
 
-/// How long the machine is left alone before the window opens, so the reading
-/// is of the machine rather than of the checkout that just finished on it.
-#[cfg(target_os = "linux")]
-const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+/// **How long the machine is left alone before the window opens**, so the
+/// reading is of the machine rather than of the checkout that just finished on
+/// it.
+///
+/// [`BUSY_BOUND`] is placed against readings taken this way: sampled without a
+/// settle, the same runner reads in the fifties, and the bound would be placed
+/// against the tail of a job's own checkout. So this is a bound both spellings
+/// of the reading obey — the Darwin one buys it with `top`'s first sample, the
+/// Linux one by sleeping, and [`READINGS_SCRIPT`] does the same in each — and it
+/// is public because that agreement is what a test can hold them to.
+pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// How long the processor share is sampled over. Seconds of accounting are
-/// enough to be a reading and short enough that a lane pays it without noticing.
-#[cfg(target_os = "linux")]
-const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+/// **How long the processor share is sampled over.** Seconds of accounting are
+/// enough to be a reading and short enough that a lane pays it without noticing,
+/// and, like [`SETTLE`], it is the same window on both sides of the split.
+pub const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A decimal reading in thousandths, so a reading is an integer a record can be
 /// compared on.

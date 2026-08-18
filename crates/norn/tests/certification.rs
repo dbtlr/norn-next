@@ -551,10 +551,28 @@ fn a_lanes_reading_script_writes_the_line_the_classifier_reads() {
     let root = workspace_root();
     let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "host-readings")
         .expect("a sandbox for the readings script");
+    let began = std::time::Instant::now();
     let outcome = norn_testkit::process::Run::new(&sandbox, root.join(preflight::READINGS_SCRIPT))
         .wait()
         .expect("running the host-readings script");
+    let took = began.elapsed();
     outcome.assert_success();
+
+    // The window is the other half of the agreement, and the bound is placed
+    // against readings taken over it: a script that stopped settling would read
+    // the tail of the checkout that ran before it — the same runner reads in the
+    // fifties that way — and `BUSY_BOUND` would then be a bound on a different
+    // quantity than the one it was calibrated against. Both spellings reach the
+    // window by sleeping or by asking their platform's tool to, so the time the
+    // script spends is what says it took one.
+    let window = preflight::SETTLE + preflight::SAMPLE_WINDOW;
+    assert!(
+        took >= window,
+        "`{}` answered in {took:?}, inside the {window:?} settle and sample window the classifier \
+         reads over — so the two are sampling different quantities and the busy bound is placed \
+         against neither",
+        preflight::READINGS_SCRIPT
+    );
 
     let written = outcome.stdout_text();
     let written = written.trim_end_matches('\n');
