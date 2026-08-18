@@ -66,9 +66,8 @@
 //! vault that folds them together. A watcher-driven increment re-spells the row
 //! under a dirty root reported at the renamed path itself, so the pair stands
 //! where nothing reported the rename that way: a tree renamed while nothing was
-//! attached, a coverage loss that widened to a rescan, or a descendant reported
-//! dirty under the pre-rename spelling of a directory the same batch renamed.
-//! The heal reaches every one of them by paging over exactly this order.
+//! attached, and a coverage loss that widened to a rescan. The heal reaches
+//! both by paging over exactly this order.
 //!
 //! # The rest of the row
 //!
