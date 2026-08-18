@@ -159,6 +159,21 @@ impl Batch {
             ..Self::default()
         }
     }
+    /// The same invalidation, carrying that the reported path is gone.
+    ///
+    /// The two constructors are the two standings a report can have, and the
+    /// difference is not decoration: a root nothing has spelled live never
+    /// displaces a live spelling of its identity, and it covers only a root
+    /// that also died. A caller standing an invalidation up without a coalescer
+    /// therefore has to say which it is, or a removal it means to state would
+    /// speak for the live names under it.
+    pub fn vault_removal(root: NormalizedPath) -> Self {
+        Self {
+            retired: BTreeSet::from([root.clone()]),
+            vault_roots: BTreeSet::from([root]),
+            ..Self::default()
+        }
+    }
     /// Normalized vault-relative roots whose entries and descendants are invalid.
     ///
     /// A root stands at one identity, and on a folding volume several spellings
@@ -316,12 +331,23 @@ impl Batch {
     ///
     /// Where the two name one identity, `other`'s spelling wins: a caller folds
     /// batches in the order the vault produced them, so `other` carries the
-    /// later evidence. Retirement does not survive settling — a batch keeps one
-    /// spelling per identity and not the reports behind it — so a spelling that
-    /// this fold takes from `other` is as live as the batch could establish.
+    /// later evidence.
+    ///
+    /// **A root the other batch never saw stand crosses the fold as one.**
+    /// Whether a name died is what coverage reads, and a fold that called every
+    /// root live would have a batch's own dead spelling subsume a live
+    /// descendant beside it — so the fold asks each root what it is rather than
+    /// declaring the lot of them rendered. That is the same rule the reports
+    /// behind a batch are read by: a retired root fills an identity nothing has
+    /// spelled live and displaces nothing.
     pub fn merge(&mut self, other: Batch) {
         for root in other.vault_roots {
-            self.note_vault_root(root, Spelling::Rendered);
+            let spelling = if other.retired.contains(&root) {
+                Spelling::Retired
+            } else {
+                Spelling::Rendered
+            };
+            self.note_vault_root(root, spelling);
         }
         self.schema_dirty |= other.schema_dirty;
         self.rescans.extend(other.rescans);
@@ -1506,6 +1532,9 @@ fn suppress(root: &Path, ledger: &Arc<Mutex<Ledger>>, mut batch: Batch) -> Batch
         };
         !matches_expected(&root.join(path.as_path()), expected)
     });
+    batch
+        .retired
+        .retain(|path| batch.vault_roots.contains(path));
     batch
 }
 
@@ -3336,6 +3365,72 @@ mod tests {
             let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
             assert_eq!(paths, [Path::new("FOLDER")], "merged as {order:?}");
         }
+    }
+
+    /// **A fold carries retirement across.** A host folds every batch it drains
+    /// into one before anything reads it, so a rule the fold forgets is a rule
+    /// no delivery obeys. A batch settled as a dead directory spelling beside a
+    /// live descendant folds into a batch holding both — and the dead spelling
+    /// does not become a covering root on the way through.
+    #[test]
+    fn a_host_side_fold_carries_retirement_across() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = |spelling| normalizer.normalize(Path::new(spelling)).unwrap();
+        let settled = |roots: [Batch; 2]| {
+            let [first, second] = roots;
+            let mut batch = first;
+            batch.merge(second);
+            batch
+        };
+        for (label, delivered) in [
+            (
+                "one batch carrying both",
+                vec![settled([
+                    Batch::vault_removal(path("folder")),
+                    Batch::vault_change(path("FOLDER/note.md")),
+                ])],
+            ),
+            (
+                "the death and the change in two batches",
+                vec![
+                    Batch::vault_removal(path("folder")),
+                    Batch::vault_change(path("FOLDER/note.md")),
+                ],
+            ),
+            (
+                "the change delivered before the death",
+                vec![
+                    Batch::vault_change(path("FOLDER/note.md")),
+                    Batch::vault_removal(path("folder")),
+                ],
+            ),
+        ] {
+            let mut folded = Batch::default();
+            for batch in delivered {
+                folded.merge(batch);
+            }
+            let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(
+                paths,
+                [Path::new("folder"), Path::new("FOLDER/note.md")],
+                "{label}"
+            );
+        }
+    }
+
+    /// **A fold keeps a live spelling over a dead one.** A batch naming an
+    /// identity only by the name that died is later than the one naming it
+    /// live, and later is not what decides a spelling: a report that a path is
+    /// gone says which name died, never which one lives.
+    #[test]
+    fn a_host_side_fold_keeps_the_live_spelling_over_a_later_dead_one() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = |spelling| normalizer.normalize(Path::new(spelling)).unwrap();
+        let mut folded = Batch::vault_change(path("NOTE.md"));
+        folded.merge(Batch::vault_removal(path("note.md")));
+
+        let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("NOTE.md")]);
     }
 
     /// **A merge takes the later batch's spelling.** A settled batch keeps one

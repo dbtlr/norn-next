@@ -7883,7 +7883,7 @@ mod tests {
         }
     }
 
-    /// **A dirty set whose only spelling of a directory is the one that died
+    /// **A batch whose only spelling of a directory is the one that died
     /// converges through the descendant that stands.**
     ///
     /// A backend can report a directory's old name gone without reporting the
@@ -7892,9 +7892,9 @@ mod tests {
     /// spelling and stores every row under it that way, so the descendant is
     /// what has to reach the store: it is the only root naming the identity at
     /// a name a directory entry holds. The batch seam keeps that pair standing
-    /// for exactly this reason, and this is the leg that reads it.
+    /// through the fold a delivery crosses, and this is the leg that reads it.
     #[test]
-    fn a_dirty_set_holding_a_dead_directory_spelling_lands_the_descendants_own() {
+    fn a_folded_batch_holding_a_dead_directory_spelling_lands_the_descendants_own() {
         let f = Fixture::new("dead-directory-spelling-with-descendant");
         if norn_fs::PathNormalizer::detect(&f.vault())
             .unwrap()
@@ -7911,10 +7911,20 @@ mod tests {
         fs::rename(f.vault().join("folder"), f.vault().join("FOLDER")).unwrap();
         fs::write(f.vault().join("FOLDER/note.md"), "revised body").unwrap();
 
+        // Folded the way a delivery is: the host drains each settled batch into
+        // one pending batch, so both roots reach this leg through that fold.
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let mut batch = norn_fs::Batch::default();
+        batch.merge(norn_fs::Batch::vault_removal(
+            normalizer.normalize(Path::new("folder")).unwrap(),
+        ));
+        batch.merge(norn_fs::Batch::vault_change(
+            normalizer.normalize(Path::new("FOLDER/note.md")).unwrap(),
+        ));
         scoped_increment(
             &mut attachment.store,
             f.vault().as_path(),
-            &dirty_paths(f.vault().as_path(), &["folder", "FOLDER/note.md"]),
+            batch.vault_roots(),
             ProductionPolicy::new(2, 2).unwrap(),
             &progress.healing(),
             &exclusions(&attachment.registration, &attachment._shadows),
@@ -9267,17 +9277,6 @@ mod tests {
     /// a set literal says: the seam decides which roots a report leaves
     /// standing, and a set built beside it would answer a question no watcher
     /// asks.
-    fn dirty_paths(
-        root: &Path,
-        relatives: &[&str],
-    ) -> std::collections::BTreeSet<norn_fs::NormalizedPath> {
-        let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
-        relatives
-            .iter()
-            .map(|relative| normalizer.normalize(Path::new(relative)).unwrap())
-            .collect()
-    }
-
     fn dirty_batch(root: &Path, relatives: &[&str]) -> norn_fs::Batch {
         let normalizer = norn_fs::PathNormalizer::detect(root).unwrap();
         let mut batch = norn_fs::Batch::default();
