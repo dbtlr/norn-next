@@ -140,9 +140,23 @@ impl Batch {
     /// and the disappearance of the pre-rename spelling does not put it back.
     ///
     /// The spelling is a root's own, and a root does not re-spell the ancestors
-    /// of another. A directory case rename reports the directory and not its
+    /// of another. **No root has to, because no root stands beneath another.**
+    /// A root covers its own entry and everything under it, so a root that
+    /// another already covers is a second name for work the first one carries —
+    /// and the set drops it rather than keeping a path spelled through an
+    /// ancestor whose own report is the later evidence about that ancestor's
+    /// name. A directory case rename reports the directory and not its
     /// descendants, so a descendant that is separately dirty in the same batch
-    /// keeps whatever spelling of the renamed ancestor its own report carried.
+    /// arrives spelled through the name the directory rendered *before* the
+    /// rename; the covering root is what the consumer derives at, and it
+    /// carries the name the directory renders now.
+    ///
+    /// The set holds the covering root whichever order the two arrived in, and
+    /// whether the covering report says the path stands or says it is gone.
+    /// **A path that is gone answers for its subtree exactly as one that
+    /// stands does**: a consumer reading a root that is no longer there reads
+    /// one absence over the whole range beneath it, which is every fact a
+    /// covered descendant could have carried.
     pub fn vault_roots(&self) -> &BTreeSet<NormalizedPath> {
         &self.vault_roots
     }
@@ -175,7 +189,26 @@ impl Batch {
     ///
     /// The identity is recorded exactly once either way: a re-spelling is not a
     /// second place to walk.
+    ///
+    /// **A root covered by one already standing is not recorded, and the roots
+    /// an arriving one covers are dropped.** Coverage is
+    /// [`NormalizedPath::starts_with`] — the vault's own fold identity, whole
+    /// components only — so what a covering root subsumes is exactly what a
+    /// consumer reading it reaches. This is where a directory case rename stops
+    /// being two answers: the directory's report carries the rendered spelling,
+    /// a descendant's report carries the retired one, and a set holding both
+    /// would have a consumer derive the same identity twice at two names.
+    ///
+    /// Coverage is decided on the path alone and not on which report said the
+    /// path stands, because both readings of a covering root answer for the
+    /// whole range beneath it — one enumerates the subtree, the other says
+    /// there is nothing in it.
     fn note_vault_root(&mut self, root: NormalizedPath, spelling: Spelling) {
+        if self.is_covered(&root) {
+            return;
+        }
+        self.vault_roots
+            .retain(|standing| *standing == root || !standing.starts_with(&root));
         match spelling {
             Spelling::Rendered => {
                 self.vault_roots.replace(root);
@@ -184,6 +217,13 @@ impl Batch {
                 self.vault_roots.insert(root);
             }
         }
+    }
+
+    /// Whether a root already standing covers `root` without being it.
+    fn is_covered(&self, root: &NormalizedPath) -> bool {
+        self.vault_roots
+            .iter()
+            .any(|standing| standing != root && root.starts_with(standing))
     }
 
     /// Merge another settled batch without losing any uncertainty.
@@ -2972,6 +3012,176 @@ mod tests {
                 Path::new("notes/flipping.md")
             ]
         );
+    }
+
+    /// **A directory root subsumes the roots it covers, in either arrival
+    /// order.**
+    ///
+    /// A directory case rename reports the directory alone, so a descendant
+    /// that is separately dirty in the same window arrives spelled through the
+    /// name the directory rendered before the rename. Keeping both would hand a
+    /// consumer one identity at two names and let the stale one derive last;
+    /// the covering root carries the name the directory renders now, and it is
+    /// the only root the set keeps.
+    ///
+    /// **Arrival order is not the contract.** A backend reports the directory
+    /// before the file under it or after it depending on what the change was
+    /// and which backend saw it, and both rows below settle at the same root
+    /// set.
+    ///
+    /// The shapes are the two a covered root can have — a file under the
+    /// renamed directory, and a directory under it with its own descendant —
+    /// because coverage is whole components rather than a spelling prefix, and
+    /// the sibling in every row is what says so: `folderish` opens with the
+    /// renamed directory's characters and is nobody's descendant.
+    #[test]
+    fn a_covering_directory_root_subsumes_what_it_covers_in_either_arrival_order() {
+        let flipped = EventKind::Modify(ModifyKind::Name(RenameMode::Any));
+        for (label, reports, kept) in [
+            (
+                "a file under the renamed directory, the directory first",
+                vec!["/vault/FOLDER", "/vault/folder/note.md", "/vault/folderish"],
+                vec!["FOLDER", "folderish"],
+            ),
+            (
+                "a file under the renamed directory, the file first",
+                vec!["/vault/folder/note.md", "/vault/folderish", "/vault/FOLDER"],
+                vec!["FOLDER", "folderish"],
+            ),
+            (
+                "a nested directory under the renamed directory, the top first",
+                vec![
+                    "/vault/FOLDER",
+                    "/vault/folder/inner",
+                    "/vault/folder/inner/note.md",
+                    "/vault/folderish",
+                ],
+                vec!["FOLDER", "folderish"],
+            ),
+            (
+                "a nested directory under the renamed directory, the deepest first",
+                vec![
+                    "/vault/folder/inner/note.md",
+                    "/vault/folder/inner",
+                    "/vault/folderish",
+                    "/vault/FOLDER",
+                ],
+                vec!["FOLDER", "folderish"],
+            ),
+            (
+                "a nested directory that is covered before its own top arrives",
+                vec![
+                    "/vault/folder/inner/note.md",
+                    "/vault/folder/inner",
+                    "/vault/folderish",
+                ],
+                vec!["folder/inner", "folderish"],
+            ),
+        ] {
+            let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+            for path in reports {
+                ingest(&state, Ok(Event::new(flipped).add_path(path.into())));
+            }
+            let mut locked = state.lock().unwrap();
+            let batch = &locked.pending.as_mut().unwrap().batch;
+            let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+            let expected: Vec<_> = kept.iter().map(Path::new).collect();
+            assert_eq!(paths, expected, "{label}");
+        }
+    }
+
+    /// **A root that is gone covers what it held.** A removal names one path
+    /// and answers for everything under it, so a covering root reported as
+    /// retired subsumes exactly what a rendered one does: the consumer reads
+    /// one absence over the whole range rather than a list of the names inside
+    /// it.
+    ///
+    /// The spelling rule is untouched by this — a retired report still fills
+    /// only an identity nothing has spelled — so the row below is the covering
+    /// root at the one spelling reported for it.
+    #[test]
+    fn a_retired_covering_root_subsumes_what_a_rendered_one_does() {
+        let removed = EventKind::Remove(RemoveKind::Any);
+        for (label, reports) in [
+            (
+                "the directory's removal reported first",
+                vec!["/vault/folder", "/vault/folder/note.md"],
+            ),
+            (
+                "the entry inside it reported first",
+                vec!["/vault/folder/note.md", "/vault/folder"],
+            ),
+        ] {
+            let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
+            for path in reports {
+                ingest(&state, Ok(Event::new(removed).add_path(path.into())));
+            }
+            let mut locked = state.lock().unwrap();
+            let batch = &locked.pending.as_mut().unwrap().batch;
+            let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(paths, [Path::new("folder")], "{label}");
+        }
+    }
+
+    /// **Coverage is the vault's own case behavior.** Where two spellings are
+    /// two places, a differently-cased ancestor covers nothing: the descendant
+    /// is under a directory the volume says is not the one that was reported,
+    /// and it keeps its own root.
+    #[test]
+    fn a_case_sensitive_vault_keeps_a_descendant_a_flipped_ancestor_does_not_cover() {
+        let state = state_with_in_vault_schema(CaseSensitivity::Sensitive, "schema.yml");
+        for path in ["/vault/FOLDER", "/vault/folder/note.md"] {
+            ingest(
+                &state,
+                Ok(
+                    Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+                        .add_path(path.into()),
+                ),
+            );
+        }
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("FOLDER"), Path::new("folder/note.md")]);
+    }
+
+    /// **A covering root carries no schema fact away with it.** The schema's
+    /// own path is a dirty root as well as the subject of the schema flag, and
+    /// a directory above it covers the root without covering the flag: the
+    /// invalidation the batch carries about the schema is a field of its own.
+    #[test]
+    fn a_covering_directory_root_does_not_swallow_the_schema_fact() {
+        let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "config/schema.yml");
+        for path in ["/vault/config/schema.yml", "/vault/config"] {
+            ingest(
+                &state,
+                Ok(Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.into())),
+            );
+        }
+        let mut locked = state.lock().unwrap();
+        let batch = &locked.pending.as_mut().unwrap().batch;
+        let paths: Vec<_> = batch.vault_roots.iter().map(|p| p.as_path()).collect();
+        assert_eq!(paths, [Path::new("config")]);
+        assert!(batch.schema_dirty);
+    }
+
+    /// **A fold subsumes across the batches it folds.** A host draining a slow
+    /// subscription merges what it takes, and coverage is decided over the
+    /// folded set rather than inside each batch: the directory root one batch
+    /// carries takes the descendant another batch carried, and a descendant
+    /// arriving after a covering root is not recorded.
+    #[test]
+    fn a_host_side_merge_subsumes_across_the_batches_it_folds() {
+        let normalizer = PathNormalizer::for_sensitivity(CaseSensitivity::Insensitive);
+        let path = |spelling| normalizer.normalize(Path::new(spelling)).unwrap();
+        for order in [["folder/note.md", "FOLDER"], ["FOLDER", "folder/note.md"]] {
+            let mut folded = Batch::default();
+            for spelling in order {
+                folded.merge(Batch::vault_change(path(spelling)));
+            }
+            let paths: Vec<_> = folded.vault_roots.iter().map(|p| p.as_path()).collect();
+            assert_eq!(paths, [Path::new("FOLDER")], "merged as {order:?}");
+        }
     }
 
     /// **A merge takes the later batch's spelling.** A settled batch keeps one
