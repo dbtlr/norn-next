@@ -8021,21 +8021,26 @@ mod tests {
     }
 
     /// **The walk's other refusals are answered by a covering root the same
-    /// way.** A shadow name is one of four names the walk will not read
+    /// way.** A shadow name is one of four things the walk will not read
     /// through; the rest are a symbolic link, an entry that is neither file nor
-    /// directory, and — closed downwards, so never below a covering root that
-    /// stands — an exclusion. Each row below stands a dirty root through one of
-    /// those names beside a covering directory root, and what the store holds
+    /// directory, and an exclusion. Each row below stands a dirty root at one
+    /// of them beside a covering directory root, and what the store holds
     /// afterwards is what a build from zero holds.
     ///
-    /// **Neither of these two is a place a covered root reads anything at
-    /// either**, which is the second assertion in each row and the difference
+    /// **None of the three is a place a covered root reads anything at
+    /// either**, which is the first assertion in each row and the difference
     /// from the shadow name: a path spelled through a link reads as a regular
     /// file to a stat that follows it and is then refused by the open that does
-    /// not, and a pipe is not a file at all — so each root's own leg prunes its
-    /// range and derives nothing, and the covering root withdraws nothing that
-    /// was there. The shadow name is the one refusal where the two legs
-    /// genuinely differ.
+    /// not; a pipe is not a file at all; and an exclusion is read by
+    /// [`scoped_increment`] itself, one leg at a time, before any of them opens
+    /// anything. So each root's own leg derives nothing and the covering root
+    /// withdraws nothing that was there. The shadow name is the one refusal
+    /// where the two legs genuinely differ.
+    ///
+    /// The exclusion row is the one the two readings disagree about: the
+    /// watcher admits every path outside the mechanism root, so a host root
+    /// reaches a dirty set as an ordinary path, and it is the increment's own
+    /// reading of the walk's exclusion set that answers for it.
     ///
     /// The subtree behind the link is reached under its own name rather than
     /// through it, which is what keeps the row about the refusal: `elsewhere`
@@ -8079,7 +8084,11 @@ mod tests {
             )
             .unwrap();
         };
-        for refused in ["dir/link/note.md", "dir/pipe.md"] {
+        for (cover, refused) in [
+            ("dir", "dir/link/note.md"),
+            ("dir", "dir/pipe.md"),
+            (".norn", IN_VAULT_SCHEMA_PATH),
+        ] {
             increment(
                 &mut attachment.store,
                 &dirty_path(f.vault().as_path(), refused),
@@ -8090,7 +8099,7 @@ mod tests {
                 "a root spelled through {refused} derived a row of its own"
             );
 
-            let batch = dirty_batch(f.vault().as_path(), &["dir", refused]);
+            let batch = dirty_batch(f.vault().as_path(), &[cover, refused]);
             increment(&mut attachment.store, batch.vault_roots());
             assert_eq!(
                 stored_paths(&mut attachment.store),
