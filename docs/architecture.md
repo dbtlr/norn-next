@@ -198,8 +198,9 @@ record that run uploaded qualifies.
 authored work bounds are bounds on work, sized for a machine with a core free for the work it
 is given; a machine that does not have one measures its own queue at the bound, and a run
 that ends there leaves the case's claim unproven rather than failed. The bounds stand and the
-evidence is gated instead: each lane reads its host before it builds anything — load per
-core, and on Darwin the processor share and resident set of the event daemon every
+evidence is gated instead: each lane reads its host before it builds anything — how much of
+the machine is already busy, sampled over a window rather than read off a decayed load
+average, and on Darwin the processor share and resident set of the event daemon every
 real-watcher case subscribes to — classifies the reading against a closed set of refusal
 reasons, and the verdict is what fills the record's preflight slot. A refused host is
 non-qualifying for the environment however green the cases went, and the same probe run

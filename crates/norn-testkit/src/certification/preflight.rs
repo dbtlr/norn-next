@@ -25,21 +25,35 @@
 //!
 //! # What it measures
 //!
-//! Two things, and the second only on Darwin.
+//! Three things, and the third only on Darwin.
 //!
-//! - **Load per core.** The one-minute load average over the machine's core
-//!   count. It is the direct reading of the condition the bounds are sized
-//!   against — how many runnable things are already competing for the cores the
-//!   suites are about to want — and it is a whole-machine reading rather than a
-//!   process one, which is what catches the hazard the suites actually meet:
-//!   another checkout's `cargo test` on the same workstation.
+//! - **How busy the machine's processors already are**, as the share of them
+//!   that was not idle across a short sample window. It is the direct reading
+//!   of the condition the bounds are sized against — how much of the machine is
+//!   already spoken for by work the suites did not start — and it is a
+//!   whole-machine reading rather than a process one, which is what catches the
+//!   hazard the suites actually meet: another checkout's `cargo test` on the
+//!   same workstation.
+//!
+//!   **It is a sampled share and not the load average**, which is the reading
+//!   this started with and had to give up. A load average is decayed history,
+//!   and on a runner handed over minutes after its own boot the history is the
+//!   boot: a `macos-15` runner reads 11.6 over three cores at checkout while
+//!   sitting idle, and refusing it would refuse every scheduled run there is.
+//!   A share measured over a window is about the machine the suites are about
+//!   to get.
+//! - **The core count**, against a floor rather than a ratio. A machine with
+//!   one processor runs a host and the watcher thread it is waiting on in turn,
+//!   which no bound authored on a real machine survives. Above the floor the
+//!   count is recorded and decides nothing: what the bounds turn on is how much
+//!   of the machine is free, which the share above answers directly.
 //! - **fseventsd health, on Darwin.** The real-watcher cases subscribe to a
 //!   service the machine runs once for everything on it. A saturated or bloated
 //!   fseventsd answers a crowd by delivering late or by going silent, and a
 //!   watcher case waiting for a delivery it will get in forty seconds fails at
 //!   its bound with nothing wrong in the watcher. So the daemon's own processor
 //!   share and resident set are read, and a host whose fseventsd is outside
-//!   either bound is refused for the same reason a loaded one is.
+//!   either bound is refused for the same reason a busy one is.
 //!
 //! # What it refuses
 //!
@@ -53,8 +67,8 @@
 //! [`Reading::from_host`] takes the reading itself, which is what a local run
 //! wants. A lane's reading is taken before the lane builds anything —
 //! [`READINGS_SCRIPT`] writes it into the job environment at [`READING`], and
-//! [`Reading::observed`] prefers it — because a load average read after a cold
-//! cargo build is a reading of this run's own compile rather than of the
+//! [`Reading::observed`] prefers it — because a processor share sampled during
+//! a cold cargo build is a reading of this run's own compile rather than of the
 //! machine it landed on.
 
 use std::fmt::Write as _;
@@ -75,16 +89,27 @@ pub const READINGS_SCRIPT: &str = ".github/scripts/host-readings.sh";
 /// What a lane runs to turn a reading into the verdict its record carries.
 pub const CLASSIFIER: &str = "cargo test --locked -p norn-testkit --lib certification::preflight";
 
-/// **How many runnable things per core still leave the work bounds meaning what
-/// they were authored to mean.**
+/// **How much of the machine may already be spoken for and still leave the work
+/// bounds meaning what they were authored to mean.**
 ///
-/// One. At a load average equal to the core count every runnable thing has a
-/// core, and the suites' work is one more thing wanting one; past it the
-/// machine is handing out time slices and a fifteen-second work bound is
-/// fifteen seconds of waiting plus whatever work fits. The bound is on the
-/// average rather than on an instant because a sampled instant on a machine
-/// running a test suite is noise in both directions.
-pub const LOAD_PER_CORE_BOUND: f64 = 1.0;
+/// Half. A machine half taken still has half its processors for the suites, and
+/// the bounds were authored with headroom of that order — the slowest case they
+/// cover runs in under two thirds of its bound on a quiet machine. Past half,
+/// what a fifteen-second work bound measures is increasingly the queue.
+///
+/// A share rather than a ratio to the core count: the suites' work is what is
+/// left over, and half of two processors and half of twelve are both half a
+/// machine.
+pub const BUSY_BOUND: f64 = 50.0;
+
+/// **The fewest processors a host can run these suites on and have the bounds
+/// mean anything.**
+///
+/// Two. Every case here runs a host beside the watcher thread it is waiting on,
+/// and on one processor those take turns: the wait and the work it is waiting
+/// for cannot both proceed, so the bound measures scheduling rather than the
+/// product. Above two the count decides nothing and is recorded.
+pub const MINIMUM_CORES: usize = 2;
 
 /// **The processor share a healthy fseventsd sits under.**
 ///
@@ -109,9 +134,10 @@ pub const FSEVENTSD_RESIDENT_BOUND_KIB: u64 = 512 * 1024;
 pub struct Reading {
     /// The machine's core count.
     pub cores: Option<usize>,
-    /// The one-minute load average, in thousandths so that a reading is a value
-    /// two reads agree on and a record is comparable years later.
-    pub load_milli: Option<u64>,
+    /// The share of the machine's processors that was not idle across the
+    /// sample window, in tenths of a percent, so that a reading is a value two
+    /// reads agree on and a record is comparable years later.
+    pub busy_deci_percent: Option<u64>,
     /// What Darwin's filesystem-event daemon is doing.
     pub fseventsd: Fseventsd,
 }
@@ -145,9 +171,11 @@ pub enum Refusal {
     /// A measurement the verdict turns on could not be taken. Named rather than
     /// defaulted: the record's claim is that this host was checked.
     Unmeasured(&'static str),
-    /// The machine is already busy. Carried in thousandths of a runnable thing
-    /// per core.
-    Loaded { load_per_core_milli: u64 },
+    /// The machine is already busy with work the suites did not start. Carried
+    /// in tenths of a percent of the whole machine.
+    Busy { busy_deci_percent: u64 },
+    /// The machine has too few processors for a bound authored on a real one.
+    TooFewCores { cores: usize },
     /// Darwin's event daemon is burning processor. Carried in tenths of a
     /// percent.
     FseventsdSaturated { cpu_deci_percent: u64 },
@@ -164,13 +192,15 @@ impl Refusal {
             Refusal::Unmeasured(what) => {
                 format!("{what} could not be measured, so this host was not checked")
             }
-            Refusal::Loaded {
-                load_per_core_milli,
-            } => format!(
-                "{}.{:03} runnable per core, past {LOAD_PER_CORE_BOUND:.2}: the work bounds would \
+            Refusal::Busy { busy_deci_percent } => format!(
+                "{}.{}% of the machine already busy, past {BUSY_BOUND:.0}%: the work bounds would \
                  measure the queue",
-                load_per_core_milli / 1000,
-                load_per_core_milli % 1000
+                busy_deci_percent / 10,
+                busy_deci_percent % 10
+            ),
+            Refusal::TooFewCores { cores } => format!(
+                "{cores} processor(s), under {MINIMUM_CORES}: a host and the watcher thread it \
+                 waits on take turns here"
             ),
             Refusal::FseventsdSaturated { cpu_deci_percent } => format!(
                 "fseventsd at {}.{}% of a core, past {FSEVENTSD_CPU_BOUND:.0}%: real-watcher \
@@ -222,18 +252,17 @@ impl Reading {
     /// to arrange.
     pub fn verdict(&self) -> Verdict {
         let mut refusals = Vec::new();
-        match (self.cores, self.load_milli) {
-            (Some(cores), Some(load_milli)) if cores > 0 => {
-                let load_per_core_milli = load_milli / cores as u64;
-                if load_per_core_milli > (LOAD_PER_CORE_BOUND * 1000.0) as u64 {
-                    refusals.push(Refusal::Loaded {
-                        load_per_core_milli,
-                    });
-                }
+        match self.cores {
+            None => refusals.push(Refusal::Unmeasured("the core count")),
+            Some(cores) if cores < MINIMUM_CORES => refusals.push(Refusal::TooFewCores { cores }),
+            Some(_) => {}
+        }
+        match self.busy_deci_percent {
+            None => refusals.push(Refusal::Unmeasured("the processor share in use")),
+            Some(busy_deci_percent) if busy_deci_percent > (BUSY_BOUND * 10.0) as u64 => {
+                refusals.push(Refusal::Busy { busy_deci_percent });
             }
-            (None, _) | (Some(0), _) => refusals.push(Refusal::Unmeasured("the core count")),
-            (Some(_), None) => refusals.push(Refusal::Unmeasured("the load average")),
-            (Some(_), Some(_)) => {}
+            Some(_) => {}
         }
         match self.fseventsd {
             Fseventsd::NotApplicable => {}
@@ -268,8 +297,8 @@ impl Reading {
         if let Some(cores) = self.cores {
             let _ = write!(rendered, "cores={cores} ");
         }
-        if let Some(load_milli) = self.load_milli {
-            let _ = write!(rendered, "load-milli={load_milli} ");
+        if let Some(busy_deci_percent) = self.busy_deci_percent {
+            let _ = write!(rendered, "busy-deci={busy_deci_percent} ");
         }
         match self.fseventsd {
             Fseventsd::NotApplicable => {}
@@ -302,7 +331,7 @@ impl Reading {
             };
             match key {
                 "cores" => reading.cores = value.parse().ok(),
-                "load-milli" => reading.load_milli = value.parse().ok(),
+                "busy-deci" => reading.busy_deci_percent = value.parse().ok(),
                 "fseventsd" => match value {
                     "running" => running = true,
                     "absent" => reading.fseventsd = Fseventsd::Absent,
@@ -344,7 +373,7 @@ impl Reading {
     pub fn from_host() -> Reading {
         Reading {
             cores: std::thread::available_parallelism().ok().map(Into::into),
-            load_milli: load_average_milli(),
+            busy_deci_percent: busy_share_deci_percent(),
             fseventsd: fseventsd(),
         }
     }
@@ -385,37 +414,75 @@ pub fn detail(reading: &Reading, verdict: &Verdict) -> String {
     }
 }
 
-/// The one-minute load average in thousandths.
+/// **How much of the machine was busy across a short sample window**, in tenths
+/// of a percent of the whole machine.
 ///
-/// Read from the place each platform keeps it rather than through a crate: the
-/// two spellings are three lines each, and a dependency added to the harness is
-/// a dependency in the graph the architecture gate holds.
+/// Sampled rather than read off a decayed average, and read from the place each
+/// platform keeps its processor accounting rather than through a crate: the two
+/// spellings are a few lines each, and a dependency added to the harness is a
+/// dependency in the graph the architecture gate holds.
+///
+/// A window is what makes the reading a reading. An instant is one scheduler
+/// tick and says nothing; a second of accounting is the machine.
 #[cfg(target_os = "linux")]
-#[allow(clippy::disallowed_methods)] // Harness scaffolding: this host's own load average.
-fn load_average_milli() -> Option<u64> {
-    let text = std::fs::read_to_string("/proc/loadavg").ok()?;
-    milli(text.split_whitespace().next()?)
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: this host's own processor accounting.
+fn busy_share_deci_percent() -> Option<u64> {
+    let first = processor_ticks()?;
+    std::thread::sleep(SAMPLE_WINDOW);
+    let second = processor_ticks()?;
+    let total = second.0.checked_sub(first.0)?;
+    let idle = second.1.checked_sub(first.1)?;
+    (total > 0).then(|| 1000 - (idle * 1000 / total).min(1000))
 }
 
+/// The machine's `(total, idle)` processor ticks since boot, off the aggregate
+/// line of `/proc/stat`. Idle counts the waiting-for-io column too: a processor
+/// blocked on the disk is one the suites can have.
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: this host's own processor accounting.
+fn processor_ticks() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = text.lines().find(|line| line.starts_with("cpu "))?;
+    let fields: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|field| field.parse().ok())
+        .collect();
+    // user nice system idle iowait ...
+    (fields.len() >= 5).then(|| (fields.iter().sum(), fields[3] + fields[4]))
+}
+
+/// The Darwin spelling, off `top`'s own two-sample accounting: the first line
+/// it prints is since boot and the last is the window, which is the one read.
 #[cfg(target_os = "macos")]
-fn load_average_milli() -> Option<u64> {
-    // `{ 1.23 4.56 7.89 }`, most recent first.
-    let reported = command("sysctl", &["-n", "vm.loadavg"])?;
-    milli(
-        reported
-            .trim_matches(['{', '}', ' ', '\n'])
-            .split_whitespace()
-            .next()?,
-    )
+fn busy_share_deci_percent() -> Option<u64> {
+    let sampled = command("top", &["-l", "2", "-n", "0", "-s", "1"])?;
+    // `CPU usage: 5.12% user, 8.20% sys, 86.67% idle`
+    let last = sampled
+        .lines()
+        .rfind(|line| line.starts_with("CPU usage:"))?;
+    let idle = last
+        .split(',')
+        .find(|part| part.trim_end().ends_with("idle"))?
+        .trim()
+        .split('%')
+        .next()?;
+    Some(1000 - (milli(idle)? / 100).min(1000))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn load_average_milli() -> Option<u64> {
+fn busy_share_deci_percent() -> Option<u64> {
     None
 }
 
+/// How long the processor share is sampled over. One second of accounting is
+/// enough to be a reading and short enough that a lane pays it without noticing.
+#[cfg(target_os = "linux")]
+const SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// A decimal reading in thousandths, so a reading is an integer a record can be
 /// compared on.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn milli(reported: &str) -> Option<u64> {
     let (whole, fraction) = reported.split_once('.').unwrap_or((reported, "0"));
     let fraction: String = fraction.chars().take(3).collect();
@@ -479,12 +546,12 @@ fn command(program: &str, arguments: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A host with nothing wrong with it: eight cores, a load of two, and on
-    /// Darwin a daemon doing nothing.
+    /// A host with nothing wrong with it: eight cores, a quarter of the machine
+    /// in use, and on Darwin a daemon doing nothing.
     fn healthy() -> Reading {
         Reading {
             cores: Some(8),
-            load_milli: Some(2_000),
+            busy_deci_percent: Some(250),
             fseventsd: Fseventsd::Running {
                 cpu_deci_percent: 3,
                 resident_kib: 40 * 1024,
@@ -499,11 +566,11 @@ mod tests {
         assert_eq!(healthy().verdict(), Verdict::Admitted);
     }
 
-    /// **A host with no Darwin daemon to read is admitted on its load alone.**
+    /// **A host with no Darwin daemon to read is judged on its share alone.**
     /// The Linux lane's real watcher is inotify, and a bound on a service it
     /// does not run would refuse every Linux run there is.
     #[test]
-    fn a_host_that_is_not_darwin_is_judged_on_load_alone() {
+    fn a_host_that_is_not_darwin_is_judged_on_its_share_alone() {
         assert_eq!(
             Reading {
                 fseventsd: Fseventsd::NotApplicable,
@@ -514,14 +581,14 @@ mod tests {
         );
     }
 
-    /// **Exactly one runnable thing per core is still admitted**, and the first
-    /// thousandth past it is not. The bound is where the machine stops having a
-    /// core for everything that wants one.
+    /// **A machine exactly half taken is still admitted**, and the first tenth
+    /// of a percent past it is not. The bound is where less than half the
+    /// machine is left for the work the bounds were authored over.
     #[test]
-    fn the_load_bound_admits_a_full_machine_and_refuses_an_oversubscribed_one() {
+    fn the_share_bound_admits_a_half_taken_machine_and_refuses_the_first_step_past_it() {
         assert_eq!(
             Reading {
-                load_milli: Some(8_000),
+                busy_deci_percent: Some(500),
                 ..healthy()
             }
             .verdict(),
@@ -529,34 +596,71 @@ mod tests {
         );
         assert_eq!(
             Reading {
-                load_milli: Some(8_008),
+                busy_deci_percent: Some(501),
                 ..healthy()
             }
             .verdict(),
-            Verdict::Refused(vec![Refusal::Loaded {
-                load_per_core_milli: 1_001
+            Verdict::Refused(vec![Refusal::Busy {
+                busy_deci_percent: 501
             }])
         );
     }
 
-    /// **The workstation the ledger was collected on is refused.** Twelve
-    /// cores under a load of ten is the class-A starvation condition, and a
+    /// **The workstation the ledger was collected on is refused.** A machine
+    /// with no idle processor left is the class-A starvation condition, and a
     /// run taken there is not evidence about the candidate.
     #[test]
-    fn an_oversubscribed_workstation_is_refused() {
+    fn a_saturated_workstation_is_refused() {
         let verdict = Reading {
             cores: Some(12),
-            load_milli: Some(21_600),
+            busy_deci_percent: Some(1_000),
             ..healthy()
         }
         .verdict();
         assert_eq!(
             verdict,
-            Verdict::Refused(vec![Refusal::Loaded {
-                load_per_core_milli: 1_800
+            Verdict::Refused(vec![Refusal::Busy {
+                busy_deci_percent: 1_000
             }])
         );
         assert_eq!(verdict.spelling(), "refused");
+    }
+
+    /// **A runner idling with a high load average is admitted.** The reading
+    /// this probe started with was the load average, and a `macos-15` runner
+    /// hands the lane three cores reading 11.6 while sitting idle: history from
+    /// its own boot, not work competing with the suites. The share is of the
+    /// machine the suites are about to get.
+    #[test]
+    fn a_freshly_handed_over_runner_is_admitted() {
+        assert_eq!(
+            Reading {
+                cores: Some(3),
+                busy_deci_percent: Some(80),
+                fseventsd: Fseventsd::Running {
+                    cpu_deci_percent: 9,
+                    resident_kib: 8_160,
+                },
+            }
+            .verdict(),
+            Verdict::Admitted
+        );
+    }
+
+    /// **A machine with one processor is refused whatever it is doing.** A host
+    /// and the watcher thread it waits on take turns there, so the bound
+    /// measures scheduling.
+    #[test]
+    fn a_single_processor_host_is_refused() {
+        assert_eq!(
+            Reading {
+                cores: Some(1),
+                busy_deci_percent: Some(0),
+                ..healthy()
+            }
+            .verdict(),
+            Verdict::Refused(vec![Refusal::TooFewCores { cores: 1 }])
+        );
     }
 
     /// **The degraded daemon this bound exists for is refused, on both
@@ -619,11 +723,7 @@ mod tests {
                 ..healthy()
             },
             Reading {
-                cores: Some(0),
-                ..healthy()
-            },
-            Reading {
-                load_milli: None,
+                busy_deci_percent: None,
                 ..healthy()
             },
             Reading::default(),
@@ -668,7 +768,7 @@ mod tests {
     fn the_detail_names_every_refusal_on_one_line() {
         let reading = Reading {
             cores: Some(12),
-            load_milli: Some(21_600),
+            busy_deci_percent: Some(1_000),
             fseventsd: Fseventsd::Running {
                 cpu_deci_percent: 760,
                 resident_kib: 2_200_000,
@@ -678,7 +778,7 @@ mod tests {
         let detail = detail(&reading, &verdict);
         assert!(!detail.contains('\n'), "{detail:?}");
         assert!(detail.starts_with("refused: "), "{detail}");
-        assert!(detail.contains("runnable per core"), "{detail}");
+        assert!(detail.contains("of the machine already busy"), "{detail}");
         assert!(detail.contains("fseventsd at 76.0%"), "{detail}");
         assert!(detail.contains("fseventsd resident at"), "{detail}");
 
