@@ -10,3 +10,6 @@
 
 # In-repo worktree checkouts (worktrunk layout)
 /.worktrees/
+
+# The scheduled lanes write their certification suite logs here.
+certification-logs/

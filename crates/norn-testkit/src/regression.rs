@@ -556,7 +556,12 @@ impl TestIndex {
 
 /// Whether a listed test name is `prefix` followed by a module path ending in
 /// `function`.
-fn matches_function(listed: &str, prefix: &str, function: &str) -> bool {
+///
+/// Public because two readers resolve the same names: the reconciliation above,
+/// against what cargo listed, and the certification lane's log reader, against
+/// what the harness reported. One rule, so a name that resolves for one of them
+/// resolves for the other.
+pub fn matches_function(listed: &str, prefix: &str, function: &str) -> bool {
     let Some(rest) = listed.strip_prefix(prefix) else {
         return false;
     };

@@ -20,14 +20,18 @@
 //! is the same trade the regression registry's carrier audit makes: a binding
 //! checked against the built suite is worth a build, because a binding checked
 //! against the text of a file is a claim about text.
+#![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own log fixtures, and the lane files it reads.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use norn_testkit::certification::{
     inventory::{self, Lane, REQUIRED_CASES, Suite, UNREACHED_ARMS},
+    lane,
     ledger::{self, CaseOutcome, Classification, Outcome, Platform, Preflight, Record, RunResult},
     manifest,
 };
+use norn_testkit::process::Sandbox;
+use norn_testkit::regression::TestRef;
 
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -157,11 +161,13 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         ".github/workflows/ci.yml",
         ".github/workflows/soak.yml",
         ".github/scripts/lane-suite.sh",
+        ".github/scripts/certification-suite.sh",
         "Cargo.lock",
         "rust-toolchain.toml",
         // The rules: what the layer requires, how that is reconciled, and what
         // makes a record count.
         "crates/norn-testkit/src/certification/inventory.rs",
+        "crates/norn-testkit/src/certification/lane.rs",
         "crates/norn-testkit/src/certification/ledger.rs",
         "crates/norn-testkit/src/certification/manifest.rs",
         "crates/norn-testkit/src/regression.rs",
@@ -303,6 +309,210 @@ fn this_runs_record_is_assembled_and_written_where_a_sink_names() {
     match ledger::emit(&root).expect("emitting the record") {
         Some(path) => eprintln!("wrote the qualification record to {}", path.display()),
         None => eprintln!("no {} was named, so this run wrote no record", ledger::SINK),
+    }
+}
+
+/// **The collector.** A lane's suite logs become one outcome per required case,
+/// and a full set of logs leaves no case `not-run`.
+///
+/// The claim under test is the one a scheduled lane's record rests on: every
+/// required case is reachable from the logs the lane keeps, under the log names
+/// the lane's script writes. A carrier the mapping cannot resolve, a target
+/// whose log is named something the reader does not split, or an id the
+/// translation drops all show here as a case with no line — which is exactly
+/// what would classify a real run as a suite change.
+///
+/// The logs are synthesized rather than produced by running the suites: what is
+/// being checked is the translation, and running every certification target to
+/// check a mapping would make this case the lane it describes.
+#[test]
+fn a_lanes_suite_logs_become_an_outcome_for_every_required_case() {
+    let sandbox = Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), "lane-logs")
+        .expect("a sandbox for the lane's logs");
+    let logs = sandbox.work_dir();
+    let invocations = lane::required_invocations();
+    assert!(
+        !invocations.is_empty(),
+        "the inventory names no target to run, so a lane running it would certify nothing"
+    );
+
+    for invocation in &invocations {
+        let mut rendered = String::from("running the suite\n");
+        for case in REQUIRED_CASES {
+            let reference = TestRef::parse(case.carrier).expect("a carrier reference");
+            let target = reference.target().expect("a carrier's target");
+            if target.package != invocation.package || target.target != invocation.target {
+                continue;
+            }
+            // A unit test is listed under the module path its file compiles
+            // into, and an integration test under its bare name — the two
+            // spellings the harness writes, and both are what the collector
+            // resolves against the inventory's carriers.
+            rendered.push_str(&format!(
+                "test {}{} ... ok\n",
+                target.module_prefix, reference.function
+            ));
+        }
+        rendered.push_str("test result: ok. some passed\n");
+        std::fs::write(invocation.log(&logs), rendered).expect("writing a suite log");
+    }
+
+    let outcomes = lane::outcomes_from_logs(&logs).expect("reading the lane's logs");
+    let lines: Vec<&str> = outcomes.lines().collect();
+    for case in REQUIRED_CASES {
+        assert!(
+            lines.contains(&format!("{} passed", case.id).as_str()),
+            "the logs report no outcome for `{}`, so a lane that ran it would record it not-run",
+            case.id
+        );
+    }
+    assert_eq!(
+        lines.len(),
+        REQUIRED_CASES.len(),
+        "the outcomes carry a line the inventory does not require: {lines:?}"
+    );
+
+    // A run that names the logs writes them where the ledger reads them; a run
+    // outside a lane names none and this does nothing.
+    match lane::collect().expect("collecting the lane's outcomes") {
+        Some(path) => eprintln!("wrote the lane's case outcomes to {}", path.display()),
+        None => eprintln!("no {} was named, so this run collected none", lane::LOGS),
+    }
+}
+
+/// **Every lane that writes a record ran the cases, and labels what ran.**
+///
+/// Two claims about the lane files, and each is a way a record can be sound and
+/// still wrong about the run behind it. A lane that skipped a required target
+/// leaves those cases with no line, which reaches the record as a suite change
+/// rather than as the lane gap it is. And a lane's watcher-backend label is a
+/// field the workflow sets rather than something the process observes, so a
+/// label paired with a runner that installs a different backend would certify
+/// the backend-deciding case on a machine that never ran it.
+///
+/// The subject is every job that names a record sink, in any workflow: a job
+/// that writes a qualification record is a lane whatever it is called. Read off
+/// the text rather than off parsed YAML, and the two labels are held together
+/// by adjacency because they are set one line apart in the block that sets
+/// them.
+#[test]
+fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
+    let workflows = workspace_root().join(".github/workflows");
+    let mut listing: Vec<PathBuf> = std::fs::read_dir(&workflows)
+        .expect("reading the workflow directory")
+        .map(|entry| entry.expect("a workflow directory entry").path())
+        .collect();
+    listing.sort();
+
+    let mut lanes = Vec::new();
+    for path in &listing {
+        let workflow = std::fs::read_to_string(path).expect("reading a workflow");
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        lanes.extend(
+            jobs(&workflow)
+                .into_iter()
+                .filter(|(_, body)| body.contains(ledger::SINK))
+                .map(|(job, body)| (format!("{file}:{job}"), body)),
+        );
+    }
+    assert!(
+        !lanes.is_empty(),
+        "no job writes a qualification record, so nothing a campaign counts is produced"
+    );
+
+    for (lane, body) in &lanes {
+        for invocation in lane::required_invocations() {
+            let command = format!("certification-suite.sh {}", invocation.script_arguments());
+            assert!(
+                body.contains(&command),
+                "`{lane}` writes a qualification record and does not run `{command}`, so every \
+                 case that target carries reaches its record as not-run"
+            );
+        }
+        assert_backend_label_matches_the_runner(lane, body);
+    }
+}
+
+/// Each job of one workflow, as its name and the text under it.
+///
+/// A job's own key is the only thing at two spaces of indentation under `jobs:`;
+/// everything a job holds is deeper, and a comment at that depth belongs to the
+/// job below it rather than naming one.
+fn jobs(workflow: &str) -> Vec<(String, String)> {
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    let mut reached_the_jobs = false;
+    for line in workflow.lines() {
+        if line.trim_end() == "jobs:" {
+            reached_the_jobs = true;
+            continue;
+        }
+        if !reached_the_jobs {
+            continue;
+        }
+        let names_a_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.trim_start().starts_with('#')
+            && line.trim_end().ends_with(':');
+        if names_a_job {
+            jobs.push((line.trim().trim_end_matches(':').to_string(), String::new()));
+        } else if let Some((_, body)) = jobs.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    jobs
+}
+
+/// The backend a lane labels its records with is the one its runner installs.
+///
+/// The runner and the backend are set one line apart, which is what ties a
+/// label to a machine: a label alone says nothing about where it was produced.
+/// Which backend a platform installs is decided in `crates/norn-fs/src/watch.rs`
+/// — FSEvents on macOS, the recommended native watcher on Linux, which is
+/// inotify, and a polling substitute refused outright.
+fn assert_backend_label_matches_the_runner(lane: &str, body: &str) {
+    let runner = format!("{}: ", ledger::RUNNER);
+    let backend = format!("{}: ", ledger::WATCHER_BACKEND);
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let labelled: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with(&backend))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        !labelled.is_empty(),
+        "`{lane}` writes a record and names no watcher backend, and a record that names none \
+         covers neither answer the backend-deciding case requires"
+    );
+    for at in labelled {
+        let declared = lines[at]
+            .strip_prefix(&backend)
+            .expect("a line that starts with the backend key")
+            .trim();
+        let named_runner = lines[at.saturating_sub(1)]
+            .strip_prefix(&runner)
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{}` in `{lane}` is not preceded by the runner it describes: `{}`",
+                    lines[at],
+                    lines[at.saturating_sub(1)]
+                )
+            })
+            .trim();
+        let installed = match named_runner {
+            image if image.starts_with("ubuntu-") => "inotify",
+            image if image.starts_with("macos-") => "fsevents",
+            other => panic!(
+                "`{other}` is a runner this workspace states no watcher backend for; what a \
+                 platform installs is decided in crates/norn-fs/src/watch.rs"
+            ),
+        };
+        assert_eq!(
+            declared, installed,
+            "`{lane}` labels its records `{declared}` and hosts on `{named_runner}` install \
+             `{installed}`"
+        );
     }
 }
 
