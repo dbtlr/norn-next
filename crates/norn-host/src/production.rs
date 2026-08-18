@@ -3114,6 +3114,72 @@ mod tests {
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// **The maintainer lock is the last thing an attachment gives back**, and
+    /// this file states that twice: [`release`] hands the resources back in
+    /// order, and the field declarations decide the order a *dropped*
+    /// attachment hands them back in. Both orders are read here off this file's
+    /// own source and held equal.
+    ///
+    /// The order runs one way. A lock released while a watch over the vault
+    /// still stands is a window another process takes maintainership in while
+    /// this one is still reporting facts about the tree; the reverse costs
+    /// nothing. Nothing outside this process can see which of the two orderings
+    /// a drop ran in — both end with the lock gone and the watch closed — so
+    /// the declaration is where the claim is checkable, and it is checked here
+    /// rather than left to a reader's eye.
+    #[test]
+    fn the_maintainer_lock_outlives_the_watch_and_the_store_it_guards() {
+        const SOURCE: &str = include_str!("production.rs");
+
+        assert_ascending(
+            section(SOURCE, "pub struct ProductionAttachment {"),
+            &[
+                "    subscription:",
+                "    store: Store,",
+                "    maintainership:",
+            ],
+            "the fields of `ProductionAttachment`, which drop in declaration order,",
+        );
+        assert_ascending(
+            section(SOURCE, "fn release(attachment: ProductionAttachment) {"),
+            &[
+                "attachment.subscription",
+                "attachment.store",
+                "attachment.maintainership",
+            ],
+            "the body of `release`",
+        );
+    }
+
+    /// The source from `opening` up to the first line that closes it at column
+    /// zero.
+    fn section<'a>(source: &'a str, opening: &str) -> &'a str {
+        let start = source
+            .find(opening)
+            .unwrap_or_else(|| panic!("`{opening}` opens something in this file"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`{opening}` is closed at column zero"));
+        &rest[..end]
+    }
+
+    /// Fail where `section` does not name every one of `needles`, in the order
+    /// they are given.
+    #[track_caller]
+    fn assert_ascending(section: &str, needles: &[&str], subject: &str) {
+        let mut cursor = 0;
+        for needle in needles {
+            let found = section[cursor..]
+                .find(needle)
+                .map(|at| at + cursor)
+                .unwrap_or_else(|| {
+                    panic!("{subject} does not name `{needle}` after the one before it")
+                });
+            cursor = found + needle.len();
+        }
+    }
+
     /// **The bar on what a walk is told about shadows.** A fallback home is
     /// excluded by the fallback root, so the entry cuts every maintainership's
     /// home at one node, and the root is vault-relative so it cuts the same node
