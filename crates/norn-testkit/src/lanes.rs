@@ -17,10 +17,18 @@
 //! that adopts it, and a prefix sanctioned for a different file is rejected
 //! exactly as loudly as one that is not sanctioned at all.
 //!
-//! **What binds is the lane a case claims, not that a lane runs it.** Nothing
-//! here reads a workflow: a stem in the table with no step behind it is a lane
-//! that runs nothing, and that pairing is review-held. What this removes is the
-//! opposite hazard — a case a lane picks up under a bar nobody assigned it.
+//! **The lane a case claims and the step that runs it are held to each other.**
+//! [`assert_lane_steps_agree`] reads the workflows and pairs the two: a table
+//! stem no step names is a lane that runs nothing, and a step naming a target
+//! no table stem covers is a suite whose ignored cases a lane adopts outside
+//! the walk above. Both directions fail, so a suite joins a lane in one diff or
+//! not at all.
+//!
+//! Adoption **by kind** is what the pairing reads: `.github/scripts/lane-suite.sh`
+//! is the one spelling that runs a target's ignored cases wholesale, so a step
+//! invoking it is a step that adopts whatever `#[ignore]` that target holds. A
+//! step that names its cases by filter adopts nothing wholesale — a stray
+//! `#[ignore]` cannot fall into one — and is outside this pairing.
 //!
 //! A second sweep catches the shapes the primary matcher cannot parse:
 //! `#[cfg_attr(unix, ignore = "...")]` never starts a trimmed line with
@@ -41,7 +49,11 @@
 //! module asserts the rows against
 //! [`LANE_IGNORE_PREFIXES`](crate::regression::LANE_IGNORE_PREFIXES).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+/// The script a CI step adopts a whole target's ignored cases through.
+const LANE_SCRIPT: &str = "lane-suite.sh";
 
 /// Which lane prefixes each package's test files bind, by package name.
 ///
@@ -260,10 +272,102 @@ pub fn assert_lane_prefixes_agree(package: &str, lanes: &[(&str, &str)]) {
     );
 }
 
+/// Every wholesale adoption a workflow declares, as `(package, test target)`.
+///
+/// The invocation is read as tokens rather than matched as a line, so a
+/// wrapper in front of the script — the flake tripwire runs one — and harness
+/// arguments behind it change nothing: the two tokens after the script are its
+/// package and its target, which is the script's own argument order. A comment
+/// line is not an invocation however it mentions the script, and the module
+/// doc above mentions it in prose that would otherwise parse as one.
+fn lane_steps(workflow: &str) -> Vec<(String, String)> {
+    workflow
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut tokens = line.split_whitespace();
+            tokens.find(|token| {
+                *token == LANE_SCRIPT || token.ends_with(&format!("/{LANE_SCRIPT}"))
+            })?;
+            let package = tokens.next()?;
+            let target = tokens.next()?;
+            Some((package.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+/// The workflows directory above `manifest_dir`.
+///
+/// The walk is upward from the package's own manifest directory rather than
+/// from a path a caller composed, so a package nested any depth under the
+/// repository root finds the one workflow set that runs it.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: locates this repository's own workflow directory.
+fn workflows_directory(manifest_dir: &Path) -> PathBuf {
+    manifest_dir
+        .ancestors()
+        .map(|dir| dir.join(".github").join("workflows"))
+        .find(|dir| dir.is_dir())
+        .unwrap_or_else(|| {
+            panic!(
+                "no `.github/workflows` directory stands above {}, so the steps that adopt this \
+                 package's ignored cases cannot be read",
+                manifest_dir.display()
+            )
+        })
+}
+
+/// **The pairing.** The targets CI adopts `package`'s ignored cases from are
+/// exactly the file stems its lane table names.
+///
+/// Two hazards close together here. A step naming a target the table does not
+/// cover adopts that suite's `#[ignore]`s under a lane the walk above never
+/// checked them against. A stem the table names and no step runs is a lane
+/// that measures nothing — the ignored cases under it never execute, and the
+/// pass-count assertion inside the script never gets the chance to say so.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files.
+pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&str, &str)]) {
+    let directory = workflows_directory(manifest_dir);
+    let entries = std::fs::read_dir(&directory)
+        .unwrap_or_else(|e| panic!("reading {} for workflows: {e}", directory.display()));
+
+    let mut workflows = 0usize;
+    let mut adopted: BTreeSet<String> = BTreeSet::new();
+    for entry in entries {
+        let path = entry.expect("a directory entry").path();
+        if !path.extension().is_some_and(|e| e == "yml" || e == "yaml") {
+            continue;
+        }
+        workflows += 1;
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for (named, target) in lane_steps(&text) {
+            if named == package {
+                adopted.insert(target);
+            }
+        }
+    }
+    assert!(
+        workflows > 0,
+        "{} holds no workflow, so nothing was read",
+        directory.display()
+    );
+
+    let tabled: BTreeSet<String> = lanes.iter().map(|(stem, _)| (*stem).to_string()).collect();
+    assert_eq!(
+        adopted, tabled,
+        "`{package}`'s lane table and the CI steps that adopt its ignored cases have drifted. The \
+         steps run `{LANE_SCRIPT}` against these targets: {adopted:?}; the table names these file \
+         stems: {tabled:?}. A target the table does not name has its `#[ignore]`s adopted under a \
+         lane nothing checked them against, and a stem no step runs is a lane that measures \
+         nothing."
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, ignore_attributes, reason,
+        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, ignore_attributes, lane_steps, reason,
         unrecognized_ignore_attribute_lines,
     };
     use crate::regression::LANE_IGNORE_PREFIXES;
@@ -355,5 +459,43 @@ mod tests {
     fn a_doc_comment_quoting_ignore_is_never_flagged() {
         let source = "//! The `#[ignore]` reason names the lane, ignore or not.\n";
         assert!(unrecognized_ignore_attribute_lines(source).is_empty());
+    }
+
+    /// A step reads as its package and its target whatever stands around the
+    /// script: a wrapper in front of it, harness arguments behind it, and the
+    /// YAML that carries the line.
+    #[test]
+    fn a_wrapped_invocation_reads_as_its_package_and_target() {
+        let workflow = "        run: .github/scripts/flake-tripwire.sh \
+                        .github/scripts/lane-suite.sh norn-host memory --nocapture\n";
+        assert_eq!(
+            lane_steps(workflow),
+            vec![("norn-host".to_string(), "memory".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_bare_invocation_reads_as_its_package_and_target() {
+        let workflow = "        run: .github/scripts/lane-suite.sh norn-text frontmatter_cost\n";
+        assert_eq!(
+            lane_steps(workflow),
+            vec![("norn-text".to_string(), "frontmatter_cost".to_string())]
+        );
+    }
+
+    /// **A comment is prose, not a step.** Both workflows explain the script
+    /// above the jobs that run it, and a comment read as an invocation would
+    /// bind a lane to whatever two words followed the sentence.
+    #[test]
+    fn a_comment_mentioning_the_script_is_not_a_step() {
+        let workflow = "# `lane-suite.sh` runs a suite's ignored cases and fails a step that \
+                        measured nothing.\n";
+        assert!(lane_steps(workflow).is_empty());
+    }
+
+    #[test]
+    fn a_line_that_names_no_script_is_not_a_step() {
+        let workflow = "        run: cargo test --locked --workspace\n";
+        assert!(lane_steps(workflow).is_empty());
     }
 }

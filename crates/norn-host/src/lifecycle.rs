@@ -10731,7 +10731,8 @@ mod tests {
 
         // One poll that answers with facts and finds maintenance due — the
         // busy vault's poll, driven rather than waited for.
-        ops.off_thread_rescan_poll_batches.store(1, Ordering::SeqCst);
+        ops.off_thread_rescan_poll_batches
+            .store(1, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
         poll_watchers(&host.shared);
 
