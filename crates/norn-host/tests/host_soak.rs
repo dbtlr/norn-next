@@ -52,7 +52,10 @@
 //! until calibration runs of the scheduled lane produce readings to author one
 //! from, and the reading lands in the run's table meanwhile — a recorded
 //! measurement with no bar over it, which is the state a bar is authored out
-//! of.
+//! of. It is the peak of the *load*: the child samples itself from inside the
+//! churn loop, which it reaches once the attachment is ready, so the attach and
+//! the heal over the ≥5k tree are ahead of the first sample and outside the
+//! series.
 //!
 //! Running this needs `/proc` or its BSD equivalent, so the case is present on
 //! Linux and macOS and absent elsewhere. The scheduled lane runs it on Linux.
@@ -356,11 +359,15 @@ fn reported_recoveries(report: &str) -> u32 {
 /// them, so the height the load ever reached is a separate reading — and it is
 /// the maximum of samples already taken rather than a second instrument.
 ///
-/// The samples are of the current resident set on a one-second cadence, so this
-/// is the highest sampled value and not the kernel's high-water mark: an
-/// allocation that lands and is released between two ticks is not in it. What
-/// the reading answers for is what the load sustains, which is the quantity a
-/// ceiling at this profile is about.
+/// Two things it is not, and both are about what the series covers. The samples
+/// are of the current resident set on a one-second cadence, so this is the
+/// highest sampled value and not the kernel's high-water mark: an allocation
+/// that lands and is released between two ticks is not in it. And the series
+/// begins once the attachment reads ready — the churn loop takes the first
+/// sample — so the attach and the heal walk over the ≥5k tree are before it,
+/// and a cost paid there and released is outside every reading. What this
+/// answers for is the load's own sustained peak; the attach's peak is barred at
+/// the 2k profile by the per-PR lane and is unmeasured at this one.
 fn peak_resident_set(samples: &[Sample]) -> u64 {
     samples
         .iter()

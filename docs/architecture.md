@@ -41,18 +41,22 @@ The invariant is *measured*, not asserted:
 
 - Per-PR CI asserts peak memory at a realistic ~2k-document profile, alongside
   size-independence pairs expressed as counts rather than clocks.
-- The scheduled soak lane records two peak-memory readings each run, and each
-  has its own authored ceiling: what generating the ≥5k profile's tree costs,
-  and the highest resident set the host reaches under the hour-long load over
-  that tree. The generator's ceiling is authored; **the host's is not yet** —
-  no run before the one that records the reading measured it, and under [ADR
+- The scheduled soak lane records two peak-memory readings each run, and they
+  are separate gates with separate ceilings. One is what generating the ≥5k
+  profile's tree costs, and its ceiling is authored. The other is the host's
+  own: the highest resident set the load's process reaches while working that
+  tree, sampled from the moment the attachment is ready, so it is the peak the
+  hour sustains and not the attach's. **That one has no ceiling yet** — no run
+  before the one that records the reading measured it, and under [ADR
   0007](decisions/0007-authored-measurement-thresholds.md) a threshold is an
   authored constraint with stated grounds, so the reading is recorded and
   barred against nothing until calibration runs on the scheduled platform
-  produce grounds for a ceiling. A baseline moves only by a reviewed edit, and
-  the downward direction of that movement is review-held rather than
-  mechanized — nothing here fails a raised baseline, so this is a place this
-  section's own rule applies: a review-held invariant rots quietly.
+  produce grounds for a ceiling. **A third reading is missing rather than
+  deferred**: the attach and heal at ≥5k are ahead of the first sample, and the
+  per-PR attach ceiling covers that phase only at 2k. A baseline moves only by
+  a reviewed edit, and the downward direction of that movement is review-held
+  rather than mechanized — nothing here fails a raised baseline, so this is a
+  place this section's own rule applies: a review-held invariant rots quietly.
 - The mechanized form is a flat-slope requirement, and it runs in the same
   lane: a host attaches the ≥5k profile's vault and works it under a nightly
   mixed load while sampling its own resident set, and the run compares the
