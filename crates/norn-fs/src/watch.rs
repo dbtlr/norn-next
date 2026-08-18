@@ -9,6 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::Bound;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
@@ -207,8 +209,9 @@ impl Batch {
         if self.is_covered(&root) {
             return;
         }
-        self.vault_roots
-            .retain(|standing| *standing == root || !standing.starts_with(&root));
+        for standing in self.covers(&root) {
+            self.vault_roots.remove(&standing);
+        }
         match spelling {
             Spelling::Rendered => {
                 self.vault_roots.replace(root);
@@ -220,10 +223,33 @@ impl Batch {
     }
 
     /// Whether a root already standing covers `root` without being it.
+    ///
+    /// A covering root's own identity opens `root`'s, so every one of them
+    /// sorts ahead of `root` and the range below is the whole of where one can
+    /// be. Which of them it is does not matter: the set holds no covered root,
+    /// so at most one root in it covers any other.
     fn is_covered(&self, root: &NormalizedPath) -> bool {
         self.vault_roots
-            .iter()
-            .any(|standing| standing != root && root.starts_with(standing))
+            .range(..root)
+            .any(|standing| root.starts_with(standing))
+    }
+
+    /// The roots already standing that `root` covers.
+    ///
+    /// Everything `root` covers opens with `root`'s own comparison key, and
+    /// identities that open with one run of bytes are one unbroken stretch of
+    /// the order — so the walk stops at the first identity that does not,
+    /// rather than reading the rest of the set. Opening with the key is the
+    /// bound on the stretch and not the answer inside it: coverage is whole
+    /// components, which is what the filter asks.
+    fn covers(&self, root: &NormalizedPath) -> Vec<NormalizedPath> {
+        let key = root.comparison_key().as_bytes();
+        self.vault_roots
+            .range((Bound::Excluded(root), Bound::Unbounded))
+            .take_while(|standing| standing.comparison_key().as_bytes().starts_with(key))
+            .filter(|standing| standing.starts_with(root))
+            .cloned()
+            .collect()
     }
 
     /// Merge another settled batch without losing any uncertainty.
