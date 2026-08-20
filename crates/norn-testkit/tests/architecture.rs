@@ -43,6 +43,32 @@ fn the_workspace_dependency_graph_matches_the_allowlist() {
     assert_eq!(reading().violations(), Vec::<String>::new());
 }
 
+/// The development process command belongs to the package cargo never builds
+/// for `cargo build -p norn`. A target under the product package would become
+/// a second release binary even with no dependency edge to it.
+#[test]
+fn the_development_process_command_is_not_a_product_binary() {
+    let graph = reading()
+        .under(DEFAULT_SELECTION)
+        .expect("the matrix carries the default selection");
+    assert!(
+        graph
+            .binary_targets
+            .contains(&("norn-testkit".to_string(), "norn-process".to_string())),
+        "norn-process is not owned by the development testkit package"
+    );
+    let product_targets: BTreeSet<&str> = graph
+        .binary_targets
+        .iter()
+        .filter_map(|(package, target)| (package == "norn").then_some(target.as_str()))
+        .collect();
+    assert_eq!(
+        product_targets,
+        BTreeSet::from(["norn"]),
+        "the shipped product package has a second binary target"
+    );
+}
+
 /// Heavy-dependency isolation, read off the resolve graph. A crate's own
 /// manifest test can only say what that crate asks for; a feature is the
 /// dependent's to turn on, and what the workspace actually links under a

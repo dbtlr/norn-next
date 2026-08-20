@@ -161,6 +161,8 @@ pub struct WorkspaceGraph {
     /// The directory each member's manifest sits in. Compared against the
     /// directories under `crates/` to catch an excluded member.
     pub member_directories: BTreeSet<PathBuf>,
+    /// Binary targets, as `(owning package, target name)`.
+    pub binary_targets: BTreeSet<(String, String)>,
     pub normal: BTreeSet<(String, String)>,
     pub build: BTreeSet<(String, String)>,
     /// Normal or build edges from a member to a local package the workspace
@@ -259,6 +261,23 @@ impl WorkspaceGraph {
                     graph
                         .declared_features
                         .insert((name.clone(), feature.clone()));
+                }
+            }
+            if let Some(targets) = package.get("targets").and_then(Value::as_array) {
+                for target in targets {
+                    let is_binary = target
+                        .get("kind")
+                        .and_then(Value::as_array)
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"));
+                    if is_binary {
+                        let target_name = target
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .ok_or("a binary target carries no name")?;
+                        graph
+                            .binary_targets
+                            .insert((name.clone(), target_name.to_string()));
+                    }
                 }
             }
         }

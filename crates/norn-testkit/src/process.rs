@@ -49,6 +49,16 @@
 //! **This module is unix-only.** The wait-and-account call is `wait4` and the
 //! status decoding is the unix one; there is no Windows path and none is
 //! pretended.
+//!
+//! # Registered development workloads
+//!
+//! The non-shipping `norn-process supervise` command owns commands started by
+//! development scripts and agents. Its resident launcher leads the workload's
+//! process group, waits behind a private release pipe, and stays alive after the
+//! direct workload exits to pin the registered identity. The supervisor writes
+//! and syncs one registry record before it releases the workload. SIGINT and
+//! SIGTERM first close the owned group through the same mechanism as [`Run`],
+//! then terminate the supervisor with the original signal.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -61,6 +71,12 @@ use std::time::Duration;
 use crate::scratch::Scratch;
 
 mod group;
+mod identity;
+mod registry;
+mod signals;
+mod supervisor;
+
+pub use supervisor::{LaunchRequest, SuperviseRequest, launch, supervise};
 
 /// The environment variables a run is given, beyond `PATH`. Each points into
 /// the sandbox, so a run's machine-local state is its own.

@@ -40,6 +40,18 @@ pub(super) struct OwnedProcessGroup {
     faults: Faults,
 }
 
+pub(super) enum WaitResult<T> {
+    Finished {
+        result: io::Result<ProcessEnd>,
+        group_empty: bool,
+    },
+    Interrupted {
+        event: T,
+        cleanup: io::Result<ProcessEnd>,
+        group_empty: bool,
+    },
+}
+
 enum OwnershipState {
     Pinned(Child),
     Reaped,
@@ -81,8 +93,24 @@ impl OwnedProcessGroup {
         })
     }
 
-    pub(super) fn wait(mut self, deadline: Duration) -> io::Result<ProcessEnd> {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.wait_inner(deadline))) {
+    pub(super) fn wait(self, deadline: Duration) -> io::Result<ProcessEnd> {
+        match self.wait_interruptible(deadline, || Ok(None::<()>)) {
+            WaitResult::Finished { result, .. } => result,
+            WaitResult::Interrupted { .. } => unreachable!("the inert interrupt source fired"),
+        }
+    }
+
+    pub(super) fn wait_interruptible<F, T>(
+        mut self,
+        deadline: Duration,
+        interrupt: F,
+    ) -> WaitResult<T>
+    where
+        F: FnMut() -> io::Result<Option<T>>,
+    {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.wait_inner(deadline, interrupt)
+        })) {
             Ok(result) => {
                 self.cleanup_armed = false;
                 result
@@ -101,10 +129,28 @@ impl OwnedProcessGroup {
         }
     }
 
-    fn wait_inner(&mut self, deadline: Duration) -> io::Result<ProcessEnd> {
+    fn wait_inner<F, T>(&mut self, deadline: Duration, mut interrupt: F) -> WaitResult<T>
+    where
+        F: FnMut() -> io::Result<Option<T>>,
+    {
         let started = Instant::now();
         let mut poll_wait = poll::FIRST_GAP;
         let timed_out = loop {
+            match interrupt() {
+                Ok(Some(event)) => {
+                    let cleanup = self.close(false);
+                    let group_empty = self.group_empty();
+                    return WaitResult::Interrupted {
+                        event,
+                        cleanup,
+                        group_empty,
+                    };
+                }
+                Ok(None) => {}
+                Err(interrupt_error) => {
+                    return self.finished_after_error(interrupt_error);
+                }
+            }
             match self.observe_leader() {
                 Ok(true) => break false,
                 Ok(false) => {}
@@ -116,10 +162,7 @@ impl OwnedProcessGroup {
                             self.pgid
                         ),
                     );
-                    return match self.close(false) {
-                        Ok(ended) => Err(with_leader_status(wait_error, ended.status)),
-                        Err(cleanup_error) => Err(combined(wait_error, cleanup_error)),
-                    };
+                    return self.finished_after_error(wait_error);
                 }
             }
 
@@ -130,7 +173,39 @@ impl OwnedProcessGroup {
             poll_wait = poll::sleep_gap(poll_wait, left);
         };
 
-        self.close(timed_out)
+        let result = self.close(timed_out);
+        let group_empty = self.group_empty();
+        WaitResult::Finished {
+            result,
+            group_empty,
+        }
+    }
+
+    pub(super) fn close_now(mut self) -> io::Result<ProcessEnd> {
+        let result = self.close(false);
+        self.cleanup_armed = false;
+        result
+    }
+
+    pub(super) fn pgid(&self) -> libc::pid_t {
+        self.pgid
+    }
+
+    fn group_empty(&self) -> bool {
+        matches!(self.state, OwnershipState::EmptyProven)
+    }
+
+    fn finished_after_error<T>(&mut self, primary: io::Error) -> WaitResult<T> {
+        let cleanup = self.close(false);
+        let group_empty = self.group_empty();
+        let result = match cleanup {
+            Ok(ended) => Err(with_leader_status(primary, ended.status)),
+            Err(cleanup_error) => Err(combined(primary, cleanup_error)),
+        };
+        WaitResult::Finished {
+            result,
+            group_empty,
+        }
     }
 
     fn close(&mut self, timed_out: bool) -> io::Result<ProcessEnd> {
@@ -601,11 +676,21 @@ mod tests {
         group.fail_next_leader_observation(libc::EIO);
         group.fail_next_group_signal(libc::EIO);
 
-        let error = group
-            .wait(Duration::from_secs(5))
-            .expect_err("the combined lifecycle error");
+        let (result, group_empty) =
+            match group.wait_interruptible(Duration::from_secs(5), || Ok(None::<()>)) {
+                WaitResult::Finished {
+                    result,
+                    group_empty,
+                } => (result, group_empty),
+                WaitResult::Interrupted { .. } => unreachable!("the inert interrupt source fired"),
+            };
+        let error = result.expect_err("the combined lifecycle error");
         let message = error.to_string();
 
+        assert!(
+            group_empty,
+            "the injected delivery error hid containment proof"
+        );
         assert!(message.contains("waitid"), "{message}");
         assert!(message.contains("SIGKILL"), "{message}");
         assert!(message.contains("Input/output error"), "{message}");
