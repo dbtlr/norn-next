@@ -157,7 +157,7 @@ pub fn supervise(request: SuperviseRequest) -> io::Result<ExitCode> {
             cleanup,
             group_empty,
         } => {
-            if group_empty && let Err(error) = published.remove() {
+            if let Some(Err(error)) = group_empty.then(|| published.remove()) {
                 eprintln!(
                     "norn-process: cleaned the process group but could not remove its registry record: {error}"
                 );
@@ -179,6 +179,7 @@ pub fn supervise(request: SuperviseRequest) -> io::Result<ExitCode> {
 #[doc(hidden)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The launcher adopts its private release-pipe handle.
 pub fn launch(request: LaunchRequest) -> io::Result<ExitCode> {
+    validate_launcher_descriptors(request.release_fd, request.status_fd)?;
     let mut release = unsafe { std::fs::File::from_raw_fd(request.release_fd) };
     let status = unsafe { std::fs::File::from_raw_fd(request.status_fd) };
     let mut byte = [0_u8; 1];
@@ -200,6 +201,33 @@ pub fn launch(request: LaunchRequest) -> io::Result<ExitCode> {
     loop {
         unsafe { libc::pause() };
     }
+}
+
+fn validate_launcher_descriptors(release_fd: RawFd, status_fd: RawFd) -> io::Result<()> {
+    if release_fd < 3 || status_fd < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "launcher file descriptors must not be standard or negative descriptors",
+        ));
+    }
+    if release_fd == status_fd {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "launcher release and status descriptors must be different",
+        ));
+    }
+    for (name, fd) in [("release", release_fd), ("status", status_fd)] {
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "launcher {name} descriptor {fd} is not open: {}",
+                    io::Error::last_os_error()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn finish(ended: ProcessEnd) -> io::Result<ExitCode> {

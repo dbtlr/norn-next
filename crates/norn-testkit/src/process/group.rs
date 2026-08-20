@@ -148,16 +148,7 @@ impl OwnedProcessGroup {
                 }
                 Ok(None) => {}
                 Err(interrupt_error) => {
-                    let cleanup = self.close(false);
-                    let group_empty = self.group_empty();
-                    let result = match cleanup {
-                        Ok(ended) => Err(with_leader_status(interrupt_error, ended.status)),
-                        Err(cleanup_error) => Err(combined(interrupt_error, cleanup_error)),
-                    };
-                    return WaitResult::Finished {
-                        result,
-                        group_empty,
-                    };
+                    return self.finished_after_error(interrupt_error);
                 }
             }
             match self.observe_leader() {
@@ -171,16 +162,7 @@ impl OwnedProcessGroup {
                             self.pgid
                         ),
                     );
-                    let cleanup = self.close(false);
-                    let group_empty = self.group_empty();
-                    let result = match cleanup {
-                        Ok(ended) => Err(with_leader_status(wait_error, ended.status)),
-                        Err(cleanup_error) => Err(combined(wait_error, cleanup_error)),
-                    };
-                    return WaitResult::Finished {
-                        result,
-                        group_empty,
-                    };
+                    return self.finished_after_error(wait_error);
                 }
             }
 
@@ -211,6 +193,19 @@ impl OwnedProcessGroup {
 
     fn group_empty(&self) -> bool {
         matches!(self.state, OwnershipState::EmptyProven)
+    }
+
+    fn finished_after_error<T>(&mut self, primary: io::Error) -> WaitResult<T> {
+        let cleanup = self.close(false);
+        let group_empty = self.group_empty();
+        let result = match cleanup {
+            Ok(ended) => Err(with_leader_status(primary, ended.status)),
+            Err(cleanup_error) => Err(combined(primary, cleanup_error)),
+        };
+        WaitResult::Finished {
+            result,
+            group_empty,
+        }
     }
 
     fn close(&mut self, timed_out: bool) -> io::Result<ProcessEnd> {

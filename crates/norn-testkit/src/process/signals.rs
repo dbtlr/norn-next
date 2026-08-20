@@ -4,7 +4,6 @@ use std::io;
 
 pub(super) struct TerminationSignals {
     previous: libc::sigset_t,
-    set: libc::sigset_t,
 }
 
 impl TerminationSignals {
@@ -16,7 +15,7 @@ impl TerminationSignals {
         if masked != 0 {
             return Err(io::Error::from_raw_os_error(masked));
         }
-        Ok(TerminationSignals { previous, set })
+        Ok(TerminationSignals { previous })
     }
 
     pub(super) fn pending(&self) -> io::Result<Option<libc::c_int>> {
@@ -27,8 +26,9 @@ impl TerminationSignals {
         for candidate in [libc::SIGINT, libc::SIGTERM] {
             match unsafe { libc::sigismember(&raw const pending, candidate) } {
                 1 => {
+                    let selected = signal_set(candidate)?;
                     let mut signal = 0;
-                    let waited = unsafe { libc::sigwait(&raw const self.set, &raw mut signal) };
+                    let waited = unsafe { libc::sigwait(&raw const selected, &raw mut signal) };
                     return if waited == 0 {
                         Ok(Some(signal))
                     } else {

@@ -356,6 +356,34 @@ fn the_cli_refuses_an_empty_purpose_and_an_empty_workload() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // The integration seam invokes the hidden boundary with descriptors it must reject.
+fn the_launcher_refuses_invalid_or_aliased_file_descriptors() {
+    for arguments in [
+        [
+            "__launch",
+            "--release-fd=-1",
+            "--status-fd=4",
+            "--",
+            "/bin/true",
+        ],
+        [
+            "__launch",
+            "--release-fd=3",
+            "--status-fd=3",
+            "--",
+            "/bin/true",
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+            .args(arguments)
+            .output()
+            .expect("running the hidden launcher boundary");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("launcher"));
+    }
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // The integration seam observes descendants after both workload outcomes.
 fn successful_and_failed_workloads_leave_no_group_member() {
     for code in [0, 7] {
