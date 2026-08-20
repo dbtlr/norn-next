@@ -1,8 +1,8 @@
 //! The cadence a bounded wait polls at.
 //!
-//! Both bounded waits in this crate ask, wait, and ask again: [`crate::process`]
-//! asks whether the child has ended, and [`crate::wait`] asks whether the
-//! condition holds. The subjects differ; the cadence is one policy, and it
+//! Bounded waits in this crate ask, wait, and ask again: [`crate::process`]
+//! asks about process lifecycle and [`crate::wait`] asks whether a condition
+//! holds. The subjects differ; the cadence is one policy, and it
 //! lives here once. The first question is asked before any wait, so a subject
 //! that is already there is answered immediately. The gap then doubles to a
 //! ceiling, so a wait that lasts costs a bounded number of questions rather
