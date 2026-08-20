@@ -545,6 +545,16 @@ mod tests {
         OwnedProcessGroup::spawn(&mut command).expect("a sleeping process group")
     }
 
+    fn completed_group() -> OwnedProcessGroup {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        OwnedProcessGroup::spawn(&mut command).expect("a completed process group")
+    }
+
     fn wait_for_file(path: &Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !marker_exists(path) {
@@ -675,13 +685,7 @@ mod tests {
 
     #[test]
     fn pinned_eperm_stops_destructive_signals_and_defers_to_the_final_proof() {
-        let mut command = Command::new("/bin/sh");
-        command
-            .args(["-c", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut group = OwnedProcessGroup::spawn(&mut command).expect("a completed process group");
+        let mut group = completed_group();
         let attempts = group.count_group_signals_for_test();
         group.fail_next_group_signal(libc::EPERM);
 
@@ -695,12 +699,12 @@ mod tests {
 
     #[test]
     fn group_verification_is_bounded_and_reports_the_known_leader_status() {
-        let mut group = sleeping_group();
+        let mut group = completed_group();
         group.set_cleanup_deadline_for_test(Duration::from_millis(20));
         group.pretend_group_remains_present();
 
         let error = group
-            .wait(Duration::from_millis(1))
+            .wait(Duration::from_secs(5))
             .expect_err("the bounded containment error");
         let message = error.to_string();
 
