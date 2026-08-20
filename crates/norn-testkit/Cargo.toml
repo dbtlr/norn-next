@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "norn-process"
+path = "src/bin/norn-process.rs"
+
 # `norn-fixtures` is the generator whose profiles name the two scales a
 # size-independence pair is run at. `libc` is the child-process accounting the
 # process harness reads its peak resident set from.
@@ -21,6 +25,7 @@ publish.workspace = true
 # operational-validity leg reads a stored finding's scope to say which side of a
 # document row it may stand on, and that scope is defined there.
 [dependencies]
+clap = { workspace = true }
 libc = { workspace = true }
 norn-fixtures = { path = "../norn-fixtures" }
 norn-store = { path = "../norn-store" }
