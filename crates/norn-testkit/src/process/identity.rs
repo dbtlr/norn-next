@@ -24,6 +24,26 @@ pub(super) enum StartIdentitySource {
     DarwinMicroseconds,
 }
 
+pub(super) enum Observation {
+    Absent,
+    Matching,
+    Mismatched,
+}
+
+pub(super) fn observe(expected: &ProcessIdentity) -> io::Result<Observation> {
+    match process(expected.pid) {
+        Ok(observed) if observed == *expected => Ok(Observation::Matching),
+        Ok(_) => Ok(Observation::Mismatched),
+        Err(error)
+            if error.raw_os_error() == Some(libc::ESRCH)
+                || error.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(Observation::Absent)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn process(pid: libc::pid_t) -> io::Result<ProcessIdentity> {
     Ok(ProcessIdentity {
         pid,
@@ -173,8 +193,29 @@ fn darwin_boot_id() -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::linux_start_ticks;
+    use super::{Observation, ProcessIdentity, StartIdentity, StartIdentitySource, observe};
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_absent_process_is_observed_as_absent() {
+        let expected = ProcessIdentity {
+            pid: libc::pid_t::MAX,
+            start: StartIdentity {
+                source: if cfg!(target_os = "linux") {
+                    StartIdentitySource::LinuxClockTicks
+                } else {
+                    StartIdentitySource::DarwinMicroseconds
+                },
+                value: 1,
+                boot_id: "not-a-live-process".to_string(),
+            },
+        };
+        assert!(matches!(observe(&expected).unwrap(), Observation::Absent));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_stat_parser_uses_the_start_field_after_a_name_with_a_closing_parenthesis() {
         let stat = "41 (worker) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987 20";

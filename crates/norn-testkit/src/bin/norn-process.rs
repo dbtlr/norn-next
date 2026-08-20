@@ -11,7 +11,9 @@ use std::time::Duration;
 #[cfg(unix)]
 use clap::{Parser, Subcommand};
 #[cfg(unix)]
-use norn_testkit::process::{LaunchRequest, SuperviseRequest, launch, supervise};
+use norn_testkit::process::{
+    LaunchRequest, SuperviseRequest, launch, reap, report, scan, supervise,
+};
 
 #[cfg(unix)]
 #[derive(Parser)]
@@ -24,6 +26,12 @@ struct Cli {
 #[cfg(unix)]
 #[derive(Subcommand)]
 enum Command {
+    /// Report stale registered process groups without changing them.
+    Scan,
+    /// Remove identity-validated stale registered process groups.
+    Reap,
+    /// Report durable process-group recovery evidence.
+    Report,
     /// Run a development workload in a registered process group.
     Supervise {
         /// Short reason for this workload.
@@ -59,6 +67,9 @@ fn non_empty_purpose(value: &str) -> Result<String, String> {
 #[cfg(unix)]
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
+        Command::Scan => return write_recovery(scan()),
+        Command::Reap => return write_recovery(reap()),
+        Command::Report => return write_json(report()),
         Command::Supervise {
             purpose,
             deadline_seconds,
@@ -86,6 +97,37 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(unix)]
+#[allow(clippy::disallowed_macros, clippy::disallowed_methods)] // This non-shipping development binary owns its JSON stdout boundary.
+fn write_json<T: serde::Serialize>(result: std::io::Result<T>) -> ExitCode {
+    match result {
+        Ok(value) => match serde_json::to_writer(std::io::stdout(), &value) {
+            Ok(()) => {
+                println!();
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("norn-process: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => {
+            eprintln!("norn-process: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(unix)]
+fn write_recovery(result: std::io::Result<norn_testkit::process::RecoveryReport>) -> ExitCode {
+    let failed = match result.as_ref() {
+        Ok(report) => report.errors != 0,
+        Err(_) => true,
+    };
+    let written = write_json(result);
+    if failed { ExitCode::FAILURE } else { written }
 }
 
 #[cfg(not(unix))]
