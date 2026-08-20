@@ -29,24 +29,19 @@
 //!   copies it to a private path first. A binary that a concurrent build may
 //!   rewrite is not a stable thing to exec, and the failure is a spurious one
 //!   in whichever suite happens to be running.
-//! - **The child's peak resident set is measured**, by waiting on it through
-//!   `wait4` and reading the kernel's own accounting rather than sampling.
-//!   The measurement covers the child this harness spawned and every
-//!   descendant *that child waited on*, which is what `wait4` accounts for. A
-//!   grandchild the child forked and left running is invisible to it, so a
-//!   subject that measures itself by detaching a worker measures nothing.
-//! - **The measured wait is bounded.** Every run carries a deadline; the wait
-//!   polls for the child's end, and at the deadline it kills the child, reaps
-//!   it, and reports [`RunStatus::TimedOut`] naming the bound it passed. A
-//!   subject that hangs costs its run's deadline rather than the runner's own
-//!   timeout. What the deadline bounds is the polling wait: the reap that
-//!   follows a kill blocks, because `SIGKILL` is not the child's to catch and
-//!   the kernel is what ends it, and a kill the kernel refused leaves the reap
-//!   after it with nothing to bound it. The kill goes to the child this
-//!   harness spawned, so a grandchild that child left running outlives the run
-//!   and finishes under pid 1 — the accepted cost of signalling one process
-//!   rather than a group, and the same reason that grandchild is absent from
-//!   the accounting.
+//! - **The direct child's peak resident set is measured**, by reaping it through
+//!   `wait4` and reading the kernel's accounting rather than sampling. This
+//!   measurement includes descendants that the child waited on. It does not
+//!   include a grandchild that the child left running.
+//! - **Every run owns one process group.** The direct child leads it. The
+//!   harness sends `SIGKILL` to the complete group on every end, reaps the
+//!   leader, and returns an [`Outcome`] only after the group no longer exists.
+//!   A workload that calls `setsid` or changes its process group has left this
+//!   contract.
+//! - **The measured wait and cleanup are bounded.** Every run carries a
+//!   workload deadline. Cleanup has a separate private five-second deadline.
+//!   A run that reaches its workload deadline reports [`RunStatus::TimedOut`]
+//!   only after the complete process group is gone.
 //!
 //! The sandbox is removed when it drops, so a suite leaves nothing behind;
 //! what a run said is in its [`Outcome`], not in a file to go looking for.
@@ -61,10 +56,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::poll;
 use crate::scratch::Scratch;
+
+mod group;
 
 /// The environment variables a run is given, beyond `PATH`. Each points into
 /// the sandbox, so a run's machine-local state is its own.
@@ -190,7 +186,7 @@ pub const DEFAULT_CAPTURE_LIMIT: u64 = 8 * 1024 * 1024;
 ///
 /// A child that never finishes is a subject under test, not a reason for the
 /// suite measuring it to wait on the runner's own timeout to decide. At this
-/// bound the harness kills the child it spawned and reports
+/// bound the harness removes the complete owned process group and reports
 /// [`RunStatus::TimedOut`]. A run with more work than this to do names its own
 /// bound with [`Run::deadline`]. Every run has one: this is what a run that
 /// says nothing gets, and there is no constructor that leaves it unset.
@@ -266,17 +262,30 @@ impl<'a> Run<'a> {
         // Output goes to files rather than pipes: a pipe nobody is reading
         // fills and stops the child, and the harness has to wait on the child
         // to measure it.
-        let child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
             .current_dir(self.sandbox.work_dir())
             .env_clear()
             .envs(&self.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::from(std::fs::File::create(&out_path)?))
-            .stderr(Stdio::from(std::fs::File::create(&err_path)?))
-            .spawn()?;
+            .stderr(Stdio::from(std::fs::File::create(&err_path)?));
 
-        let (status, peak_rss_bytes) = wait_for(child, self.deadline)?;
+        let ended = group::OwnedProcessGroup::spawn(&mut command)?.wait(self.deadline)?;
+        let status = decoded(ended.pid, ended.status)?;
+        let status = match status {
+            RunStatus::Signaled(libc::SIGKILL) if ended.timed_out => RunStatus::TimedOut {
+                after: self.deadline,
+            },
+            status => status,
+        };
+        let max_rss = ended.usage.ru_maxrss.max(0) as u64;
+        let peak_rss_bytes = if MAX_RSS_IN_BYTES {
+            max_rss
+        } else {
+            max_rss * 1024
+        };
         let (stdout, stdout_truncated) = capture(&out_path, self.capture_limit)?;
         let (stderr, stderr_truncated) = capture(&err_path, self.capture_limit)?;
         Ok(Outcome {
@@ -295,8 +304,8 @@ impl<'a> Run<'a> {
 pub enum RunStatus {
     Exited(i32),
     Signaled(i32),
-    /// The harness ended the run: the child was still going at the deadline
-    /// it names, and was killed and reaped there.
+    /// The harness ended the run: the leader was still going at the deadline
+    /// it names, and the complete owned process group was removed there.
     ///
     /// This is reported for an end the harness caused and for no other. A
     /// child that exited or took a signal of its own reports that, however
@@ -312,10 +321,9 @@ pub enum RunStatus {
 /// What a run did, and what it cost.
 pub struct Outcome {
     pub status: RunStatus,
-    /// The child's peak resident set, in bytes, as the kernel accounted it:
-    /// the spawned process and every descendant it waited on, and nothing it
-    /// left running. For a run that reports [`RunStatus::TimedOut`] this is
-    /// the peak as of the kill, which is as far as the run got.
+    /// The direct child's peak resident set, in bytes, as the kernel accounted
+    /// it: the spawned process and every descendant it waited on. For a run
+    /// that reports [`RunStatus::TimedOut`], this is the peak at cleanup.
     pub peak_rss_bytes: u64,
     pub stdout: Vec<u8>,
     /// Whether the child wrote more to stdout than the capture limit, so what
@@ -345,129 +353,6 @@ impl Outcome {
     }
 }
 
-/// What one `wait4` reported about a child that has ended: the raw status and
-/// the accounting, read in the one call.
-struct Ended {
-    status: libc::c_int,
-    usage: libc::rusage,
-}
-
-/// Wait on `child` through `wait4` until it ends or `deadline` is up, so its
-/// exit and its resource accounting are read in one call.
-///
-/// The wait polls rather than blocks, because a blocking wait on a child that
-/// never ends is the whole thing the deadline exists to stop. At the deadline
-/// the child this harness spawned takes a `SIGKILL` and is reaped through the
-/// same call; that reap blocks, because `SIGKILL` is not the child's to catch
-/// and the kernel is what ends the wait.
-///
-/// **The deadline observes; it does not preempt.** A status the child produced
-/// is the status reported, including one produced between the last poll and
-/// the kill: [`RunStatus::TimedOut`] is reported for the harness's own
-/// `SIGKILL` and for nothing else.
-///
-/// **On the success path the child is reaped here and nowhere else**: nothing
-/// calls `wait` on it afterwards, because the process is already gone and its
-/// identifier is free for the kernel to hand to somebody else. Where `wait4`
-/// did not reap — it failed, or the kill before it failed — the child is
-/// killed and waited on through [`reaping`] before the error goes back, so a
-/// run that failed to be measured leaves no process behind. The one failure
-/// that comes after a reap is a status this code has no reading for, and it
-/// takes that path for the same reason: the child is already gone.
-fn wait_for(child: std::process::Child, deadline: Duration) -> io::Result<(RunStatus, u64)> {
-    let pid = child.id() as libc::pid_t;
-    let started = Instant::now();
-    let mut poll_wait = poll::FIRST_GAP;
-    let ended = loop {
-        match waited(pid, libc::WNOHANG) {
-            Ok(Some(ended)) => break Some(ended),
-            Ok(None) => {}
-            Err(error) => return Err(reaping(child, error)),
-        }
-        // The poll above is the question asked at the boundary too, so a child
-        // that ended inside its deadline is reported however late this loop
-        // got around to asking.
-        let left = deadline.saturating_sub(started.elapsed());
-        if left.is_zero() {
-            break None;
-        }
-        poll_wait = poll::sleep_gap(poll_wait, left);
-    };
-
-    let (ended, timed_out) = match ended {
-        Some(ended) => (ended, false),
-        None => {
-            // SAFETY: `pid` is this process's own child and nothing has reaped
-            // it, so the number is still that child's and not somebody else's.
-            if unsafe { libc::kill(pid, libc::SIGKILL) } == -1 {
-                return Err(reaping(child, io::Error::last_os_error()));
-            }
-            match waited(pid, 0) {
-                Ok(Some(ended)) => (ended, true),
-                // A zero is the answer `WNOHANG` asks for, and this wait does
-                // not ask for it, so it is a return this code has no reading
-                // for like any other.
-                Ok(None) => return Err(reaping(child, unexpected(pid, 0))),
-                Err(error) => return Err(reaping(child, error)),
-            }
-        }
-    };
-
-    let status = decoded(pid, ended.status)?;
-    let status = match status {
-        RunStatus::Signaled(libc::SIGKILL) if timed_out => RunStatus::TimedOut { after: deadline },
-        status => status,
-    };
-    let max_rss = ended.usage.ru_maxrss.max(0) as u64;
-    Ok((
-        status,
-        if MAX_RSS_IN_BYTES {
-            max_rss
-        } else {
-            max_rss * 1024
-        },
-    ))
-}
-
-/// One `wait4` on `pid`, retried through interruption.
-///
-/// `None` is a zero return: `wait4` reporting the child still running, which
-/// is the answer `WNOHANG` asks for and the only one that does not reap. What
-/// it means where nothing asked for it is the caller's to say.
-fn waited(pid: libc::pid_t, flags: libc::c_int) -> io::Result<Option<Ended>> {
-    loop {
-        let mut status: libc::c_int = 0;
-        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-        // SAFETY: `pid` is this process's own child, and both out-parameters
-        // are live for the call.
-        let waited = unsafe { libc::wait4(pid, &mut status, flags, &mut usage) };
-        if waited == pid {
-            return Ok(Some(Ended { status, usage }));
-        }
-        if waited == 0 {
-            return Ok(None);
-        }
-        // `errno` says nothing except where the call reported failure, so it
-        // is only read at -1. Asked about one pid, `wait4` returns that pid,
-        // zero, or -1; anything else is a contract this code does not
-        // understand and will not guess at.
-        if waited != -1 {
-            return Err(unexpected(pid, waited));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
-/// The error for a `wait4` return this code has no reading for.
-fn unexpected(pid: libc::pid_t, returned: libc::pid_t) -> io::Error {
-    io::Error::other(format!(
-        "`wait4` on pid {pid} returned {returned}, which is neither the child nor a failure"
-    ))
-}
-
 /// What a raw wait status says the child did.
 ///
 /// Exit and signal are decided by asking, not by elimination: a status that is
@@ -482,20 +367,6 @@ fn decoded(pid: libc::pid_t, status: libc::c_int) -> io::Result<RunStatus> {
             "pid {pid} reported wait status {status:#x}, which is neither an exit nor a signal"
         )))
     }
-}
-
-/// Kill and reap a child that `wait4` did not, and hand back the error that
-/// says why.
-///
-/// **This is called only where the reap did not happen**, and it holds only
-/// there: the wait it makes is `std::process::Child`'s own, which asks about a
-/// pid the kernel is free to reuse the moment something else reaps it. Reached
-/// after a reap, it would be a question about whatever process holds that
-/// number now.
-fn reaping(mut child: std::process::Child, error: io::Error) -> io::Error {
-    let _ = child.kill();
-    let _ = child.wait();
-    error
 }
 
 /// Read at most `limit` bytes of `path`, and say whether there were more.
@@ -543,6 +414,7 @@ pub fn open_fd_count() -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::time::Instant;
 
     use super::*;
 
@@ -555,6 +427,36 @@ mod tests {
             .args(["-c", script])
             .wait()
             .expect("running a shell")
+    }
+
+    struct Descendant(libc::pid_t);
+
+    impl Descendant {
+        fn from(outcome: &Outcome) -> Self {
+            Descendant(
+                outcome
+                    .stdout_text()
+                    .trim()
+                    .parse()
+                    .expect("the background process pid"),
+            )
+        }
+
+        fn is_alive(&self) -> bool {
+            if unsafe { libc::kill(self.0, 0) } == 0 {
+                return true;
+            }
+            io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+    }
+
+    fn assert_descendant_gone(outcome: &Outcome) {
+        let descendant = Descendant::from(outcome);
+        assert!(
+            !descendant.is_alive(),
+            "background pid {} survived its run",
+            descendant.0
+        );
     }
 
     #[test]
@@ -695,6 +597,42 @@ mod tests {
     fn a_runs_exit_code_comes_back() {
         let sandbox = sandbox("exit");
         assert_eq!(shell(&sandbox, "exit 3").status, RunStatus::Exited(3));
+    }
+
+    #[test]
+    fn a_completed_run_leaves_no_background_grandchild_in_its_owned_group() {
+        let sandbox = sandbox("background-grandchild");
+        let outcome = shell(&sandbox, "sleep 5 & echo $!");
+
+        outcome.assert_success();
+        assert_descendant_gone(&outcome);
+    }
+
+    #[test]
+    fn a_failed_run_leaves_no_background_grandchild_in_its_owned_group() {
+        let sandbox = sandbox("failed-background-grandchild");
+        let outcome = shell(&sandbox, "sleep 5 & echo $!; exit 7");
+
+        assert_eq!(outcome.status, RunStatus::Exited(7));
+        assert_descendant_gone(&outcome);
+    }
+
+    #[test]
+    fn a_timed_out_run_leaves_no_child_in_its_owned_group() {
+        let sandbox = sandbox("timed-out-child");
+        let outcome = Run::new(&sandbox, "/bin/sh")
+            .args(["-c", "sleep 5 & echo $!; wait"])
+            .deadline(Duration::from_millis(100))
+            .wait()
+            .expect("running a shell");
+
+        assert_eq!(
+            outcome.status,
+            RunStatus::TimedOut {
+                after: Duration::from_millis(100)
+            }
+        );
+        assert_descendant_gone(&outcome);
     }
 
     #[test]
