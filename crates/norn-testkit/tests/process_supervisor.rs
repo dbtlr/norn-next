@@ -10,6 +10,26 @@ use std::time::{Duration, Instant};
 use norn_testkit::scratch::Scratch;
 
 #[test]
+#[allow(clippy::disallowed_methods)] // The repository launcher must not depend on the caller's working directory.
+fn the_repository_launcher_exposes_the_process_command_from_any_directory() {
+    let scratch = Scratch::new("norn-process-launcher");
+    let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/norn-process");
+
+    let output = Command::new(launcher)
+        .arg("--help")
+        .current_dir(scratch.root())
+        .output()
+        .expect("running the repository process launcher");
+
+    assert!(
+        output.status.success(),
+        "the repository process launcher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage: norn-process <COMMAND>"));
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // The integration seam observes the process registry and workload marker.
 fn registration_exists_before_the_workload_starts() {
     let scratch = Scratch::new("norn-process-registration-first");
@@ -685,6 +705,25 @@ fn scan_of_an_absent_registry_creates_nothing() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // The CLI seam proves that an empty report performs no filesystem write.
+fn report_of_an_absent_state_creates_nothing() {
+    let scratch = Scratch::new("norn-process-report-empty");
+    let state = scratch.join("state");
+    let reported = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .args(["report", "--since-unix-ms", "20"])
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("reporting from absent state");
+
+    assert!(reported.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&reported.stdout).expect("the structured audit report");
+    assert_eq!(report["since_unix_ms"], 20);
+    assert_eq!(report["events"].as_array().map(Vec::len), Some(0));
+    assert!(!state.exists(), "report created machine-local state");
+}
+
+#[test]
 #[allow(clippy::disallowed_methods)] // The fixture corrupts only its registered identity and proves that no signal follows.
 fn reap_refuses_a_mismatched_process_group_identity() {
     let fixture = stale_group_fixture("norn-process-reap-mismatch");
@@ -786,6 +825,69 @@ fn report_refuses_an_unterminated_audit_event() {
 
     let reported = process_command(&state, "report");
     assert!(!reported.status.success());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Durable evidence requires a state directory that another account cannot rewrite.
+fn report_refuses_a_state_directory_writable_by_another_user() {
+    let scratch = Scratch::new("norn-process-report-unsafe-state");
+    let state = scratch.join("state");
+    fs::create_dir(&state).expect("creating the audit root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o777)).unwrap();
+    let audit = state.join("process-groups.audit.jsonl");
+    fs::write(
+        &audit,
+        concat!(
+            r#"{"schema":1,"recorded_at_unix_ms":20,"run_token":"kept","process_group":102,"process_count":2,"age_ms":6,"reason":"supervisor-absent","result":"cleaned","detail":null}"#,
+            "\n",
+        ),
+    )
+    .expect("writing the audit event");
+    fs::set_permissions(&audit, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let reported = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg("report")
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("reading recovery evidence from unsafe state");
+
+    assert!(!reported.status.success());
+    assert!(reported.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&reported.stderr).contains("grants unsafe access"));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The CLI seam filters durable recovery evidence for session startup.
+fn report_selects_events_at_or_after_the_requested_time() {
+    let scratch = Scratch::new("norn-process-report-recent");
+    let state = scratch.join("state");
+    fs::create_dir(&state).expect("creating the audit root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let audit = state.join("process-groups.audit.jsonl");
+    fs::write(
+        &audit,
+        concat!(
+            r#"{"schema":1,"recorded_at_unix_ms":19,"run_token":"old","process_group":101,"process_count":1,"age_ms":5,"reason":"supervisor-absent","result":"cleaned","detail":null}"#,
+            "\n",
+            r#"{"schema":1,"recorded_at_unix_ms":20,"run_token":"recent","process_group":102,"process_count":2,"age_ms":6,"reason":"supervisor-identity-mismatch","result":"refused","detail":null}"#,
+            "\n",
+        ),
+    )
+    .expect("writing the audit events");
+    fs::set_permissions(&audit, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let reported = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .args(["report", "--since-unix-ms", "20"])
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("reading recent recovery evidence");
+
+    assert!(reported.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&reported.stdout).expect("the structured audit report");
+    assert_eq!(report["since_unix_ms"], 20);
+    assert_eq!(report["events"].as_array().map(Vec::len), Some(1));
+    assert_eq!(report["events"][0]["run_token"], "recent");
 }
 
 #[test]
