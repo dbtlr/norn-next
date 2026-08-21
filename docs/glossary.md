@@ -120,3 +120,30 @@ _Avoid_: Venue (unqualified)
 **Regression binding**:
 The deliberate association of a regression case with the tests that carry its property. A case is dormant before that association and bound afterward.
 _Avoid_: Activation, bound (unqualified)
+
+**Index projection**:
+A declared unit of derived state naming its inputs, whether it is deterministic, and the one key that invalidates it wholesale. The declaration decides its derivation lane.
+
+**Derivation lane**:
+One of two maintenance disciplines for derived state. Lane 1 is deterministic projection of vault documents, committed inside the changeset. Lane 2 is everything else: asynchronous, eventually consistent, and derived from lane-1 records rather than vault files.
+_Avoid_: Sync/async indexing (unqualified)
+
+**Engine**:
+A lane-2 domain that owns a sidecar database, consumes the change feed, and answers its own query capabilities. An engine never reads vault files.
+_Avoid_: Worker, plugin
+
+**Sidecar database**:
+A derived database owned by one engine, keyed by content and versions, carrying its own fingerprint and epoch, and rebuildable independently of the main derived store.
+
+**Change feed**:
+The ordered, cursor-resumable view of lane-1 change: current rows and tombstones by write generation, projecting fingerprints so a consumer triages before it fetches. It is read as a query over current state, never kept as a log.
+_Avoid_: Event queue, event bus
+
+**Store epoch**:
+The identity a derived database carries from creation to discard. A feed cursor is valid within one epoch; a new epoch requires a rescan.
+
+**Progressive revalidation**:
+Converging derived state after a contract change by re-deriving only what the delta invalidates. Wholesale rebuild is the always-correct floor and the current implementation everywhere.
+
+**Inference firewall**:
+The rule that inferred or higher-order derived state answers queries only, and never becomes a finding, a plan, or a repair input.
