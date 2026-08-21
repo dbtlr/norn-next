@@ -65,10 +65,10 @@ use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, FindingFacts, HeadingFact, IndexedTerm, Invalidation,
-    LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span, StoredDocument, StoredFacts,
-    StoredFinding, StoredPathOrder, StoredTombstone, TagFact, TagSource, VaultSchemaPin,
-    VectorFacts,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
+    HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
+    SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
+    TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
 use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
@@ -92,6 +92,14 @@ pub const MAX_PAGE: usize = 1024;
 /// from the cursor.
 const BELOW_EVERY_FINDING_KEY: i64 = 0;
 
+/// The lowest generation a stamped row can carry, minus one, which is the floor
+/// an unset feed cursor coalesces to.
+///
+/// [`store::next_generation`] moves the counter before it reports it and the
+/// counter is created at zero, so the first generation a row is ever stamped
+/// with is 1. Zero is therefore below every stamped row and above nothing.
+const BELOW_EVERY_GENERATION: i64 = 0;
+
 /// A row reading that can fail twice: the driver may not produce the row, and
 /// the row may hold a value this schema does not describe.
 type Reading<T> = rusqlite::Result<Result<T, StoreError>>;
@@ -111,6 +119,11 @@ const EXPLAINED_FINDING_CURSOR: i64 = 1;
 
 /// The term an indexed-term page is explained from.
 const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
+
+/// The generation a change-feed page is explained from. Any generation inside
+/// the sequence's own range does; what matters is that the cursor is bound
+/// rather than null.
+const EXPLAINED_FEED_GENERATION: i64 = 1;
 
 /// The columns every reader of a document row selects, in the order
 /// [`stored_document`] reads them. A reader that wants the row's id or its body
@@ -939,6 +952,101 @@ impl<'a> Request<'a> {
         )
     }
 
+    /// The next bounded page of the **document change feed**: live document rows
+    /// in write-generation order, each projected down to its path and its
+    /// fingerprints.
+    ///
+    /// # The feed is a query over current state, never a retained log
+    ///
+    /// What comes back is the `documents` table as it stands, read in the order
+    /// the store's global write sequence stamped it. Nothing is retained for a
+    /// consumer and nothing is evicted once every consumer has passed it: a row
+    /// re-derived twice is in the feed once, at the generation of the second
+    /// derivation, and a consumer that never read the first one has missed
+    /// nothing it could act on. That is what makes a slow consumer cost latency
+    /// rather than retention.
+    ///
+    /// # The cursor is a position, and it is valid within one store epoch
+    ///
+    /// [`FeedCursor`] is `(generation, path)`, and both halves are load-bearing:
+    /// one changeset stamps every row it writes with one generation, so a
+    /// generation alone names a set of rows rather than a place inside it. A
+    /// consumer that kept one would repeat the changeset it stopped inside or
+    /// skip the rest of it.
+    ///
+    /// A cursor is meaningful **only against the store epoch it was taken in**.
+    /// Generations are one database's sequence, so a cursor carried into a
+    /// database that was discarded and built again names a position in a
+    /// sequence that no longer exists. A consumer records
+    /// [`crate::Store::epoch`] beside its cursor and rescans from the start of
+    /// the feed where the two disagree.
+    ///
+    /// # What a page projects, and why it is not the document
+    ///
+    /// Path, generation and three fingerprints — the whole document, the body,
+    /// and the frontmatter projection. A consumer **triages before it fetches**:
+    /// it compares the fingerprint of the part it derives from against the one
+    /// it recorded, and reads the document through the keyed readers only where
+    /// they differ. A page that carried bodies would cost what the fetch it
+    /// exists to avoid costs.
+    ///
+    /// `after` is exclusive.
+    pub fn changed_documents_after(
+        &self,
+        after: Option<&FeedCursor>,
+        limit: usize,
+    ) -> Result<Vec<(FeedCursor, FeedDocument)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a document change-feed page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            &document_feed_sql(),
+            params_from_iter(feed_page_parameters(after, limit)),
+            fed_document,
+            "reading the document change-feed page",
+        )
+    }
+
+    /// The next bounded page of the **death change feed**: recorded deaths in
+    /// write-generation order, each projected down to its path and the hash it
+    /// was last derived at.
+    ///
+    /// The other half of [`Request::changed_documents_after`], and it carries
+    /// the same contract: a query over the `tombstones` table as it stands
+    /// rather than a log, ordered by the one global write sequence, paged by a
+    /// [`FeedCursor`] that is valid within one store epoch.
+    ///
+    /// A consumer needs both halves. One reading the living alone keeps deriving
+    /// from a path that is gone, because a document that died leaves no row to
+    /// find. `last_content_hash` is what a consumer matches its own recorded
+    /// state against, and it is absent where the death was learned from a path
+    /// that was already absent.
+    ///
+    /// `after` is exclusive.
+    pub fn changed_tombstones_after(
+        &self,
+        after: Option<&FeedCursor>,
+        limit: usize,
+    ) -> Result<Vec<(FeedCursor, FeedTombstone)>, StoreError> {
+        if limit == 0 || limit > MAX_PAGE {
+            return Err(StoreError::Bound {
+                what: "a tombstone change-feed page",
+                limit: MAX_PAGE,
+                given: limit,
+            });
+        }
+        self.read_all(
+            &tombstone_feed_sql(),
+            params_from_iter(feed_page_parameters(after, limit)),
+            fed_tombstone,
+            "reading the tombstone change-feed page",
+        )
+    }
+
     /// The next bounded page of stored suffix keys, each beside the path whose
     /// row holds it, in path order.
     ///
@@ -1141,6 +1249,8 @@ impl<'a> Request<'a> {
             ExplainedStatement::StoredTombstonePage => TOMBSTONE_PAGE_SQL.to_string(),
             ExplainedStatement::StoredSuffixKeyPage => SUFFIX_KEY_PAGE_SQL.to_string(),
             ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
+            ExplainedStatement::DocumentFeedPage => document_feed_sql(),
+            ExplainedStatement::TombstoneFeedPage => tombstone_feed_sql(),
         };
         let read = |row: &Row<'_>| {
             Ok(Ok(PlanStep {
@@ -1224,6 +1334,22 @@ impl<'a> Request<'a> {
                     read,
                     "explaining an emitted statement",
                 )?,
+                // Both halves of the feed cursor are bound, for the same reason
+                // the enumerations bind theirs: the statement text does not
+                // branch on the cursor, so the plan is the same in either state
+                // today, and a cursor left null would explain the first page
+                // alone if an edit ever gave the two states their own text.
+                ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
+                    self.read_all(
+                        &explained,
+                        params_from_iter(feed_page_parameters(
+                            Some(&explained_feed_cursor()),
+                            MAX_PAGE,
+                        )),
+                        read,
+                        "explaining an emitted statement",
+                    )?
+                }
             })
         })();
         self.read_steps.set(before_the_explain);
@@ -1466,6 +1592,12 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::indexed_terms_after`], the page a caller drains the full-text
     /// index's own vocabulary through.
     IndexedTermPage,
+    /// [`Request::changed_documents_after`], the generation-ordered walk a
+    /// lane-2 consumer reads live document rows through.
+    DocumentFeedPage,
+    /// [`Request::changed_tombstones_after`], the generation-ordered walk a
+    /// lane-2 consumer reads recorded deaths through.
+    TombstoneFeedPage,
 }
 
 /// The stored subjects one act addresses.
@@ -1533,6 +1665,29 @@ pub enum DiscardScope<'a> {
 /// cursor no further than the next page.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FindingCursor(i64);
+
+/// Where the next page of a change feed starts.
+///
+/// **A position in a drain, never a fact about the row it came back beside.**
+/// What makes it a position is the pair: one changeset stamps every row it
+/// writes with one generation, so a generation names a set of rows and a
+/// `(generation, path)` names a place inside that set.
+///
+/// **It is valid within one store epoch and no further.** A generation is one
+/// database's write sequence, so a cursor carried into a database that was
+/// discarded and built again names a position in a sequence that no longer
+/// exists. A consumer keeps [`crate::Store::epoch`] beside its cursor and
+/// rescans from the start of the feed where the two disagree.
+///
+/// One type serves both feeds, because both are read in the one global write
+/// sequence: a consumer draining documents and deaths together compares the two
+/// positions to decide which side to advance, and two types that differed only
+/// in name would make that comparison a conversion.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FeedCursor {
+    generation: i64,
+    path: DocumentPath,
+}
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1906,6 +2061,19 @@ fn finding_page_sql() -> String {
     )
 }
 
+/// The cursor [`Request::emitted_plan`] explains a change-feed page with.
+///
+/// Both halves bound, because both are arguments of the one row-value floor the
+/// plan is judged on: a page explained with either half null would state the bar
+/// over a parameterization a resumed drain never produces.
+fn explained_feed_cursor() -> FeedCursor {
+    FeedCursor {
+        generation: EXPLAINED_FEED_GENERATION,
+        path: DocumentPath::new(EXPLAINED_PAGE_CURSOR_LEAF)
+            .expect("the explained feed cursor is a document path"),
+    }
+}
+
 /// The cursor and the page bound, in the order [`finding_page_sql`] numbers
 /// them.
 fn finding_page_parameters(after: Option<FindingCursor>, limit: usize) -> Vec<Value> {
@@ -1952,6 +2120,115 @@ const INDEXED_TERM_PAGE_SQL: &str = "SELECT term, doc, cnt FROM documents_fts_vo
              WHERE term > COALESCE(?1, '')
              ORDER BY term
              LIMIT ?2";
+
+/// The statement [`Request::changed_documents_after`] emits.
+///
+/// # The floor is a row value, because the position is a pair
+///
+/// One changeset stamps many rows with one generation, so `generation` alone is
+/// not a key and a page bounded by it alone cannot be both complete and
+/// non-repeating. The bound is therefore `(generation, path)` against
+/// `(cursor generation, cursor path)`, which is one comparison over the leading
+/// two columns of `documents_change_feed` — and SQLite plans a row-value
+/// comparison against an index's leading columns as a seek, exactly as it plans
+/// a scalar one.
+///
+/// Each half of the floor coalesces to a value below every stored row, on the
+/// rule every page here follows: the cursor is the seek's own lower bound rather
+/// than a filter over rows the seek already reached, because a cursor spelled as
+/// a filter reads everything already paged before it returns anything. The
+/// generation floor is [`BELOW_EVERY_GENERATION`] and the path floor is the
+/// empty string, which [`DocumentPath`] refuses and the column refuses to store.
+///
+/// # The index carries every column the page selects
+///
+/// `documents_change_feed` holds the order the page states and then the three
+/// fingerprints, so the page is answered out of the index and the row itself is
+/// never read: no sorter, no table read, and a drain of the whole feed is one
+/// walk of the index.
+fn document_feed_sql() -> String {
+    format!(
+        "SELECT generation, path, content_hash, body_hash, frontmatter_projection_hash
+             FROM documents
+             WHERE (generation, path) > (COALESCE(?1, {BELOW_EVERY_GENERATION}), COALESCE(?2, ''))
+             ORDER BY generation, path
+             LIMIT ?3"
+    )
+}
+
+/// The statement [`Request::changed_tombstones_after`] emits.
+///
+/// The same shape as [`document_feed_sql`] over the other pillar, and for the
+/// same reasons: a row-value floor because one changeset records many deaths at
+/// one generation, and `tombstones_change_feed` carrying the order and the hash
+/// the page projects, so the page is answered out of the index.
+fn tombstone_feed_sql() -> String {
+    format!(
+        "SELECT generation, path, last_content_hash
+             FROM tombstones
+             WHERE (generation, path) > (COALESCE(?1, {BELOW_EVERY_GENERATION}), COALESCE(?2, ''))
+             ORDER BY generation, path
+             LIMIT ?3"
+    )
+}
+
+/// The cursor's two halves and the page bound, in the order the feed statements
+/// number them.
+fn feed_page_parameters(after: Option<&FeedCursor>, limit: usize) -> Vec<Value> {
+    vec![
+        after.map_or(Value::Null, |cursor| Value::Integer(cursor.generation)),
+        after.map_or(Value::Null, |cursor| {
+            Value::Text(cursor.path.as_str().to_string())
+        }),
+        Value::Integer(i64::try_from(limit).expect("the page bound fits i64")),
+    ]
+}
+
+/// One document row of the change feed, with the position it came off the feed
+/// at.
+fn fed_document(row: &Row<'_>) -> Reading<(FeedCursor, FeedDocument)> {
+    let generation: i64 = row.get(0)?;
+    let path: String = row.get(1)?;
+    let content_hash: String = row.get(2)?;
+    let body_hash: String = row.get(3)?;
+    let frontmatter_projection_hash: Option<String> = row.get(4)?;
+    Ok(DocumentPath::new(&path).map(|path| {
+        (
+            FeedCursor {
+                generation,
+                path: path.clone(),
+            },
+            FeedDocument {
+                path,
+                generation,
+                content_hash,
+                body_hash,
+                frontmatter_projection_hash,
+            },
+        )
+    }))
+}
+
+/// One recorded death of the change feed, with the position it came off the feed
+/// at.
+fn fed_tombstone(row: &Row<'_>) -> Reading<(FeedCursor, FeedTombstone)> {
+    let generation: i64 = row.get(0)?;
+    let path: String = row.get(1)?;
+    let last_content_hash: Option<String> = row.get(2)?;
+    Ok(DocumentPath::new(&path).map(|path| {
+        (
+            FeedCursor {
+                generation,
+                path: path.clone(),
+            },
+            FeedTombstone {
+                path,
+                generation,
+                last_content_hash,
+            },
+        )
+    }))
+}
 
 /// The cursor and the page bound, for the two pages whose cursor is text.
 ///

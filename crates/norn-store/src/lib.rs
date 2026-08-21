@@ -63,6 +63,7 @@ mod error;
 mod facts;
 #[cfg(feature = "induced-failure")]
 mod faults;
+mod hash;
 mod increment;
 mod json;
 mod path;
@@ -72,10 +73,10 @@ mod store;
 pub use counters::DerivationCounters;
 pub use error::StoreError;
 pub use facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
-    IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
-    StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact,
-    TagSource, VaultSchemaPin, VectorFacts,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,
+    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport,
+    Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
@@ -86,8 +87,8 @@ pub use path::{
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_PAGE, PlanStep, Request,
-    SubjectScope,
+    DiscardScope, EmittedPlan, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, PlanStep,
+    Request, SubjectScope,
 };
 pub use store::{
     OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,

@@ -13,6 +13,7 @@ use rusqlite::{CachedStatement, OptionalExtension, Transaction, TransactionBehav
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
 use crate::facts::{DocumentFacts, Invalidation, Provenance};
+use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
 use crate::request;
@@ -301,16 +302,19 @@ impl<'t> Statements<'t> {
             // reference a document that has been re-read since.
             upsert_document: prepared(
                 "INSERT INTO documents (
-                     path, suffix_key, content_hash, byte_length, body, body_offset, frontmatter,
-                     frontmatter_diagnostic_count, generation, derived_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     path, suffix_key, content_hash, byte_length, body, body_hash, body_offset,
+                     frontmatter, frontmatter_projection_hash, frontmatter_diagnostic_count,
+                     generation, derived_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(path) DO UPDATE SET
                      suffix_key                   = excluded.suffix_key,
                      content_hash                 = excluded.content_hash,
                      byte_length                  = excluded.byte_length,
                      body                         = excluded.body,
+                     body_hash                    = excluded.body_hash,
                      body_offset                  = excluded.body_offset,
                      frontmatter                  = excluded.frontmatter,
+                     frontmatter_projection_hash  = excluded.frontmatter_projection_hash,
                      frontmatter_diagnostic_count = excluded.frontmatter_diagnostic_count,
                      generation                   = excluded.generation,
                      derived_at                   = excluded.derived_at
@@ -379,6 +383,15 @@ impl<'t> Statements<'t> {
 }
 
 /// Write one document's facts, replacing everything derived from it.
+///
+/// **The sub-fingerprints are stamped here and nowhere else.** The row states
+/// what its body hashes to and what its frontmatter projection hashes to, and
+/// each is taken over the value this statement is about to store — so a row at
+/// rest cannot carry a hash of something other than what stands beside it. What
+/// they buy is a change-feed consumer that triages before it fetches: it reads
+/// the fingerprints off the feed and asks for a body only where the one it holds
+/// no longer matches. A document with no frontmatter projection carries no
+/// projection hash, which is the `NULL` pair [`crate::ddl::documents`] checks.
 fn upsert(
     statements: &mut Statements<'_>,
     generation: i64,
@@ -392,6 +405,7 @@ fn upsert(
         .as_ref()
         .map(json::canonical_json)
         .transpose()?;
+    let projection_hash = projection.as_deref().map(hash::sub_fingerprint);
 
     let document: i64 = statements
         .upsert_document
@@ -402,8 +416,10 @@ fn upsert(
                 facts.content_hash,
                 facts.byte_length,
                 facts.body,
+                hash::sub_fingerprint(&facts.body),
                 facts.body_offset,
                 projection,
+                projection_hash,
                 facts.frontmatter_diagnostic_count,
                 generation,
                 derived_at,
