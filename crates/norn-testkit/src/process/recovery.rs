@@ -66,6 +66,7 @@ pub struct AuditEvent {
 #[derive(Debug, Serialize)]
 pub struct AuditReport {
     pub schema: u32,
+    pub since_unix_ms: Option<u64>,
     pub events: Vec<AuditEvent>,
 }
 
@@ -78,8 +79,15 @@ pub fn reap() -> io::Result<RecoveryReport> {
 }
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Recovery owns its machine-local audit file.
-pub fn report() -> io::Result<AuditReport> {
-    let path = audit_path()?;
+pub fn report(since_unix_ms: Option<u64>) -> io::Result<AuditReport> {
+    let Some(root) = registry::state_root_if_present()? else {
+        return Ok(AuditReport {
+            schema: 1,
+            since_unix_ms,
+            events: Vec::new(),
+        });
+    };
+    let path = audit_path(&root);
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
@@ -89,14 +97,22 @@ pub fn report() -> io::Result<AuditReport> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AuditReport {
                 schema: 1,
+                since_unix_ms,
                 events: Vec::new(),
             });
         }
         Err(error) => return Err(error),
     };
     validate_private_file(&file)?;
-    let events = read_audit(&file)?;
-    Ok(AuditReport { schema: 1, events })
+    let mut events = read_audit(&file)?;
+    if let Some(since_unix_ms) = since_unix_ms {
+        events.retain(|event| event.recorded_at_unix_ms >= since_unix_ms);
+    }
+    Ok(AuditReport {
+        schema: 1,
+        since_unix_ms,
+        events,
+    })
 }
 
 fn recover(operation: RecoveryOperation) -> io::Result<RecoveryReport> {
@@ -339,7 +355,8 @@ fn append_result(result: &GroupResult, now: SystemTime) -> io::Result<()> {
 
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Recovery owns its append-only machine-local audit file.
 fn append_audit(event: AuditEvent) -> io::Result<()> {
-    let path = audit_path()?;
+    let root = registry::state_root()?;
+    let path = audit_path(&root);
     let existed = path.exists();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -355,7 +372,7 @@ fn append_audit(event: AuditEvent) -> io::Result<()> {
     file.write_all(&line)?;
     file.sync_all()?;
     if !existed {
-        std::fs::File::open(registry::state_root()?)?.sync_all()?;
+        std::fs::File::open(root)?.sync_all()?;
     }
     Ok(())
 }
@@ -388,8 +405,8 @@ fn read_audit(file: &std::fs::File) -> io::Result<Vec<AuditEvent>> {
     }
 }
 
-fn audit_path() -> io::Result<std::path::PathBuf> {
-    Ok(crate::isolation::root().join("process-groups.audit.jsonl"))
+fn audit_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("process-groups.audit.jsonl")
 }
 
 #[allow(clippy::disallowed_types)] // Recovery validates its machine-local audit and lock files.

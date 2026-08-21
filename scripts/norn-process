@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -eu
+
+script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+repository_root=$(CDPATH= cd "$script_dir/.." && pwd)
+
+exec cargo run \
+  --locked \
+  --quiet \
+  --manifest-path "$repository_root/Cargo.toml" \
+  -p norn-testkit \
+  --bin norn-process \
+  -- "$@"

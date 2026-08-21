@@ -31,7 +31,11 @@ enum Command {
     /// Remove identity-validated stale registered process groups.
     Reap,
     /// Report durable process-group recovery evidence.
-    Report,
+    Report {
+        /// Include events recorded at or after this Unix time in milliseconds.
+        #[arg(long)]
+        since_unix_ms: Option<u64>,
+    },
     /// Run a development workload in a registered process group.
     Supervise {
         /// Short reason for this workload.
@@ -69,7 +73,7 @@ fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Scan => return write_recovery(scan()),
         Command::Reap => return write_recovery(reap()),
-        Command::Report => return write_json(report()),
+        Command::Report { since_unix_ms } => return write_json(report(since_unix_ms)),
         Command::Supervise {
             purpose,
             deadline_seconds,

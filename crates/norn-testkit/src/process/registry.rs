@@ -140,13 +140,9 @@ impl Published {
 
 #[allow(clippy::disallowed_methods)] // The registry owns enumeration of its machine-local records.
 pub(super) fn registrations() -> io::Result<Vec<Result<StoredRegistration, String>>> {
-    let root = crate::isolation::root();
-    let root_metadata = match std::fs::symlink_metadata(&root) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+    let Some(root) = state_root_if_present()? else {
+        return Ok(Vec::new());
     };
-    validate_directory(&root, &root_metadata, DirectoryAccess::OwnerWrites)?;
     let directory = root.join("process-groups");
     let directory_metadata = match std::fs::symlink_metadata(&directory) {
         Ok(metadata) => metadata,
@@ -270,6 +266,18 @@ pub(super) fn state_root() -> io::Result<PathBuf> {
     let root = crate::isolation::root();
     secure_directory(&root, DirectoryAccess::OwnerWrites)?;
     Ok(root)
+}
+
+#[allow(clippy::disallowed_methods)] // The registry owns validation of its machine-local root.
+pub(super) fn state_root_if_present() -> io::Result<Option<PathBuf>> {
+    let root = crate::isolation::root();
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    validate_directory(&root, &metadata, DirectoryAccess::OwnerWrites)?;
+    Ok(Some(root))
 }
 
 #[derive(Clone, Copy)]
