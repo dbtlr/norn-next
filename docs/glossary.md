@@ -121,6 +121,9 @@ _Avoid_: Venue (unqualified)
 The deliberate association of a regression case with the tests that carry its property. A case is dormant before that association and bound afterward.
 _Avoid_: Activation, bound (unqualified)
 
+**Pillar**:
+One named body of derived state the store maintains and heals as a unit.
+
 **Index projection**:
 A declared unit of derived state naming its inputs, whether it is deterministic, and the one key that invalidates it wholesale. The declaration decides its derivation lane.
 
@@ -133,17 +136,17 @@ A lane-2 domain that owns a sidecar database, consumes the change feed, and answ
 _Avoid_: Worker, plugin
 
 **Sidecar database**:
-A derived database owned by one engine, keyed by content and versions, carrying its own fingerprint and epoch, and rebuildable independently of the main derived store.
+A derived database owned by one engine, rebuildable independently of the main derived store.
 
 **Change feed**:
-The ordered, cursor-resumable view of lane-1 change: current rows and tombstones by write generation, projecting fingerprints so a consumer triages before it fetches. It is read as a query over current state, never kept as a log.
+The ordered, resumable view of lane-1 change that a consumer reads at its own pace. It is answered from current state, never kept as a log.
 _Avoid_: Event queue, event bus
 
 **Store epoch**:
-The identity a derived database carries from creation to discard. A feed cursor is valid within one epoch; a new epoch requires a rescan.
+The identity a derived database carries from creation to discard. Progress recorded against one epoch is not valid in the next.
 
 **Progressive revalidation**:
-Converging derived state after a contract change by re-deriving only what the delta invalidates. Wholesale rebuild is the always-correct floor and the current implementation everywhere.
+Converging derived state after a contract change by re-deriving only what the change invalidates rather than rebuilding the whole.
 
 **Inference firewall**:
 The rule that inferred or higher-order derived state answers queries only, and never becomes a finding, a plan, or a repair input.
