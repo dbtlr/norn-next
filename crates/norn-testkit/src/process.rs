@@ -59,6 +59,12 @@
 //! and syncs one registry record before it releases the workload. SIGINT and
 //! SIGTERM first close the owned group through the same mechanism as [`Run`],
 //! then terminate the supervisor with the original signal.
+//!
+//! The same command scans the durable registry and recovers groups after
+//! supervisor loss. A matching supervisor identity remains authoritative even
+//! after its deadline. Recovery sends a destructive signal only after it
+//! revalidates the registered group identity. It syncs an append-only audit
+//! event before it removes the registry record.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -72,10 +78,12 @@ use crate::scratch::Scratch;
 
 mod group;
 mod identity;
+mod recovery;
 mod registry;
 mod signals;
 mod supervisor;
 
+pub use recovery::{AuditReport, RecoveryReport, reap, report, scan};
 pub use supervisor::{LaunchRequest, SuperviseRequest, launch, supervise};
 
 /// The environment variables a run is given, beyond `PATH`. Each points into

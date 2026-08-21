@@ -537,13 +537,356 @@ fn abrupt_supervisor_loss_leaves_the_registered_group_for_recovery() {
         "abrupt loss removed the recovery record"
     );
 
-    // The registered leader is alive at this signal. It pins the process-group
-    // identity until this controlled fixture receives its one destructive act.
-    assert_eq!(unsafe { libc::kill(pgid, 0) }, 0);
-    assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+    let reaped = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg("reap")
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("reaping the stale registered group");
+    assert!(
+        reaped.status.success(),
+        "the reaper failed: {}",
+        String::from_utf8_lossy(&reaped.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&reaped.stdout).expect("the structured reap result");
+    assert_eq!(result["found"], 1);
+    assert_eq!(result["cleaned"], 1);
+    assert_eq!(result["refused"], 0);
+    assert_eq!(result["errors"], 0);
+    assert_eq!(result["groups"][0]["run_token"], record["run_token"]);
+    assert_eq!(result["groups"][0]["result"], "cleaned");
     wait_for_group_absence(pgid);
-    fs::remove_file(record_path).expect("removing the controlled fixture record");
     assert_registry_empty(&state);
+
+    let report = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg("report")
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("reading the recovery audit report");
+    assert!(report.status.success());
+    let audit: serde_json::Value =
+        serde_json::from_slice(&report.stdout).expect("the structured audit report");
+    assert_eq!(audit["events"][0]["run_token"], record["run_token"]);
+    assert_eq!(audit["events"][0]["result"], "cleaned");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The CLI seam proves that scan does not disturb a live registration.
+fn scan_preserves_a_live_registered_group() {
+    let scratch = Scratch::new("norn-process-scan-live");
+    let state = scratch.join("state");
+    let ready = scratch.join("ready");
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .args([
+            "supervise",
+            "--purpose",
+            "scan-live-test",
+            "--deadline-seconds",
+            "30",
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!("touch '{}' && exec sleep 3600", ready.display()),
+        ])
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .spawn()
+        .expect("spawning norn-process");
+
+    wait_for_file(&ready);
+    let record = one_registry_record(&state);
+    let scanned = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg("scan")
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("scanning the registry");
+    assert!(scanned.status.success());
+    let result: serde_json::Value =
+        serde_json::from_slice(&scanned.stdout).expect("the structured scan result");
+    assert_eq!(result["found"], 0);
+    assert_eq!(result["cleaned"], 0);
+    assert!(record.exists());
+    assert!(!state.join("process-groups.audit.jsonl").exists());
+    assert!(!state.join("process-groups.reap.lock").exists());
+
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    assert_eq!(
+        supervisor.wait().expect("waiting for supervisor").signal(),
+        Some(libc::SIGTERM)
+    );
+    assert_registry_empty(&state);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // A stopped supervisor remains the identity owner after its recorded deadline.
+fn reap_preserves_an_overdue_identity_matched_supervisor() {
+    let scratch = Scratch::new("norn-process-scan-overdue-live");
+    let state = scratch.join("state");
+    let ready = scratch.join("ready");
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .args([
+            "supervise",
+            "--purpose",
+            "scan-overdue-live-test",
+            "--deadline-seconds",
+            "1",
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!("touch '{}' && exec sleep 3600", ready.display()),
+        ])
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .spawn()
+        .expect("spawning norn-process");
+
+    wait_for_file(&ready);
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as libc::pid_t, libc::SIGSTOP) },
+        0
+    );
+    std::thread::sleep(Duration::from_millis(1_100));
+    let reaped = process_command(&state, "reap");
+    assert!(reaped.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&reaped.stdout).unwrap();
+    assert_eq!(result["found"], 0);
+    assert_eq!(registry_entries(&state).len(), 1);
+
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as libc::pid_t, libc::SIGCONT) },
+        0
+    );
+    assert!(
+        !supervisor
+            .wait()
+            .expect("waiting for deadline cleanup")
+            .success()
+    );
+    assert_registry_empty(&state);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The CLI seam proves that an empty scan performs no filesystem write.
+fn scan_of_an_absent_registry_creates_nothing() {
+    let scratch = Scratch::new("norn-process-scan-empty");
+    let state = scratch.join("state");
+    let scanned = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg("scan")
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .output()
+        .expect("scanning an absent registry");
+
+    assert!(scanned.status.success());
+    let result: serde_json::Value =
+        serde_json::from_slice(&scanned.stdout).expect("the structured scan result");
+    assert_eq!(result["found"], 0);
+    assert!(!state.exists(), "scan created machine-local state");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The fixture corrupts only its registered identity and proves that no signal follows.
+fn reap_refuses_a_mismatched_process_group_identity() {
+    let fixture = stale_group_fixture("norn-process-reap-mismatch");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&fixture.record).expect("the stale registry record"))
+            .expect("a registry record");
+    record["process_group"]["start"]["value"] = serde_json::json!(1);
+    fs::write(
+        &fixture.record,
+        serde_json::to_vec_pretty(&record).expect("rendering the mismatched record"),
+    )
+    .expect("writing the mismatched record");
+
+    let reaped = process_command(&fixture.state, "reap");
+    assert!(reaped.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&reaped.stdout).unwrap();
+    assert_eq!(result["found"], 1);
+    assert_eq!(result["cleaned"], 0);
+    assert_eq!(result["refused"], 1);
+    assert_eq!(unsafe { libc::killpg(fixture.pgid, 0) }, 0);
+    assert!(fixture.record.exists());
+
+    assert_eq!(unsafe { libc::killpg(fixture.pgid, libc::SIGKILL) }, 0);
+    wait_for_group_absence(fixture.pgid);
+    fs::remove_file(fixture.record).expect("removing the refused fixture record");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The CLI seam leaves an unregistered process outside reaper authority.
+fn reap_never_selects_an_unregistered_process() {
+    let scratch = Scratch::new("norn-process-reap-unregistered");
+    let state = scratch.join("state");
+    let mut unrelated = Command::new("sleep")
+        .arg("3600")
+        .spawn()
+        .expect("spawning an unrelated process");
+    let reaped = process_command(&state, "reap");
+    assert!(reaped.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&reaped.stdout).unwrap();
+    assert_eq!(result["found"], 0);
+    assert_eq!(unsafe { libc::kill(unrelated.id() as libc::pid_t, 0) }, 0);
+    unrelated.kill().expect("ending the unrelated fixture");
+    unrelated.wait().expect("reaping the unrelated fixture");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The fixture makes durable audit unavailable and observes the retained authorization record.
+fn an_audit_failure_keeps_the_registry_record_after_cleanup() {
+    let fixture = stale_group_fixture("norn-process-reap-audit-failure");
+    fs::create_dir(fixture.state.join("process-groups.audit.jsonl"))
+        .expect("the unusable audit path");
+
+    let reaped = process_command(&fixture.state, "reap");
+    assert!(!reaped.status.success());
+    wait_for_group_absence(fixture.pgid);
+    assert!(
+        fixture.record.exists(),
+        "audit failure discarded recovery authority"
+    );
+    fs::remove_dir(fixture.state.join("process-groups.audit.jsonl"))
+        .expect("removing the unusable audit path");
+
+    let retried = process_command(&fixture.state, "reap");
+    assert!(retried.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(result["cleaned"], 1);
+    assert!(!fixture.record.exists());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // A partial prior event cannot become durable evidence for a later cleanup.
+fn a_partial_audit_tail_keeps_the_registry_record() {
+    let fixture = stale_group_fixture("norn-process-reap-partial-audit");
+    let audit = fixture.state.join("process-groups.audit.jsonl");
+    fs::write(&audit, b"{\"schema\":1").expect("writing the partial audit event");
+    fs::set_permissions(&audit, fs::Permissions::from_mode(0o600))
+        .expect("securing the partial audit file");
+
+    let reaped = process_command(&fixture.state, "reap");
+    assert!(!reaped.status.success());
+    wait_for_group_absence(fixture.pgid);
+    assert!(fixture.record.exists());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Report accepts only events whose terminating newline reached the audit file.
+fn report_refuses_an_unterminated_audit_event() {
+    let scratch = Scratch::new("norn-process-report-partial-audit");
+    let state = scratch.join("state");
+    fs::create_dir(&state).expect("creating the audit root");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let audit = state.join("process-groups.audit.jsonl");
+    fs::write(
+        &audit,
+        br#"{"schema":1,"recorded_at_unix_ms":1,"run_token":null,"process_group":null,"process_count":null,"age_ms":null,"reason":"fixture","result":"error","detail":null}"#,
+    )
+    .expect("writing the unterminated audit event");
+    fs::set_permissions(&audit, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let reported = process_command(&state, "report");
+    assert!(!reported.status.success());
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // The fixture holds the machine-local lock and proves that a second reaper performs no cleanup.
+fn the_exclusive_reap_lock_prevents_a_second_cleanup_writer() {
+    use std::os::fd::AsRawFd;
+
+    let fixture = stale_group_fixture("norn-process-reap-lock");
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(fixture.state.join("process-groups.reap.lock"))
+        .expect("opening the reaper lock");
+    fs::set_permissions(
+        fixture.state.join("process-groups.reap.lock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .expect("securing the reaper lock");
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+
+    let reaped = process_command(&fixture.state, "reap");
+    assert!(!reaped.status.success());
+    assert_eq!(unsafe { libc::killpg(fixture.pgid, 0) }, 0);
+    assert!(fixture.record.exists());
+    drop(lock);
+
+    assert!(process_command(&fixture.state, "reap").status.success());
+    wait_for_group_absence(fixture.pgid);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // The malformed record is reported and never becomes cleanup authority.
+fn a_malformed_registry_record_is_an_operational_error() {
+    let scratch = Scratch::new("norn-process-reap-malformed");
+    let state = scratch.join("state");
+    let registry = state.join("process-groups");
+    fs::create_dir_all(&registry).expect("creating the controlled registry");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+    let record = registry.join("bad.json");
+    fs::write(&record, b"not json").unwrap();
+    fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let reaped = process_command(&state, "reap");
+    assert!(!reaped.status.success());
+    assert!(record.exists());
+}
+
+struct StaleGroupFixture {
+    _scratch: Scratch,
+    state: std::path::PathBuf,
+    record: std::path::PathBuf,
+    pgid: libc::pid_t,
+}
+
+#[allow(clippy::disallowed_methods)] // Controlled process fixture for identity-safe recovery tests.
+fn stale_group_fixture(label: &str) -> StaleGroupFixture {
+    let scratch = Scratch::new(label);
+    let root = scratch.root().to_owned();
+    let state = root.join("state");
+    let ready = root.join("ready");
+    let mut supervisor = Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .args([
+            "supervise",
+            "--purpose",
+            label,
+            "--deadline-seconds",
+            "30",
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!("touch '{}' && exec sleep 3600", ready.display()),
+        ])
+        .env("NORN_TEST_ISOLATION_DIR", &state)
+        .spawn()
+        .expect("spawning the recovery fixture");
+    wait_for_file(&ready);
+    let record = one_registry_record(&state);
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let pgid = value["process_group"]["pid"].as_i64().unwrap() as libc::pid_t;
+    assert_eq!(
+        unsafe { libc::kill(supervisor.id() as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    assert_eq!(supervisor.wait().unwrap().signal(), Some(libc::SIGKILL));
+    StaleGroupFixture {
+        _scratch: scratch,
+        state,
+        record,
+        pgid,
+    }
+}
+
+fn process_command(state: &Path, command: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_norn-process"))
+        .arg(command)
+        .env("NORN_TEST_ISOLATION_DIR", state)
+        .output()
+        .expect("running norn-process")
 }
 
 #[test]
