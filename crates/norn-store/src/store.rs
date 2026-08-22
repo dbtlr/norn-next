@@ -1,5 +1,5 @@
-//! The store itself: one database file, one connection, and the lifecycle of
-//! both.
+//! The store itself: what one derived database means, over the file and the
+//! connection `norn-db` owns.
 //!
 //! # One writer per store, and the borrow checker is what enforces it
 //!
@@ -20,7 +20,7 @@
 //! **Reads belong on a separate handle, not on this connection.** That is
 //! recorded here because it is the other half of the writer discipline: a wire
 //! read is answered from a dedicated read-only snapshot handle with its own
-//! connection, opened inside this crate so the substrate seam holds, and `&mut`
+//! connection, opened under the substrate seam like every other, and `&mut`
 //! stays what a writer takes. A shared borrow of the store itself cannot serve
 //! reads, because the store lives inside an attachment that lifecycle jobs hold
 //! mutably for their whole duration (ADR 0015). [`SnapshotReader`] is that
@@ -28,22 +28,15 @@
 //! every request in this crate is `&mut` against the one connection, and no
 //! caller anywhere holds a reader.
 //!
-//! # Write-ahead logging, foreign keys, and why they are set in one place
+//! # What the substrate owns, and what is decided here
 //!
-//! Both are **per-connection** settings in SQLite rather than properties of the
-//! file — foreign keys are off by default in every new connection — and the
-//! cascade that carries wholesale row replacement depends on them being on. One
-//! function opens every connection this crate ever holds, so there is no
-//! reading of the schema under settings the schema was not designed for.
-//!
-//! The open flags are named rather than defaulted, and the one that is left out
-//! is the point: **URI filenames are off**. With them on, a path is a
-//! mini-language — `file:...?mode=memory` opens a database that is not the file
-//! the caller named, and the file-lifecycle operations here would then remove a
-//! path nothing was ever written to and report success. A path handed to this
-//! crate is a filesystem path, all of it, and the two spellings SQLite treats
-//! specially whatever the flags say (`:memory:` and the empty name) are refused
-//! as caller errors.
+//! The connection, the pragmas the store schema is designed to be read under —
+//! write-ahead logging and the foreign keys the cascade depends on among them —
+//! the pinned-scalar mechanics, the store epoch and the database file's
+//! lifecycle are `norn-db`'s. What is decided here is what a reading of those
+//! mechanics *means* for derived state: whether the shape in front of an open
+//! is the one this build writes, which rung a disagreement is, and whether the
+//! file outlives the store.
 //!
 //! # The database-side heal rung
 //!
@@ -75,53 +68,20 @@
 //! of them discards anything. Refusing is the correct resolution when the
 //! environment is broken and the stored state is not, because discarding a sound
 //! database destroys work to fix nothing. One policy decides which is which —
-//! [`error::is_damaged`] — and every read an open performs goes through it.
+//! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
+use norn_db::rusqlite::{self, Connection};
+use norn_db::{Attempt, Database, meta};
 use norn_wire::{FindingKind, Severity};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
 
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{LinkFamily, Provenance, TagSource};
 use crate::hash;
 use crate::request::Request;
-
-/// How long a connection waits on a lock before reporting the database busy.
-///
-/// Serialization is the host's job, so contention here means two processes have
-/// the same derived store open — which the maintainer file lock is what
-/// prevents. Two processes holding one *vault* it neither prevents nor needs to:
-/// a vault is multi-writer, and two derived stores over it are two files. The
-/// timeout is the backstop that turns a race into a wait rather than an error.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The flags every connection is opened with.
-///
-/// Named rather than defaulted so that `SQLITE_OPEN_URI` is *absent*: a path is a
-/// filesystem path and never a URI with parameters in it.
-const OPEN_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
-    .union(OpenFlags::SQLITE_OPEN_CREATE)
-    .union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
-
-/// The two names SQLite reads as something other than a file, whatever the URI
-/// flag says: the in-memory database, and the anonymous temporary one.
-const NOT_A_FILE: &[&str] = &[":memory:", ""];
-
-/// How many compiled statements a connection keeps.
-///
-/// Compiling SQL is a material share of what a small changeset costs, and the
-/// increment prepares thirteen statements — the document write, one discard per
-/// fact table, one insert per fact table, the document delete, the tombstone
-/// write and the two findings discards — every time it runs. The cache is what
-/// makes that a per-connection cost rather than a per-changeset one, so the
-/// capacity is set above the widest write path's count rather than left at the
-/// driver's default of sixteen, which the next statement to join that path would
-/// take the store over.
-const PREPARED_STATEMENT_CACHE: usize = 32;
 
 /// The read-only snapshot handle wire reads run on.
 ///
@@ -222,11 +182,9 @@ impl fmt::Display for RebuildReason {
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
-    pub(crate) connection: Connection,
-    path: PathBuf,
+    pub(crate) database: Database,
     mode: StoreMode,
     outcome: OpenOutcome,
-    epoch: String,
     torn_down: bool,
 }
 
@@ -256,9 +214,9 @@ impl Store {
     }
 
     fn open_in_mode(path: &Path, mode: StoreMode) -> Result<Self, StoreError> {
-        refuse_a_name_that_is_not_a_file(path)?;
-        prepare_parent(path)?;
-        let (connection, outcome) = match connect(path)? {
+        norn_db::refuse_a_name_that_is_not_a_file(path)?;
+        norn_db::prepare_parent(path)?;
+        let (connection, outcome) = match norn_db::connect(path)? {
             Attempt::Connected(connection) => match inspect(&connection)? {
                 Verdict::Fresh => {
                     create(&connection, mode)?;
@@ -273,35 +231,27 @@ impl Store {
                     (rebuild(path, mode)?, OpenOutcome::RebuiltFromZero(reason))
                 }
             },
-            Attempt::Rebuild(reason) => {
-                (rebuild(path, mode)?, OpenOutcome::RebuiltFromZero(reason))
-            }
+            Attempt::Unreadable { detail } => (
+                rebuild(path, mode)?,
+                OpenOutcome::RebuiltFromZero(RebuildReason::Damaged { detail }),
+            ),
         };
-        // Read once, here, rather than on every ask. The epoch is written at
-        // create and never rewritten, so a value read at open is the value for
-        // as long as this handle is open — and a consumer that has to compare
-        // its recorded epoch against the store's before every read should not
-        // pay a `meta` query to do it.
-        let epoch = get_meta::<String>(&connection, ddl::meta::STORE_EPOCH)?.ok_or_else(|| {
-            StoreError::Damaged {
-                what: "the database records no store epoch, so nothing it holds can be progressed \
-                       against"
-                    .to_string(),
-            }
-        })?;
         Ok(Store {
-            connection,
-            path: path.to_path_buf(),
+            database: Database::adopt(connection, path)?,
             mode,
             outcome,
-            epoch,
             torn_down: false,
         })
     }
 
     /// The database file this store is holding.
     pub fn path(&self) -> &Path {
-        &self.path
+        self.database.path()
+    }
+
+    /// The connection this store's requests run their statements on.
+    pub(crate) fn connection(&self) -> &Connection {
+        self.database.connection()
     }
 
     /// Whether this store's file outlives it — and so whether closing or dropping
@@ -346,7 +296,7 @@ impl Store {
     /// a comparator holds its positions no further than the drain it took them
     /// in.
     pub fn epoch(&self) -> &str {
-        &self.epoch
+        self.database.epoch()
     }
 
     /// Open a request. Everything the store does happens inside one, so that
@@ -392,7 +342,7 @@ impl Store {
     /// everything else is reported as the refused operation it was.
     pub fn verify_integrity(&self) -> Result<(), StoreError> {
         let report: String = self
-            .connection
+            .connection()
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .map_err(|error| error::sql("checking database integrity", error))?;
         if report != "ok" {
@@ -400,7 +350,7 @@ impl Store {
         }
 
         let orphans: i64 = self
-            .connection
+            .connection()
             .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
                 row.get(0)
             })
@@ -411,13 +361,13 @@ impl Store {
             });
         }
 
-        self.connection
+        self.connection()
             .execute(
                 "INSERT INTO documents_fts(documents_fts, rank) VALUES ('integrity-check', 1)",
                 [],
             )
             .map_err(|error| {
-                if error::is_damaged(&error) {
+                if norn_db::is_damaged(&error) {
                     StoreError::Damaged {
                         what: format!(
                             "the full-text index disagrees with the documents it indexes: {error}"
@@ -429,7 +379,7 @@ impl Store {
             })?;
 
         let unreadable: i64 = self
-            .connection
+            .connection()
             .query_row(
                 "SELECT count(*) FROM documents
                  WHERE frontmatter IS NOT NULL AND json_valid(frontmatter) = 0",
@@ -473,7 +423,7 @@ impl Store {
             ),
         ] {
             let outside: i64 = self
-                .connection
+                .connection()
                 .query_row(
                     &format!("SELECT count(*) FROM {table} WHERE {column} NOT IN ({vocabulary})"),
                     [],
@@ -502,7 +452,7 @@ impl Store {
     fn recompute_the_sub_fingerprints(&self) -> Result<(), StoreError> {
         let operation = "recomputing a document's sub-fingerprints";
         let mut statement = self
-            .connection
+            .connection()
             .prepare(
                 "SELECT path, body, body_hash, frontmatter, frontmatter_projection_hash
                  FROM documents",
@@ -558,9 +508,9 @@ impl Store {
     /// reports what an already-open store settled on rather than deciding it.
     pub fn recorded_store_schema(&self) -> Result<RecordedStoreSchema, StoreError> {
         Ok(RecordedStoreSchema {
-            version: get_meta(&self.connection, ddl::meta::STORE_SCHEMA_VERSION)?,
-            ddl_fingerprint: get_meta(&self.connection, ddl::meta::DDL_FINGERPRINT)?,
-            schema_digest: get_meta(&self.connection, ddl::meta::SCHEMA_DIGEST)?,
+            version: norn_db::meta::get_meta(self.connection(), meta::STORE_SCHEMA_VERSION)?,
+            ddl_fingerprint: norn_db::meta::get_meta(self.connection(), meta::DDL_FINGERPRINT)?,
+            schema_digest: norn_db::meta::get_meta(self.connection(), meta::SCHEMA_DIGEST)?,
         })
     }
 
@@ -570,7 +520,8 @@ impl Store {
     /// build would have created. Compared against
     /// [`RecordedStoreSchema::schema_digest`] on every open.
     pub fn schema_digest(&self) -> Result<String, StoreError> {
-        schema_digest(&self.connection).map_err(|error| error::sql("digesting the schema", error))
+        norn_db::schema_digest(self.connection())
+            .map_err(|error| error::sql("digesting the schema", error))
     }
 
     /// Close the store, tearing a throwaway one down.
@@ -579,7 +530,7 @@ impl Store {
     /// same teardown with its failures reported rather than swallowed.
     pub fn close(mut self) -> Result<(), StoreError> {
         if self.mode == StoreMode::Throwaway {
-            remove_database(&self.path)?;
+            norn_db::remove_database(self.database.path())?;
             self.torn_down = true;
         }
         Ok(())
@@ -593,7 +544,7 @@ impl Store {
     /// this build; this is the entry point for damage found later, which the
     /// lower rungs cannot resolve.
     pub fn discard(mut self) -> Result<(), StoreError> {
-        remove_database(&self.path)?;
+        norn_db::remove_database(self.database.path())?;
         self.torn_down = true;
         Ok(())
     }
@@ -620,7 +571,7 @@ impl Store {
     /// Everything the discarded database held is derived state, and the caller's
     /// next act is deriving it again from the vault.
     pub fn discard_and_reopen(self) -> Result<Self, StoreError> {
-        let path = self.path.clone();
+        let path = self.database.path().to_path_buf();
         let mode = self.mode;
         self.discard()?;
         Self::open_in_mode(&path, mode)
@@ -646,16 +597,9 @@ impl Drop for Store {
             // to a silent failure here is a temporary database that outlives
             // every process that could have removed it. `close` is the spelling
             // that reports.
-            let _ = remove_database(&self.path);
+            let _ = norn_db::remove_database(self.database.path());
         }
     }
-}
-
-/// What connecting to a path produced.
-enum Attempt {
-    Connected(Connection),
-    /// The file is there and is not a database this build can read.
-    Rebuild(RebuildReason),
 }
 
 /// What inspecting a connected database concluded.
@@ -665,63 +609,6 @@ enum Verdict {
     /// The shape this build writes.
     Usable,
     Rebuild(RebuildReason),
-}
-
-/// Refuse a name SQLite would read as something other than the file it spells.
-///
-/// `:memory:` and the empty name are special to SQLite whatever the open flags
-/// say, and neither is a file this crate's lifecycle operations could remove or
-/// rebuild. A caller that passed one made a mistake about what a store is, which
-/// is a refusal — never a verdict about stored state.
-fn refuse_a_name_that_is_not_a_file(path: &Path) -> Result<(), StoreError> {
-    let spelled = path.to_string_lossy();
-    if NOT_A_FILE.contains(&spelled.as_ref()) {
-        return Err(StoreError::Lifecycle {
-            operation: "opening the database",
-            path: path.to_path_buf(),
-            message: "a store is a file, and this names a database that is not one".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Open a connection and put it in the state the store schema is designed for.
-///
-/// Every connection this crate holds comes from here. The journal mode is read
-/// back rather than assumed, because a database that refuses write-ahead logging
-/// is not a database this store can keep its promises on.
-#[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
-fn connect(path: &Path) -> Result<Attempt, StoreError> {
-    let connection =
-        Connection::open_with_flags(path, OPEN_FLAGS).map_err(|error| StoreError::Lifecycle {
-            operation: "opening the database",
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?;
-    connection
-        .busy_timeout(BUSY_TIMEOUT)
-        .map_err(|error| error::sql("setting the busy timeout", error))?;
-    connection.set_prepared_statement_cache_capacity(PREPARED_STATEMENT_CACHE);
-
-    let journal: String =
-        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0)) {
-            Ok(mode) => mode,
-            Err(error) => return rebuild_or_fail(error).map(Attempt::Rebuild),
-        };
-    if !journal.eq_ignore_ascii_case("wal") {
-        return Err(StoreError::Damaged {
-            what: format!("the database refused write-ahead logging and reports `{journal}`"),
-        });
-    }
-    connection
-        .pragma_update(None, "synchronous", "NORMAL")
-        .map_err(|error| error::sql("setting the synchronous mode", error))?;
-    connection
-        .pragma_update(None, "foreign_keys", true)
-        .map_err(|error| error::sql("turning foreign keys on", error))?;
-    #[cfg(feature = "induced-failure")]
-    crate::faults::cap_the_pages(&connection)?;
-    Ok(Attempt::Connected(connection))
 }
 
 /// Read the store schema this database carries, and decide whether it is the
@@ -759,10 +646,11 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
         }));
     }
 
-    let version: Option<i64> = match read_meta(connection, ddl::meta::STORE_SCHEMA_VERSION) {
-        Ok(version) => version,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
+    let version: Option<i64> =
+        match norn_db::meta::read_meta(connection, meta::STORE_SCHEMA_VERSION) {
+            Ok(version) => version,
+            Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
+        };
     if version != Some(ddl::STORE_SCHEMA_VERSION) {
         return Ok(Verdict::Rebuild(RebuildReason::StoreSchemaVersion {
             expected: ddl::STORE_SCHEMA_VERSION,
@@ -770,7 +658,7 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
         }));
     }
 
-    let found: Option<String> = match read_meta(connection, ddl::meta::DDL_FINGERPRINT) {
+    let found: Option<String> = match norn_db::meta::read_meta(connection, meta::DDL_FINGERPRINT) {
         Ok(found) => found,
         Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
     };
@@ -781,11 +669,11 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
         }));
     }
 
-    let recorded: Option<String> = match read_meta(connection, ddl::meta::SCHEMA_DIGEST) {
+    let recorded: Option<String> = match norn_db::meta::read_meta(connection, meta::SCHEMA_DIGEST) {
         Ok(recorded) => recorded,
         Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
     };
-    let holds = match schema_digest(connection) {
+    let holds = match norn_db::schema_digest(connection) {
         Ok(digest) => digest,
         Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
     };
@@ -805,7 +693,7 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
     // else — and it is the reading a consumer's whole record of progress is
     // keyed by, so an open that handed it back absent would let a cursor from a
     // discarded database read as a position in this one.
-    let epoch: Option<String> = match read_meta(connection, ddl::meta::STORE_EPOCH) {
+    let epoch: Option<String> = match norn_db::meta::read_meta(connection, meta::STORE_EPOCH) {
         Ok(epoch) => epoch,
         Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
     };
@@ -818,57 +706,29 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
     Ok(Verdict::Usable)
 }
 
-/// The digest of the schema a database actually holds.
+/// Which rung a driver error met while reading the store schema belongs to.
 ///
-/// Every object, in a fixed order, by kind, name and the statement that created
-/// it. A dropped index, table or trigger changes it; so does one redefined
-/// behind the store's back. `sql` is null for an index SQLite created for a
-/// constraint, and the empty string stands in for it.
-fn schema_digest(connection: &Connection) -> rusqlite::Result<String> {
-    let mut statement = connection
-        .prepare("SELECT type, name, ifnull(sql, '') FROM sqlite_schema ORDER BY 1, 2")?;
-    let mut parts: Vec<String> = Vec::new();
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        parts.push(row.get(0)?);
-        parts.push(row.get(1)?);
-        parts.push(row.get(2)?);
-    }
-    Ok(ddl::digest(parts.iter().map(String::as_str)))
-}
-
-/// Whether a driver error met while reading the store schema says the database
-/// is not one this build wrote, or says the environment is broken.
-///
-/// A value in `meta` that will not convert counts as the former: the column's
-/// contents are part of the shape, so text where an integer belongs means the
-/// file was written by something else.
+/// The policy is the substrate's — a code about the file's own contents, or a
+/// value the pinned-scalar column cannot produce, says the file is not one this
+/// build wrote — and what is decided here is what that reading means: a rebuild
+/// reason, or the refused operation the environment made of it.
 fn rebuild_or_fail(error: rusqlite::Error) -> Result<RebuildReason, StoreError> {
-    let unreadable = matches!(
-        error,
-        rusqlite::Error::InvalidColumnType(..)
-            | rusqlite::Error::FromSqlConversionFailure(..)
-            | rusqlite::Error::IntegralValueOutOfRange(..)
-    );
-    if error::is_damaged(&error) || unreadable {
-        Ok(RebuildReason::Damaged {
-            detail: error.to_string(),
-        })
-    } else {
-        Err(error::sql("reading the store schema", error))
+    match norn_db::damage_or_fail("reading the store schema", error) {
+        Ok(detail) => Ok(RebuildReason::Damaged { detail }),
+        Err(refused) => Err(refused.into()),
     }
 }
 
 /// Remove the database and create it again from the statement list.
 fn rebuild(path: &Path, mode: StoreMode) -> Result<Connection, StoreError> {
-    remove_database(path)?;
-    match connect(path)? {
+    norn_db::remove_database(path)?;
+    match norn_db::connect(path)? {
         Attempt::Connected(connection) => {
             create(&connection, mode)?;
             Ok(connection)
         }
-        Attempt::Rebuild(reason) => Err(StoreError::Damaged {
-            what: format!("a database rebuilt from zero is still not readable: {reason}"),
+        Attempt::Unreadable { detail } => Err(StoreError::Damaged {
+            what: format!("a database rebuilt from zero is still not readable: {detail}"),
         }),
     }
 }
@@ -896,41 +756,25 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
             error::sql_at_statement("creating the store schema", &statement, error)
         })?;
     }
-    let digest =
-        schema_digest(&transaction).map_err(|error| error::sql("digesting the schema", error))?;
-    put_meta(
+    let digest = norn_db::schema_digest(&transaction)
+        .map_err(|error| error::sql("digesting the schema", error))?;
+    norn_db::meta::put_meta(
         &transaction,
-        ddl::meta::STORE_SCHEMA_VERSION,
+        meta::STORE_SCHEMA_VERSION,
         ddl::STORE_SCHEMA_VERSION,
     )?;
-    put_meta(&transaction, ddl::meta::DDL_FINGERPRINT, ddl::fingerprint())?;
-    put_meta(&transaction, ddl::meta::SCHEMA_DIGEST, digest)?;
-    put_meta(&transaction, ddl::meta::STORE_MODE, mode.as_str())?;
-    put_meta(&transaction, ddl::meta::WRITE_GENERATION, 0_i64)?;
-    put_meta(
+    norn_db::meta::put_meta(&transaction, meta::DDL_FINGERPRINT, ddl::fingerprint())?;
+    norn_db::meta::put_meta(&transaction, meta::SCHEMA_DIGEST, digest)?;
+    norn_db::meta::put_meta(&transaction, meta::STORE_MODE, mode.as_str())?;
+    norn_db::meta::put_meta(&transaction, meta::WRITE_GENERATION, 0_i64)?;
+    norn_db::meta::put_meta(
         &transaction,
-        ddl::meta::STORE_EPOCH,
-        mint_an_epoch(&transaction)?,
+        meta::STORE_EPOCH,
+        norn_db::mint_an_epoch(&transaction)?,
     )?;
     transaction
         .commit()
         .map_err(|error| error::sql("committing the store schema", error))
-}
-
-/// Mint an epoch for a database being created.
-///
-/// **128 random bits, drawn through the connection the create already holds.**
-/// Two epochs are equal when they name one database lifetime, so what the value
-/// has to carry is identity and nothing else: a clock reading has a platform's
-/// resolution to argue about and a process id is reused, while randomness this
-/// wide makes a collision a thing nobody has to reason about.
-///
-/// It states no fact about the database and is never parsed back. What a reader
-/// does with it is compare it against one it recorded.
-fn mint_an_epoch(connection: &Connection) -> Result<String, StoreError> {
-    connection
-        .query_row("SELECT hex(randomblob(16))", [], |row| row.get(0))
-        .map_err(|error| error::sql("minting a store epoch", error))
 }
 
 /// Reconcile the mode a database records with the mode it is being opened in.
@@ -953,7 +797,7 @@ fn mint_an_epoch(connection: &Connection) -> Result<String, StoreError> {
 /// folded behind a wildcard — a wildcard is how the throwaway-and-absent case
 /// went unnoticed the first time.
 fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(), StoreError> {
-    let recorded = get_meta::<String>(connection, ddl::meta::STORE_MODE)?
+    let recorded = norn_db::meta::get_meta::<String>(connection, meta::STORE_MODE)?
         .as_deref()
         .and_then(StoreMode::from_str);
     match (mode, recorded) {
@@ -973,77 +817,15 @@ fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(
                 .to_string(),
         }),
         (StoreMode::Throwaway, Some(StoreMode::Throwaway)) => {
-            put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
+            norn_db::meta::put_meta(connection, meta::STORE_MODE, mode.as_str())
+                .map_err(StoreError::from)
         }
         (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(()),
         (StoreMode::Durable, Some(StoreMode::Throwaway)) | (StoreMode::Durable, None) => {
-            put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
+            norn_db::meta::put_meta(connection, meta::STORE_MODE, mode.as_str())
+                .map_err(StoreError::from)
         }
     }
-}
-
-/// Write one pinned scalar.
-pub(crate) fn put_meta(
-    connection: &Connection,
-    key: &str,
-    value: impl ToSql,
-) -> Result<(), StoreError> {
-    connection
-        .execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![key, value],
-        )
-        .map_err(|error| error::sql("writing a pinned value", error))?;
-    Ok(())
-}
-
-/// Read one pinned scalar, or `None` where the key is not set.
-pub(crate) fn get_meta<T: rusqlite::types::FromSql>(
-    connection: &Connection,
-    key: &str,
-) -> Result<Option<T>, StoreError> {
-    read_meta(connection, key).map_err(|error| error::sql("reading a pinned value", error))
-}
-
-/// [`get_meta`] with the driver's own error.
-///
-/// The open path needs the error rather than a message: whether a failed `meta`
-/// read means the database is damaged or the environment is broken decides
-/// whether a sound database is discarded, and that decision is one policy over
-/// driver error codes.
-fn read_meta<T: rusqlite::types::FromSql>(
-    connection: &Connection,
-    key: &str,
-) -> rusqlite::Result<Option<T>> {
-    #[cfg(feature = "induced-failure")]
-    if crate::faults::NEXT_META_READ_FAILS.replace(false) {
-        return Err(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-            Some("database is locked".to_string()),
-        ));
-    }
-    connection
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            rusqlite::params![key],
-            |row| row.get(0),
-        )
-        .optional()
-}
-
-/// The next write generation, taken inside whatever transaction is open.
-///
-/// Taking it is the same act as recording it, so the counter cannot be read by
-/// one write and used by another: the update and the read are one statement.
-pub(crate) fn next_generation(connection: &Connection) -> Result<i64, StoreError> {
-    connection
-        .query_row(
-            "UPDATE meta SET value = value + 1 WHERE key = ?1 RETURNING value",
-            rusqlite::params![ddl::meta::WRITE_GENERATION],
-            |row| row.get(0),
-        )
-        .map_err(|error| error::sql("taking the next write generation", error))
 }
 
 /// A closed vocabulary as an SQL list of quoted literals.
@@ -1052,64 +834,6 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
-}
-
-/// Prepare the directory the database file sits in.
-///
-/// A failure here is environmental — a permission, a path that is a file — so it
-/// is reported and nothing is discarded.
-#[allow(clippy::disallowed_methods)] // The derived database's own directory; the store owns its file lifecycle.
-fn prepare_parent(path: &Path) -> Result<(), StoreError> {
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(parent).map_err(|error| StoreError::Lifecycle {
-        operation: "preparing the database directory",
-        path: parent.to_path_buf(),
-        message: error.to_string(),
-    })
-}
-
-/// Remove the database and every sidecar a journal leaves beside it.
-///
-/// All four, because a rebuilt database beside a stale journal is a database
-/// with somebody else's committed pages in it. `-wal` and `-shm` are write-ahead
-/// logging's, and `-journal` is the rollback journal's: a store opens in WAL
-/// mode, but a file this store did not write may carry one, and rung 3 is
-/// reached for exactly those files. A file that is already gone is not a
-/// failure.
-#[allow(clippy::disallowed_methods)] // Removing the derived database at heal rung 3, and tearing a throwaway store down.
-fn remove_database(path: &Path) -> Result<(), StoreError> {
-    for candidate in [
-        path.to_path_buf(),
-        sidecar(path, "-wal"),
-        sidecar(path, "-shm"),
-        sidecar(path, "-journal"),
-    ] {
-        match std::fs::remove_file(&candidate) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(StoreError::Lifecycle {
-                    operation: "removing the database",
-                    path: candidate,
-                    message: error.to_string(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// The path SQLite writes a sidecar to: the database's own path with a suffix
-/// appended to the file name.
-fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
 }
 
 #[cfg(test)]

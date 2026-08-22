@@ -1,0 +1,42 @@
+[package]
+name = "norn-db"
+description = "The SQLite substrate — connection ownership, the pinned-scalar meta pattern, damage typing and a database file's lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# A leaf in the dependency allowlist (docs/architecture.md): zero workspace
+# dependencies. A database here is a file, a statement list and a few pinned
+# scalars; what those statements mean belongs to the crate that hands them
+# over, so nothing about vaults, documents, lanes or orchestration reaches in.
+#
+# `rusqlite` is the substrate this crate exists to own — the one crate in the
+# workspace that opens a SQLite connection, and so the one manifest that names
+# the driver. A client composes SQL through the re-export at this crate's root
+# rather than declaring the dependency a second time. Features are pinned
+# rather than defaulted:
+#
+# - `bundled` compiles SQLite from vendored source, so a schema is read by the
+#   library version this workspace pins rather than by whatever the host
+#   machine ships. It is also what turns FTS5 and JSON1 on, both of which a
+#   client's statement list requires as pillars rather than as optional extras.
+# - `fallible_uint` binds unsigned values to SQLite's signed integers with a
+#   checked conversion, so an offset or a length that does not fit is an error
+#   rather than a wrapped number. The alternative is casting at every call
+#   site, which is where a wrapped number stops being visible.
+# - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
+#   rest is the client's own projection, and a driver convenience that decided
+#   it would be a second spelling of one.
+[dependencies]
+rusqlite = { workspace = true }
+
+# `induced-failure` gates the driver-seam arrangements a suite reaches a rung
+# through: the page cap an open applies, which is a full disk met by the engine
+# rather than described to it, and the busy a pinned-scalar read reports. Off
+# by default, so a shipped build carries neither the arms nor the reads into
+# them. A client forwards its own feature of the same name to this one, because
+# the arrangement is armed in the client's suite and met inside this crate.
+[features]
+induced-failure = []

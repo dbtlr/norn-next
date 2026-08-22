@@ -12,16 +12,19 @@
 //! operation; which of those facts a caller is owed, and under which reason
 //! code, is an orchestration decision.
 //!
-//! **The one judgment this crate does make is damaged or not.** Which driver
+//! **The one judgment that reaches a caller is damaged or not.** Which driver
 //! codes describe the file's own contents is a fact about SQLite, and SQLite is
-//! this crate's to own — a host reading it off a message would be matching on
-//! the driver through a keyhole. So [`sql`] types damage as
-//! [`StoreError::Damaged`] wherever it is met, [`StoreError::damage`] is how a
-//! caller reads that verdict, and the resolution the verdict authorizes — the
-//! database discarded and derived again — stays the host's decision to make.
+//! the substrate's to own — a host reading it off a message would be matching
+//! on the driver through a keyhole. So `norn-db` types damage at the driver
+//! seam, every refusal it hands back arrives here as a [`StoreError`],
+//! [`StoreError::damage`] is how a caller reads that verdict, and the
+//! resolution the verdict authorizes — the database discarded and derived
+//! again — stays the host's decision to make.
 
 use std::fmt;
 use std::path::PathBuf;
+
+use norn_db::{DbError, rusqlite};
 
 /// A store operation that did not happen.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +135,27 @@ impl StoreError {
 
 impl std::error::Error for StoreError {}
 
+/// The substrate's three refusal shapes are three of this crate's own, and the
+/// conversion is the whole of the mapping: the driver-seam judgment about
+/// damage was already taken, and nothing here re-decides it.
+impl From<DbError> for StoreError {
+    fn from(error: DbError) -> Self {
+        match error {
+            DbError::Sql { operation, message } => StoreError::Sql { operation, message },
+            DbError::Lifecycle {
+                operation,
+                path,
+                message,
+            } => StoreError::Lifecycle {
+                operation,
+                path,
+                message,
+            },
+            DbError::Damaged { what } => StoreError::Damaged { what },
+        }
+    }
+}
+
 /// The refusal for a changeset entry, naming which entry it was.
 pub(crate) fn in_entry(
     index: usize,
@@ -147,25 +171,17 @@ pub(crate) fn in_entry(
 
 /// The refusal for a driver error met while `operation` was running.
 ///
-/// **Every driver error this crate reports passes through here, and this is
-/// where damage is typed.** A code describing the file's own contents is
-/// [`StoreError::Damaged`] whichever operation met it — a read, a write, an
-/// increment, a verification — because a corrupt page is the same fact about
-/// the same file at all of them. Reporting it as the refused operation would
-/// leave every caller to re-derive the distinction from a message, and a
-/// caller that cannot tell damaged state from a broken environment resolves
-/// both the same way: by trying again against a database that will never
-/// answer.
+/// **Every driver error this crate reports passes through here**, and the
+/// damage typing under it is `norn-db`'s: a code describing the file's own
+/// contents is [`StoreError::Damaged`] whichever operation met it — a read, a
+/// write, an increment, a verification — because a corrupt page is the same
+/// fact about the same file at all of them. Reporting it as the refused
+/// operation would leave every caller to re-derive the distinction from a
+/// message, and a caller that cannot tell damaged state from a broken
+/// environment resolves both the same way: by trying again against a database
+/// that will never answer.
 pub(crate) fn sql(operation: &'static str, error: rusqlite::Error) -> StoreError {
-    if is_damaged(&error) {
-        return StoreError::Damaged {
-            what: format!("{operation} met a database that is not readable: {error}"),
-        };
-    }
-    StoreError::Sql {
-        operation,
-        message: error.to_string(),
-    }
+    norn_db::sql(operation, error).into()
 }
 
 /// The refusal for a driver error met while running one statement out of a
@@ -180,42 +196,7 @@ pub(crate) fn sql_at_statement(
     statement: &str,
     error: rusqlite::Error,
 ) -> StoreError {
-    match sql(operation, error) {
-        StoreError::Sql { operation, message } => StoreError::Sql {
-            operation,
-            message: format!(
-                "`{}`: {message}",
-                statement.lines().next().unwrap_or(statement)
-            ),
-        },
-        damaged => damaged,
-    }
-}
-
-/// Whether a driver error says the *database* is damaged, as opposed to saying
-/// the environment is.
-///
-/// One policy, read at two places: the open, which resolves damage by
-/// rebuilding before it hands a store back, and [`sql`], which types damage met
-/// by every operation afterwards. The distinction decides whether rebuilding
-/// from zero is the answer.
-/// Discarding a sound database because a disk was full or a permission was
-/// revoked would destroy work to fix nothing, so only the codes that describe
-/// the file's own contents qualify: it is not a database, or its pages are
-/// corrupt.
-///
-/// Two codes deliberately do **not** qualify. `SQLITE_BUSY` and `SQLITE_LOCKED`
-/// say somebody else holds the database, and `SQLITE_SCHEMA` says the schema
-/// moved under a prepared statement — each of them describes a moment rather
-/// than the file, and each of them is resolved by trying again.
-pub(crate) fn is_damaged(error: &rusqlite::Error) -> bool {
-    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
-    match error {
-        rusqlite::Error::SqliteFailure(failure, _) => {
-            matches!(failure.code, DatabaseCorrupt | NotADatabase)
-        }
-        _ => false,
-    }
+    norn_db::sql_at_statement(operation, statement, error).into()
 }
 
 #[cfg(test)]

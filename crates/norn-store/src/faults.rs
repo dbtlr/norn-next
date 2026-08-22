@@ -10,8 +10,10 @@
 //! So the seam lives here. [`induced_failure`] is the arming surface a suite
 //! calls, and the rest of this file is what the store's own paths read: the
 //! thread-local and process-wide arms, the two abort points the increment
-//! checks, the page cap an open applies, and the condition a store schema's
-//! statement list meets.
+//! checks, and the condition a store schema's statement list meets. **Two
+//! arrangements are met at the driver seam rather than here** — the page cap an
+//! open applies, and the busy a pinned-scalar read reports — so the arms behind
+//! them are `norn-db`'s and the surface below forwards to them.
 //!
 //! **The seam is deliberately small.** It names *where* a store operation can be
 //! made to fail, and *how* — a busy database, a full disk, a corrupt or refusing
@@ -20,11 +22,12 @@
 //!
 //! # The whole file is behind a feature
 //!
-//! `induced-failure` gates the module declaration in `lib.rs`, so a shipped
-//! build carries none of this and none of the reads into it: the call sites in
-//! `store.rs` and `increment.rs` are gated on the same feature and compile to
-//! nothing without it. No other crate may open a connection, so a store's own
-//! crate is the only place either an arrangement or its arming surface can live.
+//! `induced-failure` gates the module declaration in `lib.rs` and forwards to
+//! `norn-db`'s feature of the same name, so a shipped build carries none of this
+//! and none of the reads into it: the call sites in `store.rs`, `increment.rs`
+//! and the substrate are gated on the same feature and compile to nothing
+//! without it. No other crate reaches a store's database, so a store's own crate
+//! is the only place either an arrangement or its arming surface can live.
 //!
 //! # Reaching it from outside
 //!
@@ -38,18 +41,18 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use norn_db::rusqlite::{self, Connection};
 
 use crate::error::{self, StoreError};
-use crate::store::{Store, put_meta};
+use crate::store::Store;
 
 /// The arrangements a suite reaches past the store's own guarantees to make.
 ///
 /// Every function here puts the database, or the connection to it, in a state no
 /// store operation produces, and each of them exists because a rung, a refusal or
-/// a verification cannot be reached from outside otherwise — no other crate may
-/// open a connection, so the only way to arrange either is through the crate that
-/// owns the connection. **Nothing in a product path calls any of this.** The
+/// a verification cannot be reached from outside otherwise — no other crate
+/// reaches the derived database, so the only way to arrange either is through
+/// the crate that owns it. **Nothing in a product path calls any of this.** The
 /// module is hidden from the documentation and every name in it says what it
 /// does.
 ///
@@ -71,10 +74,9 @@ pub mod induced_failure {
     use std::sync::atomic::Ordering;
 
     use super::{
-        CHANGESETS_COMMITTED, DISARMED, PAGE_CAP, Store, StoreError, TEAR_AFTER_COMMIT,
-        TEAR_AT_CHUNK_BOUNDARY, error, put_meta,
+        CHANGESETS_COMMITTED, DISARMED, Store, StoreError, TEAR_AFTER_COMMIT,
+        TEAR_AT_CHUNK_BOUNDARY, error, rusqlite,
     };
-    use crate::ddl;
 
     /// The environment variable naming the file fired arms record themselves in.
     ///
@@ -111,11 +113,10 @@ pub mod induced_failure {
         fingerprint: &str,
     ) -> Result<(), StoreError> {
         let transaction = store
-            .connection
-            .transaction()
-            .map_err(|error| error::sql("opening the store schema transaction", error))?;
-        put_meta(&transaction, ddl::meta::STORE_SCHEMA_VERSION, version)?;
-        put_meta(&transaction, ddl::meta::DDL_FINGERPRINT, fingerprint)?;
+            .database
+            .immediate_transaction("opening the store schema transaction")?;
+        norn_db::meta::put_meta(&transaction, norn_db::meta::STORE_SCHEMA_VERSION, version)?;
+        norn_db::meta::put_meta(&transaction, norn_db::meta::DDL_FINGERPRINT, fingerprint)?;
         transaction
             .commit()
             .map_err(|error| error::sql("recording the store schema", error))
@@ -141,7 +142,7 @@ pub mod induced_failure {
     /// be about the file rather than about one process's memory.
     pub fn execute_out_of_band(store: &mut Store, sql: &str) -> Result<(), StoreError> {
         store
-            .connection
+            .connection()
             .execute_batch(sql)
             .map_err(|error| error::sql("running SQL out of band", error))
     }
@@ -155,7 +156,7 @@ pub mod induced_failure {
     /// deterministically — the store's timeout turns real contention into a wait.
     /// The arrangement is per-thread and one-shot.
     pub fn fail_next_meta_read_as_busy() {
-        super::NEXT_META_READ_FAILS.set(true);
+        norn_db::faults::fail_next_meta_read_as_busy();
     }
 
     /// Kill this process partway through the next changeset, once `entries` of
@@ -228,12 +229,12 @@ pub mod induced_failure {
     /// cannot grow at all; [`uncap_the_pages`] clears it, which is what a
     /// recovery case does before demanding the vault again.
     pub fn cap_the_pages(pages: u64) {
-        PAGE_CAP.store(pages, Ordering::SeqCst);
+        norn_db::faults::set_page_cap(pages);
     }
 
     /// Let every store this process opens from here on grow again.
     pub fn uncap_the_pages() {
-        PAGE_CAP.store(0, Ordering::SeqCst);
+        norn_db::faults::set_page_cap(0);
     }
 
     /// How many pages this database is holding.
@@ -243,7 +244,7 @@ pub mod induced_failure {
     /// file size is a number that leaves the case passing for the wrong reason.
     pub fn page_count(store: &mut Store) -> Result<u64, StoreError> {
         store
-            .connection
+            .connection()
             .query_row("PRAGMA page_count", [], |row| row.get(0))
             .map_err(|error| error::sql("reading the page count", error))
     }
@@ -304,7 +305,7 @@ pub mod induced_failure {
     /// one process arms a cap, watches a request refuse under it, and then has
     /// to watch the same request converge without it.
     pub fn disarm() {
-        PAGE_CAP.store(0, Ordering::SeqCst);
+        norn_db::faults::set_page_cap(0);
         *super::ARMED_STORE_SCHEMA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -313,30 +314,7 @@ pub mod induced_failure {
     }
 }
 
-/// Hold this connection to the page count an arrangement capped it at.
-///
-/// The cap is what a database on a disk with no room left meets, and it is met
-/// by the engine rather than by a fabricated error: past the limit every
-/// statement that has to grow the file reports `SQLITE_FULL`, which is the code
-/// a real full disk produces and which every reader downstream classifies
-/// exactly as it classifies one. A build without the feature never reads the
-/// cap.
-pub(crate) fn cap_the_pages(connection: &Connection) -> Result<(), StoreError> {
-    let pages = PAGE_CAP.load(std::sync::atomic::Ordering::Relaxed);
-    if pages == 0 {
-        return Ok(());
-    }
-    connection
-        .pragma_update(None, "max_page_count", pages)
-        .map_err(|error| error::sql("capping the page count", error))
-}
-
 std::thread_local! {
-    /// Whether the next pinned-scalar read reports the database busy. Set only
-    /// by [`induced_failure::fail_next_meta_read_as_busy`], and cleared by the
-    /// read it fails.
-    pub(crate) static NEXT_META_READ_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-
     /// How many entries a changeset applies before this process aborts. Set
     /// only by [`induced_failure::abort_after_changeset_entries`]; nothing
     /// clears it, because nothing runs after the abort it arms.
@@ -360,10 +338,6 @@ static TEAR_AFTER_COMMIT: std::sync::atomic::AtomicU64 =
 /// changeset's first statement.
 static TEAR_AT_CHUNK_BOUNDARY: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(DISARMED);
-
-/// The page count every connection opened from here on is held to, or zero for
-/// a database nothing caps.
-static PAGE_CAP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The database whose next store schema meets a driver error, and the code it
 /// meets — or nothing, which is what every ordinary process holds.

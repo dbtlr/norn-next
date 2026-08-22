@@ -518,8 +518,8 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
-a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and twelve named statements carry an index bar through it: suffix candidates,
+a statement it emitted, because a plan cannot be taken by a crate that may not reach the
+database — and twelve named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 the page a walk reads its scope's unaccounted finding subjects through, the ordered
