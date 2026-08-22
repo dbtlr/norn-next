@@ -67,6 +67,12 @@
 //! The tie-break is what makes a position a position: one changeset stamps every
 //! death it records with one generation, so a cursor holding a generation alone
 //! would either repeat the changeset it stopped inside or skip the rest of it.
+//!
+//! The two feeds are merged in that one order, and they are not disjoint —
+//! a path that died and was written again stands in both. **At one position the
+//! document row outranks the death.** A death deletes the document row, so a
+//! path holding both at one generation is a path that changeset killed and then
+//! wrote, and `documents` holds its end state.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)

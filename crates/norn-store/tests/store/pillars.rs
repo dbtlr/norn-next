@@ -1302,6 +1302,68 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
     );
 }
 
+/// **A path killed and written again in one changeset stands in both feeds at
+/// one position, and the document row is what stands there.** The merged order
+/// the two feeds are read in is `(generation, path)`, and this pair ties it: one
+/// changeset stamps one generation, and the path is the same path. The write
+/// path is what breaks the tie — a death deletes the document row, so a document
+/// row surviving beside the tombstone is the changeset's end state.
+#[test]
+fn a_path_killed_and_rewritten_in_one_changeset_ties_the_two_feeds() {
+    let scratch = Scratch::new("feed-tie");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let at = path("revived.md");
+    write_document(&mut request, &document(at.as_str(), "hash-1", "a body\n"));
+    request
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [
+                norn_store::Change::Death {
+                    path: at.clone(),
+                    provenance: Provenance::HealPrune,
+                },
+                norn_store::Change::Upsert(document(at.as_str(), "hash-2", "another body\n")),
+            ],
+        )
+        .expect("killing and rewriting one path in one changeset");
+
+    let mut living = request
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the document feed");
+    let mut dead = request
+        .changed_tombstones_after(None, norn_store::MAX_PAGE)
+        .expect("the death feed");
+    assert_eq!(living.len(), 1, "the document feed is not one row");
+    assert_eq!(dead.len(), 1, "the death feed is not one row");
+    let (at_living, fed) = living.pop().expect("a row of the document feed");
+    let (at_dead, death) = dead.pop().expect("a row of the death feed");
+
+    assert_eq!(fed.path, at);
+    assert_eq!(death.path, at);
+    assert_eq!(
+        at_living, at_dead,
+        "the two feeds no longer hand back one position for a path killed and rewritten in one \
+         changeset, so the tie this case pins is somewhere else"
+    );
+
+    // What the tie resolves to. The row the store holds is the document the
+    // changeset wrote, so a consumer that broke the tie toward the death would
+    // drop a document the store still has.
+    assert_eq!(
+        fed.content_hash, "hash-2",
+        "the document feed does not carry the hash the changeset wrote"
+    );
+    assert_eq!(
+        request
+            .stored_facts(&at)
+            .expect("reading the rewritten path")
+            .map(|facts| facts.document.content_hash),
+        Some("hash-2".to_string()),
+        "the changeset's end state is not the document it wrote"
+    );
+}
+
 /// **The feed projects the fingerprints a consumer triages on, and they describe
 /// the parts they name.** A body hash equal for two documents with different
 /// frontmatter is what lets a body-deriving consumer skip a fetch; a projection

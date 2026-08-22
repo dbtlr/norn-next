@@ -998,6 +998,22 @@ impl<'a> Request<'a> {
     /// they differ. A page that carried bodies would cost what the fetch it
     /// exists to avoid costs.
     ///
+    /// # The two feeds merge in one order, and the document outranks the death
+    ///
+    /// A consumer reads this feed and [`Request::changed_tombstones_after`] as
+    /// one sequence, merged in `(generation, path)` order, because both are
+    /// pages over the one global write sequence. The two are not disjoint: a
+    /// path that died and was written again holds a document row and a
+    /// tombstone, so it stands in both.
+    ///
+    /// **Where both stand at one position, the document is what is true now.** A
+    /// death deletes the document row, and one changeset stamps every row it
+    /// writes with one generation — so a path holding both at one generation is
+    /// a path that changeset killed and then wrote, and the document row is the
+    /// changeset's end state. A consumer that broke the tie the other way would
+    /// drop a live document and stop deriving from it until something wrote that
+    /// path again.
+    ///
     /// `after` is exclusive.
     pub fn changed_documents_after(
         &self,
@@ -1033,6 +1049,12 @@ impl<'a> Request<'a> {
     /// find. `last_content_hash` is what a consumer matches its own recorded
     /// state against, and it is absent where the death was learned from a path
     /// that was already absent.
+    ///
+    /// A path can stand in both feeds at once: a tombstone records a death and
+    /// never claims the path is absent now. The two are merged in
+    /// `(generation, path)` order, and **at one position the document row
+    /// outranks the death** — see [`Request::changed_documents_after`] for why
+    /// that ordering is what the write path produces.
     ///
     /// `after` is exclusive.
     pub fn changed_tombstones_after(
