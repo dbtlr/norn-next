@@ -505,18 +505,18 @@ impl Store {
         let mut rows = statement
             .query([])
             .map_err(|error| error::sql(operation, error))?;
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<HashedColumns> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        };
         while let Some(row) = rows.next().map_err(|error| error::sql(operation, error))? {
-            let hashed: HashedColumns = (|| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })()
-            .map_err(|error: rusqlite::Error| error::sql(operation, error))?;
-            let (path, body, body_hash, frontmatter, projection_hash) = hashed;
+            let (path, body, body_hash, frontmatter, projection_hash) =
+                read(row).map_err(|error| error::sql(operation, error))?;
             if hash::sub_fingerprint(&body) != body_hash {
                 return Err(StoreError::Damaged {
                     what: format!("`{path}` records a body hash its stored body does not produce"),
