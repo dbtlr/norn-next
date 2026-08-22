@@ -1714,6 +1714,13 @@ const READER_WORK: WorkBar = WorkBar {
     per_row: 160,
 };
 
+/// What a drain that never ends has met: a cursor that stopped moving, so the
+/// reader hands back the row it just handed back. Every drain below is bounded
+/// by the rows its fixture holds, because non-advancement is the hazard a
+/// keyset cursor exists to close and a bar reports it best as an assertion
+/// naming the reader rather than as a run that never returns.
+const STUCK: &str = "the cursor did not advance past the rows the fixture holds";
+
 /// **A paged reader costs a line in the rows it drained, and a re-reading one
 /// does not.**
 ///
@@ -1768,6 +1775,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
                 {
                     cursor = Some(row.path);
                     reached += 1;
+                    assert!(reached <= DRAINED_ROWS, "the heal page: {STUCK}");
                 }
                 reached
             },
@@ -1797,6 +1805,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(next);
                 reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the findings enumeration: {STUCK}");
             }
             reached
         },
@@ -1825,6 +1834,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(death.path);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the tombstone enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1853,6 +1866,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(at);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the suffix-key enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1881,6 +1898,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(term.term);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the indexed-term enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1909,6 +1930,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(next);
                 reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the document change feed: {STUCK}");
             }
             reached
         },
@@ -1937,6 +1959,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(next);
                 reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the death change feed: {STUCK}");
             }
             reached
         },

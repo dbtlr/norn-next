@@ -301,6 +301,13 @@ impl StoreProjection {
         loop {
             let page = request.changed_documents_after(position.as_ref(), PAGE)?;
             let Some((last, _)) = page.last() else { break };
+            // A drain ends because its cursor moves. One that stopped moving
+            // would read the same page forever, so it is named here rather than
+            // met as a run that never returns.
+            assert!(
+                position.as_ref().is_none_or(|held| held < last),
+                "the change feed handed back a page that did not advance the cursor"
+            );
             position = Some(last.clone());
             for (_, fed) in page {
                 sub_fingerprints.insert(
@@ -318,6 +325,10 @@ impl StoreProjection {
                 StoredPathOrder::Sensitive,
             )?;
             let Some(last) = page.last() else { break };
+            assert!(
+                after.as_ref().is_none_or(|held| held < &last.path),
+                "the ordered document page did not advance the cursor"
+            );
             after = Some(last.path.clone());
             let paths: Vec<DocumentPath> = page.into_iter().map(|row| row.path).collect();
             for path in paths {
