@@ -1713,10 +1713,41 @@ pub struct FindingCursor(i64);
 /// sequence: a consumer draining documents and deaths together compares the two
 /// positions to decide which side to advance, and two types that differed only
 /// in name would make that comparison a conversion.
+///
+/// **It comes apart and goes back together**, because a consumer that keeps
+/// progress across runs keeps it at rest rather than in a handle:
+/// [`FeedCursor::generation`] and [`FeedCursor::path`] are the two halves to
+/// record, and [`FeedCursor::at`] is how they come back. What a consumer records
+/// beside them is [`crate::Store::epoch`], and it compares that first: an epoch
+/// that matches makes the recorded pair a position in this database, and an
+/// epoch that does not makes it a position in a database that no longer exists —
+/// where the next drain starts from `None`.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FeedCursor {
     generation: i64,
     path: DocumentPath,
+}
+
+impl FeedCursor {
+    /// The position `(generation, path)` names.
+    ///
+    /// A recorded pair read back into the type a drain resumes from. It states
+    /// nothing about the database it is used against: a caller supplies the
+    /// epoch check, because a pair rebuilt against a store whose epoch moved
+    /// names a place in a sequence that is gone.
+    pub fn at(generation: i64, path: DocumentPath) -> Self {
+        FeedCursor { generation, path }
+    }
+
+    /// The write generation this position is inside.
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    /// The path this position is at within its generation.
+    pub fn path(&self) -> &DocumentPath {
+        &self.path
+    }
 }
 
 /// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.

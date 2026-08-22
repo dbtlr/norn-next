@@ -1364,6 +1364,48 @@ fn a_path_killed_and_rewritten_in_one_changeset_ties_the_two_feeds() {
     );
 }
 
+/// **A cursor comes apart into the two values a consumer records, and those two
+/// values go back together into the position it was.** A consumer that keeps
+/// progress across runs keeps it at rest beside the store epoch, so the drain it
+/// resumes starts from a pair it read back rather than from a handle it held.
+#[test]
+fn a_recorded_feed_position_rebuilds_into_the_cursor_it_was_taken_from() {
+    let scratch = Scratch::new("feed-cursor-round-trip");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("first/a.md", "hash-a", "alpha\n"),
+            document("second/b.md", "hash-b", "beta\n"),
+        ],
+    );
+    write_document(&mut request, &document("third/c.md", "hash-c", "gamma\n"));
+
+    let (taken, _) = request
+        .changed_documents_after(None, 1)
+        .expect("the first page of the document feed")
+        .pop()
+        .expect("a first row");
+    let rebuilt = norn_store::FeedCursor::at(taken.generation(), taken.path().clone());
+    assert_eq!(
+        rebuilt, taken,
+        "a cursor rebuilt from the values it hands out is not the position it was"
+    );
+
+    let from_the_rebuilt: Vec<String> = request
+        .changed_documents_after(Some(&rebuilt), norn_store::MAX_PAGE)
+        .expect("the rest of the feed, from the rebuilt position")
+        .into_iter()
+        .map(|(_, fed)| fed.path.as_str().to_string())
+        .collect();
+    assert_eq!(
+        from_the_rebuilt,
+        vec!["second/b.md", "third/c.md"],
+        "a drain resumed from a rebuilt position does not read what the position it was resumes"
+    );
+}
+
 /// **The feed projects the fingerprints a consumer triages on, and they describe
 /// the parts they name.** A body hash equal for two documents with different
 /// frontmatter is what lets a body-deriving consumer skip a fetch; a projection
