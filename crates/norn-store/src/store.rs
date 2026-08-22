@@ -79,8 +79,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use norn_wire::{FindingKind, Severity};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
@@ -337,8 +336,9 @@ impl Store {
     /// later — and each of them re-runs create, so a new epoch follows a rebuild
     /// rather than being arranged for it.
     ///
-    /// The value is opaque: it is compared against a recorded one and never read
-    /// for what it is made of.
+    /// The value is 128 random bits, and it is opaque: it is compared against a
+    /// recorded one and never read for what it is made of. Two epochs are equal
+    /// when they name one database lifetime, and nothing else is asked of them.
     pub fn epoch(&self) -> &str {
         &self.epoch
     }
@@ -901,38 +901,30 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
     put_meta(&transaction, ddl::meta::SCHEMA_DIGEST, digest)?;
     put_meta(&transaction, ddl::meta::STORE_MODE, mode.as_str())?;
     put_meta(&transaction, ddl::meta::WRITE_GENERATION, 0_i64)?;
-    put_meta(&transaction, ddl::meta::STORE_EPOCH, mint_an_epoch())?;
+    put_meta(
+        &transaction,
+        ddl::meta::STORE_EPOCH,
+        mint_an_epoch(&transaction)?,
+    )?;
     transaction
         .commit()
         .map_err(|error| error::sql("committing the store schema", error))
 }
 
-/// How many epochs this process has minted.
-///
-/// The clock alone is not enough to tell two mints apart: a rebuild is a file
-/// removal and a create, which two platforms report at two resolutions, and a
-/// resolution coarser than that work makes two epochs equal. A counter that
-/// moves once per mint is what makes them distinct whatever the clock reports.
-static EPOCHS_MINTED: AtomicU64 = AtomicU64::new(0);
-
 /// Mint an epoch for a database being created.
 ///
-/// Three parts, because each closes what the others leave open. The creation
-/// instant in nanoseconds separates two databases created by two runs; the
-/// process id separates two created at one instant by two processes, and
-/// survives a clock that moved backwards between them; the mint counter
-/// separates two created by one process, which is what a rebuild inside one run
-/// is.
+/// **128 random bits, drawn through the connection the create already holds.**
+/// Two epochs are equal when they name one database lifetime, so what the value
+/// has to carry is identity and nothing else: a clock reading has a platform's
+/// resolution to argue about and a process id is reused, while randomness this
+/// wide makes a collision a thing nobody has to reason about.
 ///
 /// It states no fact about the database and is never parsed back. What a reader
-/// does with it is compare it against one it recorded, which is why the parts
-/// are concatenated rather than given a grammar.
-fn mint_an_epoch() -> String {
-    let minted = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let sequence = EPOCHS_MINTED.fetch_add(1, Ordering::Relaxed);
-    format!("{minted:032x}-{:08x}-{sequence:016x}", std::process::id())
+/// does with it is compare it against one it recorded.
+fn mint_an_epoch(connection: &Connection) -> Result<String, StoreError> {
+    connection
+        .query_row("SELECT hex(randomblob(16))", [], |row| row.get(0))
+        .map_err(|error| error::sql("minting a store epoch", error))
 }
 
 /// Reconcile the mode a database records with the mode it is being opened in.
