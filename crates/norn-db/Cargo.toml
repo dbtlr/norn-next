@@ -13,10 +13,12 @@ publish.workspace = true
 # over, so nothing about vaults, documents, lanes or orchestration reaches in.
 #
 # `rusqlite` is the substrate this crate exists to own — the one crate in the
-# workspace that opens a SQLite connection, and so the one manifest that names
-# the driver. A client composes SQL through the re-export at this crate's root
-# rather than declaring the dependency a second time. Features are pinned
-# rather than defaulted:
+# workspace that opens a SQLite connection, and so the one crate manifest that
+# declares the driver. A client composes SQL through the re-export at this
+# crate's root rather than declaring the dependency a second time. The version
+# and the features are pinned in the workspace root manifest, which is what
+# this `workspace = true` inherits; what that pin holds, and why each half of
+# it is not optional:
 #
 # - `bundled` compiles SQLite from vendored source, so a schema is read by the
 #   library version this workspace pins rather than by whatever the host

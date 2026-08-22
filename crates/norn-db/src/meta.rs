@@ -14,17 +14,20 @@
 //!
 //! # Two kinds of key, and this crate owns one of them
 //!
-//! **The mechanics keys are here** — the pinned store schema version, the DDL
-//! fingerprint, the schema digest, the store mode, the write generation and
-//! the store epoch. Each of them is read or written by an open, a rebuild or a
-//! write stamp, so each of them is the substrate's rather than any one
-//! client's.
+//! **The mechanics keys are here**, and they are here for two different
+//! reasons. Two of them the substrate reads and writes itself: it reads
+//! [`STORE_EPOCH`] at [`crate::Database::adopt`], and it writes
+//! [`WRITE_GENERATION`] at [`next_generation`]. The other three —
+//! [`STORE_SCHEMA_VERSION`], [`DDL_FINGERPRINT`] and [`SCHEMA_DIGEST`] — are
+//! defined here and written by the client, because every database derived over
+//! this crate records all three and one spelling is what lets a second client's
+//! database be read by the same reasoning as the first's.
 //!
 //! **Every other key belongs to the client that writes it.** A key naming what
-//! a database was derived under, or what it holds a projection of, is the
-//! client's own vocabulary: it spells the key, it decides what the value
-//! means, and it reads and writes it through [`put_meta`] and [`get_meta`]
-//! like any other pinned scalar.
+//! a database was derived under, what it holds a projection of, or whether its
+//! file outlives the handle, is the client's own vocabulary: it spells the key,
+//! it decides what the value means, and it reads and writes it through
+//! [`put_meta`] and [`get_meta`] like any other pinned scalar.
 
 use rusqlite::{Connection, OptionalExtension, ToSql};
 
@@ -53,9 +56,6 @@ pub const DDL_FINGERPRINT: &str = "ddl_fingerprint";
 
 /// The digest of the schema this database held when it was created.
 pub const SCHEMA_DIGEST: &str = "schema_digest";
-
-/// Whether this database's file is durable or disposable.
-pub const STORE_MODE: &str = "store_mode";
 
 /// The global write sequence every write draws its stamp from.
 ///

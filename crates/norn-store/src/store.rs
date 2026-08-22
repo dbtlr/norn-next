@@ -20,7 +20,7 @@
 //! **Reads belong on a separate handle, not on this connection.** That is
 //! recorded here because it is the other half of the writer discipline: a wire
 //! read is answered from a dedicated read-only snapshot handle with its own
-//! connection, opened under the substrate seam like every other, and `&mut`
+//! connection, taken from the substrate seam like every other, and `&mut`
 //! stays what a writer takes. A shared borrow of the store itself cannot serve
 //! reads, because the store lives inside an attachment that lifecycle jobs hold
 //! mutably for their whole duration (ADR 0015). [`SnapshotReader`] is that
@@ -95,9 +95,13 @@ use crate::request::Request;
 /// The discipline the mint must satisfy when it arrives is the one this shape
 /// was carved for. A reader is made from a live [`Store`], because minting from
 /// a live store is what binds the handle's lifetime and what guarantees the
-/// usable `-shm` a read-only WAL open requires. Its connection is opened
-/// read-only with `query_only` set, so a reader answers from the last committed
-/// increment, never blocks the writer, and derives nothing.
+/// usable `-shm` a read-only WAL open requires. Its connection comes from the
+/// substrate seam, which is where every connection comes from — and read-only
+/// with `query_only` set is an open shape `norn-db` gains when the reader is
+/// built: today it opens read-write-create and writes the pragmas a schema is
+/// read under, which a reader that derives nothing may not do. What the shape
+/// buys is a reader that answers from the last committed increment, never
+/// blocks the writer, and derives nothing.
 pub enum SnapshotReader {}
 
 /// Whether the store's file outlives the store.
@@ -214,7 +218,6 @@ impl Store {
     }
 
     fn open_in_mode(path: &Path, mode: StoreMode) -> Result<Self, StoreError> {
-        norn_db::refuse_a_name_that_is_not_a_file(path)?;
         norn_db::prepare_parent(path)?;
         let (connection, outcome) = match norn_db::connect(path)? {
             Attempt::Connected(connection) => match inspect(&connection)? {
@@ -765,7 +768,7 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
     )?;
     norn_db::meta::put_meta(&transaction, meta::DDL_FINGERPRINT, ddl::fingerprint())?;
     norn_db::meta::put_meta(&transaction, meta::SCHEMA_DIGEST, digest)?;
-    norn_db::meta::put_meta(&transaction, meta::STORE_MODE, mode.as_str())?;
+    norn_db::meta::put_meta(&transaction, ddl::meta::STORE_MODE, mode.as_str())?;
     norn_db::meta::put_meta(&transaction, meta::WRITE_GENERATION, 0_i64)?;
     norn_db::meta::put_meta(
         &transaction,
@@ -797,7 +800,7 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
 /// folded behind a wildcard — a wildcard is how the throwaway-and-absent case
 /// went unnoticed the first time.
 fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(), StoreError> {
-    let recorded = norn_db::meta::get_meta::<String>(connection, meta::STORE_MODE)?
+    let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
         .as_deref()
         .and_then(StoreMode::from_str);
     match (mode, recorded) {
@@ -817,12 +820,12 @@ fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(
                 .to_string(),
         }),
         (StoreMode::Throwaway, Some(StoreMode::Throwaway)) => {
-            norn_db::meta::put_meta(connection, meta::STORE_MODE, mode.as_str())
+            norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
                 .map_err(StoreError::from)
         }
         (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(()),
         (StoreMode::Durable, Some(StoreMode::Throwaway)) | (StoreMode::Durable, None) => {
-            norn_db::meta::put_meta(connection, meta::STORE_MODE, mode.as_str())
+            norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
                 .map_err(StoreError::from)
         }
     }

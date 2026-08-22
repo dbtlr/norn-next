@@ -16,12 +16,14 @@
 //! # What lives here, and what lives under the seam
 //!
 //! **The mechanics keys are `norn-db`'s** — the pinned store schema version,
-//! the DDL fingerprint, the schema digest taken at create, the store mode, the
-//! write generation and the store epoch. Each of them is read or written by an
-//! open, a rebuild or a write stamp, so each belongs to the crate that
-//! performs those acts. This module names the three that are the store's own:
-//! `vault_schema_bytes`, `vault_schema_fingerprint` and
-//! `vault_schema_generation` — the pinned vault-schema projection.
+//! the DDL fingerprint, the schema digest taken at create, the write
+//! generation and the store epoch. Every database derived over the substrate
+//! records them, so one spelling of each belongs to the crate every such
+//! database is opened through. This module names the keys that are the store's
+//! own: `vault_schema_bytes`, `vault_schema_fingerprint` and
+//! `vault_schema_generation` — the pinned vault-schema projection — and
+//! `store_mode`, which is a fact about this crate's own two ways of opening
+//! rather than about running a database.
 //!
 //! # The vault-schema projection is derived state
 //!
@@ -42,3 +44,11 @@ pub(crate) const VAULT_SCHEMA_FINGERPRINT: &str = "vault_schema_fingerprint";
 
 /// The write generation the vault schema was pinned at.
 pub(crate) const VAULT_SCHEMA_GENERATION: &str = "vault_schema_generation";
+
+/// Whether this store's file outlives the store — durable or throwaway.
+///
+/// The values and what a disagreement between the recorded one and the one an
+/// open asks for means are [`crate::StoreMode`]'s and [`crate::Store`]'s: the
+/// substrate opens a file and never decides whether that file survives the
+/// handle.
+pub(crate) const STORE_MODE: &str = "store_mode";

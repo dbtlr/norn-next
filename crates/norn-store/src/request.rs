@@ -756,9 +756,8 @@ impl<'a> Request<'a> {
     pub fn stored_facts(&mut self, path: &DocumentPath) -> Result<Option<StoredFacts>, StoreError> {
         let transaction = self
             .store
-            .connection()
-            .unchecked_transaction()
-            .map_err(|error| error::sql("opening the stored-facts snapshot", error))?;
+            .database
+            .deferred_transaction("opening the stored-facts snapshot")?;
         let found = Self::read_one(
             &transaction,
             &format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),

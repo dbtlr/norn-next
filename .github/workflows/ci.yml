@@ -80,16 +80,17 @@ jobs:
         run: cargo build --locked --workspace
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # The lint above never sees norn-fs's or norn-store's library with the
-      # feature off. Each is its own dev-dependency with `induced-failure` on, so
-      # `--all-targets` pulls the dev graph in and cargo unifies the feature to
-      # on for every target in the run — including the library. The shipped
-      # build is the feature-off one, and the items each fault seam leaves behind
-      # there are held clean by `cfg_attr` allows that nothing else checks. This
-      # step is the lane that checks them: the libraries alone, no dev targets,
-      # no feature.
+      # The lint above never sees norn-db's, norn-fs's or norn-store's library
+      # with the feature off. norn-fs and norn-store are each their own
+      # dev-dependency with `induced-failure` on, and norn-store forwards the
+      # feature to norn-db, so `--all-targets` pulls the dev graph in and cargo
+      # unifies the feature to on for every target in the run — including the
+      # libraries. The shipped build is the feature-off one, and the items each
+      # fault seam leaves behind there are held clean by `cfg_attr` allows that
+      # nothing else checks. This step is the lane that checks them: the
+      # libraries alone, no dev targets, no feature.
       - name: Lint the shipped libraries
-        run: cargo clippy --locked -p norn-fs -p norn-store --lib -- -D warnings
+        run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
       # The workspace lint above builds norn-host's targets with its
       # `induced-failure` feature off, and that crate's lockdown and
       # crash-convergence suites are whole files behind the feature: with it off
@@ -100,10 +101,11 @@ jobs:
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace
-      # Three crates declare an `induced-failure` feature, and the workspace test
-      # above reaches two of them. norn-fs and norn-store each turn their own on
-      # through a self dev-dependency, so those crates' lockdown and environment
-      # suites run above already. norn-host's is a feature a caller asks for, and
+      # Four crates declare an `induced-failure` feature, and the workspace test
+      # above reaches three of them. norn-fs and norn-store each turn their own
+      # on through a self dev-dependency, and norn-store forwards it to norn-db,
+      # so those crates' lockdown and environment suites run above already.
+      # norn-host's is a feature a caller asks for, and
       # nothing above asks: its crash-convergence proof (kill_recovery.rs) and
       # its lockdown suite are whole files behind it and compile to zero tests
       # there. This step is scoped to that crate for that reason.

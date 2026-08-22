@@ -27,7 +27,8 @@
 //! - [`digest`] and [`schema_digest`] — which statement list produced this
 //!   database, and whether it still holds what that list created.
 //! - [`Database::immediate_transaction`] — the transaction discipline every
-//!   write goes through.
+//!   write goes through, and [`Database::deferred_transaction`], the read
+//!   snapshot a multi-statement read answers from.
 //! - [`sql`] and [`is_damaged`] — the one judgment made about a driver error:
 //!   damaged state, which authorizes a rebuild, or a broken environment, which
 //!   does not.
@@ -53,10 +54,7 @@ pub mod meta;
 mod plan;
 mod schema;
 
-pub use database::{
-    Attempt, Database, connect, mint_an_epoch, prepare_parent, refuse_a_name_that_is_not_a_file,
-    remove_database,
-};
+pub use database::{Attempt, Database, connect, mint_an_epoch, prepare_parent, remove_database};
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{EmittedPlan, PlanStep, emitted_plan};
 pub use schema::{digest, schema_digest};

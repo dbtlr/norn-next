@@ -16,9 +16,10 @@ publish.workspace = true
 # `norn-db` is the substrate this crate is the first client of. It owns the
 # connection, the pinned-scalar mechanics, the DDL fingerprint, the store epoch
 # and the database file's lifecycle; this crate owns what the statements and
-# the rows mean. The driver itself is named in that crate's manifest alone and
-# reached through its re-export, which is what makes "one crate knows SQL" a
-# fact about the manifests and not only about the code.
+# the rows mean. The driver is declared by that crate's manifest alone — the
+# workspace root pins its version and its features — and reached through its
+# re-export, which is what makes "one crate knows SQL" a fact about the
+# manifests and not only about the code.
 #
 # `sha2` is here because this crate hashes rather than only stores hashes. A
 # document row carries a sub-fingerprint per part a change-feed consumer derives

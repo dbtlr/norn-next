@@ -140,12 +140,42 @@ impl Database {
     /// the busy timeout turns into a wait. `operation` names what the write is,
     /// because a refusal to begin says which lock was held and never which
     /// write wanted it.
+    ///
+    /// [`Database::deferred_transaction`] is the sibling a read snapshot takes;
+    /// nothing that writes may take that one.
     pub fn immediate_transaction(
         &mut self,
         operation: &'static str,
     ) -> Result<Transaction<'_>, DbError> {
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error::sql(operation, error))
+    }
+
+    /// Open a transaction that takes no lock at `BEGIN` — `BEGIN DEFERRED`.
+    ///
+    /// **This is what a multi-statement read runs in**, so that every statement
+    /// in it answers from one write-ahead-log snapshot rather than from
+    /// whatever is committed when each of them runs. A read takes no write
+    /// lock, so the upgrade deadlock [`Database::immediate_transaction`] exists
+    /// to rule out is not reachable from here; a write inside one is, which is
+    /// why the two spellings are separate and named for the lock they take.
+    ///
+    /// The behavior is pinned at the call rather than read from the
+    /// connection's default, which is a value SQLite lets anything holding the
+    /// connection mutably change. `operation` names what the read is, for the
+    /// same reason the write's does.
+    ///
+    /// **The caller guarantees no transaction is already open on this
+    /// connection**, because a nested `BEGIN` is a driver error rather than a
+    /// compile error here. What enforces it in practice is the write
+    /// discipline above: every request borrows its store mutably, so no second
+    /// transaction on one connection can be alive while this one is.
+    pub fn deferred_transaction(
+        &self,
+        operation: &'static str,
+    ) -> Result<Transaction<'_>, DbError> {
+        Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(|error| error::sql(operation, error))
     }
 }
@@ -156,13 +186,20 @@ impl Database {
 /// say, and neither is a file the lifecycle operations here could remove or
 /// rebuild. A caller that passed one made a mistake about what a database is,
 /// which is a refusal — never a verdict about stored state.
-pub fn refuse_a_name_that_is_not_a_file(path: &Path) -> Result<(), DbError> {
+///
+/// **Both entry points that take a path call this for themselves** — [`connect`]
+/// and [`remove_database`] — so the refusal is the substrate's rather than a
+/// step each client remembers to run first. A client that forgot one would
+/// otherwise open an in-memory database and be told it succeeded. `operation`
+/// is the caller's own, because the two of them refuse the same name for the
+/// same reason and report different acts.
+fn refuse_a_name_that_is_not_a_file(operation: &'static str, path: &Path) -> Result<(), DbError> {
     let spelled = path.to_string_lossy();
     if NOT_A_FILE.contains(&spelled.as_ref()) {
         return Err(DbError::Lifecycle {
-            operation: "opening the database",
+            operation,
             path: path.to_path_buf(),
-            message: "a store is a file, and this names a database that is not one".to_string(),
+            message: "a database is a file, and this names one that is not".to_string(),
         });
     }
     Ok(())
@@ -174,8 +211,13 @@ pub fn refuse_a_name_that_is_not_a_file(path: &Path) -> Result<(), DbError> {
 /// Every connection this workspace holds comes from here. The journal mode is
 /// read back rather than assumed, because a database that refuses write-ahead
 /// logging is not a database a caller can keep its promises on.
+///
+/// A name SQLite reads as something other than a file — `:memory:` and the
+/// empty name — is refused here rather than opened, so a client that never
+/// checks one for itself cannot be told an in-memory database is its file.
 #[allow(clippy::disallowed_methods)] // The substrate seam: this is the one place a SQLite connection is opened.
 pub fn connect(path: &Path) -> Result<Attempt, DbError> {
+    refuse_a_name_that_is_not_a_file("opening the database", path)?;
     let connection =
         Connection::open_with_flags(path, OPEN_FLAGS).map_err(|error| DbError::Lifecycle {
             operation: "opening the database",
@@ -254,8 +296,14 @@ pub fn prepare_parent(path: &Path) -> Result<(), DbError> {
 /// is in WAL mode, but a file this crate did not write may carry one, and a
 /// rebuild is reached for exactly those files. A file that is already gone is
 /// not a failure.
+///
+/// A name SQLite reads as something other than a file is refused here too,
+/// before anything is removed: nothing on disk answers to `:memory:` or to the
+/// empty name, so removing four files that were never there and reporting
+/// success would tell a caller a database it can still read is gone.
 #[allow(clippy::disallowed_methods)] // Discarding a database, and tearing a disposable one down.
 pub fn remove_database(path: &Path) -> Result<(), DbError> {
+    refuse_a_name_that_is_not_a_file("removing the database", path)?;
     for candidate in [
         path.to_path_buf(),
         sidecar(path, "-wal"),

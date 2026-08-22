@@ -114,7 +114,7 @@ pub mod induced_failure {
     ) -> Result<(), StoreError> {
         let transaction = store
             .database
-            .immediate_transaction("opening the store schema transaction")?;
+            .deferred_transaction("opening the store schema transaction")?;
         norn_db::meta::put_meta(&transaction, norn_db::meta::STORE_SCHEMA_VERSION, version)?;
         norn_db::meta::put_meta(&transaction, norn_db::meta::DDL_FINGERPRINT, fingerprint)?;
         transaction
