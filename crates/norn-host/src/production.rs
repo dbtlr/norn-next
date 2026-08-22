@@ -5709,7 +5709,7 @@ mod tests {
         let attachment = ops.attach(&f.registration(), &progress).unwrap();
         let database = attachment.store.path().to_path_buf();
         ops.detach(&name, attachment);
-        corrupt_the_document_pages(&database);
+        corrupt_the_document_pages(&f, &database);
 
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
@@ -6086,17 +6086,23 @@ mod tests {
     /// the schema. This is real corruption rather than an injected verdict: what
     /// the store meets is a page SQLite refuses to read.
     ///
-    /// **The last quarter, not the last half.** The schema's own pages are
-    /// allocated while the statement list runs, before a single document is
-    /// written, so they are all within the pages the created database occupied —
-    /// and that is a share of the finished file rather than a fixed page, so a
-    /// schema that grows moves the boundary the proxy has to stay behind. A
-    /// quarter of a store holding this many documents is still many pages of
-    /// them, which is what the read below meets.
-    fn corrupt_the_document_pages(database: &Path) {
+    /// **The boundary is measured, not a share of the file.** A store created
+    /// beside this one holds the same store schema and no documents, so its
+    /// length is exactly how far the create wrote — and every byte past that
+    /// mark in this database was appended by a later write. A fraction of the
+    /// finished file names the same boundary only until the schema next grows.
+    fn corrupt_the_document_pages(f: &Fixture, database: &Path) {
+        let measured = f.root.join("created-length.sqlite3");
+        Store::open(&measured)
+            .expect("creating a store to measure a create by")
+            .close()
+            .expect("closing the measured store");
+        let head = fs::metadata(&measured).unwrap().len() as usize;
         let mut bytes = fs::read(database).unwrap();
-        let head = bytes.len() - bytes.len() / 4;
-        assert!(head > 0, "the database is empty");
+        assert!(
+            bytes.len() > head,
+            "the database holds no pages past the ones its create wrote"
+        );
         for byte in bytes.iter_mut().skip(head) {
             *byte = 0x5a;
         }
