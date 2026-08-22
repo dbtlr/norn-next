@@ -11,9 +11,12 @@
 //! at the write is a value the row it describes can move out from under.
 //!
 //! **The same value class as `documents.content_hash`**: SHA-256, spelled as 64
-//! lowercase hex digits, which is the form the filesystem seam hands over. A
-//! consumer comparing a body hash against a content hash gets a meaningful
-//! answer — unequal — rather than a type error dressed as one.
+//! lowercase hex digits, which is the form the filesystem seam hands over. So a
+//! consumer comparing a body hash against a content hash compares two hashes of
+//! bytes rather than meeting a type error dressed as an answer. The two are
+//! equal where the body is the whole document — one carrying no frontmatter
+//! block — and that costs nothing, because the two values answer
+//! different questions and neither is read as the other.
 
 use std::fmt::Write as _;
 

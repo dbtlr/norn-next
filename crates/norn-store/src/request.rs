@@ -964,6 +964,11 @@ impl<'a> Request<'a> {
     /// in write-generation order, each projected down to its path and its
     /// fingerprints.
     ///
+    /// The consuming layer is the first lane-2 engine, and no consumer in the
+    /// current call graph reads this seam: the equivalence comparator drains
+    /// this feed for the fingerprints it projects, which is a comparator reading
+    /// state at rest rather than a consumer keeping progress against it.
+    ///
     /// # The feed is a query over current state, never a retained log
     ///
     /// What comes back is the `documents` table as it stands, read in the order
@@ -1042,7 +1047,10 @@ impl<'a> Request<'a> {
     /// The other half of [`Request::changed_documents_after`], and it carries
     /// the same contract: a query over the `tombstones` table as it stands
     /// rather than a log, ordered by the one global write sequence, paged by a
-    /// [`FeedCursor`] that is valid within one store epoch.
+    /// [`FeedCursor`] that is valid within one store epoch. Its consuming layer
+    /// is the first lane-2 engine, and nothing in the current call graph reads
+    /// it — not even the equivalence comparator, which drains the living side
+    /// alone.
     ///
     /// A consumer needs both halves. One reading the living alone keeps deriving
     /// from a path that is gone, because a document that died leaves no row to

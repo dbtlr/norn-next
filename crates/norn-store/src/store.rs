@@ -339,6 +339,12 @@ impl Store {
     /// The value is 128 random bits, and it is opaque: it is compared against a
     /// recorded one and never read for what it is made of. Two epochs are equal
     /// when they name one database lifetime, and nothing else is asked of them.
+    ///
+    /// The layer that records one is the first lane-2 engine, which is the layer
+    /// that keeps a change-feed cursor. Nothing in the current call graph reads
+    /// this: the only reader of a feed today is the equivalence comparator, and
+    /// a comparator holds its positions no further than the drain it took them
+    /// in.
     pub fn epoch(&self) -> &str {
         &self.epoch
     }

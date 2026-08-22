@@ -133,6 +133,12 @@
 //! many rows with one generation, so a generation is not a position — a cursor
 //! that held one alone would either repeat every row of the changeset it stopped
 //! inside or skip the rest of it.
+//!
+//! **What it costs.** A covering index is a second copy of the columns it
+//! covers: three 64-character hashes and the path, per document, beside the
+//! table's own. And `generation` leads the key, so an entry does not stay put —
+//! every re-derivation moves its row's entry to the end of the index, and a full
+//! heal, which re-derives every document, churns the whole index.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
