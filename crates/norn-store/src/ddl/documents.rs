@@ -79,6 +79,7 @@
 //! - `body` — the document's body, frontmatter block excluded. It is here
 //!   because the full-text pillar is an external-content FTS5 index over this
 //!   column; see [`crate::ddl::fts`] for what that buys and what it costs.
+//! - `body_hash` — the hash of `body`, in the value class `content_hash` holds.
 //! - `body_offset` — where `body` begins inside the document. **Every span
 //!   this schema stores is body-relative**, because that is the frame
 //!   `norn-text` reports them in; this column is the one place that frame is
@@ -90,6 +91,10 @@
 //!   presence column would be a redundant answer to a question this one already
 //!   settles. See [`crate::json`], and `frontmatter_diagnostic_count` for which
 //!   of the two `NULL` means.
+//! - `frontmatter_projection_hash` — the hash of `frontmatter`, and `NULL`
+//!   exactly where `frontmatter` is. A `CHECK` holds the two together, because
+//!   a hash beside no projection describes a projection this row does not carry
+//!   and a projection beside no hash is a row the feed cannot triage.
 //! - `frontmatter_diagnostic_count` — how many **frontmatter-scoped**
 //!   diagnostics the parse raised, which is what discriminates the two things
 //!   `frontmatter IS NULL` can mean: zero is "there was no block", and nonzero
@@ -100,6 +105,40 @@
 //! - `generation` — the write generation this row was last derived at.
 //! - `derived_at` — unix seconds, for a person reading a report. It orders
 //!   nothing: `generation` does that.
+//!
+//! # The sub-fingerprints are stamped where the row is derived
+//!
+//! `content_hash` answers whether the *document* changed, and that is the
+//! question a heal asks. A change-feed consumer asks a narrower one: whether the
+//! part it derives from changed. A consumer over bodies re-reads a document
+//! whose frontmatter alone moved, and a consumer over frontmatter re-reads one
+//! whose body alone moved, unless the row states the two separately.
+//!
+//! So the row carries both, in the same value class as `content_hash`, and the
+//! increment stamps them from the values it is already writing — the body it
+//! stores, and the canonical JSON projection it has just materialized. That is
+//! what lets a feed consumer **triage before it fetches**: it compares hashes it
+//! read off the feed and asks for a body only where the hash it holds no longer
+//! matches.
+//!
+//! # The change feed is a query, and this index is what makes it one
+//!
+//! `documents_change_feed` orders by `generation` and breaks ties on `path`,
+//! which is the order a consumer drains current state in, and then carries the
+//! three fingerprints. So a page of the feed is a seek into the index and a walk
+//! along it: the row itself is never read, nothing sorts, and a drain of the
+//! whole table costs one pass over the index rather than one per page of it.
+//!
+//! The tie-break is load-bearing rather than decorative. One changeset stamps
+//! many rows with one generation, so a generation is not a position — a cursor
+//! that held one alone would either repeat every row of the changeset it stopped
+//! inside or skip the rest of it.
+//!
+//! **What it costs.** A covering index is a second copy of the columns it
+//! covers: three 64-character hashes and the path, per document, beside the
+//! table's own. And `generation` leads the key, so an entry does not stay put —
+//! every re-derivation moves its row's entry to the end of the index, and a full
+//! heal, which re-derives every document, churns the whole index.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
@@ -113,13 +152,19 @@ const STATEMENTS: &[&str] = &[
     content_hash                 TEXT    NOT NULL,
     byte_length                  INTEGER NOT NULL,
     body                         TEXT    NOT NULL,
+    body_hash                    TEXT    NOT NULL,
     body_offset                  INTEGER NOT NULL,
     frontmatter                  TEXT,
+    frontmatter_projection_hash  TEXT,
     frontmatter_diagnostic_count INTEGER NOT NULL,
     generation                   INTEGER NOT NULL,
-    derived_at                   INTEGER NOT NULL
+    derived_at                   INTEGER NOT NULL,
+    CHECK ((frontmatter IS NULL) = (frontmatter_projection_hash IS NULL))
 )",
     "CREATE UNIQUE INDEX documents_path ON documents(path)",
     "CREATE INDEX documents_path_nocase ON documents(path COLLATE NOCASE, path)",
     "CREATE INDEX documents_suffix_key ON documents(suffix_key)",
+    "CREATE INDEX documents_change_feed ON documents(
+    generation, path, content_hash, body_hash, frontmatter_projection_hash
+)",
 ];

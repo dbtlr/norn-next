@@ -355,6 +355,46 @@ pub struct StoredTombstone {
     pub recorded_at: i64,
 }
 
+/// One live document row, as the change feed projects it.
+///
+/// **Fingerprints and a position, and nothing else.** The feed exists so a
+/// lane-2 consumer can decide what to fetch without fetching anything: it reads
+/// the hash of the part it derives from, compares it against the one it recorded
+/// last time, and asks for the document only where the two differ. A projection
+/// carrying the body would make every page cost what the fetch it exists to
+/// avoid costs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedDocument {
+    pub path: DocumentPath,
+    /// The write generation this row was last derived at, which is what orders
+    /// it in the feed.
+    pub generation: i64,
+    /// The hash of the whole document. **Only a content hash concludes
+    /// "unchanged"** about the document as a document.
+    pub content_hash: String,
+    /// The hash of the stored body, for a consumer that derives from bodies.
+    pub body_hash: String,
+    /// The hash of the stored frontmatter projection, and `None` exactly where
+    /// there is no projection — no block, or a block that did not parse.
+    pub frontmatter_projection_hash: Option<String>,
+}
+
+/// One recorded death, as the change feed projects it.
+///
+/// The other half of what a consumer has to see: a consumer reading the living
+/// alone keeps deriving from a path that is gone. `last_content_hash` is what a
+/// consumer matches its own recorded state against, and it is absent for the
+/// same reason it is absent on the row — a death learned from a path already
+/// absent has nothing left to hash.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedTombstone {
+    pub path: DocumentPath,
+    /// The write generation the death was recorded at, which is what orders it
+    /// in the feed.
+    pub generation: i64,
+    pub last_content_hash: Option<String>,
+}
+
 /// One resolution candidate in a finding's bounded head.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateFact {

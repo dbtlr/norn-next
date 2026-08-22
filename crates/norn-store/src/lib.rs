@@ -22,6 +22,12 @@
 //!   one way in for document facts. **A changeset is the unit of atomicity**: it
 //!   lands whole or not at all, and that entry point states the contract in
 //!   full.
+//! - [`Request::changed_documents_after`] and
+//!   [`Request::changed_tombstones_after`] — the change feed, which is a
+//!   generation-ordered query over current state rather than a retained log. A
+//!   consumer pages it at its own rate, triages on the fingerprints it projects,
+//!   and keeps [`Store::epoch`] beside its cursor: a position is meaningless in
+//!   a database that was discarded and built again.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.
@@ -63,6 +69,7 @@ mod error;
 mod facts;
 #[cfg(feature = "induced-failure")]
 mod faults;
+mod hash;
 mod increment;
 mod json;
 mod path;
@@ -72,10 +79,10 @@ mod store;
 pub use counters::DerivationCounters;
 pub use error::StoreError;
 pub use facts::{
-    BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FindingFacts, HeadingFact,
-    IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance, SchemaPin, Span,
-    StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone, TagFact,
-    TagSource, VaultSchemaPin, VectorFacts,
+    BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,
+    FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport,
+    Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
@@ -86,8 +93,8 @@ pub use path::{
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, EmittedPlan, ExplainedStatement, FindingCursor, MAX_PAGE, PlanStep, Request,
-    SubjectScope,
+    DiscardScope, EmittedPlan, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, PlanStep,
+    Request, SubjectScope,
 };
 pub use store::{
     OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,

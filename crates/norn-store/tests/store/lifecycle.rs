@@ -68,6 +68,144 @@ fn a_first_open_creates_and_a_second_reuses() {
     assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
 }
 
+/// **An epoch is minted at create and stands for as long as the database does.**
+/// It is what a change-feed consumer keys its recorded progress by, so an epoch
+/// that moved under a database nothing discarded would send every consumer back
+/// to a rescan it did not need, and one that stood across a discard would let a
+/// cursor into a sequence that no longer exists.
+#[test]
+fn an_epoch_is_minted_at_create_and_survives_every_reopen() {
+    let scratch = Scratch::new("epoch");
+    let database = scratch.database();
+
+    let store = Store::open(&database).expect("creating a store");
+    assert_eq!(*store.open_outcome(), OpenOutcome::Created);
+    let minted = store.epoch().to_string();
+    assert!(!minted.is_empty(), "a created store minted no epoch");
+    drop(store);
+
+    let reopened = Store::open(&database).expect("reopening a store");
+    assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
+    assert_eq!(
+        reopened.epoch(),
+        minted,
+        "reopening one database handed back a second epoch, so every consumer's cursor would \
+         read as stale"
+    );
+    // Readable straight off the open, because a consumer compares its recorded
+    // epoch against the store's before it decides whether its cursor means
+    // anything — which is ahead of the first read it takes.
+    drop(reopened);
+
+    let mut store = Store::open(&database).expect("reopening a store");
+    write_document(
+        &mut store.begin_request(),
+        &document("glossary.md", "hash-1", "a body\n"),
+    );
+    assert_eq!(store.epoch(), minted, "a write moved the epoch");
+    drop(store);
+
+    let written = Store::open(&database).expect("reopening after a write");
+    assert_eq!(written.epoch(), minted, "a write moved the epoch at rest");
+}
+
+/// **A discard is a new epoch, whichever route reaches it.** Both are the same
+/// act — the file goes and the statement list runs again — so a consumer that
+/// held a cursor across either finds an epoch it does not recognize and rescans.
+#[test]
+fn a_database_built_again_carries_an_epoch_of_its_own() {
+    let scratch = Scratch::new("epoch-rebuild");
+    let database = scratch.database();
+
+    // The deliberate route: damage found after the open.
+    let store = Store::open(&database).expect("creating a store");
+    let first = store.epoch().to_string();
+    let replaced = store
+        .discard_and_reopen()
+        .expect("discarding and reopening");
+    let second = replaced.epoch().to_string();
+    assert_ne!(
+        first, second,
+        "a discarded database's replacement carries its epoch, so a cursor into the discarded \
+         sequence reads as a position in the new one"
+    );
+    drop(replaced);
+
+    // The open's own route: heal rung 3, reached by a store schema this build
+    // did not write.
+    let mut store = Store::open(&database).expect("reopening a store");
+    induced_failure::record_store_schema_out_of_band(
+        &mut store,
+        ddl::STORE_SCHEMA_VERSION,
+        "0000000000000000",
+    )
+    .expect("recording a store schema this build did not write");
+    drop(store);
+
+    let rebuilt = Store::open(&database).expect("reopening a store");
+    assert!(matches!(
+        rebuilt.open_outcome(),
+        OpenOutcome::RebuiltFromZero(RebuildReason::DdlFingerprint { .. })
+    ));
+    assert_ne!(
+        rebuilt.epoch(),
+        second,
+        "a rebuild from zero kept its epoch"
+    );
+}
+
+/// **A store with no epoch is damage, not an old store to adopt.** Create writes
+/// one, so a database that agrees with this build about its version, its
+/// fingerprint and the schema it holds and records no epoch was written by
+/// something else — and adopting it would let a cursor from a discarded database
+/// read as a position in this one.
+#[test]
+fn a_database_recording_no_epoch_is_rebuilt_from_zero() {
+    let scratch = Scratch::new("epoch-absent");
+    let database = scratch.database();
+    let subject = path("glossary.md");
+
+    let mut store = Store::open(&database).expect("creating a store");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
+    let recorded = store.recorded_store_schema().expect("the recorded schema");
+    let discarded = store.epoch().to_string();
+    induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_epoch'")
+        .expect("removing the epoch");
+    // The three gates ahead of it still pass, which is the point: nothing else
+    // an open reads notices a row leaving `meta`.
+    assert_eq!(
+        store.recorded_store_schema().expect("the recorded schema"),
+        recorded,
+        "removing the epoch moved a value one of the earlier gates reads"
+    );
+    drop(store);
+
+    let mut rebuilt = Store::open(&database).expect("reopening a store");
+    match rebuilt.open_outcome() {
+        OpenOutcome::RebuiltFromZero(RebuildReason::Damaged { detail }) => {
+            assert!(detail.contains("store epoch"), "{detail}");
+        }
+        other => panic!("the store opened as {other:?} rather than rebuilding"),
+    }
+    assert!(!rebuilt.epoch().is_empty(), "the rebuilt store minted none");
+    assert_ne!(
+        rebuilt.epoch(),
+        discarded,
+        "the rebuilt store adopted the epoch the damaged database lost"
+    );
+    assert_eq!(
+        rebuilt
+            .begin_request()
+            .stored_document(&subject)
+            .expect("reading a document"),
+        None,
+        "a rebuild from zero kept derived state from the database it discarded"
+    );
+}
+
 /// A store schema version is pinned at 1 and the fingerprint is the digest of
 /// the whole statement list, so both are readable facts rather than claims.
 #[test]

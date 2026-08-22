@@ -17,12 +17,13 @@
 //! its own deaths through the operational leg instead.
 //!
 //! Most mutations go through the store's own writer, which is what a caller can
-//! really do. Four fields have no writer that reaches them alone — the full-text
+//! really do. Six fields have no writer that reaches them alone — the full-text
 //! index, which is only ever written through `documents.body`; the recorded size
 //! and body offset, which the store refuses to accept unless they add up with
-//! the body; and the timestamp, which the store reads off the clock itself.
-//! Those four reach the database through `induced_failure`, the store's own
-//! fenced seam, and each case says why where it does.
+//! the body; the two sub-fingerprints, which are stamped from the columns they
+//! hash; and the timestamp, which the store reads off the clock itself. Those
+//! six reach the database through `induced_failure`, the store's own fenced
+//! seam, and each case says why where it does.
 
 use norn_store::{Provenance, Store, induced_failure};
 use norn_testkit::equivalence::{
@@ -173,6 +174,43 @@ fn a_changed_body_offset_is_a_divergence() {
         .expect("moving the recorded body offset alone");
     });
     assert_names(&divergence, "document[one/glossary.md].body_offset");
+}
+
+/// A sub-fingerprint is stamped from the column it hashes, so no writer moves
+/// one alone: a body a caller changes changes both fields, and the comparison
+/// would name the body. Writing the hash column on its own is what leaves every
+/// other field standing — and it is the drift a change-feed consumer would act
+/// on, since it triages on this value and fetches nothing where it matches.
+#[test]
+fn a_changed_body_hash_is_a_divergence() {
+    let mut pair = Pair::new("pin-body-hash");
+    let divergence = pair.diverged(|store| {
+        induced_failure::execute_out_of_band(
+            store,
+            "UPDATE documents SET body_hash = 'a hash of nothing stored here'",
+        )
+        .expect("moving the recorded body hash alone");
+    });
+    assert_names(&divergence, "document[one/glossary.md].body_hash");
+}
+
+/// The frontmatter projection's sub-fingerprint, out of band for the same
+/// reason.
+#[test]
+fn a_changed_frontmatter_projection_hash_is_a_divergence() {
+    let mut pair = Pair::new("pin-frontmatter-hash");
+    let divergence = pair.diverged(|store| {
+        induced_failure::execute_out_of_band(
+            store,
+            "UPDATE documents SET frontmatter_projection_hash = 'a hash of nothing stored here'
+             WHERE frontmatter IS NOT NULL",
+        )
+        .expect("moving the recorded frontmatter projection hash alone");
+    });
+    assert_names(
+        &divergence,
+        "document[one/glossary.md].frontmatter_projection_hash",
+    );
 }
 
 #[test]

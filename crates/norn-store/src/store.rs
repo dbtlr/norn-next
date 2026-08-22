@@ -48,18 +48,26 @@
 //! # The database-side heal rung
 //!
 //! Rung 3 is *discard and rebuild*, and this is where it lives. An open reads
-//! three things out of `meta` — the store schema version, the DDL fingerprint,
-//! and the digest of the schema the database was created holding — and rebuilds
-//! from zero when any of them disagrees with this build, or when the file is not
-//! a database at all. The rebuild is the whole file: it is removed, along with
-//! the sidecars a journal leaves beside it, and created again from the statement
-//! list.
+//! four things out of `meta` — the store schema version, the DDL fingerprint,
+//! the digest of the schema the database was created holding, and the store
+//! epoch — and rebuilds from zero when any of them disagrees with this build or
+//! is absent, or when the file is not a database at all. The rebuild is the
+//! whole file: it is removed, along with the sidecars a journal leaves beside
+//! it, and created again from the statement list.
 //!
 //! The third read is what the first two cannot answer. A fingerprint is compared
 //! against a value the database reports about *itself*, so a dropped index, table
 //! or trigger leaves it matching — and a dropped `documents_path` forks every
 //! path into duplicate rows. The schema digest is taken over `sqlite_schema`, so
 //! it is a statement about what is actually there.
+//!
+//! The fourth is not about shape at all. Create mints an epoch, so a database
+//! that agrees with this build about every part of its shape and records none
+//! was written by something else — and it is what every consumer's record of
+//! progress is keyed by, so an open that adopted it would let a cursor into a
+//! discarded database read as a position in this one. A rebuild re-runs create,
+//! which is why a new epoch follows a discard rather than being arranged for it:
+//! see [`Store::epoch`].
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a
@@ -79,6 +87,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql};
 use crate::ddl;
 use crate::error::{self, StoreError};
 use crate::facts::{LinkFamily, Provenance, TagSource};
+use crate::hash;
 use crate::request::Request;
 
 /// How long a connection waits on a lock before reporting the database busy.
@@ -217,6 +226,7 @@ pub struct Store {
     path: PathBuf,
     mode: StoreMode,
     outcome: OpenOutcome,
+    epoch: String,
     torn_down: bool,
 }
 
@@ -267,11 +277,24 @@ impl Store {
                 (rebuild(path, mode)?, OpenOutcome::RebuiltFromZero(reason))
             }
         };
+        // Read once, here, rather than on every ask. The epoch is written at
+        // create and never rewritten, so a value read at open is the value for
+        // as long as this handle is open — and a consumer that has to compare
+        // its recorded epoch against the store's before every read should not
+        // pay a `meta` query to do it.
+        let epoch = get_meta::<String>(&connection, ddl::meta::STORE_EPOCH)?.ok_or_else(|| {
+            StoreError::Damaged {
+                what: "the database records no store epoch, so nothing it holds can be progressed \
+                       against"
+                    .to_string(),
+            }
+        })?;
         Ok(Store {
             connection,
             path: path.to_path_buf(),
             mode,
             outcome,
+            epoch,
             torn_down: false,
         })
     }
@@ -298,6 +321,34 @@ impl Store {
         &self.outcome
     }
 
+    /// The identity this database carries from creation to discard.
+    ///
+    /// **Progress recorded against one epoch is not valid in the next.** A write
+    /// generation orders the writes of one database; the epoch says which
+    /// database those generations belong to. So a consumer that keeps a change-
+    /// feed cursor keeps this beside it, and a cursor whose epoch is not the
+    /// store's names a position in a database that no longer exists — the answer
+    /// there is a rescan from the start of the feed, never a seek.
+    ///
+    /// It is minted at create and never rewritten, so an epoch that moved is a
+    /// database that was discarded and built again. Every route to that is one
+    /// act — heal rung 3 at open, [`Store::discard_and_reopen`] for damage found
+    /// later — and each of them re-runs create, so a new epoch follows a rebuild
+    /// rather than being arranged for it.
+    ///
+    /// The value is 128 random bits, and it is opaque: it is compared against a
+    /// recorded one and never read for what it is made of. Two epochs are equal
+    /// when they name one database lifetime, and nothing else is asked of them.
+    ///
+    /// The layer that records one is the first lane-2 engine, which is the layer
+    /// that keeps a change-feed cursor. Nothing in the current call graph reads
+    /// this: the only reader of a feed today is the equivalence comparator, and
+    /// a comparator holds its positions no further than the drain it took them
+    /// in.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
     /// Open a request. Everything the store does happens inside one, so that
     /// every derivation is attributable to the request that caused it.
     pub fn begin_request(&mut self) -> Request<'_> {
@@ -307,18 +358,29 @@ impl Store {
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Five checks, because a store has five kinds of consistency to lose: the
+    /// Six checks, because a store has six kinds of consistency to lose: the
     /// pages themselves, the foreign keys that carry cascade deletion, the
     /// full-text index against the column it is an index of, the frontmatter
-    /// projection against being JSON at all, and the closed vocabularies against
-    /// the values a reader will accept. The third is what an external-content
-    /// FTS5 table can lose without anything else noticing, which is exactly why
-    /// the index is maintained by triggers — and it is asked at **rank 1**, which
-    /// checks the index against `documents.body` rather than only against itself.
-    /// The fourth is the projection's own claim, checked by the JSON1 reader that
-    /// will be asked to query it. The fifth closes the gap between "the doctor
-    /// says healthy" and a read that fails: a value outside a closed vocabulary
-    /// is damage the reader reports, so the verification has to see it too.
+    /// projection against being JSON at all, the closed vocabularies against
+    /// the values a reader will accept, and each document's sub-fingerprints
+    /// against the columns they are hashes of. The third is what an
+    /// external-content FTS5 table can lose without anything else noticing,
+    /// which is exactly why the index is maintained by triggers — and it is
+    /// asked at **rank 1**, which checks the index against `documents.body`
+    /// rather than only against itself. The fourth is the projection's own
+    /// claim, checked by the JSON1 reader that will be asked to query it. The
+    /// fifth closes the gap between "the doctor says healthy" and a read that
+    /// fails: a value outside a closed vocabulary is damage the reader reports,
+    /// so the verification has to see it too.
+    ///
+    /// The sixth is a **recompute at rest**, for the reason the stored suffix
+    /// key gets one: a sub-fingerprint is a derived column, and every read that
+    /// would notice one drifting from the column it hashes is a read that has
+    /// already trusted it. A change-feed consumer triages on these values and
+    /// fetches nothing where they match, so a body hash that stopped describing
+    /// its body is a document that stops being re-derived and reports nothing
+    /// wrong. The check reads one row at a time, so what it costs in memory is
+    /// one document rather than the table.
     ///
     /// This is a maintenance act rather than a request: it derives nothing, so
     /// it moves no counter.
@@ -427,6 +489,63 @@ impl Store {
                 });
             }
         }
+
+        self.recompute_the_sub_fingerprints()
+    }
+
+    /// Recompute every document's sub-fingerprints from the columns they are
+    /// hashes of, and report the first row that disagrees.
+    ///
+    /// One row at a time, and nothing accumulates: a body is read, hashed and
+    /// dropped before the next row is asked for, so the check costs the widest
+    /// document rather than the table.
+    fn recompute_the_sub_fingerprints(&self) -> Result<(), StoreError> {
+        let operation = "recomputing a document's sub-fingerprints";
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT path, body, body_hash, frontmatter, frontmatter_projection_hash
+                 FROM documents",
+            )
+            .map_err(|error| error::sql(operation, error))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| error::sql(operation, error))?;
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RecomputedRow> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        };
+        while let Some(row) = rows.next().map_err(|error| error::sql(operation, error))? {
+            let (path, body, body_hash, frontmatter, projection_hash) =
+                read(row).map_err(|error| error::sql(operation, error))?;
+            if hash::sub_fingerprint(&body) != body_hash {
+                return Err(StoreError::Damaged {
+                    what: format!("`{path}` records a body hash its stored body does not produce"),
+                });
+            }
+            let agrees = match (&frontmatter, &projection_hash) {
+                (None, None) => true,
+                (Some(projection), Some(recorded)) => {
+                    hash::sub_fingerprint(projection) == *recorded
+                }
+                // The `CHECK` on the table refuses this pair, so reaching it is
+                // damage rather than a shape a write produces.
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            if !agrees {
+                return Err(StoreError::Damaged {
+                    what: format!(
+                        "`{path}` records a frontmatter projection hash its stored projection does \
+                         not produce"
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -507,6 +626,10 @@ impl Store {
         Self::open_in_mode(&path, mode)
     }
 }
+
+/// One row the sub-fingerprint recompute reads: the path a failure names, then
+/// each hashed column beside the hash it has to produce.
+type RecomputedRow = (String, String, String, Option<String>, Option<String>);
 
 /// What a database says about the store schema it was written under.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -675,6 +798,23 @@ fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
             ),
         }));
     }
+
+    // The epoch is the last gate because it is the one the three above cannot
+    // ask. Create writes it, so a database that agrees with this build about
+    // every part of its shape and records no epoch was written by something
+    // else — and it is the reading a consumer's whole record of progress is
+    // keyed by, so an open that handed it back absent would let a cursor from a
+    // discarded database read as a position in this one.
+    let epoch: Option<String> = match read_meta(connection, ddl::meta::STORE_EPOCH) {
+        Ok(epoch) => epoch,
+        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
+    };
+    if epoch.is_none() {
+        return Ok(Verdict::Rebuild(RebuildReason::Damaged {
+            detail: "the database records no store epoch, so it is not a store this build wrote"
+                .to_string(),
+        }));
+    }
     Ok(Verdict::Usable)
 }
 
@@ -767,9 +907,30 @@ fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
     put_meta(&transaction, ddl::meta::SCHEMA_DIGEST, digest)?;
     put_meta(&transaction, ddl::meta::STORE_MODE, mode.as_str())?;
     put_meta(&transaction, ddl::meta::WRITE_GENERATION, 0_i64)?;
+    put_meta(
+        &transaction,
+        ddl::meta::STORE_EPOCH,
+        mint_an_epoch(&transaction)?,
+    )?;
     transaction
         .commit()
         .map_err(|error| error::sql("committing the store schema", error))
+}
+
+/// Mint an epoch for a database being created.
+///
+/// **128 random bits, drawn through the connection the create already holds.**
+/// Two epochs are equal when they name one database lifetime, so what the value
+/// has to carry is identity and nothing else: a clock reading has a platform's
+/// resolution to argue about and a process id is reused, while randomness this
+/// wide makes a collision a thing nobody has to reason about.
+///
+/// It states no fact about the database and is never parsed back. What a reader
+/// does with it is compare it against one it recorded.
+fn mint_an_epoch(connection: &Connection) -> Result<String, StoreError> {
+    connection
+        .query_row("SELECT hex(randomblob(16))", [], |row| row.get(0))
+        .map_err(|error| error::sql("minting a store epoch", error))
 }
 
 /// Reconcile the mode a database records with the mode it is being opened in.

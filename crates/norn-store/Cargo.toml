@@ -30,9 +30,18 @@ publish.workspace = true
 # - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
 #   rest is this crate's own projection, and a driver convenience that decided
 #   it would be a second spelling of one.
+#
+# `sha2` is here because this crate hashes rather than only stores hashes. A
+# document row carries a sub-fingerprint per part a change-feed consumer derives
+# from — the body, and the frontmatter projection — and each is stamped at the
+# one derivation site, over the value the increment is already writing. That is
+# what lets a consumer triage before it fetches, and stamping it anywhere else
+# would put a second answer to "what is at rest here" outside the write that
+# put it there.
 [dependencies]
 norn-wire = { path = "../norn-wire" }
 rusqlite = { workspace = true }
+sha2 = { workspace = true }
 
 # `induced-failure` gates `induced_failure`, the module of out-of-band
 # arrangements the store's own suite reaches through to reach a rung or a

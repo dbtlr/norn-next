@@ -234,6 +234,64 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
     }
 }
 
+/// **A sub-fingerprint is recomputed at rest rather than trusted.** It is a
+/// derived column, and every read that would notice one drifting from the column
+/// it hashes is a read that has already trusted it: a change-feed consumer
+/// triages on these values and fetches nothing where they match, so a body hash
+/// that stopped describing its body is a document that quietly stops being
+/// re-derived.
+///
+/// Both directions of the drift are arranged, because the increment writes the
+/// pair together and only an out-of-band write can separate them: the hash moved
+/// away from its column, and the column moved away from its hash.
+#[test]
+fn a_sub_fingerprint_that_does_not_describe_its_column_is_damage() {
+    for (arrange, named) in [
+        (
+            "UPDATE documents SET body_hash = 'not the hash of anything'",
+            "body hash",
+        ),
+        (
+            "UPDATE documents SET body = 'an entirely different body'",
+            "body hash",
+        ),
+        (
+            "UPDATE documents SET frontmatter_projection_hash = 'not the hash of anything'",
+            "frontmatter projection hash",
+        ),
+        (
+            "UPDATE documents SET frontmatter = '{\"title\":\"another title\"}'",
+            "frontmatter projection hash",
+        ),
+    ] {
+        let scratch = Scratch::new("sub-fingerprint");
+        let mut store = scratch.open();
+        let subject = path("docs/norn/glossary.md");
+        let mut facts = document(subject.as_str(), "hash-1", "a body\n");
+        facts.frontmatter = titled_frontmatter();
+        write_document(&mut store.begin_request(), &facts);
+        store.verify_integrity().expect("a store just written to");
+
+        // The triggers stay, so a rewritten body carries the full-text index
+        // with it and the checks ahead of the recompute all pass. What is left
+        // wrong is the pair the recompute is the only reader of.
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("separating a hash from the column it describes");
+
+        let error = store
+            .verify_integrity()
+            .expect_err("a sub-fingerprint that describes nothing");
+        let StoreError::Damaged { what } = &error else {
+            panic!("`{arrange}` was reported as {error:?} rather than as damage");
+        };
+        assert!(what.contains(named), "{what}");
+        assert!(
+            what.contains(subject.as_str()),
+            "the damage does not name the row it was found at: {what}"
+        );
+    }
+}
+
 /// A vector is identified by its document and its model, replaced when it is
 /// recomputed, and taken by the cascade when its document dies.
 #[test]
@@ -612,6 +670,9 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         | ExplainedStatement::IndexedTermPage => {
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it"
         }
+        ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
+            "a_feed_page_walks_its_covering_index_and_reads_no_row"
+        }
     }
 }
 
@@ -623,6 +684,13 @@ const ENUMERATIONS: &[ExplainedStatement<'static>] = &[
     ExplainedStatement::StoredTombstonePage,
     ExplainedStatement::StoredSuffixKeyPage,
     ExplainedStatement::IndexedTermPage,
+];
+
+/// The two statements a lane-2 consumer drains change through, named once so
+/// the plan bar, the cursor-spelling bar and the work bar judge the same pair.
+const FEEDS: &[ExplainedStatement<'static>] = &[
+    ExplainedStatement::DocumentFeedPage,
+    ExplainedStatement::TombstoneFeedPage,
 ];
 
 /// **Every statement findings maintenance runs reaches its rows through an
@@ -840,11 +908,13 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     ]
     .into_iter()
     .chain(ENUMERATIONS.iter().copied())
+    .chain(FEEDS.iter().copied())
     .map(barred_by)
     .collect();
     assert_eq!(
         bars,
         [
+            "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_heal_page_seeks_the_index_that_holds_its_order",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
@@ -1049,7 +1119,365 @@ fn an_enumeration_refuses_a_page_bound_it_does_not_hold() {
         assert!(request.stored_tombstones_after(None, limit).is_err());
         assert!(request.suffix_keys_after(None, limit).is_err());
         assert!(request.indexed_terms_after(None, limit).is_err());
+        assert!(request.changed_documents_after(None, limit).is_err());
+        assert!(request.changed_tombstones_after(None, limit).is_err());
     }
+}
+
+/// **A change-feed page is a walk of an index and never a read of a row.** A
+/// lane-2 consumer drains the whole feed to catch up and drains it again on
+/// every wake, so a page that reached the table would make catching up cost the
+/// pillar rather than the pillar's key columns.
+///
+/// The bar reads three things off each plan:
+///
+/// - The page **searches** rather than scans, which is the row-value floor
+///   working as a seek. A covering index read end to end reports `SCAN … USING
+///   COVERING INDEX` and would fail the scan bars here, so a page that lost its
+///   seek fails whether or not it kept the index.
+/// - It names the covering index the feed's columns live in, so a page that
+///   answered out of some other index — and therefore read the row for the
+///   fingerprints — fails.
+/// - Nothing sorts. The index holds `generation` then `path`, which is the order
+///   the page states, so a temporary B-tree here means the order and the index
+///   have come apart.
+#[test]
+fn a_feed_page_walks_its_covering_index_and_reads_no_row() {
+    let scratch = Scratch::new("feed-plans");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("one/glossary.md", "hash-1", "alpha beta\n"),
+            document("two/glossary.md", "hash-2", "beta gamma\n"),
+        ],
+    );
+    record_death(&mut request, &path("three/gone.md"), Provenance::HealPrune);
+
+    for statement in FEEDS {
+        let page = plan(
+            request
+                .emitted_plan(*statement)
+                .expect("a query plan for a change-feed page"),
+        );
+        page.assert_no_table_scan();
+        page.assert_no_full_scan();
+        page.assert_no_temp_btree();
+        match statement {
+            ExplainedStatement::DocumentFeedPage => {
+                page.assert_searches("documents");
+                page.assert_uses_index("documents_change_feed");
+            }
+            ExplainedStatement::TombstoneFeedPage => {
+                page.assert_searches("tombstones");
+                page.assert_uses_index("tombstones_change_feed");
+            }
+            other => panic!("`FEEDS` names {other:?}, which is not a feed"),
+        }
+        // The index answers the page whole. SQLite says so itself, and it is the
+        // difference between a page that costs its own columns and one that
+        // costs a row lookup per row it returns.
+        assert!(
+            page.rows()
+                .iter()
+                .any(|row| row.detail.contains("COVERING INDEX")),
+            "the page reads the row for columns the index was declared to carry: {:?}",
+            page.rows()
+        );
+    }
+}
+
+/// **A feed drained a page at a time reaches every row, in generation order,
+/// once.** The claim the composite cursor exists for is here: one changeset
+/// stamps many rows with one generation, so a cursor that carried a generation
+/// alone would repeat the changeset it stopped inside or skip the rest of it.
+///
+/// The fixture is arranged for exactly that. Two changesets write four documents
+/// between them and two record deaths, so each generation holds more than one
+/// row of each feed — a drain a page at a time therefore stops inside a
+/// changeset twice per feed, which is the position a bare generation cannot
+/// spell.
+#[test]
+fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
+    let scratch = Scratch::new("feed-drain");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("second/b.md", "hash-b", "beta\n"),
+            document("first/a.md", "hash-a", "alpha\n"),
+        ],
+    );
+    write_documents(
+        &mut request,
+        &[
+            document("fourth/d.md", "hash-d", "delta\n"),
+            document("third/c.md", "hash-c", "gamma\n"),
+        ],
+    );
+    // One changeset, so the two deaths share a generation and the death feed's
+    // cursor has to break the tie exactly as the document feed's does.
+    let deaths_at = request
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            ["gone/y.md", "gone/x.md"].map(|at| norn_store::Change::Death {
+                path: path(at),
+                provenance: Provenance::HealPrune,
+            }),
+        )
+        .expect("recording two deaths in one changeset")
+        .generation
+        .expect("a changeset that recorded deaths took a generation");
+
+    let mut documents: Vec<(i64, String)> = Vec::new();
+    let mut cursor: Option<norn_store::FeedCursor> = None;
+    while let Some((next, fed)) = request
+        .changed_documents_after(cursor.as_ref(), 1)
+        .expect("a page of the document feed")
+        .pop()
+    {
+        documents.push((fed.generation, fed.path.as_str().to_string()));
+        cursor = Some(next);
+        assert!(
+            documents.len() < 32,
+            "the document feed cursor did not advance"
+        );
+    }
+    let generations: Vec<i64> = documents
+        .iter()
+        .map(|(generation, _)| *generation)
+        .collect();
+    let paths: Vec<&str> = documents.iter().map(|(_, at)| at.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["first/a.md", "second/b.md", "fourth/d.md", "third/c.md"],
+        "the feed is not ordered by generation with the path breaking the tie"
+    );
+    assert_eq!(
+        generations[0], generations[1],
+        "the two documents of one changeset are not at one generation, so the fixture no longer \
+         puts the cursor inside a changeset"
+    );
+    assert!(
+        generations[1] < generations[2],
+        "the second changeset did not take a later generation"
+    );
+
+    // A page wide enough for the whole feed reads the same rows in the same
+    // order, so what the page-of-one drain proves is the cursor rather than the
+    // statement.
+    let whole: Vec<String> = request
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the whole document feed")
+        .into_iter()
+        .map(|(_, fed)| fed.path.as_str().to_string())
+        .collect();
+    assert_eq!(whole, paths);
+
+    let mut deaths: Vec<String> = Vec::new();
+    let mut cursor: Option<norn_store::FeedCursor> = None;
+    while let Some((next, fed)) = request
+        .changed_tombstones_after(cursor.as_ref(), 1)
+        .expect("a page of the death feed")
+        .pop()
+    {
+        assert_eq!(
+            fed.last_content_hash, None,
+            "a death at a path nothing derived carries no hash to compare against"
+        );
+        assert_eq!(
+            fed.generation, deaths_at,
+            "a death is not at the generation of the changeset that recorded it"
+        );
+        deaths.push(fed.path.as_str().to_string());
+        cursor = Some(next);
+        assert!(deaths.len() < 32, "the death feed cursor did not advance");
+    }
+    assert_eq!(
+        deaths,
+        vec!["gone/x.md", "gone/y.md"],
+        "the two deaths of one changeset did not come off in the path order that breaks their tie"
+    );
+}
+
+/// **A path killed and written again in one changeset stands in both feeds at
+/// one position, and the document row is what stands there.** The merged order
+/// the two feeds are read in is `(generation, path)`, and this pair ties it: one
+/// changeset stamps one generation, and the path is the same path. The write
+/// path is what breaks the tie — a death deletes the document row, so a document
+/// row surviving beside the tombstone is the changeset's end state.
+#[test]
+fn a_path_killed_and_rewritten_in_one_changeset_ties_the_two_feeds() {
+    let scratch = Scratch::new("feed-tie");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let at = path("revived.md");
+    write_document(&mut request, &document(at.as_str(), "hash-1", "a body\n"));
+    request
+        .apply_increment(
+            norn_store::IncrementProvenance::Derived,
+            [
+                norn_store::Change::Death {
+                    path: at.clone(),
+                    provenance: Provenance::HealPrune,
+                },
+                norn_store::Change::Upsert(document(at.as_str(), "hash-2", "another body\n")),
+            ],
+        )
+        .expect("killing and rewriting one path in one changeset");
+
+    let mut living = request
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the document feed");
+    let mut dead = request
+        .changed_tombstones_after(None, norn_store::MAX_PAGE)
+        .expect("the death feed");
+    assert_eq!(living.len(), 1, "the document feed is not one row");
+    assert_eq!(dead.len(), 1, "the death feed is not one row");
+    let (at_living, fed) = living.pop().expect("a row of the document feed");
+    let (at_dead, death) = dead.pop().expect("a row of the death feed");
+
+    assert_eq!(fed.path, at);
+    assert_eq!(death.path, at);
+    assert_eq!(
+        at_living, at_dead,
+        "the two feeds no longer hand back one position for a path killed and rewritten in one \
+         changeset, so the tie this case pins is somewhere else"
+    );
+
+    // What the tie resolves to. The row the store holds is the document the
+    // changeset wrote, so a consumer that broke the tie toward the death would
+    // drop a document the store still has.
+    assert_eq!(
+        fed.content_hash, "hash-2",
+        "the document feed does not carry the hash the changeset wrote"
+    );
+    assert_eq!(
+        request
+            .stored_facts(&at)
+            .expect("reading the rewritten path")
+            .map(|facts| facts.document.content_hash),
+        Some("hash-2".to_string()),
+        "the changeset's end state is not the document it wrote"
+    );
+}
+
+/// **A cursor comes apart into the two values a consumer records, and those two
+/// values go back together into the position it was.** A consumer that keeps
+/// progress across runs keeps it at rest beside the store epoch, so the drain it
+/// resumes starts from a pair it read back rather than from a handle it held.
+#[test]
+fn a_recorded_feed_position_rebuilds_into_the_cursor_it_was_taken_from() {
+    let scratch = Scratch::new("feed-cursor-round-trip");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    write_documents(
+        &mut request,
+        &[
+            document("first/a.md", "hash-a", "alpha\n"),
+            document("second/b.md", "hash-b", "beta\n"),
+        ],
+    );
+    write_document(&mut request, &document("third/c.md", "hash-c", "gamma\n"));
+
+    let (taken, _) = request
+        .changed_documents_after(None, 1)
+        .expect("the first page of the document feed")
+        .pop()
+        .expect("a first row");
+    let rebuilt = norn_store::FeedCursor::at(taken.generation(), taken.path().clone());
+    assert_eq!(
+        rebuilt, taken,
+        "a cursor rebuilt from the values it hands out is not the position it was"
+    );
+
+    let from_the_rebuilt: Vec<String> = request
+        .changed_documents_after(Some(&rebuilt), norn_store::MAX_PAGE)
+        .expect("the rest of the feed, from the rebuilt position")
+        .into_iter()
+        .map(|(_, fed)| fed.path.as_str().to_string())
+        .collect();
+    assert_eq!(
+        from_the_rebuilt,
+        vec!["second/b.md", "third/c.md"],
+        "a drain resumed from a rebuilt position does not read what the position it was resumes"
+    );
+}
+
+/// **The feed projects the fingerprints a consumer triages on, and they describe
+/// the parts they name.** A body hash equal for two documents with different
+/// frontmatter is what lets a body-deriving consumer skip a fetch; a projection
+/// hash that moved when only the frontmatter did is what makes a
+/// frontmatter-deriving consumer take one.
+#[test]
+fn the_feed_projects_a_fingerprint_per_part_a_consumer_derives_from() {
+    let scratch = Scratch::new("feed-fingerprints");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let plain = document("plain.md", "hash-plain", "one body\n");
+    let mut titled = document("titled.md", "hash-titled", "one body\n");
+    titled.frontmatter = titled_frontmatter();
+    write_documents(&mut request, &[plain, titled]);
+
+    let fed: std::collections::BTreeMap<String, norn_store::FeedDocument> = request
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the document feed")
+        .into_iter()
+        .map(|(_, fed)| (fed.path.as_str().to_string(), fed))
+        .collect();
+    let plain = &fed["plain.md"];
+    let titled = &fed["titled.md"];
+
+    assert_ne!(
+        plain.content_hash, titled.content_hash,
+        "two different documents share a content hash"
+    );
+    assert_eq!(
+        plain.body_hash, titled.body_hash,
+        "two documents with one body do not share a body hash, so a body-deriving consumer \
+         re-reads a document whose frontmatter alone moved"
+    );
+    assert_eq!(
+        plain.frontmatter_projection_hash, None,
+        "a document with no frontmatter projection records a hash of one"
+    );
+    assert!(
+        titled.frontmatter_projection_hash.is_some(),
+        "a document with a frontmatter projection records no hash of it"
+    );
+
+    // Re-deriving the body alone moves the body hash and leaves the projection
+    // hash where it was, which is the discrimination the two columns exist for.
+    let mut rewritten = document("titled.md", "hash-titled-2", "another body\n");
+    rewritten.frontmatter = titled_frontmatter();
+    write_document(&mut request, &rewritten);
+    let after = request
+        .changed_documents_after(None, norn_store::MAX_PAGE)
+        .expect("the document feed")
+        .into_iter()
+        .map(|(_, fed)| fed)
+        .find(|fed| fed.path.as_str() == "titled.md")
+        .expect("the re-derived document is in the feed");
+    assert_ne!(
+        after.body_hash, titled.body_hash,
+        "the body hash did not move"
+    );
+    assert_eq!(
+        after.frontmatter_projection_hash, titled.frontmatter_projection_hash,
+        "the frontmatter projection hash moved for a change the frontmatter did not make"
+    );
+}
+
+/// The frontmatter the fingerprint bar writes twice, unchanged between the two
+/// derivations it is written in.
+fn titled_frontmatter() -> Option<norn_store::FrontmatterValue> {
+    Some(norn_store::FrontmatterValue::Map(vec![(
+        "title".to_string(),
+        norn_store::FrontmatterValue::String("a title".to_string()),
+    )]))
 }
 
 /// **A heal's page is a seek, in every scope and both orders.** The merge that
@@ -1123,6 +1551,14 @@ fn a_heal_page_seeks_the_index_that_holds_its_order() {
 /// [`a_paged_reader_costs_a_line_in_the_rows_it_drained`] catches a spelling
 /// nobody anticipated by measuring what the engine spent instead of reading
 /// what the crate wrote.
+///
+/// **A composite cursor is the same rule over a pair.** The change feeds seek
+/// from `(generation, path)`, because one changeset stamps many rows with one
+/// generation and a generation alone is therefore not a position. Their floor is
+/// a row value and each half of it coalesces, so what this bar reads is
+/// unchanged: the cursor's generation is the first `COALESCE`'s first argument
+/// and its path is the second's, and a spelling that led with the pillar's own
+/// floor would demote both halves to filters exactly as a scalar page's would.
 #[test]
 fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
     let scratch = Scratch::new("paged-statement-text");
@@ -1191,7 +1627,36 @@ fn a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from() {
         );
         judged += 1;
     }
-    assert_eq!(judged, 16, "a scope, an order or a pillar went unjudged");
+    // The two feed drains bind the same shape over a pair rather than a column.
+    // A feed's position is `(generation, path)` — one changeset stamps many rows
+    // with one generation — so the floor is a row value, and what the bar reads
+    // is unchanged by that: the cursor is still `COALESCE`'s first argument, and
+    // the second half of the pair is the second `COALESCE`'s. A spelling that
+    // put the pillar's own floor first would demote both halves to filters
+    // exactly as a scalar page's would.
+    for statement in FEEDS {
+        let sql = request.emitted_plan(*statement).expect("a query plan").sql;
+        assert!(
+            sql.contains("WHERE (generation, path) > (COALESCE(?1,"),
+            "the WHERE does not open on the coalesced cursor, so the seek starts where the \
+             pillar does and steps over every row already drained: {sql}"
+        );
+        assert!(
+            sql.contains(", COALESCE(?2,"),
+            "the cursor's path half is not the row value's second floor, so a page that stops \
+             inside a changeset cannot resume inside it: {sql}"
+        );
+        assert!(
+            !sql.contains("WHERE (?1 IS NULL"),
+            "the page opens on the cursor as a filter, which is the shape a seek cannot \
+             use: {sql}"
+        );
+        judged += 1;
+    }
+    assert_eq!(
+        judged, 18,
+        "a scope, an order, a pillar or a feed went unjudged"
+    );
 }
 
 /// How many rows the work bar drains.
@@ -1226,9 +1691,13 @@ const DRAINED_ROWS: usize = 400;
 /// row, read its columns, stop. Drained a row at a time over [`DRAINED_ROWS`]
 /// rows, the measured cost per row is 20 for stored suffix keys, 23 for
 /// tombstones, 26 for the heal page in path order, 28 for indexed terms, 37 for
-/// the heal page in folded order, and 51 for the findings page — the widest,
-/// because a findings page issues two further chunked statements per page to
-/// collect each finding's candidates and its classes.
+/// the heal page in folded order, 43 for the death change feed, 49 for the
+/// document change feed, and 51 for the findings page — the widest, because a
+/// findings page issues two further chunked statements per page to collect each
+/// finding's candidates and its classes. The two feeds sit high in that range
+/// because a row-value floor opens its cursor by comparing a pair, and the
+/// document feed reads five columns off the index where the death feed reads
+/// three.
 ///
 /// `per_row` is about three times that widest reading, and `floor` absorbs the
 /// empty page every advancing drain ends on. **The absorber is deliberately
@@ -1244,6 +1713,13 @@ const READER_WORK: WorkBar = WorkBar {
     floor: 500,
     per_row: 160,
 };
+
+/// What a drain that never ends has met: a cursor that stopped moving, so the
+/// reader hands back the row it just handed back. Every drain below is bounded
+/// by the rows its fixture holds, because non-advancement is the hazard a
+/// keyset cursor exists to close and a bar reports it best as an assertion
+/// naming the reader rather than as a run that never returns.
+const STUCK: &str = "the cursor did not advance past the rows the fixture holds";
 
 /// **A paged reader costs a line in the rows it drained, and a re-reading one
 /// does not.**
@@ -1271,7 +1747,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
     // A bar taken beside a plan assertion would otherwise read the explain's own
     // cost as the reader's.
     let before_the_explain = request.read_steps();
-    for statement in ENUMERATIONS {
+    for statement in ENUMERATIONS.iter().chain(FEEDS) {
         request.emitted_plan(*statement).expect("a query plan");
     }
     assert_eq!(
@@ -1299,6 +1775,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
                 {
                     cursor = Some(row.path);
                     reached += 1;
+                    assert!(reached <= DRAINED_ROWS, "the heal page: {STUCK}");
                 }
                 reached
             },
@@ -1328,6 +1805,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(next);
                 reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the findings enumeration: {STUCK}");
             }
             reached
         },
@@ -1356,6 +1834,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(death.path);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the tombstone enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1384,6 +1866,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(at);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the suffix-key enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1412,6 +1898,10 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
             {
                 cursor = Some(term.term);
                 reached += 1;
+                assert!(
+                    reached <= DRAINED_ROWS,
+                    "the indexed-term enumeration: {STUCK}"
+                );
             }
             reached
         },
@@ -1420,6 +1910,64 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
                 let page = request
                     .indexed_terms_after(None, width)
                     .expect("a page of indexed terms");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+
+    judge_a_drain(
+        &request,
+        "the document change feed",
+        rows,
+        |request| {
+            let mut cursor: Option<norn_store::FeedCursor> = None;
+            let mut reached = 0;
+            while let Some((next, _)) = request
+                .changed_documents_after(cursor.as_ref(), 1)
+                .expect("a page of the document feed")
+                .pop()
+            {
+                cursor = Some(next);
+                reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the document change feed: {STUCK}");
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .changed_documents_after(None, width)
+                    .expect("a page of the document feed");
+                assert_eq!(page.len(), width, "the control did not reach its i-th row");
+            }
+            DRAINED_ROWS
+        },
+    );
+
+    judge_a_drain(
+        &request,
+        "the death change feed",
+        rows,
+        |request| {
+            let mut cursor: Option<norn_store::FeedCursor> = None;
+            let mut reached = 0;
+            while let Some((next, _)) = request
+                .changed_tombstones_after(cursor.as_ref(), 1)
+                .expect("a page of the death feed")
+                .pop()
+            {
+                cursor = Some(next);
+                reached += 1;
+                assert!(reached <= DRAINED_ROWS, "the death change feed: {STUCK}");
+            }
+            reached
+        },
+        |request| {
+            for width in 1..=DRAINED_ROWS {
+                let page = request
+                    .changed_tombstones_after(None, width)
+                    .expect("a page of the death feed");
                 assert_eq!(page.len(), width, "the control did not reach its i-th row");
             }
             DRAINED_ROWS

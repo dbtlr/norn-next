@@ -30,6 +30,12 @@
 //!   comparable, and a single derivation touching two tables stamps both with
 //!   the same number. **Generation orders; a timestamp only informs** — a clock
 //!   can move backwards and a generation cannot.
+//! - `store_epoch` — the identity this database carries from creation to
+//!   discard, as opaque text. A generation orders writes **inside** one
+//!   database; the epoch says which database those generations belong to, so a
+//!   consumer that recorded progress against one epoch and reads another knows
+//!   its position names nothing and rescans. It is minted at create and never
+//!   rewritten, which is what makes a rebuild from zero a new epoch.
 //! - `vault_schema_bytes`, `vault_schema_fingerprint`,
 //!   `vault_schema_generation` — the pinned vault-schema projection.
 //!
@@ -66,6 +72,9 @@ pub(crate) const STORE_MODE: &str = "store_mode";
 
 /// The global write sequence every write draws its stamp from.
 pub(crate) const WRITE_GENERATION: &str = "write_generation";
+
+/// The identity this database carries from creation to discard.
+pub(crate) const STORE_EPOCH: &str = "store_epoch";
 
 /// The pinned vault schema's bytes, exactly as they were read.
 pub(crate) const VAULT_SCHEMA_BYTES: &str = "vault_schema_bytes";

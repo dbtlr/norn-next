@@ -55,6 +55,29 @@
 //! path whose hash is already recorded **keeps** the recorded one: the hash is
 //! the comparison basis a late event needs, and a second death learned from an
 //! absent file carries nothing better to replace it with.
+//!
+//! # A death is half of the change feed, and this index is its side of it
+//!
+//! A lane-2 consumer that read only the living would keep deriving from a path
+//! that is gone. `tombstones_change_feed` orders by `generation` and breaks ties
+//! on `path`, then carries `last_content_hash`, so a page of the death feed is a
+//! seek into the index and a walk along it — the row itself is never read and
+//! nothing sorts.
+//!
+//! The tie-break is what makes a position a position: one changeset stamps every
+//! death it records with one generation, so a cursor holding a generation alone
+//! would either repeat the changeset it stopped inside or skip the rest of it.
+//!
+//! What it costs is the same shape the document side pays, one column narrower:
+//! the path and the last content hash duplicated per tombstone, and a key led by
+//! `generation`, so a re-recorded death moves its entry rather than updating it
+//! in place. See [`crate::ddl::documents`].
+//!
+//! The two feeds are merged in that one order, and they are not disjoint —
+//! a path that died and was written again stands in both. **At one position the
+//! document row outranks the death.** A death deletes the document row, so a
+//! path holding both at one generation is a path that changeset killed and then
+//! wrote, and `documents` holds its end state.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
@@ -70,4 +93,7 @@ const STATEMENTS: &[&str] = &[
     recorded_at       INTEGER NOT NULL
 )",
     "CREATE UNIQUE INDEX tombstones_path ON tombstones(path)",
+    "CREATE INDEX tombstones_change_feed ON tombstones(
+    generation, path, last_content_hash
+)",
 ];

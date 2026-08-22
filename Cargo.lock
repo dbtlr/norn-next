@@ -461,6 +461,7 @@ dependencies = [
  "norn-testkit",
  "norn-wire",
  "rusqlite",
+ "sha2",
 ]
 
 [[package]]
