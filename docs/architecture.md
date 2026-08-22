@@ -124,9 +124,10 @@ codes that qualify are `norn-db`'s judgment to make because SQLite is `norn-db`'
 substrate performs the operation and types what it met, and `norn-store` reads that verdict as
 which rung the state is at. What the host does with the verdict is the rung: trust is
 withdrawn under a reason of its own, the store is consumed and its file discarded, a database
-is created in its place, and the vault is derived into it by the same heal an attach runs. **A damaged verdict never re-enters the lower rungs** — a
-retry, or coverage re-installed over the same database, meets the same page again — so the
-requirement damage sets dominates the one a broken environment sets wherever both stand.
+is created in its place, and the vault is derived into it by the same heal an attach runs.
+**A damaged verdict never re-enters the lower rungs** — a retry, or coverage re-installed
+over the same database, meets the same page again — so the requirement damage sets dominates
+the one a broken environment sets wherever both stand.
 Watcher coverage and the maintainer lock stand through the rung: neither is what was damaged.
 
 **An attach runs the rung inline, and publishes no verdict for it.** An entry holding no

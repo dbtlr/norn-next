@@ -6,9 +6,9 @@
 //! connection ownership and the pragmas a schema is designed to be read under,
 //! the pinned-scalar `meta` pattern, the DDL fingerprint and the schema digest
 //! that answer whether a database is still the shape a build wrote, the store
-//! epoch a database carries from creation to discard, the immediate
-//! transaction every changeset takes and the deferred one a read snapshot
-//! takes, damage typing at the driver seam, the
+//! epoch a database carries from creation to discard, the two transaction
+//! spellings — immediate for changesets, deferred for read snapshots —
+//! damage typing at the driver seam, the
 //! `EXPLAIN` plan handout, and the database file's own lifecycle.
 //!
 //! # A client owns the meaning; this crate owns the machinery
@@ -28,7 +28,7 @@
 //! - [`digest`] and [`schema_digest`] — which statement list produced this
 //!   database, and whether it still holds what that list created.
 //! - [`Database::immediate_transaction`] — the transaction discipline every
-//!   write goes through, and [`Database::deferred_transaction`], the read
+//!   changeset runs in, and [`Database::deferred_transaction`], the read
 //!   snapshot a multi-statement read answers from.
 //! - [`sql`] and [`is_damaged`] — the one judgment made about a driver error:
 //!   damaged state, which authorizes a rebuild, or a broken environment, which

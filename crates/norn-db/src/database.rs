@@ -134,9 +134,8 @@ impl Database {
     ///
     /// **Every changeset a client commits runs in one of these**, and one
     /// spelling of the discipline is what keeps that true. A schema creation
-    /// is the one write outside it: it runs before this handle exists, in one
-    /// transaction on the connection the create act still holds, and is not a
-    /// changeset. A deferred
+    /// runs before this handle exists, in one transaction on the connection
+    /// the create act still holds, and is not a changeset. A deferred
     /// transaction takes the lock at its first write, so two writers that both
     /// read first can each hold a read lock and deadlock on the upgrade; an
     /// immediate one either takes the lock or reports the database busy, which
@@ -144,8 +143,10 @@ impl Database {
     /// because a refusal to begin says which lock was held and never which
     /// write wanted it.
     ///
-    /// [`Database::deferred_transaction`] is the sibling a read snapshot takes;
-    /// nothing that writes may take that one.
+    /// [`Database::deferred_transaction`] is the sibling a read snapshot takes.
+    /// No shipped write takes that one; the induced-failure out-of-band
+    /// arrangement is the deliberate exception, writing through it to put a
+    /// database in states no store operation produces.
     pub fn immediate_transaction(
         &mut self,
         operation: &'static str,
@@ -167,9 +168,9 @@ impl Database {
     /// The behavior is pinned at the call rather than read from the
     /// connection's default, which is a value SQLite lets anything holding the
     /// connection mutably change, and the mutable borrow rules out a second
-    /// live transaction on this connection at compile time, exactly as the
-    /// write spelling's does. `operation` names what the read is, for the same
-    /// reason the write's does.
+    /// live transaction opened through either spelling at compile time.
+    /// `operation` names what the read is, for the same reason the write's
+    /// does.
     pub fn deferred_transaction(
         &mut self,
         operation: &'static str,
