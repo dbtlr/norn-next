@@ -36,7 +36,7 @@
 # `std::fs` disallowed workspace-wide.
 #
 # The vault filesystem seam is norn-fs and the derived database's file
-# lifecycle is norn-store's; every other filesystem effect is machine-local
+# lifecycle is norn-db's; every other filesystem effect is machine-local
 # and belongs to the crate that owns that state. The entries cover the calls
 # that reach a filesystem, including the ones spelled as `Path` methods —
 # `path.exists()` is the same effect as `std::fs::metadata` and would
@@ -92,21 +92,21 @@ disallowed-methods = [
     # No direct stdout writes outside norn-console. A handle to stdout is a
     # render seam nobody reviewed.
     { path = "std::io::stdout", reason = "norn-console owns the render seam; verbs return data" },
-    # No SQLite connection opened outside norn-store. Opening is the act the
-    # rule is about, so the constructors are its subject rather than the
-    # `Connection` type: norn-store names that type throughout, and a crate-wide
-    # allow on it would erase the marker this rule exists to leave. The
-    # `from_handle` pair is in the set because adopting a raw `sqlite3*` produces
-    # a live connection without naming a path — the same effect through a
-    # constructor that does not read as an open.
-    { path = "rusqlite::Connection::open", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::open_in_memory", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::open_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "norn-store is the substrate seam; no other crate opens a connection" },
-    { path = "rusqlite::Connection::from_handle", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
-    { path = "rusqlite::Connection::from_handle_owned", reason = "norn-store is the substrate seam; adopting a raw handle is opening one" },
+    # No SQLite connection opened outside norn-db. Opening is the act the rule
+    # is about, so the constructors are its subject rather than the `Connection`
+    # type: norn-db and the domain crate over it name that type throughout, and
+    # a crate-wide allow on it would erase the marker this rule exists to leave.
+    # The `from_handle` pair is in the set because adopting a raw `sqlite3*`
+    # produces a live connection without naming a path — the same effect through
+    # a constructor that does not read as an open.
+    { path = "rusqlite::Connection::open", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_with_flags", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_with_flags_and_vfs", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::open_in_memory_with_flags_and_vfs", reason = "norn-db is the substrate seam; no other crate opens a connection" },
+    { path = "rusqlite::Connection::from_handle", reason = "norn-db is the substrate seam; adopting a raw handle is opening one" },
+    { path = "rusqlite::Connection::from_handle_owned", reason = "norn-db is the substrate seam; adopting a raw handle is opening one" },
     # No norn-config registry-surface use outside norn-host. The registry file
     # is the serving set, and reading or changing it is the orchestrator's act;
     # the machine surface beside it — endpoint discovery, token read — is
