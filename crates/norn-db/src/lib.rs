@@ -7,7 +7,8 @@
 //! the pinned-scalar `meta` pattern, the DDL fingerprint and the schema digest
 //! that answer whether a database is still the shape a build wrote, the store
 //! epoch a database carries from creation to discard, the immediate
-//! transaction every write takes, damage typing at the driver seam, the
+//! transaction every changeset takes and the deferred one a read snapshot
+//! takes, damage typing at the driver seam, the
 //! `EXPLAIN` plan handout, and the database file's own lifecycle.
 //!
 //! # A client owns the meaning; this crate owns the machinery

@@ -115,17 +115,16 @@ At the first release, version 1 freezes as the first migratable baseline. From t
 **migrations pillar is the store schema evolution path**, and rebuild-from-zero narrows to the
 second trigger alone.
 
-**The store types damage; the host routes it.** An open resolves the damage it can see for
-itself, and it can see only the store schema — so a page that reads corrupt under a warm
-increment, a full-text index that stopped agreeing with the column it indexes, or a value
-outside a closed vocabulary is damage a *later* operation meets. Every such refusal is typed
-as damaged state at the operation that met it, and the driver codes that qualify are
-`norn-db`'s judgment to make because SQLite is `norn-db`'s to own: the substrate performs the
-operation and types what it met, and `norn-store` reads that verdict as which rung the state
-is at. What the host does with the
-verdict is the rung: trust is withdrawn under a reason of its own, the store is consumed and
-its file discarded, a database is created in its place, and the vault is derived into it by
-the same heal an attach runs. **A damaged verdict never re-enters the lower rungs** — a
+**The substrate types damage; the store reads the rung; the host routes it.** An open
+resolves the damage it can see for itself, and it can see only the store schema — so a page
+that reads corrupt under a warm increment, a full-text index that stopped agreeing with the
+column it indexes, or a value outside a closed vocabulary is damage a *later* operation meets.
+Every such refusal is typed as damaged state at the operation that met it, and the driver
+codes that qualify are `norn-db`'s judgment to make because SQLite is `norn-db`'s to own: the
+substrate performs the operation and types what it met, and `norn-store` reads that verdict as
+which rung the state is at. What the host does with the verdict is the rung: trust is
+withdrawn under a reason of its own, the store is consumed and its file discarded, a database
+is created in its place, and the vault is derived into it by the same heal an attach runs. **A damaged verdict never re-enters the lower rungs** — a
 retry, or coverage re-installed over the same database, meets the same page again — so the
 requirement damage sets dominates the one a broken environment sets wherever both stand.
 Watcher coverage and the maintainer lock stand through the rung: neither is what was damaged.

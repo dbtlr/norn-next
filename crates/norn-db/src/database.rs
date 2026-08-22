@@ -133,7 +133,10 @@ impl Database {
     /// Open a transaction that takes the write lock at `BEGIN`.
     ///
     /// **Every changeset a client commits runs in one of these**, and one
-    /// spelling of the discipline is what keeps that true. A deferred
+    /// spelling of the discipline is what keeps that true. A schema creation
+    /// is the one write outside it: it runs before this handle exists, in one
+    /// transaction on the connection the create act still holds, and is not a
+    /// changeset. A deferred
     /// transaction takes the lock at its first write, so two writers that both
     /// read first can each hold a read lock and deadlock on the upgrade; an
     /// immediate one either takes the lock or reports the database busy, which
@@ -163,19 +166,16 @@ impl Database {
     ///
     /// The behavior is pinned at the call rather than read from the
     /// connection's default, which is a value SQLite lets anything holding the
-    /// connection mutably change. `operation` names what the read is, for the
-    /// same reason the write's does.
-    ///
-    /// **The caller guarantees no transaction is already open on this
-    /// connection**, because a nested `BEGIN` is a driver error rather than a
-    /// compile error here. What enforces it in practice is the write
-    /// discipline above: every request borrows its store mutably, so no second
-    /// transaction on one connection can be alive while this one is.
+    /// connection mutably change, and the mutable borrow rules out a second
+    /// live transaction on this connection at compile time, exactly as the
+    /// write spelling's does. `operation` names what the read is, for the same
+    /// reason the write's does.
     pub fn deferred_transaction(
-        &self,
+        &mut self,
         operation: &'static str,
     ) -> Result<Transaction<'_>, DbError> {
-        Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+        self.connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| error::sql(operation, error))
     }
 }
