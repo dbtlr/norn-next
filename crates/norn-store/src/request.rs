@@ -52,7 +52,7 @@
 //! [`SuffixProbe`], which is a set of index bounds, and read exactly the class it
 //! opens. [`Request::emitted_plan`] hands a named statement's own SQL and its
 //! query plan out, because a plan bar over hand-copied SQL judges a string
-//! nobody runs — and no crate outside this one may open a connection to take a
+//! nobody runs — and no crate outside this one reaches the database to take a
 //! plan itself.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
@@ -62,12 +62,12 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
 
-use norn_wire::FindingKind;
-use rusqlite::types::Value;
-use rusqlite::{
-    Connection, OptionalExtension, Params, Row, StatementStatus, TransactionBehavior, params,
-    params_from_iter,
+use norn_db::EmittedPlan;
+use norn_db::rusqlite::types::Value;
+use norn_db::rusqlite::{
+    self, Connection, OptionalExtension, Params, Row, StatementStatus, params, params_from_iter,
 };
+use norn_wire::FindingKind;
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::ddl;
@@ -80,7 +80,7 @@ use crate::facts::{
 };
 use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
-use crate::store::{self, Store};
+use crate::store::Store;
 
 /// Maximum row count any paged reader accepts.
 ///
@@ -335,12 +335,12 @@ impl<'a> Request<'a> {
         }
         let transaction = self
             .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the finding transaction", error))?;
-        let generation = store::next_generation(&transaction)?;
+            .database
+            .immediate_transaction("opening the finding transaction")?;
+        let generation = norn_db::meta::next_generation(&transaction)?;
         let fingerprint: String =
-            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?.unwrap_or_default();
+            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+                .unwrap_or_default();
 
         let id: i64 = transaction
             .query_row(
@@ -432,7 +432,7 @@ impl<'a> Request<'a> {
     ) -> Result<Invalidation, StoreError> {
         let discarded = self
             .store
-            .connection
+            .connection()
             .execute(
                 &class_discard_sql(probe.range_count()),
                 probe_parameters(probe),
@@ -476,7 +476,7 @@ impl<'a> Request<'a> {
     ) -> Result<Invalidation, StoreError> {
         let discarded = self
             .store
-            .connection
+            .connection()
             .execute(
                 &subject_discard_sql(scope),
                 params_from_iter(subject_discard_parameters(path, scope)),
@@ -497,10 +497,9 @@ impl<'a> Request<'a> {
     pub fn store_vector(&mut self, vector: &VectorFacts) -> Result<(), StoreError> {
         let transaction = self
             .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the vector transaction", error))?;
-        let generation = store::next_generation(&transaction)?;
+            .database
+            .immediate_transaction("opening the vector transaction")?;
+        let generation = norn_db::meta::next_generation(&transaction)?;
         let document: Option<i64> = transaction
             .query_row(
                 "SELECT id FROM documents WHERE path = ?1",
@@ -567,19 +566,18 @@ impl<'a> Request<'a> {
     ) -> Result<SchemaPin, StoreError> {
         let transaction = self
             .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error::sql("opening the schema-pin transaction", error))?;
+            .database
+            .immediate_transaction("opening the schema-pin transaction")?;
 
         let pinned_fingerprint: Option<String> =
-            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
+            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?;
         let pinned_bytes: Option<Vec<u8>> =
-            store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES)?;
+            norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES)?;
         if pinned_fingerprint.as_deref() == Some(fingerprint)
             && pinned_bytes.as_deref() == Some(bytes)
         {
             let generation: i64 =
-                store::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION)?
+                norn_db::meta::get_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION)?
                     .unwrap_or_default();
             return Ok(SchemaPin {
                 generation,
@@ -588,14 +586,14 @@ impl<'a> Request<'a> {
             });
         }
 
-        let generation = store::next_generation(&transaction)?;
-        store::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES, bytes)?;
-        store::put_meta(
+        let generation = norn_db::meta::next_generation(&transaction)?;
+        norn_db::meta::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_BYTES, bytes)?;
+        norn_db::meta::put_meta(
             &transaction,
             ddl::meta::VAULT_SCHEMA_FINGERPRINT,
             fingerprint,
         )?;
-        store::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION, generation)?;
+        norn_db::meta::put_meta(&transaction, ddl::meta::VAULT_SCHEMA_GENERATION, generation)?;
 
         // Two open ranges rather than `<>`: an inequality is not a predicate an
         // index can answer, so it would read every finding in the table on every
@@ -631,7 +629,7 @@ impl<'a> Request<'a> {
         path: &DocumentPath,
     ) -> Result<Option<StoredDocument>, StoreError> {
         Self::read_one(
-            &self.store.connection,
+            self.store.connection(),
             &format!("SELECT {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
             params![path.as_str()],
             |row| stored_document(row, 0),
@@ -758,9 +756,8 @@ impl<'a> Request<'a> {
     pub fn stored_facts(&mut self, path: &DocumentPath) -> Result<Option<StoredFacts>, StoreError> {
         let transaction = self
             .store
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(|error| error::sql("opening the stored-facts snapshot", error))?;
+            .database
+            .deferred_transaction("opening the stored-facts snapshot")?;
         let found = Self::read_one(
             &transaction,
             &format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
@@ -828,7 +825,7 @@ impl<'a> Request<'a> {
         path: &DocumentPath,
     ) -> Result<Option<StoredTombstone>, StoreError> {
         Self::read_one(
-            &self.store.connection,
+            self.store.connection(),
             "SELECT path, last_content_hash, provenance, generation, recorded_at
              FROM tombstones WHERE path = ?1",
             params![path.as_str()],
@@ -1160,17 +1157,17 @@ impl<'a> Request<'a> {
 
     /// The pinned vault-schema projection, if a schema has been pinned.
     pub fn vault_schema_pin(&self) -> Result<Option<VaultSchemaPin>, StoreError> {
-        let connection = &self.store.connection;
+        let connection = self.store.connection();
         let Some(bytes): Option<Vec<u8>> =
-            store::get_meta(connection, ddl::meta::VAULT_SCHEMA_BYTES)?
+            norn_db::meta::get_meta(connection, ddl::meta::VAULT_SCHEMA_BYTES)?
         else {
             return Ok(None);
         };
         Ok(Some(VaultSchemaPin {
             bytes,
-            fingerprint: store::get_meta(connection, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
+            fingerprint: norn_db::meta::get_meta(connection, ddl::meta::VAULT_SCHEMA_FINGERPRINT)?
                 .unwrap_or_default(),
-            generation: store::get_meta(connection, ddl::meta::VAULT_SCHEMA_GENERATION)?
+            generation: norn_db::meta::get_meta(connection, ddl::meta::VAULT_SCHEMA_GENERATION)?
                 .unwrap_or_default(),
         }))
     }
@@ -1179,7 +1176,7 @@ impl<'a> Request<'a> {
     pub fn pillars(&self) -> Result<PillarReport, StoreError> {
         let count = |sql: &str| -> Result<u64, StoreError> {
             self.store
-                .connection
+                .connection()
                 .query_row(sql, [], |row| row.get(0))
                 .map_err(|error| error::sql("counting rows at rest", error))
         };
@@ -1261,11 +1258,15 @@ impl<'a> Request<'a> {
     /// reported for **that** statement.
     ///
     /// A plan bar is worth something only against the SQL that actually ran, and
-    /// no crate outside this one may open a connection to take a plan of its own.
-    /// So the store hands the pair out: the crate chooses the statement, the
-    /// caller judges the plan. It is deliberately not a way to explain arbitrary
-    /// SQL — the statements are named, and each of them carries the parameters
-    /// its own execution site binds.
+    /// no crate outside this one may take a plan of its own. So the store hands
+    /// the pair out: the crate chooses the statement, the caller judges the
+    /// plan. It is deliberately not a way to explain arbitrary SQL — the
+    /// statements are named, and each of them carries the parameters its own
+    /// execution site binds.
+    ///
+    /// **An explain is a report about a statement rather than a run of it**, so
+    /// what taking one steps is not work [`Request::read_steps`] attributes to
+    /// this request's readers.
     pub fn emitted_plan(
         &self,
         statement: ExplainedStatement<'_>,
@@ -1290,108 +1291,83 @@ impl<'a> Request<'a> {
             ExplainedStatement::DocumentFeedPage => document_feed_sql(),
             ExplainedStatement::TombstoneFeedPage => tombstone_feed_sql(),
         };
-        let read = |row: &Row<'_>| {
-            Ok(Ok(PlanStep {
-                id: row.get(0)?,
-                parent: row.get(1)?,
-                detail: row.get(3)?,
-            }))
-        };
-        let explained = format!("EXPLAIN QUERY PLAN {sql}");
-        // An explain is a report *about* a statement rather than a run of it, so
-        // what taking it steps is not work [`Request::read_steps`] attributes to
-        // this request's readers. The count is restored whichever way the
-        // explain went.
-        let before_the_explain = self.read_steps.get();
-        let taken = (|| -> Result<Vec<PlanStep>, StoreError> {
-            Ok(match statement {
-                ExplainedStatement::SuffixCandidates(probe)
-                | ExplainedStatement::FindingsInClass(probe)
-                | ExplainedStatement::ClassDiscard(probe) => self.read_all(
-                    &explained,
-                    probe_parameters(probe),
-                    read,
-                    "explaining an emitted statement",
-                )?,
-                ExplainedStatement::SubjectDiscard(path, scope) => self.read_all(
-                    &explained,
-                    params_from_iter(subject_discard_parameters(path, scope)),
-                    read,
-                    "explaining an emitted statement",
-                )?,
-                ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
-                    let cursor = explained_page_cursor(scope);
-                    self.read_all(
-                        &explained,
-                        params_from_iter(finding_subject_parameters(
-                            scope,
-                            kinds,
-                            Some(&cursor),
-                            MAX_PAGE,
-                        )),
-                        read,
-                        "explaining an emitted statement",
-                    )?
-                }
-                ExplainedStatement::StoredDocumentPage(scope, _) => {
-                    let cursor = explained_page_cursor(scope);
-                    self.read_all(
-                        &explained,
-                        params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
-                        read,
-                        "explaining an emitted statement",
-                    )?
-                }
-                // Each of the four enumerations is explained with its cursor
-                // bound, for the reason [`explained_page_cursor`] states: the
-                // statement text does not branch on the cursor, so the plan is the
-                // same either way today, and an edit that ever gave the cursor its
-                // own text would otherwise be explained on the first page alone.
-                ExplainedStatement::StoredFindingPage => self.read_all(
-                    &explained,
-                    params_from_iter(finding_page_parameters(
-                        Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
+        let connection = self.store.connection();
+        Ok(match statement {
+            ExplainedStatement::SuffixCandidates(probe)
+            | ExplainedStatement::FindingsInClass(probe)
+            | ExplainedStatement::ClassDiscard(probe) => {
+                norn_db::emitted_plan(connection, &sql, probe_parameters(probe))
+            }
+            ExplainedStatement::SubjectDiscard(path, scope) => norn_db::emitted_plan(
+                connection,
+                &sql,
+                params_from_iter(subject_discard_parameters(path, scope)),
+            ),
+            ExplainedStatement::FindingSubjectsWithoutRows(scope, kinds, _) => {
+                let cursor = explained_page_cursor(scope);
+                norn_db::emitted_plan(
+                    connection,
+                    &sql,
+                    params_from_iter(finding_subject_parameters(
+                        scope,
+                        kinds,
+                        Some(&cursor),
                         MAX_PAGE,
                     )),
-                    read,
-                    "explaining an emitted statement",
-                )?,
-                ExplainedStatement::StoredTombstonePage
-                | ExplainedStatement::StoredSuffixKeyPage => self.read_all(
-                    &explained,
+                )
+            }
+            ExplainedStatement::StoredDocumentPage(scope, _) => {
+                let cursor = explained_page_cursor(scope);
+                norn_db::emitted_plan(
+                    connection,
+                    &sql,
+                    params_from_iter(document_page_parameters(scope, Some(&cursor), MAX_PAGE)),
+                )
+            }
+            // Each of the four enumerations is explained with its cursor
+            // bound, for the reason [`explained_page_cursor`] states: the
+            // statement text does not branch on the cursor, so the plan is the
+            // same either way today, and an edit that ever gave the cursor its
+            // own text would otherwise be explained on the first page alone.
+            ExplainedStatement::StoredFindingPage => norn_db::emitted_plan(
+                connection,
+                &sql,
+                params_from_iter(finding_page_parameters(
+                    Some(FindingCursor(EXPLAINED_FINDING_CURSOR)),
+                    MAX_PAGE,
+                )),
+            ),
+            ExplainedStatement::StoredTombstonePage | ExplainedStatement::StoredSuffixKeyPage => {
+                norn_db::emitted_plan(
+                    connection,
+                    &sql,
                     params_from_iter(text_page_parameters(
                         Some(EXPLAINED_PAGE_CURSOR_LEAF),
                         MAX_PAGE,
                     )),
-                    read,
-                    "explaining an emitted statement",
-                )?,
-                ExplainedStatement::IndexedTermPage => self.read_all(
-                    &explained,
-                    params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
-                    read,
-                    "explaining an emitted statement",
-                )?,
-                // Both halves of the feed cursor are bound, for the same reason
-                // the enumerations bind theirs: the statement text does not
-                // branch on the cursor, so the plan is the same in either state
-                // today, and a cursor left null would explain the first page
-                // alone if an edit ever gave the two states their own text.
-                ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
-                    self.read_all(
-                        &explained,
-                        params_from_iter(feed_page_parameters(
-                            Some(&explained_feed_cursor()),
-                            MAX_PAGE,
-                        )),
-                        read,
-                        "explaining an emitted statement",
-                    )?
-                }
-            })
-        })();
-        self.read_steps.set(before_the_explain);
-        Ok(EmittedPlan { sql, steps: taken? })
+                )
+            }
+            ExplainedStatement::IndexedTermPage => norn_db::emitted_plan(
+                connection,
+                &sql,
+                params_from_iter(text_page_parameters(Some(EXPLAINED_TERM_CURSOR), MAX_PAGE)),
+            ),
+            // Both halves of the feed cursor are bound, for the same reason
+            // the enumerations bind theirs: the statement text does not
+            // branch on the cursor, so the plan is the same in either state
+            // today, and a cursor left null would explain the first page
+            // alone if an edit ever gave the two states their own text.
+            ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
+                norn_db::emitted_plan(
+                    connection,
+                    &sql,
+                    params_from_iter(feed_page_parameters(
+                        Some(&explained_feed_cursor()),
+                        MAX_PAGE,
+                    )),
+                )
+            }
+        }?)
     }
 
     /// **The work bar's reading.** How many SQLite virtual-machine steps this
@@ -1534,7 +1510,7 @@ impl<'a> Request<'a> {
         operation: &'static str,
     ) -> Result<Vec<T>, StoreError> {
         Self::read_all_on(
-            &self.store.connection,
+            self.store.connection(),
             &self.read_steps,
             sql,
             parameters,
@@ -1764,21 +1740,6 @@ impl FeedCursor {
     pub fn path(&self) -> &DocumentPath {
         &self.path
     }
-}
-
-/// One row of `EXPLAIN QUERY PLAN`, as SQLite reports it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlanStep {
-    pub id: i64,
-    pub parent: i64,
-    pub detail: String,
-}
-
-/// The statement a reader emitted, paired with its plan.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmittedPlan {
-    pub sql: String,
-    pub steps: Vec<PlanStep>,
 }
 
 /// The statement [`Request::suffix_candidates`] emits for a probe of

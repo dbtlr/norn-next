@@ -99,13 +99,14 @@ pub const LINT_RULES: &[LintRule] = &[
         ],
     },
     LintRule {
-        name: "no SQLite connection opened outside norn-store",
+        name: "no SQLite connection opened outside norn-db",
         state: LintState::Live,
         prefixes: &[("disallowed-methods", "rusqlite::Connection::")],
         // Opening is the act the rule is about, so its subject is the
-        // constructors rather than the `Connection` type. `norn-store` names
-        // that type throughout, and disallowing it would earn a crate-wide
-        // allow — which erases the use-site marker the rule exists to leave.
+        // constructors rather than the `Connection` type. `norn-db` and its
+        // client name that type throughout, and disallowing it would earn
+        // those crates a crate-wide allow — which erases the use-site marker
+        // the rule exists to leave.
         required: &[
             ("disallowed-methods", "rusqlite::Connection::open"),
             ("disallowed-methods", "rusqlite::Connection::open_in_memory"),
@@ -206,13 +207,13 @@ pub const INVARIANTS: &[Invariant] = &[
     Invariant {
         number: 2,
         claim: "norn-host drives the substrate and norn-store implements it: driver calls live \
-                in norn-store, and among product crates norn-host alone links it",
+                in norn-db, and among product crates norn-host alone links the store",
         // Not edge-held. `norn-testkit -> norn-store` is a permitted edge, so
         // the absence of edges cannot say "no other crate opens a
         // connection"; the lint scoped to the crates that ship says it, and
         // the sole-applier half is a judgment.
         mechanisms: &[
-            Mechanism::Lint("no SQLite connection opened outside norn-store"),
+            Mechanism::Lint("no SQLite connection opened outside norn-db"),
             Mechanism::Review("that one applier executes every plan, judged with invariant 4"),
         ],
     },

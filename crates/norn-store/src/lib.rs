@@ -1,16 +1,20 @@
 #![forbid(unsafe_code)]
 //! An SDK for talking to SQL.
 //!
-//! This crate is the first effect seam: it owns the store schema, the DDL
-//! fingerprint, the four pillars, the database-side heal rung, the derivation
-//! counters, and the file lifecycle of the database itself. **No other crate
-//! opens a SQLite connection**, harness included — what a test or a gate needs
-//! from the substrate, it gets through this API.
+//! This crate is the first effect seam: it owns the store schema, the four
+//! pillars, what the database-side heal rung means for derived state, and the
+//! derivation counters. **No other crate reaches the derived database**,
+//! harness included — what a test or a gate needs from the substrate, it gets
+//! through this API.
+//!
+//! It is `norn-db`'s first client. The connection, the pinned-scalar
+//! mechanics, the DDL fingerprint, the store epoch and the database file's
+//! lifecycle are that crate's; what is here is what the statements and the
+//! rows mean.
 //!
 //! Its verbs translate cleanly to SQL and carry no business logic beyond how a
-//! query is composed. It links one workspace crate, `norn-wire`, and it takes
-//! **typed facts rather than documents**: parsing is orchestration's job, so
-//! nothing here reads document text.
+//! query is composed. It takes **typed facts rather than documents**: parsing
+//! is orchestration's job, so nothing here reads document text.
 //!
 //! # Where to start
 //!
@@ -59,7 +63,7 @@
 //!   The probe readers here are the range primitives those builders compose;
 //!   they take index bounds, never parameters. What is here already is the seam
 //!   those bars are asserted through — [`Request::emitted_plan`] — because a
-//!   plan cannot be taken by a crate that may not open a connection.
+//!   plan cannot be taken by a crate that cannot reach the database.
 //! - **Anything that reads a document.** One parser, and it is not this crate.
 
 pub mod ddl;
@@ -88,13 +92,13 @@ pub use facts::{
 pub use faults::induced_failure;
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
+pub use norn_db::{EmittedPlan, PlanStep};
 pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe,
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, EmittedPlan, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, PlanStep,
-    Request, SubjectScope,
+    DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, Request, SubjectScope,
 };
 pub use store::{
     OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,

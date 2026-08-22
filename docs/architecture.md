@@ -95,8 +95,11 @@ restores trust. Three rungs, cheapest first:
 
 Vault files are never the thing being healed; they are the source of truth. The ladder
 splits across the two effect seams: tree-walking rungs orchestrate through `norn-fs`,
-database-side rungs (store schema fingerprint, rebuild-from-zero) live in `norn-store`. A rung
-may be subdivided; a fourth escape hatch may not be added.
+database-side rungs (store schema fingerprint, rebuild-from-zero) split across the substrate
+seam the same way every database-side act does: `norn-store` says which rung the state is at,
+and `norn-db` performs the operation — the fingerprint and the schema digest it is read from,
+the file removed, the database opened again. A rung may be subdivided; a fourth escape hatch
+may not be added.
 
 **Rung 3 has two triggers, with different lifetimes.**
 
@@ -112,17 +115,19 @@ At the first release, version 1 freezes as the first migratable baseline. From t
 **migrations pillar is the store schema evolution path**, and rebuild-from-zero narrows to the
 second trigger alone.
 
-**The store types damage; the host routes it.** An open resolves the damage it can see for
-itself, and it can see only the store schema — so a page that reads corrupt under a warm
-increment, a full-text index that stopped agreeing with the column it indexes, or a value
-outside a closed vocabulary is damage a *later* operation meets. Every such refusal is typed
-as damaged state at the operation that met it, and the driver codes that qualify are the
-store's judgment to make because SQLite is the store's to own. What the host does with the
-verdict is the rung: trust is withdrawn under a reason of its own, the store is consumed and
-its file discarded, a database is created in its place, and the vault is derived into it by
-the same heal an attach runs. **A damaged verdict never re-enters the lower rungs** — a
-retry, or coverage re-installed over the same database, meets the same page again — so the
-requirement damage sets dominates the one a broken environment sets wherever both stand.
+**The substrate types damage; the store reads the rung; the host routes it.** An open
+resolves the damage it can see for itself, and it can see only the store schema — so a page
+that reads corrupt under a warm increment, a full-text index that stopped agreeing with the
+column it indexes, or a value outside a closed vocabulary is damage a *later* operation meets.
+Every such refusal is typed as damaged state at the operation that met it, and the driver
+codes that qualify are `norn-db`'s judgment to make because SQLite is `norn-db`'s to own: the
+substrate performs the operation and types what it met, and `norn-store` reads that verdict as
+which rung the state is at. What the host does with the verdict is the rung: trust is
+withdrawn under a reason of its own, the store is consumed and its file discarded, a database
+is created in its place, and the vault is derived into it by the same heal an attach runs.
+**A damaged verdict never re-enters the lower rungs** — a retry, or coverage re-installed
+over the same database, meets the same page again — so the requirement damage sets dominates
+the one a broken environment sets wherever both stand.
 Watcher coverage and the maintainer lock stand through the rung: neither is what was damaged.
 
 **An attach runs the rung inline, and publishes no verdict for it.** An entry holding no
@@ -518,8 +523,8 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
-a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and twelve named statements carry an index bar through it: suffix candidates,
+a statement it emitted, because a plan cannot be taken by a crate that may not reach the
+database — and twelve named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 the page a walk reads its scope's unaccounted finding subjects through, the ordered
@@ -674,8 +679,8 @@ the case this part's own rule warns about — a review-held invariant rots quiet
 heavy-dependency isolation, or a standalone future. Anything else is a module. This is the
 crate-level face of one-obvious-path.
 
-Twelve product crates (including the composition root), two development crates, one shipped
-binary. Every crate carries a one-line **membership rule**. *The rule, not the current
+Thirteen product crates (including the composition root), two development crates, one
+shipped binary. Every crate carries a one-line **membership rule**. *The rule, not the current
 content list, is what reviews enforce against* — a crate's contents are evidence about the
 rule, never a substitute for it.
 
@@ -690,7 +695,8 @@ contract.
 | `norn-wire` | **The vocabulary** — request params, reports, typed plans, findings, trust states. Pure types: no I/O, no logic. **A name a request carries is a grammar here, not a string**: the vault name, whose read path is its constructor, so a name that crossed is a name that parsed, and the attach mode a demand asks its derived state under. A finding's `candidates` is a **bounded head of 5** in deterministic resolution-ladder order plus `candidates_total`; the bound is wire shape and holds at rest in the findings table too. **Every enumerable code lives in one registry here** — refusal codes and finding kinds alike — under one grammar: a flat `namespace/what-happened` string is what a client branches on, a nested typed reason is structure inside a code rather than a code, a note a layer files about its own reading of one document is not a code and does not cross this seam, and an advisory `detail` string is prose no client matches on. A finding kind also carries the scope its findings stand at, so whether a document row at a subject withholds a finding is one answer the producer and the client read from the same registry. | Params and reports are defined exactly once; CLI flags and MCP tool schemas are derived renderings of these types. |
 | `norn-text` | **The syntax of a vault document, never its semantics** — frontmatter parse / lossless edit / serialize, headings, sections, both link families (wikilink and inline Markdown, one fact shape carrying family, protocol and title, from which the resolution mode derives — protocol first, family second), `#tag` syntax (body tokens with code-span exclusion, plus the frontmatter tags shape). Frontmatter string values are scanned for wikilinks only. Pure functions over strings; answers "what does this document say", never "what does it mean" or "is it right". **A frontmatter block is read only up to an authored byte bound** (`FRONTMATTER_MAX_BYTES`), because the YAML scanner behind the seam is quadratic in block length on nested flow collections; a block past it is refused unparsed, so what a block costs to read has the ceiling the bound sets rather than growing with the block's own length — a ceiling, not a flat cost: inside the bound a nested block still costs about two orders of magnitude more than an ordinary mapping of the same length. Inside the bound, reading an ordinary mapping is **linear in its key count**, and so is deriving every field's strings back out of it: both places a block's keys are all resolved — the field split, over each scanned key line, and the text derive, over each field — go through a by-key view of the parsed mapping rather than a scan of it, and the soak lane bars both shapes by taking one whole block against four blocks of a quarter its keys. The `#tag` family is committed to graduate past syntax in two steps, in that order: the facet `norn-store` enforces belongs to the vault schema's content model and binds with it, and the query surface that reads the facet — whose shape the verb charter decides — comes after. | The one-parser invariant — every consumer reads documents through one grammar. Carve-out future: the serde-based frontmatter path can be replaced by a purpose-built parser without surgery elsewhere. |
 | `norn-fs` | **Everything that touches the vault filesystem, and nothing that doesn't** — walk, read, stat/fingerprint, the atomic-write protocol (fingerprint → shadow → verify → swap), the per-entry flock primitive, the watcher as a subscribable stream of typed filesystem facts (debounced, coalesced, atomic-replace aware), and **the one path-spelling normalization point** — case, dot-prefix, redundant separators — so every consumer compares normalized identity instead of deriving its own. **A vault's own mechanism files are part of "everything that touches the vault filesystem"**: the maintainer lock file and the shadow home — one of each per registration, keyed by data base, channel and vault name — rather than among documents. The lock file is in the norn data root; the home is under the data root too unless the vault is on another filesystem, where it falls back under the vault root carrying that same key, so two registrations over one root stage into two homes and neither sweeps the other's. Creating, reading, writing and sweeping them is `norn-fs`'s — no other crate reaches them. Watcher coverage for an entry is three edges: the vault root tree recursively; the root's own parent non-recursively, which is the only edge that can report the root name being removed or renamed — coverage ending rather than a change inside the vault; and, when the entry's configured schema source sits outside the vault, that source's parent, added only when neither of the first two already reaches it. Filesystem facts only; not a general event bus. Behind an off-by-default feature, so a shipped build has no reader for the variables that arm it and nothing in it can be armed, three sibling fault seams are each widened once at their own boundary — the write protocol's at the public write entry point, naming the stage a publication fails at and how, which is what a child that dies mid-write is arranged through; the watcher's at watch establishment, naming a registration that refuses, an event stream that fails or reports its path set lost, and a synchronization boundary that never arrives; and the walk's at a walk's construction, naming what one entry's paging stat meets between the listing that named it and the stat itself — the name gone, the name holding another kind, or the machine refusing to answer for it. Each reads the arm from the environment the process was started with, each appends to one record file — which belongs outside every watched tree, since it is written while coverage is live — and a record's `seam` field says which of the three fired. | The second effect seam; heavy-dependency isolation for the platform watcher backend; churn semantics unit-testable in-crate against a temp tree. Which backend wins is invisible outside the crate: no other crate learns it. |
-| `norn-store` | **An SDK for talking to SQL** — DDL, migration machinery, the DDL fingerprint, the four pillars (FTS5, vector, findings, migrations), write-through increments, database-side heal rungs, derivation counters, the read builders (wire params → emitted SQL, not built) with the snapshot read handles they run on, the epoch a database carries from creation to discard — which is what says a change-feed position belongs to the database being read — and the sub-fingerprints a document row is stamped with at the write that derives it, because the canonical frontmatter projection they hash exists nowhere above this crate, and — behind an off-by-default feature, so a shipped build carries none of it — the arrangements the induced-failure suite reaches a rung or a refusal through from outside. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
+| `norn-db` | **The mechanics of running a SQLite database, and no domain content at all** — connection ownership with the pragmas a schema is designed to be read under, the DDL fingerprint over a statement list the caller hands over, the pinned-scalar `meta` pattern the mechanics keys live in, the store epoch a database carries from creation to discard, changeset transaction discipline, damage typing at the driver seam, the `EXPLAIN` plan handout, and the database file's own lifecycle — its parent directory, the file, and the sidecars a journal leaves beside it. **No other crate opens a SQLite connection**, harness included, and this is the one crate manifest that declares the driver — the workspace root pins its version and its features. What a statement list means belongs to the crate that hands it over: nothing here reads a document, a vault, a wire type or a lane. Behind the same off-by-default feature its clients carry, so a shipped build carries none of it, the driver-seam arrangements a suite reaches a rung through — the page cap an open applies, and the busy a pinned-scalar read reports. | The substrate seam, earned by the second database consumer: without it either every lane-2 engine re-grows rebuild, fingerprint and damage machinery for its own sidecar, or the lane-1 crate learns the mechanics of lanes it should not know exist. See [ADR 0022](decisions/0022-one-crate-knows-sql.md). |
+| `norn-store` | **An SDK for talking to SQL** — the lane-1 DDL, migration machinery, the four pillars (FTS5, vector, findings, migrations), write-through increments, what the database-side heal rungs mean for derived state, derivation counters, the read builders (wire params → emitted SQL, not built) with the snapshot read handles they run on, and the sub-fingerprints a document row is stamped with at the write that derives it, because the canonical frontmatter projection they hash exists nowhere above this crate, and — behind an off-by-default feature, so a shipped build carries none of it — the arrangements the induced-failure suite reaches a rung or a refusal through from outside. It is `norn-db`'s first client and owns what the derived database *means*; connection ownership, the DDL fingerprint, the pinned-scalar mechanics, the store epoch and the database file's lifecycle are `norn-db`'s, reached through that API. Its verbs translate cleanly to SQL; no business logic beyond how queries are composed. A findings row records the kind it was handed: **finding-kind vocabulary is `norn-wire`'s**, and the store stores it rather than defining it. | The first effect seam. Read builders live here because the `EXPLAIN` gates test the builder's emitted SQL — store schema and queries co-evolve or they drift. |
 | `norn-embed` | **Text in → vector out, model identity explicit** — the embedding trait with `(model id, version)` first-class in the API; the deterministic stub is the default build; the real pinned runtime compiles only behind the release/soak feature. Never touches the vault or the database, never decides anything. Its one permitted effect is the opt-in machine-local weight fetch/load, at a path the host injects **from `norn-config`**; fetched weights are integrity-pinned by a static manifest compiled into the crate, mapping `(model id, version)` to a sha256 digest and a source URL. A blob's on-disk name carries its digest, and verification happens at fetch, so an unverified blob never appears under a name anything loads. A fetch failure or a digest mismatch refuses with a structured reason: semantic search stays un-enabled, and nothing else degrades. Acquisition is eager, at the explicit enable act, never lazy inside a query. A model upgrade is a release-time manifest change plus a migration of derived vector state, never ambient upstream drift. | Heavy-dependency isolation (the model runtime stays out of every development build), and a structural guarantee that inference cannot reach findings or plans. |
 | `norn-config` | **Machine-local state, one owner** — the machine-local layout (config directory, data directory, the machine-local schemas directory, the weights directory, and the per-vault derived-state directory, keyed by vault name), the registry file read/write, the bearer token read/write, and the loopback endpoint convention. The token file holds a **set of tokens keyed by label**, not one token: rotation is adding a second label and removing the first, and every stored secret is a credential the serving side verifies against. The endpoint is a convention rather than a discovery — a per-channel default port, with an explicit port override the one way past it. Every machine-local path is channel-qualified, and no API takes a channel. The vault-name grammar it keys all of that by is `norn-wire`'s, re-exported here rather than spelled a second time. Never touches a vault. | The one state surface both sides of the client/host seam must read — the serving side to authenticate, the client to find the host at all. Hand-sharing that convention in two crates is a drift class on a security-relevant file. |
 | `norn-host` | **The protocol-blind orchestrator** — registry semantics (the serving set; file access via `norn-config`), vault entries and lazy attach, vault schema (resolved through the registry entry's schema-source — default: a path inside the vault — read via `norn-fs` as one atomic read-and-fingerprint act, and pinned at attach), and the worker pool (the one applier, mutation planners, the repair planner, embedding workers). The pinned schema is projected into the store's meta (bytes, fingerprint, generation) as derived state; the file remains its sole authority. **Wire in, wire out**: a plain library with no sockets, composing `fs` + `text` + `store` + `embed` (+ `config`). Never touches vault bytes, and the one direct effect reserved to it is the one-shot legacy-cache janitor, which is not built. Every job keeps an account of what it spent and did — filesystem reads, changesets, ladder rungs — written on every build and read only behind the same off-by-default feature the induced-failure arrangements sit behind, so a shipped build carries the accounting and none of its readers. | The composition seam: sole subscriber of filesystem facts, sole caller of store increments, sole executor of plans — reachable only as wire types. |
@@ -742,6 +748,7 @@ graph TD
   client --> console["norn-console (norn-agnostic)"]
   client --> config
   store --> wire
+  store --> db["norn-db"]
   config --> wire
   fixtures["norn-fixtures (dev)"]
   testkit["norn-testkit (dev)"] -.-> fixtures
@@ -758,17 +765,18 @@ Written out, the permitted edges are exactly:
 | `norn-mcp` | `norn-wire` |
 | `norn-host` | `norn-store`, `norn-wire`, `norn-text`, `norn-fs`, `norn-embed`, `norn-config` |
 | `norn-client` | `norn-wire`, `norn-console`, `norn-config` |
-| `norn-store` | `norn-wire` |
+| `norn-store` | `norn-wire`, `norn-db` |
 | `norn-config` | `norn-wire` |
 | `norn-testkit` (dev) | `norn-fixtures`, `norn-wire`, `norn-store` |
-| `norn-wire`, `norn-text`, `norn-fs`, `norn-embed`, `norn-console`, `norn-fixtures` | *(none)* |
+| `norn-wire`, `norn-text`, `norn-fs`, `norn-embed`, `norn-console`, `norn-db`, `norn-fixtures` | *(none)* |
 
-Six crates are leaves with zero workspace dependencies. `norn-store` and `norn-config`
-depend on `norn-wire` alone: the store's API takes typed facts rather than raw documents —
-parsing happens in host orchestration — and the registry file is keyed by the vault name
-whose grammar the vocabulary owns, because that name crosses the client/host seam as well
-as keying a table and naming a directory. Neither edge widens reachability, because
-`norn-wire` reaches nothing.
+Seven crates are leaves with zero workspace dependencies. `norn-store` depends on
+`norn-wire` and `norn-db`, and `norn-config` on `norn-wire` alone: the store's API takes
+typed facts rather than raw documents — parsing happens in host orchestration — the
+substrate under it is a leaf that knows SQLite and nothing about vaults, and the registry
+file is keyed by the vault name whose grammar the vocabulary owns, because that name
+crosses the client/host seam as well as keying a table and naming a directory. None of the
+three edges widens reachability, because `norn-wire` and `norn-db` each reach nothing.
 
 ### Boundary invariants
 
@@ -786,10 +794,12 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
    database, and the absent edges are what makes that permanent.
 2. **`norn-host` drives the substrate; `norn-store` implements it.** These are separate
    claims, about different things:
-   - **Driver calls live in `norn-store`.** No other crate's code opens a SQLite connection;
-     that is the lint's subject. The harness is no exception: `norn-testkit`'s `EXPLAIN`,
-     counter and equivalence assertions run through `norn-store`'s own API, which exposes what
-     they need, so testkit opens no connection itself.
+   - **Driver calls live in `norn-db`.** No other crate's code opens a SQLite connection;
+     that is the lint's subject, and `norn-store` is inside it — a domain crate composes SQL
+     and hands it to a connection it did not open. The harness is no exception:
+     `norn-testkit`'s `EXPLAIN`, counter and equivalence assertions run through
+     `norn-store`'s own API, which exposes what they need, so testkit opens no connection
+     itself.
    - **Among product crates, `norn-host` alone links `norn-store` into a running process**,
      so in the shipped artifact one crate reaches the substrate. `norn-testkit` also depends
      on `norn-store`, but it never ships.
@@ -811,7 +821,9 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
    and keeps norn semantics out of presentation mechanics.
 8. **Two vault-effect seams, and only two.** In the shipped product, `norn-fs` and
    `norn-store` are the only crates that touch a vault — its files and its derived
-   database. Derivation is
+   database. `norn-store` reaches that database through `norn-db`, which is inside this
+   seam rather than a third one beside it: nothing but the store links it, so the effect
+   still has one owner and one way in. Derivation is
    `fs.walk → text.parse → store.upsert`; application is
    `text.compose → fs.write_atomic → store.increment`. The seam governs *vault* effects
    specifically, so a crate having some other effect is not a violation of it — serving
@@ -901,7 +913,7 @@ can express yet is review-held: the wire-seam rule is today, because `disallowed
 cannot tell a signature crossing the seam from legitimate test and helper use. The rules:
 
 - no `serde_json::Value` crossing the wire seam
-- no SQLite connection opened outside `norn-store`
+- no SQLite connection opened outside `norn-db`
 - `std::fs` disallowed workspace-wide
 - no `norn-config` registry-surface use outside `norn-host`
 - no direct stdout writes outside `norn-console`
@@ -917,7 +929,7 @@ enforceable ruleset is the harness's code**; a site missing from a table is a ga
 table, and a site the ruleset rejects is rejected whatever the table says.
 
 The other two configured rules carve out inside a single crate each, and that fact is the
-whole map: the SQLite rule's one carve-out is the connection `norn-store` opens, which is
+whole map: the SQLite rule's one carve-out is the connection `norn-db` opens, which is
 the seam the rule exists to keep to one place, and the registry rule's are in
 `norn-config`'s own suite, which exercises the surface the rule reserves to `norn-host`.
 
@@ -932,7 +944,8 @@ membership rule binds.
 | Site | Effect |
 |---|---|
 | `norn-fs` | The vault filesystem seam itself: walk, read, stat, atomic write, flock. Plus the per-registration mechanism files it owns, keyed by data base, channel and vault name — the maintainer lock file under the norn data root (created once, never unlinked) and the shadow home (created, staged into, swept), which is under the data root too unless the vault is on another filesystem. This is the rule's home, not a carve-out. Its own suites carry allows besides, for the trees and states a case arranges and judges |
-| `norn-store` | The parts of the derived database's file lifecycle the driver does not cover: deleting the database at heal rung 3, tearing down the throwaway store behind disposable derivation, and preparing its parent directory. Its suites carry allows too — the directory a case's store lives in, the bytes a case damages, and the sidecar a torn changeset left |
+| `norn-db` | The parts of a database file's lifecycle the driver does not cover: deleting the file and the sidecars a journal leaves beside it, and preparing its parent directory |
+| `norn-store` | Behind the induced-failure feature, the record file a fired arm appends to — the rest of the derived database's file lifecycle is `norn-db`'s, and the rungs and modes that decide when it happens reach it through that API. Its suites carry allows too — the directory a case's store lives in, the bytes a case damages, and the sidecar a torn changeset left |
 | `norn-config` | Config-directory bytes, and the whole protocol around them: the registry file and the token file, the `0700` creation of the config directory, the `.lock` file each data file is guarded by, the temporary file every write lands in and the sweep that clears a dead writer's, and the directory fsync that makes a rename durable. Its suites carry allows for what they arrange outside that protocol: modes the API never writes, links planted at a name, and residue a dead writer left |
 | `norn-embed` | *Reserved.* The opt-in weight fetch and load, which is not built; the crate reaches no filesystem today |
 | `norn-host` | Its suites' scaffolding, which is the whole of the crate's contact today: generated trees, subprocess probes, and fixtures impersonating external editors and retargets. *Reserved* beside it: the one-shot legacy-cache janitor, which is not built |
@@ -941,13 +954,14 @@ membership rule binds.
 
 Two notes on that table:
 
-- **Most of `norn-store`'s disk contact is driver-mediated.** Queries and increments reach
-  disk through SQLite; so does creating the file (SQLite creates on open) and rebuilding it
-  (that is DDL). What is left over — removing a file, tearing a throwaway store down,
-  preparing a parent directory — is where the crate's `std::fs` allows sit. Fixing the
-  precise allow-set is the harness's job, not this table's. The lifecycle sits in
-  `norn-store` rather than `norn-fs` because the database is store's to own: rung 3 is a
-  database-side rung, and the host chooses the mode while store performs the operation.
+- **Most of a derived database's disk contact is driver-mediated.** Queries and increments
+  reach disk through SQLite; so does creating the file (SQLite creates on open) and
+  rebuilding it (that is DDL). What is left over — removing a file, tearing a throwaway
+  store down, preparing a parent directory — is where `norn-db`'s `std::fs` allows sit.
+  Fixing the precise allow-set is the harness's job, not this table's. The lifecycle sits
+  under the substrate seam rather than in `norn-fs` because a derived database is not a
+  vault file: rung 3 is a database-side rung, the host chooses the mode, `norn-store` says
+  which rung the state is at, and `norn-db` performs the operation.
 - **The dev crates are not outside the rule.** One workspace-root `clippy.toml` binds
   workspace-wide and does not merge per-crate, so `norn-fixtures` and `norn-testkit` write
   temp trees under ordinary use-site `#[allow]`s. That is precisely why they appear in the

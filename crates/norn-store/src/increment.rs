@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use rusqlite::{CachedStatement, OptionalExtension, Transaction, TransactionBehavior, params};
+use norn_db::rusqlite::{CachedStatement, OptionalExtension, Transaction, params};
 
 use crate::counters::{Counter, DerivationCounters};
 use crate::error::{self, StoreError};
@@ -17,7 +17,7 @@ use crate::hash;
 use crate::json;
 use crate::path::{ClassKey, DocumentPath};
 use crate::request;
-use crate::store::{self, Store};
+use crate::store::Store;
 
 /// One entry in a changeset.
 ///
@@ -156,10 +156,9 @@ pub(crate) fn apply(
     // orders by it; it is what a person reads in a report.
     let recorded_at = request::unix_seconds();
     let transaction = store
-        .connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error::sql("opening the increment transaction", error))?;
-    let generation = store::next_generation(&transaction)?;
+        .database
+        .immediate_transaction("opening the increment transaction")?;
+    let generation = norn_db::meta::next_generation(&transaction)?;
 
     let mut tally = Tally::default();
     {

@@ -413,6 +413,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "norn-db"
+version = "0.0.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "norn-embed"
 version = "0.0.0"
 dependencies = [
@@ -457,10 +464,10 @@ dependencies = [
 name = "norn-store"
 version = "0.0.0"
 dependencies = [
+ "norn-db",
  "norn-store",
  "norn-testkit",
  "norn-wire",
- "rusqlite",
  "sha2",
 ]
 

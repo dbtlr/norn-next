@@ -1,10 +1,12 @@
 //! The store schema, stated once and designed whole.
 //!
 //! Every statement the store schema is made of lives in this module tree, one
-//! area per file, and [`statements`] is the order they execute in. A database
-//! is created by running exactly that list and by nothing else: there is no
-//! incremental path from an older shape, because a store schema that is not
-//! this one is resolved by discarding the database and running the list again.
+//! area per file — with one exception, `meta`, whose table is the substrate's
+//! and whose statement this list takes from `norn-db` — and [`statements`] is
+//! the order they execute in. A database is created by running exactly that
+//! list and by nothing else: there is no incremental path from an older shape,
+//! because a store schema that is not this one is resolved by discarding the
+//! database and running the list again.
 //!
 //! # The fingerprint is the whole list, and it is only half the question
 //!
@@ -68,17 +70,18 @@ pub(crate) mod vectors;
 /// evolution path.
 pub const STORE_SCHEMA_VERSION: i64 = 1;
 
-/// The areas, in execution order. `meta` is first because it is what an open
-/// reads to decide whether the rest is trustworthy; `documents` precedes
-/// everything that references it; the pillars come last because two of them
-/// (full text, vectors) are defined over rows the earlier areas own.
+/// The areas, in execution order. `meta` is first, and it is the substrate's
+/// table rather than this tree's, because it is what an open reads to decide
+/// whether the rest is trustworthy; `documents` precedes everything that
+/// references it; the pillars come last because two of them (full text,
+/// vectors) are defined over rows the earlier areas own.
 ///
 /// An area is a function rather than a slice of literals because a statement
 /// may carry a bound the Rust API also states — `finding_candidates`'s rank
 /// `CHECK` is [`crate::CANDIDATE_HEAD`] — and the statement builds that bound
 /// from the constant instead of spelling it a second time.
 const AREAS: &[fn() -> Vec<String>] = &[
-    meta::statements,
+    norn_db::meta::statements,
     documents::statements,
     facts::statements,
     tombstones::statements,
@@ -117,20 +120,5 @@ pub(crate) fn fixed(statements: &[&str]) -> Vec<String> {
 /// which is what the schema digest folded into an open ([`crate::Store`])
 /// catches independently.
 pub fn fingerprint() -> String {
-    digest(statements().iter().map(String::as_str))
-}
-
-/// FNV-1a over a sequence of parts, as sixteen lowercase hex digits.
-///
-/// Each part is followed by a separator, so that moving a boundary between two
-/// parts changes the digest rather than leaving the concatenation unchanged.
-pub(crate) fn digest<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in parts {
-        for byte in part.as_bytes().iter().chain(b"\x1e") {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-    format!("{hash:016x}")
+    norn_db::digest(statements().iter().map(String::as_str))
 }

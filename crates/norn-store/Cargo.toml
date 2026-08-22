@@ -8,28 +8,18 @@ repository.workspace = true
 publish.workspace = true
 
 # The dependency allowlist (docs/architecture.md) carries `norn-store ->
-# norn-wire` and nothing else out of this crate: parsing happens in host
-# orchestration, so this crate's API takes typed facts and never a document.
-# `norn-wire` is declared because the architecture gate requires every
-# permitted edge whose two endpoints are both present; the read builders that
-# compile wire params to SQL are what will import it, and nothing here does
-# yet.
+# norn-wire` and `norn-store -> norn-db`, and nothing else out of this crate:
+# parsing happens in host orchestration, so this crate's API takes typed facts
+# and never a document. `norn-wire` is the vocabulary a findings row records
+# the kind and severity it was handed from.
 #
-# `rusqlite` is the substrate this crate exists to own — the one crate in the
-# workspace that opens a SQLite connection. Features are pinned rather than
-# defaulted:
-#
-# - `bundled` compiles SQLite from vendored source, so the store schema is
-#   read by the library version this workspace pins rather than by whatever
-#   the host machine ships. It is also what turns FTS5 and JSON1 on, both of
-#   which the DDL requires as pillars rather than as optional extras.
-# - `fallible_uint` makes an unsigned value's conversion to SQLite's signed
-#   integer a checked one. Offsets, lengths and counts are unsigned facts, and
-#   the alternative to a checked bind is casting at every call site — which is
-#   where a wrapped number stops being visible.
-# - Nothing else. No `serde_json`, no `time`, no `chrono`: a value's shape at
-#   rest is this crate's own projection, and a driver convenience that decided
-#   it would be a second spelling of one.
+# `norn-db` is the substrate this crate is the first client of. It owns the
+# connection, the pinned-scalar mechanics, the DDL fingerprint, the store epoch
+# and the database file's lifecycle; this crate owns what the statements and
+# the rows mean. The driver is declared by that crate's manifest alone — the
+# workspace root pins its version and its features — and reached through its
+# re-export, which is what makes "one crate knows SQL" a fact about the
+# manifests and not only about the code.
 #
 # `sha2` is here because this crate hashes rather than only stores hashes. A
 # document row carries a sub-fingerprint per part a change-feed consumer derives
@@ -39,19 +29,21 @@ publish.workspace = true
 # would put a second answer to "what is at rest here" outside the write that
 # put it there.
 [dependencies]
+norn-db = { path = "../norn-db" }
 norn-wire = { path = "../norn-wire" }
-rusqlite = { workspace = true }
 sha2 = { workspace = true }
 
 # `induced-failure` gates `induced_failure`, the module of out-of-band
 # arrangements the store's own suite reaches through to reach a rung or a
 # refusal from outside — a store schema this build did not write, a dropped
-# index, a busy database, a process killed mid-changeset. Off by default, so a
-# shipped build carries none of the three hooks: the out-of-band SQL executor,
-# the busy-injection thread-local read on every pinned scalar, and the tear the
-# increment checks between two entries.
+# index, a busy database, a process killed mid-changeset. It forwards to
+# `norn-db`'s feature of the same name, because two of the arrangements are met
+# at the driver seam rather than here. Off by default, so a shipped build
+# carries none of the hooks: the out-of-band SQL executor, the busy-injection
+# thread-local read on every pinned scalar, and the tear the increment checks
+# between two entries.
 [features]
-induced-failure = []
+induced-failure = ["norn-db/induced-failure"]
 
 # This crate is its own dev-dependency, with the feature turned on, because
 # the integration suite in `tests/` links against `norn-store` as an external
