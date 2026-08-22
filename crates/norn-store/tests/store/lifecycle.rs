@@ -103,6 +103,10 @@ fn an_epoch_is_minted_at_create_and_survives_every_reopen() {
         &document("glossary.md", "hash-1", "a body\n"),
     );
     assert_eq!(store.epoch(), minted, "a write moved the epoch");
+    drop(store);
+
+    let written = Store::open(&database).expect("reopening after a write");
+    assert_eq!(written.epoch(), minted, "a write moved the epoch at rest");
 }
 
 /// **A discard is a new epoch, whichever route reaches it.** Both are the same
@@ -167,6 +171,7 @@ fn a_database_recording_no_epoch_is_rebuilt_from_zero() {
         &document(subject.as_str(), "hash-1", "a body\n"),
     );
     let recorded = store.recorded_store_schema().expect("the recorded schema");
+    let discarded = store.epoch().to_string();
     induced_failure::execute_out_of_band(&mut store, "DELETE FROM meta WHERE key = 'store_epoch'")
         .expect("removing the epoch");
     // The three gates ahead of it still pass, which is the point: nothing else
@@ -186,6 +191,11 @@ fn a_database_recording_no_epoch_is_rebuilt_from_zero() {
         other => panic!("the store opened as {other:?} rather than rebuilding"),
     }
     assert!(!rebuilt.epoch().is_empty(), "the rebuilt store minted none");
+    assert_ne!(
+        rebuilt.epoch(),
+        discarded,
+        "the rebuilt store adopted the epoch the damaged database lost"
+    );
     assert_eq!(
         rebuilt
             .begin_request()
