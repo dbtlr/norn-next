@@ -234,6 +234,64 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
     }
 }
 
+/// **A sub-fingerprint is recomputed at rest rather than trusted.** It is a
+/// derived column, and every read that would notice one drifting from the column
+/// it hashes is a read that has already trusted it: a change-feed consumer
+/// triages on these values and fetches nothing where they match, so a body hash
+/// that stopped describing its body is a document that quietly stops being
+/// re-derived.
+///
+/// Both directions of the drift are arranged, because the increment writes the
+/// pair together and only an out-of-band write can separate them: the hash moved
+/// away from its column, and the column moved away from its hash.
+#[test]
+fn a_sub_fingerprint_that_does_not_describe_its_column_is_damage() {
+    for (arrange, named) in [
+        (
+            "UPDATE documents SET body_hash = 'not the hash of anything'",
+            "body hash",
+        ),
+        (
+            "UPDATE documents SET body = 'an entirely different body'",
+            "body hash",
+        ),
+        (
+            "UPDATE documents SET frontmatter_projection_hash = 'not the hash of anything'",
+            "frontmatter projection hash",
+        ),
+        (
+            "UPDATE documents SET frontmatter = '{\"title\":\"another title\"}'",
+            "frontmatter projection hash",
+        ),
+    ] {
+        let scratch = Scratch::new("sub-fingerprint");
+        let mut store = scratch.open();
+        let subject = path("docs/norn/glossary.md");
+        let mut facts = document(subject.as_str(), "hash-1", "a body\n");
+        facts.frontmatter = titled_frontmatter();
+        write_document(&mut store.begin_request(), &facts);
+        store.verify_integrity().expect("a store just written to");
+
+        // The triggers stay, so a rewritten body carries the full-text index
+        // with it and the checks ahead of the recompute all pass. What is left
+        // wrong is the pair the recompute is the only reader of.
+        induced_failure::execute_out_of_band(&mut store, arrange)
+            .expect("separating a hash from the column it describes");
+
+        let error = store
+            .verify_integrity()
+            .expect_err("a sub-fingerprint that describes nothing");
+        let StoreError::Damaged { what } = &error else {
+            panic!("`{arrange}` was reported as {error:?} rather than as damage");
+        };
+        assert!(what.contains(named), "{what}");
+        assert!(
+            what.contains(subject.as_str()),
+            "the damage does not name the row it was found at: {what}"
+        );
+    }
+}
+
 /// A vector is identified by its document and its model, replaced when it is
 /// recomputed, and taken by the cascade when its document dies.
 #[test]

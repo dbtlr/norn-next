@@ -6085,9 +6085,17 @@ mod tests {
     /// after that is appended past it, so the tail is documents and the head is
     /// the schema. This is real corruption rather than an injected verdict: what
     /// the store meets is a page SQLite refuses to read.
+    ///
+    /// **The last quarter, not the last half.** The schema's own pages are
+    /// allocated while the statement list runs, before a single document is
+    /// written, so they are all within the pages the created database occupied —
+    /// and that is a share of the finished file rather than a fixed page, so a
+    /// schema that grows moves the boundary the proxy has to stay behind. A
+    /// quarter of a store holding this many documents is still many pages of
+    /// them, which is what the read below meets.
     fn corrupt_the_document_pages(database: &Path) {
         let mut bytes = fs::read(database).unwrap();
-        let head = bytes.len() / 2;
+        let head = bytes.len() - bytes.len() / 4;
         assert!(head > 0, "the database is empty");
         for byte in bytes.iter_mut().skip(head) {
             *byte = 0x5a;

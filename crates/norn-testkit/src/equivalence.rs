@@ -10,11 +10,12 @@
 //! # What the projection carries, and what it drops
 //!
 //! It carries every **derived fact**: the document rows and their bodies, the
-//! content hashes, byte lengths, body offsets and frontmatter diagnostic counts,
-//! the frontmatter projection, the links, headings, block ids and tags, the
-//! terms the full-text index holds, the pinned vault schema, and every finding —
-//! findings at paths no document row stands at included, because those are
-//! exactly the ones a keyed read cannot be asked for.
+//! content hashes and the sub-fingerprints beside them, byte lengths, body
+//! offsets and frontmatter diagnostic counts, the frontmatter projection, the
+//! links, headings, block ids and tags, the terms the full-text index holds, the
+//! pinned vault schema, and every finding — findings at paths no document row
+//! stands at included, because those are exactly the ones a keyed read cannot be
+//! asked for.
 //!
 //! It drops every **incidental** value, and each of the three is dropped for one
 //! reason: nothing downstream can read it, and two stores that agree on every
@@ -108,6 +109,14 @@ pub struct StoreProjection {
 pub struct ProjectedDocument {
     pub path: String,
     pub content_hash: String,
+    /// The sub-fingerprint of the body, as the change feed projects it. A
+    /// derived fact like every other field here: two stores that agree about a
+    /// document agree about what its body hashes to, whichever route derived
+    /// them.
+    pub body_hash: String,
+    /// The sub-fingerprint of the frontmatter projection, and `None` where there
+    /// is no projection to hash.
+    pub frontmatter_projection_hash: Option<String>,
     pub byte_length: u64,
     pub body_offset: u64,
     pub frontmatter: Option<String>,
@@ -280,6 +289,27 @@ impl StoreProjection {
         };
         let mut request = store.begin_request();
 
+        // The sub-fingerprints are read off the change feed rather than off the
+        // document row, because that is the only reader that hands them out:
+        // carrying two hex strings on every reader of a document page for the
+        // sake of one comparator is the second home the schema refuses. The
+        // whole feed is drained first and keyed by path, so each document takes
+        // its pair without a read of its own. The positions the drain hands back
+        // are dropped — a cursor is one store's, and a projection compares two.
+        let mut sub_fingerprints: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+        let mut position = None;
+        loop {
+            let page = request.changed_documents_after(position.as_ref(), PAGE)?;
+            let Some((last, _)) = page.last() else { break };
+            position = Some(last.clone());
+            for (_, fed) in page {
+                sub_fingerprints.insert(
+                    fed.path.as_str().to_string(),
+                    (fed.body_hash, fed.frontmatter_projection_hash),
+                );
+            }
+        }
+
         let mut after: Option<DocumentPath> = None;
         loop {
             let page = request.stored_documents_after_ordered(
@@ -294,9 +324,14 @@ impl StoreProjection {
                 let facts = request
                     .stored_facts(&path)?
                     .expect("a page named a document row the store holds");
+                let (body_hash, frontmatter_projection_hash) = sub_fingerprints
+                    .remove(path.as_str())
+                    .expect("the change feed reaches every document row the store holds");
                 projection.documents.push(ProjectedDocument {
                     path: facts.document.path.as_str().to_string(),
                     content_hash: facts.document.content_hash,
+                    body_hash,
+                    frontmatter_projection_hash,
                     byte_length: facts.document.byte_length,
                     body_offset: facts.document.body_offset,
                     frontmatter: facts.document.frontmatter,
@@ -309,6 +344,11 @@ impl StoreProjection {
                 });
             }
         }
+        assert!(
+            sub_fingerprints.is_empty(),
+            "the change feed reached rows the ordered document page did not: {:?}",
+            sub_fingerprints.keys().collect::<Vec<&String>>()
+        );
 
         let mut cursor = None;
         loop {
@@ -464,6 +504,14 @@ impl StoreProjection {
         for document in &self.documents {
             let at = format!("document[{}]", document.path);
             entries.push((format!("{at}.content_hash"), quoted(&document.content_hash)));
+            entries.push((format!("{at}.body_hash"), quoted(&document.body_hash)));
+            entries.push((
+                format!("{at}.frontmatter_projection_hash"),
+                document
+                    .frontmatter_projection_hash
+                    .as_deref()
+                    .map_or_else(|| "(none)".to_string(), quoted),
+            ));
             entries.push((
                 format!("{at}.byte_length"),
                 document.byte_length.to_string(),
@@ -856,6 +904,8 @@ mod tests {
             documents: vec![ProjectedDocument {
                 path: "docs/a.md".to_string(),
                 content_hash: "hash-1".to_string(),
+                body_hash: "body-hash-1".to_string(),
+                frontmatter_projection_hash: None,
                 byte_length: 7,
                 body_offset: 0,
                 frontmatter: None,
