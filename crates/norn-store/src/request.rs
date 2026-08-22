@@ -38,6 +38,14 @@
 //! heal decides whether a document changed and how a re-derivation compares what
 //! it is about to write.
 //!
+//! The `changed_*` readers are the change feed, and they answer the opposite
+//! question: *what has moved, in what order*. Each is a generation-ordered walk
+//! of current state, paged by a [`FeedCursor`] valid within one store epoch, and
+//! each projects fingerprints alone so a consumer decides what to fetch without
+//! fetching anything. **The feed is a query, never a retained log**: nothing is
+//! kept for a consumer and nothing is evicted once every consumer has passed it,
+//! so a slow consumer costs latency and never retention.
+//!
 //! The probe readers — [`Request::suffix_candidates`] and
 //! [`Request::findings_in_class`] — are the range reads the resolution ladder
 //! and the findings pillar are defined in terms of. They take a

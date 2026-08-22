@@ -48,18 +48,26 @@
 //! # The database-side heal rung
 //!
 //! Rung 3 is *discard and rebuild*, and this is where it lives. An open reads
-//! three things out of `meta` — the store schema version, the DDL fingerprint,
-//! and the digest of the schema the database was created holding — and rebuilds
-//! from zero when any of them disagrees with this build, or when the file is not
-//! a database at all. The rebuild is the whole file: it is removed, along with
-//! the sidecars a journal leaves beside it, and created again from the statement
-//! list.
+//! four things out of `meta` — the store schema version, the DDL fingerprint,
+//! the digest of the schema the database was created holding, and the store
+//! epoch — and rebuilds from zero when any of them disagrees with this build or
+//! is absent, or when the file is not a database at all. The rebuild is the
+//! whole file: it is removed, along with the sidecars a journal leaves beside
+//! it, and created again from the statement list.
 //!
 //! The third read is what the first two cannot answer. A fingerprint is compared
 //! against a value the database reports about *itself*, so a dropped index, table
 //! or trigger leaves it matching — and a dropped `documents_path` forks every
 //! path into duplicate rows. The schema digest is taken over `sqlite_schema`, so
 //! it is a statement about what is actually there.
+//!
+//! The fourth is not about shape at all. Create mints an epoch, so a database
+//! that agrees with this build about every part of its shape and records none
+//! was written by something else — and it is what every consumer's record of
+//! progress is keyed by, so an open that adopted it would let a cursor into a
+//! discarded database read as a position in this one. A rebuild re-runs create,
+//! which is why a new epoch follows a discard rather than being arranged for it:
+//! see [`Store::epoch`].
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a

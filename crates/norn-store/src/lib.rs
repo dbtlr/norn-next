@@ -22,6 +22,12 @@
 //!   one way in for document facts. **A changeset is the unit of atomicity**: it
 //!   lands whole or not at all, and that entry point states the contract in
 //!   full.
+//! - [`Request::changed_documents_after`] and
+//!   [`Request::changed_tombstones_after`] — the change feed, which is a
+//!   generation-ordered query over current state rather than a retained log. A
+//!   consumer pages it at its own rate, triages on the fingerprints it projects,
+//!   and keeps [`Store::epoch`] beside its cursor: a position is meaningless in
+//!   a database that was discarded and built again.
 //! - [`ddl`] — the store schema, designed whole, and its fingerprint.
 //! - [`DocumentPath`] — the segment-aware path representation the suffix
 //!   resolution ladder is indexed by.

@@ -519,13 +519,15 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not open a
-connection — and ten named statements carry an index bar through it: suffix candidates,
+connection — and twelve named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 the page a walk reads its scope's unaccounted finding subjects through, the ordered
-document page a heal merges its walk against, and the four enumerations a caller drains a
-whole pillar through: the findings table, the tombstones, every row's stored suffix key
-beside the path that has to produce it, and the vocabulary the full-text index holds.
+document page a heal merges its walk against, the four enumerations a caller drains a
+whole pillar through — the findings table, the tombstones, every row's stored suffix key
+beside the path that has to produce it, and the vocabulary the full-text index holds — and
+the two drains a lane-2 consumer reads change through: the live document rows, and the
+recorded deaths.
 
 The document page and the finding-subject page are barred in the same terms, because a page
 is judged by what it reads before it returns its first row: the cursor is a bound on an
@@ -550,12 +552,26 @@ reports the index it chose by number and never by name, so what is barred there 
 bound reached the module at all — an unconstrained module reports the pair `0:` and is a
 read of everything.
 
+The two change-feed drains carry the strongest bar of the set, because their indexes were
+declared to admit it. Each is a generation-ordered walk of an index that carries every
+column the page projects — the fingerprints on the document side, the last content hash on
+the death side — so the plan is a search of that covering index with no read of the row
+behind it and no sorter, and a consumer draining the whole feed walks the index once rather
+than once per page. A covering index read end to end is still a read of the pillar, and the
+scan bars say so, so a drain that lost its seek fails whether or not it kept its index.
+Their cursor is composite — `(generation, path)` — because one changeset stamps every row
+it writes with one generation: a generation alone names a set of rows rather than a place
+inside it, and a drain that stopped inside a changeset would repeat it or skip the rest of
+it.
+
 A plan does not say which of two candidate bounds a seek took — a scope's floor and a
 cursor report the same plan text — so every paged statement carries one further bar, taken
 over the emitted SQL rather than its plan: the cursor is the coalesced floor's first
-argument. It pins a spelling rather than a cost, and it is the strongest bar available
-until a per-statement work count is, which is a store-side reporting surface no task has
-opened.
+argument. A composite cursor is the same rule over a pair — the floor is a row value and
+each half of it coalesces, so the cursor's generation is the first `COALESCE`'s first
+argument and its path is the second's. It pins a spelling rather than a cost, and it is the
+strongest bar available until a per-statement work count is, which is a store-side
+reporting surface no task has opened.
 
 None of those is a query shape's bar. **No builder compiles wire params to SQL yet**, so no
 query shape carries its acceptance `EXPLAIN` bar today. The warm-zero counter bar does gate
