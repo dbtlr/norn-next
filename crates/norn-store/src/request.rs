@@ -1720,7 +1720,15 @@ pub struct FindingCursor(i64);
 /// One type serves both feeds, because both are read in the one global write
 /// sequence: a consumer draining documents and deaths together compares the two
 /// positions to decide which side to advance, and two types that differed only
-/// in name would make that comparison a conversion.
+/// in name would make that comparison a conversion. The one pair the comparison
+/// cannot split — a document and a death at an equal position — is decided by
+/// the merge rule on [`Request::changed_documents_after`]: the document
+/// outranks the death.
+///
+/// The consumer that records one is the first lane-2 engine, and no consumer in
+/// the current call graph keeps a cursor past its own drain: the equivalence
+/// comparator carries one only page to page, and [`FeedCursor::at`] has no
+/// production caller yet.
 ///
 /// **It comes apart and goes back together**, because a consumer that keeps
 /// progress across runs keeps it at rest rather than in a handle:
