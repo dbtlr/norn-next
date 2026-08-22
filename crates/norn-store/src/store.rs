@@ -511,7 +511,7 @@ impl Store {
         let mut rows = statement
             .query([])
             .map_err(|error| error::sql(operation, error))?;
-        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<HashedColumns> {
+        let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<RecomputedRow> {
             Ok((
                 row.get(0)?,
                 row.get(1)?,
@@ -627,9 +627,9 @@ impl Store {
     }
 }
 
-/// One row of the sub-fingerprint recompute: the path a failure names, then each
-/// hashed column beside the hash it has to produce.
-type HashedColumns = (String, String, String, Option<String>, Option<String>);
+/// One row the sub-fingerprint recompute reads: the path a failure names, then
+/// each hashed column beside the hash it has to produce.
+type RecomputedRow = (String, String, String, Option<String>, Option<String>);
 
 /// What a database says about the store schema it was written under.
 #[derive(Clone, Debug, Eq, PartialEq)]
