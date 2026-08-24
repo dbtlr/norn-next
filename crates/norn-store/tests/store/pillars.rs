@@ -1302,14 +1302,14 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
     );
 }
 
-/// **A path killed and written again in one changeset stands in both feeds at
-/// one position, and the document row is what stands there.** The merged order
-/// the two feeds are read in is `(generation, path)`, and this pair ties it: one
-/// changeset stamps one generation, and the path is the same path. The write
-/// path is what breaks the tie — a death deletes the document row, so a document
-/// row surviving beside the tombstone is the changeset's end state.
+/// **A path killed and written again in one changeset stands in the document
+/// feed alone.** The upsert clears the same-path tombstone — the death's row
+/// included, when the death landed earlier in the same changeset — so the two
+/// feeds partition path-space and the `(generation, path)` position holds one
+/// row, not two. The document-outranks-death tie-break stays specified for a
+/// merge that ever presents both, and this is the case that keeps it vacuous.
 #[test]
-fn a_path_killed_and_rewritten_in_one_changeset_ties_the_two_feeds() {
+fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed() {
     let scratch = Scratch::new("feed-tie");
     let mut store = scratch.open();
     let mut request = store.begin_request();
@@ -1331,25 +1331,26 @@ fn a_path_killed_and_rewritten_in_one_changeset_ties_the_two_feeds() {
     let mut living = request
         .changed_documents_after(None, norn_store::MAX_PAGE)
         .expect("the document feed");
-    let mut dead = request
+    let dead = request
         .changed_tombstones_after(None, norn_store::MAX_PAGE)
         .expect("the death feed");
     assert_eq!(living.len(), 1, "the document feed is not one row");
-    assert_eq!(dead.len(), 1, "the death feed is not one row");
-    let (at_living, fed) = living.pop().expect("a row of the document feed");
-    let (at_dead, death) = dead.pop().expect("a row of the death feed");
+    assert!(
+        dead.is_empty(),
+        "the death feed still carries a death the same changeset's rewrite outlived: {dead:?}"
+    );
+    let (_, fed) = living.pop().expect("a row of the document feed");
 
     assert_eq!(fed.path, at);
-    assert_eq!(death.path, at);
-    assert_eq!(
-        at_living, at_dead,
-        "the two feeds no longer hand back one position for a path killed and rewritten in one \
-         changeset, so the tie this case pins is somewhere else"
+    assert!(
+        request
+            .stored_tombstone(&at)
+            .expect("reading a tombstone")
+            .is_none(),
+        "the rewrite did not clear the tombstone the same changeset's death recorded"
     );
 
-    // What the tie resolves to. The row the store holds is the document the
-    // changeset wrote, so a consumer that broke the tie toward the death would
-    // drop a document the store still has.
+    // The changeset's end state is the document it wrote.
     assert_eq!(
         fed.content_hash, "hash-2",
         "the document feed does not carry the hash the changeset wrote"

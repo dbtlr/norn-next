@@ -226,16 +226,16 @@ impl<'a> Request<'a> {
     ///
     /// A changeset may name one path more than once, and entries apply in the
     /// order they arrive. An upsert followed by a death for the same path leaves
-    /// a tombstone and no document; the reverse leaves the document, beside the
-    /// tombstone the death recorded. Nothing is coalesced ahead of time, because
-    /// coalescing would have to decide which of two facts about one path is the
-    /// true one — and the caller already said, by ordering them.
+    /// a tombstone and no document; the reverse leaves the document and no
+    /// tombstone, because an upsert clears the same-path tombstone — the death
+    /// the entry before it recorded included. Nothing is coalesced ahead of
+    /// time, because coalescing would have to decide which of two facts about
+    /// one path is the true one — and the caller already said, by ordering
+    /// them.
     ///
-    /// So a document and a tombstone for one path can stand at the **same
-    /// generation**, and comparing the two generations then says nothing.
-    /// **Row presence is what decides liveness**: `documents` holds the live
-    /// vault, and a tombstone beside a live document is a death that a later
-    /// entry of the same changeset superseded.
+    /// So however a changeset interleaves one path, it ends in exactly one
+    /// pillar: `documents` holds the live vault, `tombstones` holds the dead
+    /// paths, and the two partition path-space.
     ///
     /// # Dependent state is composed inside the same act
     ///
@@ -1000,21 +1000,20 @@ impl<'a> Request<'a> {
     /// they differ. A page that carried bodies would cost what the fetch it
     /// exists to avoid costs.
     ///
-    /// # The two feeds merge in one order, and the document outranks the death
+    /// # The two feeds merge in one order, and they partition path-space
     ///
     /// A consumer reads this feed and [`Request::changed_tombstones_after`] as
     /// one sequence, merged in `(generation, path)` order, because both are
-    /// pages over the one global write sequence. The two are not disjoint: a
-    /// path that died and was written again holds a document row and a
-    /// tombstone, so it stands in both.
+    /// pages over the one global write sequence. At any snapshot the two are
+    /// disjoint: an upsert clears the same-path tombstone — see
+    /// [`crate::Change::Upsert`] — so a path stands in the feed that states
+    /// what it is now, never both.
     ///
-    /// **Where both stand at one position, the document is what is true now.** A
-    /// death deletes the document row, and one changeset stamps every row it
-    /// writes with one generation — so a path holding both at one generation is
-    /// a path that changeset killed and then wrote, and the document row is the
-    /// changeset's end state. A consumer that broke the tie the other way would
-    /// drop a live document and stop deriving from it until something wrote that
-    /// path again.
+    /// **Should a merge ever present both at one position, the document is
+    /// what is true now.** A death deletes the document row, so a document
+    /// standing beside a death is the later fact, and a consumer that broke
+    /// the tie the other way would drop a live document. The write path keeps
+    /// this rule vacuous; it is stated so a consumer never has to guess.
     ///
     /// `after` is exclusive.
     pub fn changed_documents_after(
@@ -1055,11 +1054,12 @@ impl<'a> Request<'a> {
     /// state against, and it is absent where the death was learned from a path
     /// that was already absent.
     ///
-    /// A path can stand in both feeds at once: a tombstone records a death and
-    /// never claims the path is absent now. The two are merged in
-    /// `(generation, path)` order, and **at one position the document row
-    /// outranks the death** — see [`Request::changed_documents_after`] for why
-    /// that ordering is what the write path produces.
+    /// A path stands in one feed at a time: an upsert clears the same-path
+    /// tombstone, so the two feeds partition path-space at any snapshot. The
+    /// two are merged in `(generation, path)` order, and **should a merge ever
+    /// present both at one position, the document row outranks the death** —
+    /// see [`Request::changed_documents_after`] for why the write path keeps
+    /// that rule vacuous.
     ///
     /// `after` is exclusive.
     pub fn changed_tombstones_after(

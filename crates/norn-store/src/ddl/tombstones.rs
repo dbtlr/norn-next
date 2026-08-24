@@ -33,11 +33,14 @@
 //! deaths would mean every such comparison started with a `MAX(generation)`
 //! over rows nothing else reads.
 //!
-//! **A tombstone is a record of a death, never a claim about the present.** A
-//! path that has died and been recreated has both a document row and a
-//! tombstone, and `documents` is the one that says what is there now. Retention
-//! — when a tombstone has outlived the disorder it was recorded to survive — is
-//! not decided here.
+//! **A tombstone stands exactly while its path is dead.** An upsert clears the
+//! same-path tombstone — see [`crate::Change::Upsert`] — so the two pillars
+//! partition path-space: a path is live, or dead, or unknown, never two of
+//! them. The clear loses nothing a late event needs, because the live row
+//! carries a newer generation and the current hash — a better comparison basis
+//! than the death it replaced. Retention for a path that dies and never comes
+//! back — when its tombstone has outlived the disorder it was recorded to
+//! survive — is not decided here.
 //!
 //! # The class outlives the document, and it is recomputed rather than stored
 //!
@@ -73,11 +76,12 @@
 //! `generation`, so a re-recorded death moves its entry rather than updating it
 //! in place. See [`crate::ddl::documents`].
 //!
-//! The two feeds are merged in that one order, and they are not disjoint —
-//! a path that died and was written again stands in both. **At one position the
-//! document row outranks the death.** A death deletes the document row, so a
-//! path holding both at one generation is a path that changeset killed and then
-//! wrote, and `documents` holds its end state.
+//! The two feeds are merged in that one order, and the partition above keeps
+//! them disjoint at any snapshot: the upsert that revives a path takes its
+//! tombstone with it, same-changeset deaths included. **Should a merge ever
+//! present both at one position, the document row outranks the death** — a
+//! death deletes the document row, so a document standing is the later fact —
+//! but the write path keeps that rule vacuous.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)

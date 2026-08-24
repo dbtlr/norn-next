@@ -32,6 +32,13 @@ pub enum Change {
     /// the triggers carry over the body. The row keeps its identity: it is
     /// updated rather than replaced.
     ///
+    /// **It clears the path's tombstone.** A path being derived is a path that
+    /// is alive, so the death it may have outlived goes with the write, and the
+    /// two pillars partition path-space: a path is live, or dead, or unknown —
+    /// never two of them. Within one changeset the order of entries carries
+    /// this: a death then a rewrite of one path ends live with no tombstone,
+    /// and a rewrite then a death ends dead with one.
+    ///
     /// **An embedding is not replaced.** A vector is keyed by
     /// `(document, model, version)` and survives the re-derivation of the
     /// document it was computed over, because computing a new one is an async
@@ -270,6 +277,9 @@ struct Statements<'t> {
     insert_tag: CachedStatement<'t>,
     delete_document: CachedStatement<'t>,
     record_tombstone: CachedStatement<'t>,
+    /// The same-path tombstone clear an upsert performs, which is what keeps
+    /// the two pillars a partition of path-space.
+    clear_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
     discard_subject: CachedStatement<'t>,
     /// The class-scoped findings discard, over one class at a time.
@@ -369,6 +379,10 @@ impl<'t> Statements<'t> {
                      recorded_at       = excluded.recorded_at",
                 "preparing a tombstone write",
             )?,
+            clear_tombstone: prepared(
+                "DELETE FROM tombstones WHERE path = ?1",
+                "preparing a tombstone clear",
+            )?,
             discard_subject: prepared(
                 request::SUBJECT_DISCARD_SQL,
                 "preparing a path's findings discard",
@@ -426,6 +440,15 @@ fn upsert(
             |row| row.get(0),
         )
         .map_err(|error| error::sql("writing a document row", error))?;
+
+    // The path is alive, so the death it may have outlived goes: the live row
+    // carries a newer generation and the current hash, which is the comparison
+    // basis a late event needs, and the two pillars stay a partition of
+    // path-space. See the `tombstones` DDL doctrine for what this holds up.
+    statements
+        .clear_tombstone
+        .execute(params![facts.path.as_str()])
+        .map_err(|error| error::sql("clearing a tombstone", error))?;
 
     for statement in &mut statements.discard_facts {
         tally.fact_rows_discarded += statement
