@@ -1340,8 +1340,8 @@ fn a_feed_drained_a_page_at_a_time_reaches_every_row_in_generation_order() {
 /// **A path killed and written again in one changeset stands in the document
 /// feed alone.** The upsert clears the same-path tombstone — the death's row
 /// included, when the death landed earlier in the same changeset — so the two
-/// feeds partition path-space and the `(generation, path)` position holds one
-/// row, not two. The document-outranks-death tie-break stays specified for a
+/// feeds are disjoint over stored paths and the `(generation, path)` position
+/// holds one row, not two. The document-outranks-death tie-break stays specified for a
 /// merge that ever presents both, and this is the case that keeps it vacuous.
 #[test]
 fn a_path_killed_and_rewritten_in_one_changeset_stands_only_in_the_document_feed() {

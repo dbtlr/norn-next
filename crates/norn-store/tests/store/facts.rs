@@ -544,8 +544,8 @@ fn a_quarantine_death_is_recorded_under_its_own_provenance() {
 }
 
 /// One row per path, holding the most recent death — and an upsert clears the
-/// same-path tombstone, so the two pillars partition path-space: a path is
-/// live or dead, never both.
+/// same-path tombstone, so the two pillars stay disjoint over stored paths: a
+/// path holds a document row, or a tombstone, or neither, never both.
 #[test]
 fn a_tombstone_holds_the_most_recent_death_and_an_upsert_clears_it() {
     let scratch = Scratch::new("re-death");
