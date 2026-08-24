@@ -233,9 +233,9 @@ impl<'a> Request<'a> {
     /// one path is the true one — and the caller already said, by ordering
     /// them.
     ///
-    /// So however a changeset interleaves one path, it ends in exactly one
+    /// So however a changeset interleaves one path, it ends in at most one
     /// pillar: `documents` holds the live vault, `tombstones` holds the dead
-    /// paths, and the two partition path-space.
+    /// paths, and the two are disjoint over stored paths.
     ///
     /// # Dependent state is composed inside the same act
     ///
@@ -1000,20 +1000,23 @@ impl<'a> Request<'a> {
     /// they differ. A page that carried bodies would cost what the fetch it
     /// exists to avoid costs.
     ///
-    /// # The two feeds merge in one order, and they partition path-space
+    /// # The two feeds merge in one order, and they are disjoint
     ///
     /// A consumer reads this feed and [`Request::changed_tombstones_after`] as
     /// one sequence, merged in `(generation, path)` order, because both are
     /// pages over the one global write sequence. At any snapshot the two are
-    /// disjoint: an upsert clears the same-path tombstone — see
+    /// disjoint: deriving a path clears its tombstone — see
     /// [`crate::Change::Upsert`] — so a path stands in the feed that states
-    /// what it is now, never both.
+    /// what it is now, never both. Disjoint over **stored paths**: the store
+    /// never folds case, so on a folding volume one vault *place* can stand
+    /// live under one spelling and dead under another — a consumer that keys
+    /// by place carries that fold itself, as [`crate::ddl::documents`] rules.
     ///
     /// **Should a merge ever present both at one position, the document is
     /// what is true now.** A death deletes the document row, so a document
     /// standing beside a death is the later fact, and a consumer that broke
-    /// the tie the other way would drop a live document. The write path keeps
-    /// this rule vacuous; it is stated so a consumer never has to guess.
+    /// the tie the other way would drop a live document. The schema keeps this
+    /// rule vacuous; it is stated so a consumer never has to guess.
     ///
     /// `after` is exclusive.
     pub fn changed_documents_after(
@@ -1054,12 +1057,12 @@ impl<'a> Request<'a> {
     /// state against, and it is absent where the death was learned from a path
     /// that was already absent.
     ///
-    /// A path stands in one feed at a time: an upsert clears the same-path
-    /// tombstone, so the two feeds partition path-space at any snapshot. The
-    /// two are merged in `(generation, path)` order, and **should a merge ever
-    /// present both at one position, the document row outranks the death** —
-    /// see [`Request::changed_documents_after`] for why the write path keeps
-    /// that rule vacuous.
+    /// A stored path stands in one feed at a time: deriving a path clears its
+    /// tombstone, so the two feeds are disjoint at any snapshot. The two are
+    /// merged in `(generation, path)` order, and **should a merge ever present
+    /// both at one position, the document row outranks the death** — see
+    /// [`Request::changed_documents_after`] for why the schema keeps that rule
+    /// vacuous.
     ///
     /// `after` is exclusive.
     pub fn changed_tombstones_after(
@@ -1696,9 +1699,10 @@ pub struct FindingCursor(i64);
 /// One type serves both feeds, because both are read in the one global write
 /// sequence: a consumer draining documents and deaths together compares the two
 /// positions to decide which side to advance, and two types that differed only
-/// in name would make that comparison a conversion. The one pair the comparison
-/// cannot split — a document and a death at an equal position — is decided by
-/// the merge rule on [`Request::changed_documents_after`]: the document
+/// in name would make that comparison a conversion. A pair the comparison
+/// cannot split — a document and a death at an equal position — is one the
+/// schema no longer produces, and the merge rule on
+/// [`Request::changed_documents_after`] stands for it anyway: the document
 /// outranks the death.
 ///
 /// The consumer that records one is the first lane-2 engine, and no consumer in

@@ -33,11 +33,14 @@ pub enum Change {
     /// updated rather than replaced.
     ///
     /// **It clears the path's tombstone.** A path being derived is a path that
-    /// is alive, so the death it may have outlived goes with the write, and the
-    /// two pillars partition path-space: a path is live, or dead, or unknown —
-    /// never two of them. Within one changeset the order of entries carries
-    /// this: a death then a rewrite of one path ends live with no tombstone,
-    /// and a rewrite then a death ends dead with one.
+    /// is alive, so the death it may have outlived goes with the write, and
+    /// the two pillars stay disjoint over stored paths: one holds a document
+    /// row, or a tombstone, or neither — never both. The clear is
+    /// trigger-carried, like the full-text index: `tombstones_clear_on_derive`
+    /// fires on the document insert, so every writer of `documents` upholds it
+    /// — see [`crate::ddl::tombstones`]. Within one changeset the order of
+    /// entries carries this: a death then a rewrite of one path ends live with
+    /// no tombstone, and a rewrite then a death ends dead with one.
     ///
     /// **An embedding is not replaced.** A vector is keyed by
     /// `(document, model, version)` and survives the re-derivation of the
@@ -55,10 +58,13 @@ pub enum Change {
     ///
     /// The hash is not supplied: it is the one the store last derived the path
     /// at, read out of the row this entry removes. **A path that dies twice
-    /// keeps the hash already recorded** where the second death has none of its
-    /// own — that hash is the comparison basis a tombstone exists to carry, and
-    /// a death learned from an absent file has nothing better to put in its
-    /// place.
+    /// keeps the hash already recorded** — that hash is the comparison basis a
+    /// tombstone exists to carry, and a death learned from an absent file has
+    /// nothing better to put in its place. A re-death is the only way to reach
+    /// a standing tombstone, and it never carries a hash: a tombstone standing
+    /// means no document row stands (an insert clears it), so the delete this
+    /// entry runs finds nothing to hash. The write's replace-with-newer arm is
+    /// therefore vacuous, kept as a defensive contract.
     ///
     /// A path nothing had derived still gets a tombstone. The ordering it
     /// carries is the point, and it is worth most exactly when a derivation
@@ -110,7 +116,10 @@ pub struct IncrementOutcome {
     /// that writes a path and then kills it reports one of each, and `documents`
     /// ends one row shorter than subtracting the two would suggest.
     pub documents_deleted: u64,
-    /// Deaths recorded, which is one per [`Change::Death`] entry.
+    /// Deaths recorded, which is one per [`Change::Death`] entry — never the
+    /// net change in the table: a changeset that records a death and then
+    /// derives the same path counts the death here and leaves no tombstone,
+    /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
     /// Every ambiguity class the changed paths are in — the resolution axis of
     /// the findings maintenance this changeset implies, and what a caller
@@ -277,9 +286,6 @@ struct Statements<'t> {
     insert_tag: CachedStatement<'t>,
     delete_document: CachedStatement<'t>,
     record_tombstone: CachedStatement<'t>,
-    /// The same-path tombstone clear an upsert performs, which is what keeps
-    /// the two pillars a partition of path-space.
-    clear_tombstone: CachedStatement<'t>,
     /// The subject-scoped findings discard, over one changed path at a time.
     discard_subject: CachedStatement<'t>,
     /// The class-scoped findings discard, over one class at a time.
@@ -379,10 +385,6 @@ impl<'t> Statements<'t> {
                      recorded_at       = excluded.recorded_at",
                 "preparing a tombstone write",
             )?,
-            clear_tombstone: prepared(
-                "DELETE FROM tombstones WHERE path = ?1",
-                "preparing a tombstone clear",
-            )?,
             discard_subject: prepared(
                 request::SUBJECT_DISCARD_SQL,
                 "preparing a path's findings discard",
@@ -440,15 +442,6 @@ fn upsert(
             |row| row.get(0),
         )
         .map_err(|error| error::sql("writing a document row", error))?;
-
-    // The path is alive, so the death it may have outlived goes: the live row
-    // carries a newer generation and the current hash, which is the comparison
-    // basis a late event needs, and the two pillars stay a partition of
-    // path-space. See the `tombstones` DDL doctrine for what this holds up.
-    statements
-        .clear_tombstone
-        .execute(params![facts.path.as_str()])
-        .map_err(|error| error::sql("clearing a tombstone", error))?;
 
     for statement in &mut statements.discard_facts {
         tally.fact_rows_discarded += statement

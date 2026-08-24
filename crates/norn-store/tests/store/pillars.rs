@@ -234,6 +234,41 @@ fn a_value_outside_a_closed_vocabulary_is_damage() {
     }
 }
 
+/// **The pillar disjointness is checked rather than trusted.** Nothing
+/// structural holds a tombstone away from a live path — the
+/// `tombstones_clear_on_derive` trigger is one maintainer on one write path —
+/// so a store where the two pillars meet is damage the verification has to see,
+/// exactly as a value outside a closed vocabulary is. A store an older write
+/// path produced is the way such a pair arrives without a defect: its DDL
+/// carries no trigger, so its fingerprint differs and it rebuilds, and this
+/// check is what stands behind that mechanism.
+#[test]
+fn a_tombstone_at_a_live_path_is_damage() {
+    let scratch = Scratch::new("undead");
+    let mut store = scratch.open();
+    let subject = path("docs/norn/glossary.md");
+    write_document(
+        &mut store.begin_request(),
+        &document(subject.as_str(), "hash-1", "a body\n"),
+    );
+    store.verify_integrity().expect("a store just written to");
+
+    induced_failure::execute_out_of_band(
+        &mut store,
+        "INSERT INTO tombstones (path, last_content_hash, provenance, generation, recorded_at)
+         VALUES ('docs/norn/glossary.md', 'hash-0', 'heal-prune', 1, 0)",
+    )
+    .expect("writing a pair nothing writes");
+    let error = store.verify_integrity().unwrap_err();
+    let StoreError::Damaged { what } = &error else {
+        panic!("a tombstone at a live path was reported as {error:?}");
+    };
+    assert!(
+        what.contains("tombstones stand at a path"),
+        "the damage does not name the pillars that met: {what}"
+    );
+}
+
 /// **A sub-fingerprint is recomputed at rest rather than trusted.** It is a
 /// derived column, and every read that would notice one drifting from the column
 /// it hashes is a read that has already trusted it: a change-feed consumer

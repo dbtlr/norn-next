@@ -679,6 +679,54 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 }
 
+/// **The clear takes its own path's tombstone and no other.** The trigger keys
+/// on the stored spelling exactly: a case variant is a different stored path
+/// even on a volume that folds the two together, and a path the derived one is
+/// a prefix of is a different path outright. A clear that reached either would
+/// silently destroy a death the vault still owes an answer for.
+#[test]
+fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
+    let scratch = Scratch::new("clear-scope");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let standing = ["docs/A.md", "docs/a.md.md", "docs/b.md"];
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            ["docs/a.md"]
+                .iter()
+                .chain(standing.iter())
+                .map(|at| death(at, Provenance::HealPrune)),
+        )
+        .expect("recording four deaths");
+
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("docs/a.md", "hash-1", "a body\n")],
+        )
+        .expect("deriving one of the dead paths");
+
+    assert!(
+        request
+            .stored_tombstone(&path("docs/a.md"))
+            .expect("reading a tombstone")
+            .is_none(),
+        "the derived path still carries its tombstone"
+    );
+    for at in standing {
+        assert!(
+            request
+                .stored_tombstone(&path(at))
+                .expect("reading a tombstone")
+                .is_some(),
+            "deriving `docs/a.md` took the death recorded at `{at}`"
+        );
+    }
+    assert_eq!(request.pillars().expect("a pillar report").tombstones, 3);
+}
+
 /// **The resolution axis is scoped by affected ambiguity class, and the scope is
 /// exact.** A finding in a class the changeset's paths are in dies; a finding in
 /// a class none of them is in survives; a finding in no class at all is outside

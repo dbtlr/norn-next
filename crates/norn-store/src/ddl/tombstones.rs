@@ -33,14 +33,29 @@
 //! deaths would mean every such comparison started with a `MAX(generation)`
 //! over rows nothing else reads.
 //!
-//! **A tombstone stands exactly while its path is dead.** An upsert clears the
-//! same-path tombstone — see [`crate::Change::Upsert`] — so the two pillars
-//! partition path-space: a path is live, or dead, or unknown, never two of
-//! them. The clear loses nothing a late event needs, because the live row
-//! carries a newer generation and the current hash — a better comparison basis
-//! than the death it replaced. Retention for a path that dies and never comes
-//! back — when its tombstone has outlived the disorder it was recorded to
-//! survive — is not decided here.
+//! **A tombstone stands exactly while its path is dead.** The
+//! `tombstones_clear_on_derive` trigger removes the same-path tombstone when a
+//! document row is inserted — see [`crate::Change::Upsert`] — so at rest the
+//! two pillars are disjoint: a path holds a document row, or a tombstone, or
+//! neither, never both. The trigger is the one maintainer, for the reason the
+//! full-text triggers are: every writer of `documents` upholds the invariant
+//! by construction, and a second maintainer in code could disagree with it.
+//! `INSERT` alone is enough — an update means a live row already stood, and a
+//! live row means no tombstone stands to clear. [`crate::Store::verify_integrity`]
+//! checks the disjointness at rest rather than trusting the trigger.
+//!
+//! The clear loses nothing a late event needs, because the live row carries a
+//! newer generation and the current hash — a better comparison basis than the
+//! death it replaced. It also spends the death's provenance: the record of how
+//! a path died is deliberately present-tense, and a death the path recovered
+//! from is not retained for diagnosis. Retention for a path that dies and
+//! never comes back — when its tombstone has outlived the disorder it was
+//! recorded to survive — is not decided here.
+//!
+//! `path` here means the stored spelling. The store never folds case — see
+//! [`crate::ddl::documents`] — so on a folding volume one vault *place* can
+//! stand live under one spelling and dead under another. The disjointness is a
+//! claim about stored paths, not about places.
 //!
 //! # The class outlives the document, and it is recomputed rather than stored
 //!
@@ -76,12 +91,12 @@
 //! `generation`, so a re-recorded death moves its entry rather than updating it
 //! in place. See [`crate::ddl::documents`].
 //!
-//! The two feeds are merged in that one order, and the partition above keeps
-//! them disjoint at any snapshot: the upsert that revives a path takes its
-//! tombstone with it, same-changeset deaths included. **Should a merge ever
-//! present both at one position, the document row outranks the death** — a
-//! death deletes the document row, so a document standing is the later fact —
-//! but the write path keeps that rule vacuous.
+//! The two feeds are merged in that one order, and the disjointness above
+//! keeps a stored path out of both at once: the insert that revives a path
+//! takes its tombstone with it, same-changeset deaths included. **Should a
+//! merge ever present both at one position, the document row outranks the
+//! death** — a death deletes the document row, so a document standing is the
+//! later fact — but the schema keeps that rule vacuous.
 
 pub(crate) fn statements() -> Vec<String> {
     super::fixed(STATEMENTS)
@@ -100,4 +115,7 @@ const STATEMENTS: &[&str] = &[
     "CREATE INDEX tombstones_change_feed ON tombstones(
     generation, path, last_content_hash
 )",
+    "CREATE TRIGGER tombstones_clear_on_derive AFTER INSERT ON documents BEGIN
+    DELETE FROM tombstones WHERE path = new.path;
+END",
 ];
