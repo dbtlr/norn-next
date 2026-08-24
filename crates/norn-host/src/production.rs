@@ -7008,6 +7008,19 @@ mod tests {
         assert_eq!(stored_paths(&mut attachment.store), ["note.md"]);
         assert!(findings_at(&mut attachment.store, "note.md").is_empty());
         assert_eq!(finding_total(&mut attachment.store), 0);
+        // The recovery also spends the quarantine's tombstone: the row standing
+        // again means the path is no longer dead, and the store keeps the two
+        // pillars disjoint. The provenance goes with it — a death a path
+        // recovered from is not retained for diagnosis.
+        assert!(
+            attachment
+                .store
+                .begin_request()
+                .stored_tombstone(&DocumentPath::new("note.md").unwrap())
+                .unwrap()
+                .is_none(),
+            "a recovered path still carries its quarantine's tombstone"
+        );
         ops.detach(&name, attachment);
     }
 

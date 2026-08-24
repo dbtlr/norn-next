@@ -32,6 +32,16 @@ pub enum Change {
     /// the triggers carry over the body. The row keeps its identity: it is
     /// updated rather than replaced.
     ///
+    /// **It clears the path's tombstone.** A path being derived is a path that
+    /// is alive, so the death it may have outlived goes with the write, and
+    /// the two pillars stay disjoint over stored paths: one holds a document
+    /// row, or a tombstone, or neither — never both. The clear is
+    /// trigger-carried, like the full-text index: `tombstones_clear_on_derive`
+    /// fires on the document insert, so every writer of `documents` upholds it
+    /// — see [`crate::ddl::tombstones`]. Within one changeset the order of
+    /// entries carries this: a death then a rewrite of one path ends live with
+    /// no tombstone, and a rewrite then a death ends dead with one.
+    ///
     /// **An embedding is not replaced.** A vector is keyed by
     /// `(document, model, version)` and survives the re-derivation of the
     /// document it was computed over, because computing a new one is an async
@@ -48,10 +58,13 @@ pub enum Change {
     ///
     /// The hash is not supplied: it is the one the store last derived the path
     /// at, read out of the row this entry removes. **A path that dies twice
-    /// keeps the hash already recorded** where the second death has none of its
-    /// own — that hash is the comparison basis a tombstone exists to carry, and
-    /// a death learned from an absent file has nothing better to put in its
-    /// place.
+    /// keeps the hash already recorded** — that hash is the comparison basis a
+    /// tombstone exists to carry, and a death learned from an absent file has
+    /// nothing better to put in its place. A re-death is the only way to reach
+    /// a standing tombstone, and it never carries a hash: a tombstone standing
+    /// means no document row stands (an insert clears it), so the delete this
+    /// entry runs finds nothing to hash. The write's replace-with-newer arm is
+    /// therefore vacuous, kept as a defensive contract.
     ///
     /// A path nothing had derived still gets a tombstone. The ordering it
     /// carries is the point, and it is worth most exactly when a derivation
@@ -103,7 +116,10 @@ pub struct IncrementOutcome {
     /// that writes a path and then kills it reports one of each, and `documents`
     /// ends one row shorter than subtracting the two would suggest.
     pub documents_deleted: u64,
-    /// Deaths recorded, which is one per [`Change::Death`] entry.
+    /// Deaths recorded, which is one per [`Change::Death`] entry — never the
+    /// net change in the table: a changeset that records a death and then
+    /// derives the same path counts the death here and leaves no tombstone,
+    /// because the document insert's trigger clears it.
     pub tombstones_recorded: u64,
     /// Every ambiguity class the changed paths are in — the resolution axis of
     /// the findings maintenance this changeset implies, and what a caller

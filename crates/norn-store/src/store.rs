@@ -311,22 +311,26 @@ impl Store {
     /// Check the database against itself, and report the first way it is not
     /// consistent.
     ///
-    /// Six checks, because a store has six kinds of consistency to lose: the
-    /// pages themselves, the foreign keys that carry cascade deletion, the
+    /// Seven checks, because a store has seven kinds of consistency to lose:
+    /// the pages themselves, the foreign keys that carry cascade deletion, the
     /// full-text index against the column it is an index of, the frontmatter
     /// projection against being JSON at all, the closed vocabularies against
-    /// the values a reader will accept, and each document's sub-fingerprints
-    /// against the columns they are hashes of. The third is what an
-    /// external-content FTS5 table can lose without anything else noticing,
-    /// which is exactly why the index is maintained by triggers — and it is
-    /// asked at **rank 1**, which checks the index against `documents.body`
-    /// rather than only against itself. The fourth is the projection's own
-    /// claim, checked by the JSON1 reader that will be asked to query it. The
-    /// fifth closes the gap between "the doctor says healthy" and a read that
-    /// fails: a value outside a closed vocabulary is damage the reader reports,
-    /// so the verification has to see it too.
+    /// the values a reader will accept, the document and tombstone pillars
+    /// against each other, and each document's sub-fingerprints against the
+    /// columns they are hashes of. The third is what an external-content FTS5
+    /// table can lose without anything else noticing, which is exactly why the
+    /// index is maintained by triggers — and it is asked at **rank 1**, which
+    /// checks the index against `documents.body` rather than only against
+    /// itself. The fourth is the projection's own claim, checked by the JSON1
+    /// reader that will be asked to query it. The fifth closes the gap between
+    /// "the doctor says healthy" and a read that fails: a value outside a
+    /// closed vocabulary is damage the reader reports, so the verification has
+    /// to see it too. The sixth is the disjointness the
+    /// `tombstones_clear_on_derive` trigger maintains — nothing structural
+    /// holds it, so it is checked at rest rather than trusted, the same ruling
+    /// the vocabularies get.
     ///
-    /// The sixth is a **recompute at rest**, for the reason the stored suffix
+    /// The seventh is a **recompute at rest**, for the reason the stored suffix
     /// key gets one: a sub-fingerprint is a derived column, and every read that
     /// would notice one drifting from the column it hashes is a read that has
     /// already trusted it. A change-feed consumer triages on these values and
@@ -441,6 +445,20 @@ impl Store {
                     ),
                 });
             }
+        }
+
+        let undead: i64 = self
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM tombstones JOIN documents USING (path)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error::sql("checking the pillars are disjoint", error))?;
+        if undead != 0 {
+            return Err(StoreError::Damaged {
+                what: format!("{undead} tombstones stand at a path that holds a document row"),
+            });
         }
 
         self.recompute_the_sub_fingerprints()

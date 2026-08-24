@@ -543,10 +543,11 @@ fn a_quarantine_death_is_recorded_under_its_own_provenance() {
         .expect("a store after a quarantine");
 }
 
-/// One row per path, holding the most recent death — and a tombstone is a record
-/// of a death, never a claim about the present, so a recreated path has both.
+/// One row per path, holding the most recent death — and an upsert clears the
+/// same-path tombstone, so the two pillars stay disjoint over stored paths: a
+/// path holds a document row, or a tombstone, or neither, never both.
 #[test]
-fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() {
+fn a_tombstone_holds_the_most_recent_death_and_an_upsert_clears_it() {
     let scratch = Scratch::new("re-death");
     let mut store = scratch.open();
     let subject = path("glossary.md");
@@ -568,8 +569,10 @@ fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() 
     assert!(second.generation > first.generation);
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 
-    // Recreated, the path has a document row and a tombstone at once. The
-    // document row is the one that says what is there now.
+    // Recreated, the path holds a document row and nothing else: the upsert
+    // clears the tombstone its earlier death left. The live row carries a newer
+    // generation and the current hash, so a late event compares against it, and
+    // the death feed stops replaying a death the path has outlived.
     write_document(
         &mut request,
         &document(subject.as_str(), "hash-3", "three\n"),
@@ -584,7 +587,13 @@ fn a_tombstone_holds_the_most_recent_death_and_says_nothing_about_the_present() 
         request
             .stored_tombstone(&subject)
             .expect("reading a tombstone")
-            .is_some()
+            .is_none(),
+        "the upsert did not clear the tombstone the path's earlier death left"
+    );
+    assert_eq!(
+        request.pillars().expect("a pillar report").tombstones,
+        0,
+        "the tombstone pillar still holds a death for a path that is live"
     );
 }
 
@@ -623,7 +632,11 @@ fn a_re_death_with_no_hash_of_its_own_keeps_the_one_recorded() {
     assert_eq!(tombstone.provenance, Provenance::HealPrune);
     assert_eq!(Some(tombstone.generation), again.generation);
 
-    // And a re-death that does have a hash still replaces it.
+    // A revival and a later death record the newer hash — through a fresh
+    // insert, not the write's replace-with-newer arm: the revival cleared the
+    // tombstone, so this death conflicts with nothing. A standing tombstone is
+    // only ever reached by a hash-less re-death, which is what keeps that arm
+    // vacuous — see `Change::Death`.
     write_document(&mut request, &document(subject.as_str(), "hash-2", "two\n"));
     record_death(&mut request, &subject, Provenance::PlanDelete);
     assert_eq!(

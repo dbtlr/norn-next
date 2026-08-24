@@ -511,8 +511,8 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
                 // the hash the row it removed was derived at.
                 upsert("killed.md", "hash-1", "a body\n"),
                 death("killed.md", Provenance::WatcherRemoval),
-                // Killed and then written: the document stands, beside the
-                // tombstone the death left.
+                // Killed and then written: the document stands, and the upsert
+                // clears the tombstone the death left.
                 death("revived.md", Provenance::HealPrune),
                 upsert("revived.md", "hash-1", "a body\n"),
             ],
@@ -553,17 +553,16 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
             .is_some(),
         "the upsert after the death did not stand"
     );
-    let revived = request
-        .stored_tombstone(&path("revived.md"))
-        .expect("reading a tombstone")
-        .expect("a tombstone");
-    assert_eq!(
-        revived.last_content_hash, None,
-        "the death had a row to hash after all"
+    assert!(
+        request
+            .stored_tombstone(&path("revived.md"))
+            .expect("reading a tombstone")
+            .is_none(),
+        "the upsert after the death did not clear the tombstone the death left"
     );
 
     assert_eq!(request.pillars().expect("a pillar report").documents, 2);
-    assert_eq!(request.pillars().expect("a pillar report").tombstones, 2);
+    assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 
     request.finish();
     store.verify_integrity().expect("a store after a changeset");
@@ -573,9 +572,9 @@ fn the_last_entry_for_a_path_is_the_one_that_stands() {
 /// second exactly as a second decides over a first, and a path that only ever
 /// dies keeps one tombstone however many deaths name it.
 ///
-/// The changeset also leaves a live document beside its own tombstone at the
-/// **same generation**, which is why row presence is what decides liveness:
-/// comparing the two generations answers nothing.
+/// The path written, killed, and written again ends live with no tombstone: the
+/// last entry's clear takes the death the middle entry recorded, exactly as it
+/// would across changesets.
 #[test]
 fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
     let scratch = Scratch::new("three-entries");
@@ -610,19 +609,12 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
     assert_eq!(revived.document.content_hash, "hash-2");
     assert_eq!(revived.body, "second\n");
 
-    let tombstone = request
-        .stored_tombstone(&path("revived.md"))
-        .expect("reading a tombstone")
-        .expect("a tombstone");
-    assert_eq!(
-        tombstone.last_content_hash.as_deref(),
-        Some("hash-1"),
-        "the death did not read the row the entry before it wrote"
-    );
-    assert_eq!(
-        revived.document.generation, tombstone.generation,
-        "a document and the tombstone it outlived stand at one generation, so nothing about \
-         which is current can be read off them"
+    assert!(
+        request
+            .stored_tombstone(&path("revived.md"))
+            .expect("reading a tombstone")
+            .is_none(),
+        "the third entry's clear did not take the death the second entry recorded"
     );
 
     let twice_dead = request
@@ -640,7 +632,7 @@ fn a_path_named_three_times_ends_where_its_last_entry_left_it() {
     );
 
     assert_eq!(request.pillars().expect("a pillar report").documents, 1);
-    assert_eq!(request.pillars().expect("a pillar report").tombstones, 2);
+    assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
 
     request.finish();
     store.verify_integrity().expect("a store after a changeset");
@@ -685,6 +677,54 @@ fn a_re_death_within_one_changeset_keeps_the_hash_already_recorded() {
     assert_eq!(tombstone.provenance, Provenance::HealPrune);
     assert_eq!(Some(tombstone.generation), outcome.generation);
     assert_eq!(request.pillars().expect("a pillar report").tombstones, 1);
+}
+
+/// **The clear takes its own path's tombstone and no other.** The trigger keys
+/// on the stored spelling exactly: a case variant is a different stored path
+/// even on a volume that folds the two together, and a path the derived one is
+/// a prefix of is a different path outright. A clear that reached either would
+/// silently destroy a death the vault still owes an answer for.
+#[test]
+fn deriving_a_path_clears_its_own_tombstone_and_no_other() {
+    let scratch = Scratch::new("clear-scope");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+
+    let standing = ["docs/A.md", "docs/a.md.md", "docs/b.md"];
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            ["docs/a.md"]
+                .iter()
+                .chain(standing.iter())
+                .map(|at| death(at, Provenance::HealPrune)),
+        )
+        .expect("recording four deaths");
+
+    request
+        .apply_increment(
+            IncrementProvenance::Derived,
+            [upsert("docs/a.md", "hash-1", "a body\n")],
+        )
+        .expect("deriving one of the dead paths");
+
+    assert!(
+        request
+            .stored_tombstone(&path("docs/a.md"))
+            .expect("reading a tombstone")
+            .is_none(),
+        "the derived path still carries its tombstone"
+    );
+    for at in standing {
+        assert!(
+            request
+                .stored_tombstone(&path(at))
+                .expect("reading a tombstone")
+                .is_some(),
+            "deriving `docs/a.md` took the death recorded at `{at}`"
+        );
+    }
+    assert_eq!(request.pillars().expect("a pillar report").tombstones, 3);
 }
 
 /// **The resolution axis is scoped by affected ambiguity class, and the scope is
