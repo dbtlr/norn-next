@@ -201,6 +201,10 @@ impl<A: SnapshotSource> ProgressReporter<A> {
     }
 
     /// Enter Lane 1 warming after a reload candidate passes core validation.
+    ///
+    /// This transition replaces the current trust label at the reporter's
+    /// epoch. Call it only from a reload leg that was admitted while the vault
+    /// was Ready. A call from another state would overwrite its trust reason.
     pub fn begin_schema_reload(&self) {
         let Some(entry) = self.entry.upgrade() else {
             return;
