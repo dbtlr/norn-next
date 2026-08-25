@@ -9,9 +9,62 @@ use norn_store::{
     BlockFact, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact, LinkFact, LinkFamily,
     Span, TagFact, TagSource,
 };
-use norn_text::{Document, SourceSpan, Value};
+use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 
-use crate::production::{Undecodable, UnreadBlock};
+/// Why a path the vault holds produces no document facts.
+///
+/// One variant per finding kind, which is how a reader tells a name the store
+/// cannot hold from bytes the parser cannot read. Every one of them leaves the
+/// deriving act with nothing to store: no identity to hold a row under, or no
+/// text to read facts out of.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Undecodable {
+    /// The path bytes are not UTF-8.
+    PathBytes,
+    /// The path is UTF-8 and is not a document path.
+    PathSpelling,
+    /// The document's bytes are not UTF-8.
+    BodyBytes,
+}
+
+/// Why a document that derives carries no frontmatter value.
+///
+/// The block was read by nothing, so the document's fields are unknown: it is
+/// the vault's own defect and not a shape of a document. The row still holds
+/// every fact the act could derive — identity, body, headings, links, body
+/// tags — and this cause is what a finding beside that row states, because a
+/// row alone would answer *this document has no tags, no title, no aliases*
+/// about fields nothing ever read.
+///
+/// One variant per way [`norn_text::BlockRefusal`] leaves a block unread, each
+/// fixed by a different edit to the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnreadBlock {
+    /// The block opens and never closes.
+    Unclosed,
+    /// Nothing read the block: it is not well-formed, or it is well-formed and
+    /// says something no value can be made of — a key written twice, a merge
+    /// directive naming no mapping.
+    Unreadable,
+    /// The block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so the text
+    /// layer refuses it unparsed rather than paying a read that grows with the
+    /// block's own length.
+    TooLarge,
+}
+
+impl UnreadBlock {
+    /// The cause behind the state the text layer reports.
+    ///
+    /// The match carries no wildcard, so a new way to leave a block unread
+    /// arrives here as a cause rather than as silence on a derived row.
+    const fn of(refusal: &BlockRefusal) -> Self {
+        match refusal {
+            BlockRefusal::Unclosed => UnreadBlock::Unclosed,
+            BlockRefusal::Unreadable { .. } => UnreadBlock::Unreadable,
+            BlockRefusal::TooLarge { .. } => UnreadBlock::TooLarge,
+        }
+    }
+}
 
 /// One document held out of derived state, and why.
 #[derive(Clone, Debug)]
