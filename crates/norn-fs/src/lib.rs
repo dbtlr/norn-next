@@ -112,7 +112,10 @@ pub use hash::{ContentHash, hashed_from};
 pub use identity::{Identity, PostState, path_identity};
 pub use lock::{Acquisition, Incumbent, Maintainership, try_acquire};
 pub use path::{CaseSensitivity, NormalizedPath, NormalizerError, PathError, PathNormalizer};
-pub use read::{PathKind, ReadAndHash, path_kind, read_and_hash, read_optional_and_hash};
+pub use read::{
+    PathKind, ReadAndHash, path_kind, read_and_hash, read_if_present_and_hash,
+    read_optional_and_hash,
+};
 pub use refusal::Refusal;
 pub use shadow::{
     FALLBACK, MaintainershipKey, Placement, SHADOW_AGE_THRESHOLD, ShadowHome, Swept,

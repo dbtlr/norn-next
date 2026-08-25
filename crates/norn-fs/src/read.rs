@@ -116,6 +116,32 @@ pub fn read_optional_and_hash(
     })
 }
 
+/// Reads a regular file, or returns `None` when its contained path is missing.
+///
+/// Only a missing path produces `None`. A symbolic link, directory, pipe,
+/// socket, or other non-file is a refusal. Use this for an optional control
+/// file whose invalid shape must stay visible to its caller.
+pub fn read_if_present_and_hash(
+    anchor: &Path,
+    relative: &Path,
+) -> Result<Option<ReadAndHash>, Refusal> {
+    let path = anchor.join(relative);
+    match observe(anchor, relative, &path)? {
+        Observed::Read(read) => Ok(Some(read)),
+        Observed::Nothing(unreached)
+            if unreached.error().kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(None)
+        }
+        Observed::Nothing(unreached) => Err(environment_at(
+            unreached.operation(),
+            &path,
+            unreached.component(),
+            unreached.error(),
+        )),
+    }
+}
+
 /// One observation, before either caller decides what an unreached name means.
 enum Observed {
     Read(ReadAndHash),

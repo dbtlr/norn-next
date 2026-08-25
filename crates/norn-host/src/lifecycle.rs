@@ -210,7 +210,6 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         if !state.claim.stands_at(self.epoch) {
             return;
         }
-        state.last_reload_error = None;
         state.close_reader();
         state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
     }

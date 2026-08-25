@@ -136,7 +136,7 @@ impl ReloadCandidate {
         let (schema_anchor, schema_name) = schema_anchor(registration)?;
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
-        let config = norn_fs::read_optional_and_hash(
+        let config = norn_fs::read_if_present_and_hash(
             registration.root.as_path(),
             Path::new(IN_VAULT_CONFIG_PATH),
         )
@@ -153,10 +153,12 @@ impl ReloadCandidate {
         let (schema_anchor, schema_name) = schema_anchor(registration)?;
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
-        std::str::from_utf8(schema.bytes())
+        let schema_text = std::str::from_utf8(schema.bytes())
+            .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
+        serde_yaml::from_str::<serde_yaml::Value>(schema_text)
             .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
 
-        let config = norn_fs::read_optional_and_hash(
+        let config = norn_fs::read_if_present_and_hash(
             registration.root.as_path(),
             Path::new(IN_VAULT_CONFIG_PATH),
         )

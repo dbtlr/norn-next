@@ -3550,6 +3550,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_schema_reload_keeps_ready_and_retains_the_active_candidate() {
+        let f = Fixture::new("invalid-schema-reload");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let active = host.inspect(&name).unwrap().active_fingerprints;
+
+        fs::write(f.vault().join(".norn/schema.yaml"), "\tinvalid: yaml\n").unwrap();
+        let refusal = host.reload(&name).expect_err("invalid YAML reloaded");
+        let crate::ReloadRefusal::Core(error) = refusal else {
+            panic!("invalid YAML returned {refusal:?}");
+        };
+
+        assert_eq!(error.file(), crate::ReloadFile::Schema);
+        assert_eq!(error.stage(), crate::ReloadStage::Parse);
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
+        assert_eq!(inspection.active_fingerprints, active);
+        assert_eq!(inspection.last_reload_error, Some(error));
+    }
+
+    #[test]
     fn config_only_reload_dispatches_without_lane_one_derivation() {
         let f = Fixture::new("config-only-reload");
         fs::write(
@@ -3699,6 +3734,47 @@ mod tests {
         assert_eq!(error.stage(), crate::ReloadStage::Read);
     }
 
+    #[test]
+    fn a_non_file_config_is_unreadable_not_missing() {
+        let f = Fixture::new("non-file-config");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Current)
+        );
+
+        fs::create_dir(f.vault().join(".norn/config.toml")).unwrap();
+
+        assert!(matches!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Unreadable(
+                crate::ReloadError::ConfigRead(_)
+            ))
+        ));
+        let refusal = host
+            .reload(&name)
+            .expect_err("a directory reloaded as config");
+        assert!(matches!(
+            refusal,
+            crate::ReloadRefusal::Core(crate::ReloadError::ConfigRead(_))
+        ));
+    }
+
     struct RecordingEngineConfig {
         name: &'static str,
         seen: std::sync::Mutex<Vec<(VaultName, Option<norn_config::vault::EngineConfig>)>>,
@@ -3715,6 +3791,85 @@ mod tests {
                 .unwrap()
                 .push((vault.clone(), config.cloned()));
         }
+    }
+
+    struct BlockingReloadConfig {
+        calls: std::sync::atomic::AtomicUsize,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl EngineConfigReceiver for BlockingReloadConfig {
+        fn name(&self) -> &str {
+            "sample"
+        }
+
+        fn receive(&self, _: &VaultName, _: Option<&norn_config::vault::EngineConfig>) {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_reload_error_remains_until_schema_reload_succeeds() {
+        let f = Fixture::new("reload-error-retention");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let (entered_send, entered) = std::sync::mpsc::sync_channel(1);
+        let (release, release_receive) = std::sync::mpsc::sync_channel(1);
+        let receiver = Arc::new(BlockingReloadConfig {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: entered_send,
+            release: std::sync::Mutex::new(release_receive),
+        });
+        let host = Arc::new(
+            crate::Host::new(
+                crate::RegistryRead::from_entries([registration]),
+                ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+                    .with_engine_config_receiver(receiver),
+                crate::LifecyclePolicy {
+                    idle_after: Duration::from_secs(60),
+                    worker_slots: 1,
+                    watch_poll_interval: Duration::from_secs(60),
+                },
+            )
+            .unwrap(),
+        );
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+        let prior = match host.reload(&name).expect_err("invalid TOML reloaded") {
+            crate::ReloadRefusal::Core(error) => error,
+            other => panic!("invalid TOML returned {other:?}"),
+        };
+        fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# changed\n",
+        )
+        .unwrap();
+
+        let reloading = Arc::clone(&host);
+        let reload_name = name.clone();
+        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        entered
+            .recv_timeout(Duration::from_secs(20))
+            .expect("schema reload did not reach config dispatch");
+
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert!(matches!(
+            inspection.trust,
+            norn_wire::TrustState::Warming { .. }
+        ));
+        assert_eq!(inspection.last_reload_error, Some(prior));
+
+        release.send(()).unwrap();
+        reload.join().unwrap().expect("schema reload");
+        assert_eq!(host.inspect(&name).unwrap().last_reload_error, None);
     }
 
     #[test]
