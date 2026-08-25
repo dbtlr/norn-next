@@ -210,27 +210,6 @@ pub(crate) fn required_string(
         .ok_or_else(|| corrupt(path, format!("{context}: `{key}` is required")))
 }
 
-/// The boolean under `key`, or `default` when the entry does not carry it.
-pub(crate) fn boolean(
-    path: &Path,
-    context: &str,
-    entry: &Table,
-    key: &str,
-    default: bool,
-) -> Result<bool, ConfigError> {
-    match entry.get(key) {
-        Some(Value::Boolean(value)) => Ok(*value),
-        Some(other) => Err(corrupt(
-            path,
-            format!(
-                "{context}: `{key}` is {}, and it holds a boolean",
-                other.type_str()
-            ),
-        )),
-        None => Ok(default),
-    }
-}
-
 /// The integer under `key`, or a refusal naming the entry that omitted it.
 pub(crate) fn required_integer(
     path: &Path,

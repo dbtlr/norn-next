@@ -910,39 +910,22 @@ pub fn burst(seed: u64) -> Phased {
     )
 }
 
-/// Where the vault's own schema declaration sits, and the two spellings a
-/// validity workload puts there.
-///
-/// A schema is a vault's own declaration rather than something a script can
-/// invent: the bytes that count as one belong to the crate that reads them, so
-/// a suite hands them in.
-pub struct SchemaGround<'a> {
-    /// The vault-relative place the declaration sits at.
-    pub at: &'a str,
-    /// The declaration the workload replaces the standing one with.
-    pub replacement: &'a [u8],
-}
-
-/// **Family 4. Transitions between readable, quarantined and valid states, and
-/// a schema replacement under them.**
+/// **Family 4. Transitions between readable, quarantined and valid states.**
 ///
 /// Four documents, each crossing a boundary in the direction the others do not:
 /// one goes from readable to undecodable, one from undecodable back to
 /// readable, one crosses the frontmatter read bound in each direction, and one
 /// is plain throughout so the workload has a subject nothing happened to. The
-/// schema is replaced part-way, which is the act that re-derives what the
-/// standing findings were derived under.
-///
 /// `oversized` is a document whose frontmatter block is past the bound the text
-/// layer reads, which — like the schema — is a fact about the layer that reads
-/// it rather than one a script can spell.
+/// layer reads, which is a fact about the layer that reads it rather than one a
+/// script can spell.
 ///
 /// The opening phase establishes each of the four states and is settled over,
 /// so every transition in the changing phase is a crossing the host has to
 /// *unmake* something for: a row it holds goes, a finding it filed clears, a
 /// row it holds loses its frontmatter projection. Each phase declares the place
 /// that derives no row while it stands, and those are two different places.
-pub fn validity_transitions(seed: u64, schema: SchemaGround<'_>, oversized: &[u8]) -> Phased {
+pub fn validity_transitions(seed: u64, oversized: &[u8]) -> Phased {
     let mut ink = Ink::new(seed);
     let opening = Script::new(
         "transitions between readable, quarantined and valid states: the four states",
@@ -1008,13 +991,6 @@ pub fn validity_transitions(seed: u64, schema: SchemaGround<'_>, oversized: &[u8
                 Act::Write {
                     at: "churn/states/steady.md".to_string(),
                     bytes: oversized.to_vec(),
-                },
-            ),
-            Step::new(
-                "replace the vault's schema declaration",
-                Act::Write {
-                    at: schema.at.to_string(),
-                    bytes: schema.replacement.to_vec(),
                 },
             ),
         ],
@@ -1335,11 +1311,7 @@ mod tests {
     /// tree stands, and the two phases name two different places.
     #[test]
     fn a_quarantining_workload_declares_the_place_that_holds_no_row() {
-        let schema = SchemaGround {
-            at: ".norn/schema.yaml",
-            replacement: b"version: 1\n",
-        };
-        let workload = validity_transitions(4, schema, b"---\nkey: value\n---\n");
+        let workload = validity_transitions(4, b"---\nkey: value\n---\n");
         assert!(
             workload
                 .opening()

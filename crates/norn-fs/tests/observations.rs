@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use norn_fs::{ContentHash, Refusal, path_identity, read_and_hash, read_optional_and_hash};
+use norn_fs::{
+    ContentHash, Refusal, path_identity, read_and_hash, read_if_present_and_hash,
+    read_optional_and_hash,
+};
 use norn_testkit::scratch;
 
 /// Long enough that a machine under load does not fail the case, short enough
@@ -73,6 +76,38 @@ fn configured_file_bytes_and_fingerprint_are_one_observation() {
     assert_eq!(observed.content_hash(), ContentHash::of(observed.bytes()));
     let (bytes, fingerprint) = observed.into_parts();
     assert_eq!(fingerprint, ContentHash::of(&bytes));
+}
+
+#[test]
+fn an_optional_control_file_defaults_only_when_its_path_is_missing() {
+    let scratch = Scratch::new("optional-control");
+    let relative = Path::new("config.toml");
+    assert!(
+        read_if_present_and_hash(scratch.anchor(), relative)
+            .expect("a missing control file")
+            .is_none()
+    );
+
+    fs::write(scratch.at("config.toml"), b"version = 1\n").unwrap();
+    assert_eq!(
+        read_if_present_and_hash(scratch.anchor(), relative)
+            .expect("a regular control file")
+            .expect("the control file is present")
+            .bytes(),
+        b"version = 1\n"
+    );
+
+    fs::remove_file(scratch.at("config.toml")).unwrap();
+    fs::create_dir(scratch.at("config.toml")).unwrap();
+    let refusal = read_if_present_and_hash(scratch.anchor(), relative)
+        .expect_err("a directory is not a missing control file");
+    assert!(matches!(
+        refusal,
+        Refusal::Environment {
+            kind: std::io::ErrorKind::InvalidData,
+            ..
+        }
+    ));
 }
 
 /// **The bar on a name that is a symbolic link.** A configured file is the file

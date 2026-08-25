@@ -1,7 +1,7 @@
 //! The registry file: which vaults exist on this machine, and where.
 //!
 //! **This module is host-only.** What is here is the registry's *shape and
-//! storage* — the five fields an entry carries, how they are written down, and
+//! storage* — the four fields an entry carries, how they are written down, and
 //! the locked read-modify-write that changes them. The registry's *semantics*
 //! are the orchestrator's: which entries are being served, what attaching one
 //! means, whether two entries point at the same tree, what happens when a root
@@ -34,7 +34,6 @@
 //!
 //! [vaults.notes]
 //! root = "/home/person/notes"
-//! semantic_search = true
 //!
 //! [vaults.work]
 //! root = "/home/person/work"
@@ -61,7 +60,6 @@ const VAULTS_KEY: &str = "vaults";
 
 const ROOT_KEY: &str = "root";
 const SCHEMA_SOURCE_KEY: &str = "schema_source";
-const SEMANTIC_SEARCH_KEY: &str = "semantic_search";
 const POLL_BACKEND_KEY: &str = "poll_backend";
 
 /// A vault's root directory, as recorded.
@@ -155,7 +153,7 @@ impl PollBackend {
 
 /// One registered vault.
 ///
-/// Five fields and no others. Anything a host learns about a vault by looking
+/// Four fields and no others. Anything a host learns about a vault by looking
 /// at it — its trust state, its store's generation, when it was last derived —
 /// is derived state and lives where derived state lives, not in the file a
 /// person edits.
@@ -168,22 +166,18 @@ pub struct Entry {
     /// Where the vault's schema is read from. Absent means the in-vault
     /// default, [`crate::IN_VAULT_SCHEMA_PATH`], relative to the root.
     pub schema_source: Option<SchemaSource>,
-    /// Whether semantic search is enabled for this vault. Off unless somebody
-    /// turned it on: it is the one feature that fetches a model.
-    pub semantic_search: bool,
     /// The watch backend this entry pins. Absent is the platform's native one.
     pub poll_backend: Option<PollBackend>,
 }
 
 impl Entry {
     /// An entry with the two fields that have no default, and the defaults for
-    /// the three that do.
+    /// the two that do.
     pub fn new(name: VaultName, root: VaultRoot) -> Self {
         Entry {
             name,
             root,
             schema_source: None,
-            semantic_search: false,
             poll_backend: None,
         }
     }
@@ -254,8 +248,6 @@ impl Registry {
                     Some(source) => Some(SchemaSource::new(source)?),
                     None => None,
                 };
-            let semantic_search =
-                document::boolean(path, &context, &table, SEMANTIC_SEARCH_KEY, false)?;
             let poll_backend =
                 match document::optional_string(path, &context, &table, POLL_BACKEND_KEY)? {
                     Some(text) => Some(PollBackend::parse(&text).ok_or_else(|| {
@@ -274,7 +266,6 @@ impl Registry {
                     name,
                     root,
                     schema_source,
-                    semantic_search,
                     poll_backend,
                 },
             );
@@ -310,10 +301,6 @@ impl Registry {
                     .schema_source
                     .as_ref()
                     .map(|source| Value::String(source.as_str().to_string())),
-            );
-            table.insert(
-                SEMANTIC_SEARCH_KEY.to_string(),
-                Value::Boolean(entry.semantic_search),
             );
             document::set_optional(
                 &mut table,

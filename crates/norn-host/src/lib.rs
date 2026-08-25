@@ -11,6 +11,7 @@ mod lifecycle;
 mod production;
 mod refusal;
 mod registry;
+mod reload;
 
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
@@ -19,8 +20,9 @@ mod registry;
 #[cfg(feature = "induced-failure")]
 pub use evidence::{EvidenceReading, JobEvidence};
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
-    LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
+    Demand, DemandLease, EntryOps, EntryReloadFailure, Healing, Host, HostError, JobFailure,
+    LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork,
+    SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.
@@ -50,6 +52,10 @@ pub use production::{
     WATCH_SYNCHRONIZATION_DEADLINE,
 };
 pub use registry::{AliasConflict, RegistryRead};
+pub use reload::{
+    ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
+    ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
+};
 
 // `norn-embed` is a declared architecture edge that no module consumes yet.
 // The witness keeps the dependency allowlist and manifest in agreement.

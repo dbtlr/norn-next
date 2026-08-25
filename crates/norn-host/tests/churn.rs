@@ -130,16 +130,6 @@ const SETTLING: Convergence = Convergence::new(
 /// that lost a few races.
 const CATCHING_A_HEAL: Duration = Duration::from_secs(60);
 
-/// The bytes the validity workload replaces the vault's schema declaration
-/// with.
-///
-/// A schema is opaque to derivation — it is read, hashed and pinned, and no
-/// document is judged against it — so what makes this a schema *change* is that
-/// the bytes differ from the ones the attachment pinned. The pin is what
-/// discards every finding derived under the old fingerprint, and the heal that
-/// follows is what derives them again.
-const REPLACEMENT_SCHEMA: &[u8] = b"version: 1\n# a second declaration\n";
-
 /// A document whose frontmatter block is past the bound the text layer reads.
 ///
 /// The block never closes inside the bound, so the read refuses it by size: the
@@ -347,8 +337,7 @@ fn a_burst_converges_on_the_last_bytes_written() {
     churned.assert_maintenance_is_bracketed(&BURST_OPENS);
 }
 
-/// **Family 4.** Documents crossing between readable, quarantined and degraded,
-/// and a schema replacement under them.
+/// **Family 4.** Documents crossing between readable, quarantined and degraded.
 ///
 /// Four boundaries are crossed, each in the direction the others are not: a
 /// readable document becomes bytes no decoder accepts, an undecodable one
@@ -359,30 +348,15 @@ fn a_burst_converges_on_the_last_bytes_written() {
 /// transitions move different pillars and a build from zero has to reach the
 /// same answer about both.
 ///
-/// The schema replacement lands last. A re-pin discards every finding derived
-/// under the fingerprint it replaced and heals the vault again, so what this
-/// case says about the findings above is that they came back.
-///
 /// **Every crossing is made against what the host already holds.** The four
 /// states are established and settled over first, so the quarantine takes a row
 /// away, the recovery gives one back, and the two read-bound crossings move the
 /// frontmatter projection of rows that stand throughout.
 ///
-/// **No work bound.** A schema re-pin is a vault-scope act by contract: the
-/// findings it discards stand at places no row does, and only a walk of the
-/// whole vault re-files them. A changed-set bound over this workload would be a
-/// bound against that contract.
 #[test]
 fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     let oversized = oversized_frontmatter();
-    let workload = churn::validity_transitions(
-        53,
-        churn::SchemaGround {
-            at: ".norn/schema.yaml",
-            replacement: REPLACEMENT_SCHEMA,
-        },
-        &oversized,
-    );
+    let workload = churn::validity_transitions(53, &oversized);
     let mut churned = churn_the_vault("churn-validity", &workload);
 
     // One document stands past the frontmatter read bound at the end — the one
@@ -444,18 +418,6 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     assert!(
         kinds_at(&projection, "churn/states/overlong.md").is_empty(),
         "a finding stands beside a block that reads"
-    );
-
-    // The schema the workload replaced is the one the store pinned, and the
-    // findings above were derived under it: a re-pin that discarded them and
-    // healed nothing would have left the pillar empty.
-    assert_eq!(
-        projection
-            .vault_schema()
-            .expect("an attachment pins the vault schema")
-            .bytes,
-        REPLACEMENT_SCHEMA,
-        "the store pinned bytes the vault no longer holds"
     );
 }
 
@@ -1159,7 +1121,7 @@ impl Churned {
         assert!(
             script.steps().is_empty() || self.census != *opened,
             "`{}` applied {} steps and the tree reads exactly as it did before them — same \
-             places, same hashes, same schema — so this phase asks the host for nothing and \
+             places and same hashes — so this phase asks the host for nothing and \
              every claim after it holds over a vault nothing changed\n{applied}",
             script.name(),
             applied.steps()
@@ -1744,10 +1706,10 @@ fn apply(script: &Script, root: &Path, applied: &mut Applied) {
 /// **The settle.** Wait until the derived store agrees with the tree about
 /// which places hold documents and what bytes they hold.
 ///
-/// The condition is coarse on purpose — paths, content hashes and the pinned
-/// schema, which is the cheapest thing that says the host caught up — and what
-/// is judged afterwards is everything a store holds. A wait on the whole
-/// judgment would be the bar waiting for itself.
+/// The condition is coarse on purpose: paths and content hashes are the
+/// cheapest signal that says the host caught up. What is judged afterwards is
+/// everything a store holds. A wait on the whole judgment would be the bar
+/// waiting for itself.
 ///
 /// **A settle that runs out says what the workload did.** The steps that really
 /// ran are printed beside the disagreement, because a wait failing on a hash at
@@ -1801,9 +1763,8 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ap
 /// asks the directory itself what spelling it renders there.
 ///
 /// **Two readings are compared for equality**, which is how a phase that
-/// applied acts and moved nothing is caught: the places, the hashes, the places
-/// that derive none and the vault's schema declaration all take part, because
-/// each of them is something a changing phase may be the only mover of.
+/// applied acts and moved nothing is caught: the places, the hashes and the
+/// places that derive none all take part.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Census {
     /// What the volume does with case, which is what makes two spellings one
@@ -1815,14 +1776,6 @@ struct Census {
     without_rows: BTreeSet<String>,
     /// Each identity's spelling on disk, which is what a failure names.
     spellings: BTreeMap<String, String>,
-    /// The vault's own schema declaration, as the tree holds it.
-    ///
-    /// **A schema replacement changes no path and no hash**, so a store that
-    /// has not yet taken it agrees with every other part of this reading. A
-    /// settle that stopped there would let a case go on to drop the host with
-    /// the re-pin still pending — which discards it — and fail downstream as a
-    /// flake about findings nothing re-derived.
-    schema: Option<Vec<u8>>,
 }
 
 /// A path as its identity on a volume with this case behavior.
@@ -1900,22 +1853,6 @@ impl Census {
                 ));
             }
         }
-        if let Some(declared) = self.schema.as_ref() {
-            let pinned = store
-                .begin_request()
-                .vault_schema_pin()
-                .expect("reading the pinned vault schema");
-            match pinned {
-                Some(pin) if &pin.bytes == declared => {}
-                Some(_) => apart.push(
-                    "the store pins bytes the vault's schema declaration no longer holds"
-                        .to_string(),
-                ),
-                None => {
-                    apart.push("the vault declares a schema and the store pins none".to_string())
-                }
-            }
-        }
         if apart.is_empty() {
             return None;
         }
@@ -1933,7 +1870,6 @@ fn census(root: &Path, folding: Folding) -> Census {
         rows: BTreeMap::new(),
         without_rows: BTreeSet::new(),
         spellings: BTreeMap::new(),
-        schema: std::fs::read(root.join(".norn/schema.yaml")).ok(),
     };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {

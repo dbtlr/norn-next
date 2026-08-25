@@ -18,3 +18,4 @@ mod names;
 mod registry;
 mod tokens;
 mod tolerance;
+mod vault;
