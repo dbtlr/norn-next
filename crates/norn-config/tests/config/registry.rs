@@ -34,7 +34,6 @@ fn an_entry_round_trips_through_the_file() {
     let mut written = entry("notes", "/home/person/notes");
     written.schema_source =
         Some(SchemaSource::new("/home/person/schemas/notes.yaml").expect("a schema source"));
-    written.semantic_search = true;
     written.poll_backend = Some(PollBackend::Poll);
 
     registry::mutate(dirs, |registry| {
@@ -63,14 +62,12 @@ fn an_entry_with_the_defaults_writes_no_optional_field() {
 
     let text = scratch.text_at(&scratch.registry_file());
     assert!(text.contains("root = \"/home/person/notes\""), "{text}");
-    assert!(text.contains("semantic_search = false"), "{text}");
     assert!(!text.contains("schema_source"), "{text}");
     assert!(!text.contains("poll_backend"), "{text}");
 
     let read = registry::read(dirs).expect("the registry");
     let entry = read.get(&name("notes")).expect("the entry");
     assert_eq!(entry.schema_source, None);
-    assert!(!entry.semantic_search);
     assert_eq!(entry.poll_backend, None);
 }
 
@@ -103,10 +100,7 @@ fn an_entry_is_replaced_by_name_and_removed_by_name() {
     .expect("a registration");
 
     let displaced = registry::mutate(dirs, |registry| {
-        Ok(registry.insert(Entry {
-            semantic_search: true,
-            ..entry("notes", "/home/person/moved")
-        }))
+        Ok(registry.insert(entry("notes", "/home/person/moved")))
     })
     .expect("a replacement");
     assert_eq!(
@@ -322,10 +316,6 @@ fn a_malformed_entry_is_refused_with_the_reason() {
         (
             "version = 1\n\n[vaults.notes]\nroot = 4\n",
             "`root` is integer",
-        ),
-        (
-            "version = 1\n\n[vaults.notes]\nroot = \"/x\"\nsemantic_search = \"yes\"\n",
-            "`semantic_search` is string",
         ),
         (
             "version = 1\n\n[vaults.notes]\nroot = \"/x\"\npoll_backend = \"kqueue\"\n",

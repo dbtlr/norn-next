@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
-//! Machine-local state, one owner.
+//! Configuration shapes with no vault I/O.
 //!
-//! Everything norn keeps on a machine and outside a vault lives here: where
-//! the config and data directories are, the registry of vaults the host
-//! serves, the bearer tokens loopback requests carry, the weights directory,
-//! and the per-vault derived-state directory.
+//! This crate owns machine-local state and the pure parser for the optional
+//! per-vault config envelope. The host supplies the bytes to that parser.
+//! Machine-local state includes the config and data directories, the registry,
+//! bearer tokens, the weights directory, and each vault's derived-state path.
 //!
 //! **One write protocol, and it is in this crate.** The registry file and the
 //! token file are opened by one module — locking, replacement and mode are
@@ -14,10 +14,9 @@
 //! spells itself; the workspace-wide `std::fs` lint and review are what hold
 //! the rest, and the crate map records this crate as the owner of those bytes.
 //!
-//! **This crate never touches a vault.** It does not read vault content, does
-//! not walk a tree, does not watch anything, and holds no opinion about what a
-//! vault contains. It knows a vault's *name* and its *root path* because the
-//! registry records them; it never opens either.
+//! **This crate never touches a vault.** It does not read vault content, walk a
+//! tree, or watch files. [`vault`] parses only bytes that a caller supplies. The
+//! registry records a vault name and root path, but this crate opens neither.
 //!
 //! # Where to start
 //!
@@ -28,6 +27,7 @@
 //!   locked read-modify-write that changes them.
 //! - [`machine`] — the surface both sides of the client/host seam share: the
 //!   bearer tokens, and the loopback endpoint.
+//! - [`vault`] — the generic per-vault config envelope.
 //!
 //! # The two surfaces
 //!
@@ -75,6 +75,7 @@ mod file;
 
 pub mod machine;
 pub mod registry;
+pub mod vault;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -99,7 +100,7 @@ pub const IN_VAULT_SCHEMA_PATH: &str = ".norn/schema.yaml";
 ///
 /// Same terms as [`IN_VAULT_SCHEMA_PATH`]: the convention lives here so that
 /// two crates do not each decide where it is, and reading it does not.
-pub const IN_VAULT_CONFIG_PATH: &str = ".norn/config.yaml";
+pub const IN_VAULT_CONFIG_PATH: &str = ".norn/config.toml";
 
 /// The registry file's name inside the config directory.
 const REGISTRY_FILE: &str = "registry.toml";

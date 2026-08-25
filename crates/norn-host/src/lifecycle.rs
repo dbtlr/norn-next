@@ -14,6 +14,10 @@ use norn_wire::{
 };
 
 use crate::registry::{AliasConflict, RegistryRead};
+use crate::reload::ReloadCandidate;
+use crate::{
+    ActiveFingerprints, AuthoredDrift, ReloadError, ReloadOutcome, ReloadRefusal, VaultInspection,
+};
 
 mod claim;
 mod serving;
@@ -78,15 +82,15 @@ pub trait EntryOps: Send + Sync + 'static {
     /// name, its root and its schema source arrive from the entry the lifecycle
     /// is attaching, so an implementation keeps no account of the serving set
     /// and has none to disagree with. What an attachment needs after this call
-    /// — the root a reconcile scopes against, the schema a recheck re-pins — it
-    /// keeps from what it is given here.
+    /// — the root a reconcile scopes against and the active controls a reload
+    /// compares — it keeps from what it is given here.
     fn attach(
         &self,
         registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure>;
-    /// Apply one coalesced envelope. Schema dirtiness dominates document roots;
-    /// a rescan widens rather than discarding uncertainty.
+    /// Apply one coalesced document envelope. A rescan widens rather than
+    /// discarding uncertainty. Control-file facts do not reach this method.
     fn reconcile(
         &self,
         name: &VaultName,
@@ -103,6 +107,21 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
+    /// Read, validate, and apply the two authored vault control files.
+    fn reload(
+        &self,
+        _: &VaultName,
+        _: &mut Self::Attachment,
+        _: &ProgressReporter<Self::Attachment>,
+    ) -> Result<ReloadOutcome, JobFailure> {
+        Err(JobFailure::Environmental(
+            "vault reload is not supported by this entry adapter".to_owned(),
+        ))
+    }
+    /// The core fingerprints active in this attachment, where it has them.
+    fn active_fingerprints(&self, _: &Self::Attachment) -> Option<ActiveFingerprints> {
+        None
+    }
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -182,6 +201,20 @@ impl<A: SnapshotSource> ProgressReporter<A> {
         Healing(self)
     }
 
+    /// Enter Lane 1 warming after a reload candidate passes core validation.
+    pub fn begin_schema_reload(&self) {
+        let Some(entry) = self.entry.upgrade() else {
+            return;
+        };
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if !state.claim.stands_at(self.epoch) {
+            return;
+        }
+        state.last_reload_error = None;
+        state.close_reader();
+        state.trust = TrustState::warming(WarmingPhase::Healing, 0, None);
+    }
+
     fn enter(&self, phase: WarmingPhase) {
         self.publish(|_, healed, total| TrustState::warming(phase, healed, total));
     }
@@ -248,6 +281,8 @@ fn reporter<A: SnapshotSource>(entry: &Arc<Entry<A>>, epoch: u64) -> ProgressRep
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobFailure {
     Environmental(String),
+    /// A vault control file failed at a typed core reload boundary.
+    Reload(ReloadError),
     /// The derived state is damaged, and no repetition of the work that met it
     /// resolves that. The store the entry holds is not a store any read can be
     /// answered from, so what the entry owes is the database-side heal rung —
@@ -357,6 +392,8 @@ impl<A: SnapshotSource> Entry<A> {
                 coverage: Coverage::none(),
                 reader: None,
                 pending: Batch::default(),
+                active_fingerprints: None,
+                last_reload_error: None,
                 recovery_required: false,
                 rebuild_required: false,
                 recovery_demands: 0,
@@ -405,6 +442,11 @@ struct EntryState<A: SnapshotSource> {
     /// moving runs under the read.
     reader: Option<Arc<A::Reader>>,
     pending: Batch,
+    /// The core fingerprints active in the attached runtime.
+    active_fingerprints: Option<ActiveFingerprints>,
+    /// The last typed core error from reading, parsing, or applying vault
+    /// control files. A successful candidate clears it.
+    last_reload_error: Option<ReloadError>,
     recovery_required: bool,
     /// Whether the entry's derived state is damaged and owes the database-side
     /// heal rung.
@@ -471,6 +513,12 @@ struct EntryState<A: SnapshotSource> {
 }
 
 impl<A: SnapshotSource> EntryState<A> {
+    fn record_reload_error(&mut self, error: ReloadError) -> String {
+        let detail = error.to_string();
+        self.last_reload_error = Some(error);
+        detail
+    }
+
     /// Owe a recovery no lease has asked for yet.
     ///
     /// The demands standing behind the requirement this one replaces are
@@ -736,6 +784,7 @@ enum Job {
     Rebuild(VaultName, u64),
     Reconcile(VaultName, u64),
     Maintenance(VaultName, u64),
+    Reload(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
     Detach(VaultName, u64),
 }
 
@@ -747,6 +796,7 @@ impl Job {
             | Self::Rebuild(_, epoch)
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
+            | Self::Reload(_, epoch, _)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -758,6 +808,7 @@ impl Job {
             | Self::Rebuild(name, _)
             | Self::Reconcile(name, _)
             | Self::Maintenance(name, _)
+            | Self::Reload(name, _, _)
             | Self::Detach(name, _) => name,
         }
     }
@@ -1057,6 +1108,7 @@ fn finish_release<O: EntryOps>(
     state.coverage.released_by(epoch);
     state.detach_in_flight = false;
     state.pending = Batch::default();
+    state.active_fingerprints = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
     // would name a store this entry no longer holds.
@@ -1773,6 +1825,61 @@ impl<O: EntryOps> Host<O> {
             .answer(name)
     }
 
+    /// The retained internal status facts for one served vault.
+    pub fn inspect(&self, name: &VaultName) -> Option<VaultInspection> {
+        self.shared.entries.get(name).map(|entry| {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            VaultInspection {
+                trust: state.trust.clone(),
+                active_fingerprints: state.active_fingerprints,
+                last_reload_error: state.last_reload_error.clone(),
+            }
+        })
+    }
+
+    /// Compare the authored control files with the active fingerprints now.
+    pub fn authored_drift(&self, name: &VaultName) -> Option<AuthoredDrift> {
+        let entry = self.shared.entries.get(name)?;
+        let active = entry
+            .gate
+            .lock()
+            .expect("entry gate poisoned")
+            .active_fingerprints;
+        let Some(active) = active else {
+            return Some(AuthoredDrift::Inactive);
+        };
+        Some(
+            match ReloadCandidate::authored_fingerprints(&entry.registration) {
+                Ok(authored) if authored == active => AuthoredDrift::Current,
+                Ok(_) => AuthoredDrift::ReloadPending,
+                Err(error) => AuthoredDrift::Unreadable(error),
+            },
+        )
+    }
+
+    /// Request one explicit reload and wait until the vault has its outcome.
+    pub fn reload(&self, name: &VaultName) -> Result<(), ReloadRefusal> {
+        let Some(entry) = self.shared.entries.get(name) else {
+            return Err(ReloadRefusal::UnknownVault);
+        };
+        let (reply, answer) = mpsc::sync_channel(1);
+        {
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            if state.trust != TrustState::Ready
+                || !state.coverage.in_hand()
+                || state.claim.is_held()
+                || state.detach_in_flight
+            {
+                return Err(ReloadRefusal::Unavailable(state.trust.clone()));
+            }
+            state
+                .claim
+                .schedule(|epoch| Job::Reload(name.clone(), epoch, reply));
+        }
+        dispatch_pending(&self.shared, &entry).map_err(|_| ReloadRefusal::HostStopped)?;
+        answer.recv().unwrap_or(Err(ReloadRefusal::HostStopped))
+    }
+
     /// How many classifications this host has run against its serving set.
     ///
     /// One classification stats every root the host serves, so this is the whole
@@ -2145,6 +2252,16 @@ fn poll_watchers<O: EntryOps>(shared: &Arc<Shared<O>>) {
                             TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                         state.coverage.park_by(epoch, attachment);
                     }
+                    Err(JobFailure::Reload(error)) => {
+                        state.claim.drop_marker();
+                        state.claim.end_poll(epoch);
+                        state.require_recovery_keeping_demands();
+                        state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        let detail = state.record_reload_error(error);
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                        state.coverage.park_by(epoch, attachment);
+                    }
                     // Damaged derived state is not what a poll retries into.
                     // The entry keeps its coverage — the watcher and the
                     // maintainer lock are not what was damaged — publishes the
@@ -2372,6 +2489,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Rebuild(name, _)
         | Job::Reconcile(name, _)
         | Job::Maintenance(name, _)
+        | Job::Reload(name, _, _)
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
@@ -2498,6 +2616,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.last_reload_error = None;
                     state.install_coverage(attachment);
                     // The coverage is this attach's, and what any earlier
                     // requirement was raised against went back with the release
@@ -2536,6 +2656,11 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.trust = TrustState::untrusted(watcher_lost(error));
                 }
                 Err(JobFailure::Environmental(detail)) => {
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                }
+                Err(JobFailure::Reload(error)) => {
+                    let detail = state.record_reload_error(error);
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                 }
@@ -2603,6 +2728,8 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             match result {
                 Ok(()) => {
                     state.pending.merge(observed);
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.last_reload_error = None;
                     state.coverage.park_by(epoch, attachment);
                     state.clear_recovery();
                     if state.detach_due {
@@ -2642,6 +2769,15 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
                     state.coverage.park_by(epoch, attachment);
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    next = schedule_due_detach(&mut state, &name);
+                }
+                Err(JobFailure::Reload(error)) => {
+                    state.require_recovery();
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.coverage.park_by(epoch, attachment);
+                    let detail = state.record_reload_error(error);
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
@@ -2726,6 +2862,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok(attachment) => {
                     state.claim.release();
                     state.pending.merge(observed);
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
                     // The store inside this coverage is not the store the
                     // entry's reader was minted from, so the handle is minted
                     // again here: this is the one leg that swaps an attached
@@ -2914,6 +3051,21 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     }
                     break None;
                 }
+                Err(JobFailure::Reload(error)) => {
+                    state.coverage.park_by(epoch, attachment);
+                    state.claim.release();
+                    state.require_recovery();
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    let detail = state.record_reload_error(error);
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    let next = schedule_due_detach(&mut state, &name);
+                    drop(state);
+                    if let Some(job) = next {
+                        dispatch_handoff(shared, entry, epoch, job);
+                    }
+                    break None;
+                }
                 // The facts this reconcile took are gone with it, and nothing
                 // is merged back for them: the rebuild's heal reads the vault
                 // whole, so every path the lost batch named is read again by
@@ -2932,6 +3084,153 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
             }
         },
+        Job::Reload(name, epoch, reply) => {
+            let mut attachment = {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if !state.claim.stands_at(epoch) {
+                    let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+                    return None;
+                }
+                state.pin();
+                let Some(attachment) = state.coverage.take(epoch) else {
+                    state.unpin();
+                    state.claim.end_job_leg(epoch);
+                    state.claim.release();
+                    let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+                    return None;
+                };
+                attachment
+            };
+            let mut result = shared
+                .ops
+                .reload(&name, &mut attachment, &reporter(entry, epoch));
+            if matches!(result, Ok(ReloadOutcome::SchemaChanged)) {
+                loop {
+                    let observed = drain_observed(&shared.ops, &name, &mut attachment);
+                    match observed {
+                        Ok((batch, false)) if batch.is_empty() => break,
+                        Ok((batch, _)) => {
+                            result = shared
+                                .ops
+                                .reconcile(
+                                    &name,
+                                    &mut attachment,
+                                    ReconcileWork { batch },
+                                    &reporter(entry, epoch),
+                                )
+                                .map(|()| ReloadOutcome::SchemaChanged);
+                            if result.is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            let mut state = entry.gate.lock().expect("entry gate poisoned");
+            state.unpin();
+            if !state.claim.stands_at(epoch) {
+                drop(state);
+                let _ = reply.send(Err(ReloadRefusal::Unavailable(TrustState::Unattached)));
+                return Some(attachment);
+            }
+            let response = match result {
+                Ok(outcome) => {
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.last_reload_error = None;
+                    state.clear_rung_requirements();
+                    match outcome {
+                        ReloadOutcome::ConfigOnly => {
+                            state.coverage.park_by(epoch, attachment);
+                        }
+                        ReloadOutcome::SchemaChanged => {
+                            state.remint_coverage(epoch, attachment);
+                        }
+                    }
+                    state.trust = TrustState::Ready;
+                    Ok(())
+                }
+                Err(JobFailure::Reload(error)) => {
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.coverage.park_by(epoch, attachment);
+                    let ready = state.trust == TrustState::Ready;
+                    let detail = state.record_reload_error(error.clone());
+                    if !ready {
+                        state.require_recovery();
+                        state.pending.merge(Batch::rescan(RescanScope::Vault));
+                        state.trust =
+                            TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    }
+                    Err(ReloadRefusal::Core(error))
+                }
+                Err(error @ JobFailure::LostMaintainership) => {
+                    begin_release(&mut state);
+                    drop(state);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
+                    let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+                    return None;
+                }
+                Err(JobFailure::MaintainerContended(incumbent)) => {
+                    let error = JobFailure::MaintainerContended(incumbent.clone());
+                    state.maintainer_contended = Some(incumbent);
+                    begin_release(&mut state);
+                    drop(state);
+                    finish_release(shared, entry, &name, epoch, Some(attachment));
+                    let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+                    return None;
+                }
+                Err(JobFailure::WatcherTerminal(error)) => {
+                    let failure = JobFailure::WatcherTerminal(error.clone());
+                    let reclassify = root_moved(&error);
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.coverage.park_by(epoch, attachment);
+                    state.require_recovery();
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.trust = TrustState::untrusted(watcher_lost(error));
+                    state.claim.end_job_leg(epoch);
+                    state.claim.release();
+                    drop(state);
+                    if reclassify {
+                        park_on_current_classification(shared, &name);
+                    }
+                    let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+                    return None;
+                }
+                Err(JobFailure::Environmental(detail)) => {
+                    let failure = JobFailure::Environmental(detail.clone());
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.coverage.park_by(epoch, attachment);
+                    state.require_recovery();
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    Err(ReloadRefusal::Runtime(failure))
+                }
+                Err(JobFailure::StoreDamaged(detail)) => {
+                    let failure = JobFailure::StoreDamaged(detail.clone());
+                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.coverage.park_by(epoch, attachment);
+                    state.require_rebuild();
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    let next = state
+                        .claim
+                        .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+                    drop(state);
+                    let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+                    dispatch_handoff(shared, entry, epoch, next);
+                    return None;
+                }
+            };
+            state.claim.end_job_leg(epoch);
+            state.claim.release();
+            drop(state);
+            let _ = reply.send(response);
+            None
+        }
         Job::Maintenance(name, epoch) => {
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -3019,6 +3318,16 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.claim.release();
                     state.require_recovery();
                     state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    state.trust =
+                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+                    next = schedule_due_detach(&mut state, &name);
+                }
+                Err(JobFailure::Reload(error)) => {
+                    state.coverage.park_by(epoch, attachment);
+                    state.claim.release();
+                    state.require_recovery();
+                    state.pending.merge(Batch::rescan(RescanScope::Vault));
+                    let detail = state.record_reload_error(error);
                     state.trust =
                         TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
                     next = schedule_due_detach(&mut state, &name);
@@ -10472,7 +10781,7 @@ mod tests {
             Job::Recover(..) => Some(DemandedWork::Recover),
             Job::Rebuild(..) => Some(DemandedWork::Rebuild),
             Job::Reconcile(..) => Some(DemandedWork::Reconcile),
-            Job::Maintenance(..) | Job::Detach(..) => None,
+            Job::Maintenance(..) | Job::Reload(..) | Job::Detach(..) => None,
         }
     }
 

@@ -142,7 +142,7 @@ fn asking_for_a_path_creates_nothing() {
 #[test]
 fn the_in_vault_conventions_are_relative_paths_under_a_dot_directory() {
     assert_eq!(IN_VAULT_SCHEMA_PATH, ".norn/schema.yaml");
-    assert_eq!(IN_VAULT_CONFIG_PATH, ".norn/config.yaml");
+    assert_eq!(IN_VAULT_CONFIG_PATH, ".norn/config.toml");
     for convention in [IN_VAULT_SCHEMA_PATH, IN_VAULT_CONFIG_PATH] {
         assert!(
             Path::new(convention).is_relative(),

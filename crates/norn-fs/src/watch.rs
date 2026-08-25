@@ -252,6 +252,18 @@ impl Batch {
         &self.rescans
     }
 
+    /// Keep only vault roots accepted by `keep`, with their standing intact.
+    pub fn retain_vault_roots(&mut self, mut keep: impl FnMut(&NormalizedPath) -> bool) {
+        self.vault_roots.retain(|root| keep(root));
+        self.retired.retain(|root| self.vault_roots.contains(root));
+    }
+
+    /// Remove all facts from the separately watched schema source.
+    pub fn discard_schema_facts(&mut self) {
+        self.schema_dirty = false;
+        self.rescans.remove(&RescanScope::Schema);
+    }
+
     /// Record one dirty root at the spelling the reporting event carried.
     ///
     /// A [`NormalizedPath`] compares on its fold identity alone, so a plain set

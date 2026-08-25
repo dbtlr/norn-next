@@ -21,7 +21,11 @@ use norn_text::{BlockRefusal, Document, SourceSpan, Value};
 use norn_wire::{FindingKind, FindingScope, MaintainerIdentity, Severity, VaultName};
 
 use crate::evidence::{JobEvidence, count_changeset};
-use crate::{EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, SnapshotSource};
+use crate::reload::{EngineConfigReceiver, ReloadCandidate};
+use crate::{
+    EntryOps, Healing, JobFailure, ProgressReporter, ReconcileWork, ReloadError, ReloadOutcome,
+    SnapshotSource,
+};
 
 /// Maximum number of document changes materialized for one store transaction.
 pub const MAX_CHANGESET_SIZE: usize = 1024;
@@ -118,12 +122,14 @@ pub struct ProductionEntryOps {
     /// caller reads it before and after the work it is asking about. Nothing
     /// here decides anything: see [`crate::evidence`].
     evidence: Arc<JobEvidence>,
+    engine_config_receivers: Vec<Arc<dyn EngineConfigReceiver>>,
 }
 
 pub struct ProductionAttachment {
     /// The registration this attachment was established from: the root it
     /// derives, and where its schema is read.
     registration: Registration,
+    controls: ReloadCandidate,
     subscription: Option<Subscription>,
     store: Store,
     heal_observed: norn_fs::Batch,
@@ -175,6 +181,19 @@ impl ProductionEntryOps {
             dirs,
             policy,
             evidence: Arc::new(JobEvidence::default()),
+            engine_config_receivers: Vec::new(),
+        }
+    }
+
+    /// Adds one engine boundary to the config dispatch set.
+    pub fn with_engine_config_receiver(mut self, receiver: Arc<dyn EngineConfigReceiver>) -> Self {
+        self.engine_config_receivers.push(receiver);
+        self
+    }
+
+    fn dispatch_config(&self, vault: &VaultName, config: &norn_config::vault::VaultConfig) {
+        for receiver in &self.engine_config_receivers {
+            receiver.receive(vault, config.engine(receiver.name()));
         }
     }
 
@@ -222,55 +241,34 @@ impl ProductionEntryOps {
             .unwrap_or_else(|| registration.root.as_path().join(IN_VAULT_SCHEMA_PATH))
     }
 
-    /// The directory a schema read is anchored at, and the name it reaches
-    /// below it.
-    ///
-    /// One rule decides both modes: **what an operator wrote down is resolved as
-    /// written, and what norn appends to it is contained.** A configured source
-    /// is a whole path an operator chose, so the directory holding it is the
-    /// anchor and only the file's own name is refused as a link. The default is
-    /// the vault root — which the operator wrote down — plus the two names norn
-    /// appends, so `.norn` and `schema.yaml` are both read through the vault's
-    /// own directories or not at all.
-    ///
-    /// That makes a link at either of those two names an attach that refuses,
-    /// naming the component. It is the same statement the read seam makes about
-    /// a document: the schema is the file at the name inside the vault, never
-    /// what something in the vault points at. An operator sharing one schema
-    /// across vaults says so in the registry, where the path is theirs and is
-    /// read as spelled.
-    fn schema_anchor(registration: &Registration) -> Result<(PathBuf, PathBuf), JobFailure> {
-        let Some(source) = registration.schema_source.as_ref() else {
-            return Ok((
-                registration.root.as_path().to_owned(),
-                PathBuf::from(IN_VAULT_SCHEMA_PATH),
-            ));
-        };
-        let source = source.as_path();
-        let (Some(directory), Some(name)) = (source.parent(), source.file_name()) else {
-            return Err(environmental(format!(
-                "schema source names no file: {}",
-                source.display()
-            )));
-        };
-        Ok((directory.to_owned(), PathBuf::from(name)))
+    #[cfg(test)]
+    fn pin_schema(store: &mut Store, registration: &Registration) -> Result<SchemaPin, JobFailure> {
+        let candidate = ReloadCandidate::read(registration).map_err(JobFailure::Reload)?;
+        Self::pin_candidate(store, &candidate)
     }
 
-    /// Re-read the vault schema and pin what it says.
-    ///
-    /// The answer carries whether the pin moved the fingerprint, which is the
-    /// fact a caller re-derives on: a pin that moved discarded every finding
-    /// keyed by the fingerprint it replaced, and only a re-derivation of the
-    /// schema-keyed tables records what holds under the new one.
-    fn pin_schema(store: &mut Store, registration: &Registration) -> Result<SchemaPin, JobFailure> {
-        let (anchor, name) = Self::schema_anchor(registration)?;
-        let observed = norn_fs::read_and_hash(&anchor, &name).map_err(effect)?;
-        std::str::from_utf8(observed.bytes())
-            .map_err(|e| environmental(format!("schema is not UTF-8: {e}")))?;
+    fn pin_candidate(
+        store: &mut Store,
+        candidate: &ReloadCandidate,
+    ) -> Result<SchemaPin, JobFailure> {
         store
             .begin_request()
-            .pin_vault_schema(observed.bytes(), &observed.content_hash().to_string())
+            .pin_vault_schema(
+                candidate.schema_bytes(),
+                &candidate.fingerprints().schema.to_string(),
+            )
             .map_err(store_effect)
+    }
+
+    fn discard_control_file_facts(registration: &Registration, batch: &mut norn_fs::Batch) {
+        let schema = Self::schema_path(registration);
+        let schema = schema.strip_prefix(registration.root.as_path()).ok();
+        batch.discard_schema_facts();
+        batch.retain_vault_roots(|root| {
+            let path = root.as_path();
+            path != Path::new(norn_config::IN_VAULT_CONFIG_PATH)
+                && schema.is_none_or(|schema| path != schema)
+        });
     }
 
     fn heal(
@@ -287,16 +285,8 @@ impl ProductionEntryOps {
         // remember to announce it.
         let healing = progress.healing();
         let exclusions = exclusions(&attachment.registration, &attachment._shadows);
-        // Pinning first is what makes this the re-derivation leg of a schema
-        // change: every finding the walk below records carries the fingerprint
-        // the pin just installed. What the pin discarded stands again on both
-        // sides of the split. A **place-scoped** finding sits only where no
-        // document row does, and the walk reads every such path whatever its
-        // bytes say. A **document-scoped** finding stands beside the row it is
-        // about, and that row states its own defect — so the walk re-derives the
-        // document whose row asserts a frontmatter nothing read while no finding
-        // stands at it, with no content hash having moved.
-        Self::pin_schema(&mut attachment.store, &attachment.registration)?;
+        // The caller pins the candidate before this walk. Every finding below
+        // therefore records the active schema fingerprint.
         heal_documents(
             &mut attachment.store,
             attachment.registration.root.as_path(),
@@ -420,6 +410,7 @@ impl ProductionEntryOps {
             }
         }
         attachment.store_verification_due = Instant::now() + STORE_VERIFICATION_INTERVAL;
+        Self::pin_candidate(&mut attachment.store, &attachment.controls)?;
         let derived = self
             .heal_under_coverage(&mut attachment, progress)
             .and_then(|()| {
@@ -528,6 +519,7 @@ impl EntryOps for ProductionEntryOps {
         registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
+        let candidate = ReloadCandidate::read(registration).map_err(JobFailure::Reload)?;
         // Everything up to the heal takes the maintainer lock, sweeps the
         // shadow home, installs watcher coverage and opens the store — work
         // that counts no document and can take a while on a loaded machine.
@@ -567,6 +559,7 @@ impl EntryOps for ProductionEntryOps {
         let store = Store::open(derived.join("store.sqlite3")).map_err(store_effect)?;
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
+            controls: candidate.clone(),
             maintainership,
             store,
             subscription: Some(subscription),
@@ -576,17 +569,20 @@ impl EntryOps for ProductionEntryOps {
             last_shadow_sweep: Instant::now(),
             store_verification_due: Instant::now() + STORE_VERIFICATION_INTERVAL,
         };
+        Self::pin_candidate(&mut attachment.store, &candidate)?;
         // The open resolves damage it can see in the store schema, and the heal
         // is where damage in the pages under it is met: a corrupt page an open
         // never read is met by the first read that does. Rung 3 runs here
         // rather than being reported, because an attach that reported it would
         // be answered by another attach that opened the same file and met the
         // same page.
-        match self.synchronize_and_heal(&mut attachment, progress) {
+        let attached = match self.synchronize_and_heal(&mut attachment, progress) {
             Ok(()) => Ok(attachment),
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
-        }
+        }?;
+        self.dispatch_config(&registration.name, candidate.config());
+        Ok(attached)
     }
 
     fn reconcile(
@@ -600,20 +596,10 @@ impl EntryOps for ProductionEntryOps {
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
-        // A reconcile derives against coverage that is already installed,
-        // whichever rung of the ladder the envelope reaches for.
-        let schema =
-            work.batch.schema_dirty() || work.batch.rescans().contains(&RescanScope::Schema);
-        // A re-pin that moved the fingerprint discarded every finding keyed by
-        // the old one, and the paths those findings sit at are not the paths
-        // this batch names — so the scoped increment cannot record them again
-        // and the vault-wide heal is the leg that does: a place-scoped finding
-        // sits only where no document row does, and the heal reads every such
-        // path. A schema event whose re-read pins the same bytes moved nothing
-        // and discarded nothing, so it stays on the increment it arrived as.
-        let repinned =
-            schema && Self::pin_schema(&mut attachment.store, &attachment.registration)?.repinned;
-        if repinned || work.batch.rescans().contains(&RescanScope::Vault) {
+        // A reconcile derives document changes under the active schema. Schema
+        // watcher facts are inert; only an explicit vault reload can replace
+        // the active pin.
+        if work.batch.rescans().contains(&RescanScope::Vault) {
             return self.heal(attachment, progress);
         }
         let healing = progress.healing();
@@ -635,6 +621,8 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
+        let candidate =
+            ReloadCandidate::read(&attachment.registration).map_err(JobFailure::Reload)?;
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -646,7 +634,50 @@ impl EntryOps for ProductionEntryOps {
             Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
-        self.synchronize_and_heal(attachment, progress)
+        Self::pin_candidate(&mut attachment.store, &candidate)?;
+        attachment.controls = candidate;
+        self.dispatch_config(&attachment.registration.name, attachment.controls.config());
+        self.synchronize_and_heal(attachment, progress)?;
+        Ok(())
+    }
+
+    fn reload(
+        &self,
+        name: &VaultName,
+        attachment: &mut Self::Attachment,
+        progress: &ProgressReporter<Self::Attachment>,
+    ) -> Result<ReloadOutcome, JobFailure> {
+        let _job = self.evidence.attributing();
+        let candidate =
+            ReloadCandidate::read(&attachment.registration).map_err(JobFailure::Reload)?;
+        let schema_changed =
+            candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
+        if !schema_changed {
+            self.dispatch_config(name, candidate.config());
+            attachment.controls = candidate;
+            return Ok(ReloadOutcome::ConfigOnly);
+        }
+
+        progress.begin_schema_reload();
+        Self::pin_candidate(&mut attachment.store, &candidate).map_err(
+            |failure| match failure {
+                JobFailure::Environmental(detail) => {
+                    JobFailure::Reload(ReloadError::SchemaApply(detail))
+                }
+                other => other,
+            },
+        )?;
+        attachment.controls = candidate;
+        self.dispatch_config(name, attachment.controls.config());
+        self.heal_under_coverage(attachment, progress)?;
+        Ok(ReloadOutcome::SchemaChanged)
+    }
+
+    fn active_fingerprints(
+        &self,
+        attachment: &Self::Attachment,
+    ) -> Option<crate::ActiveFingerprints> {
+        Some(attachment.controls.fingerprints())
     }
 
     fn poll(
@@ -667,6 +698,10 @@ impl EntryOps for ProductionEntryOps {
         } else {
             Some(std::mem::take(&mut attachment.heal_observed))
         };
+        let drained = drained.and_then(|mut batch| {
+            Self::discard_control_file_facts(&attachment.registration, &mut batch);
+            (!batch.is_empty()).then_some(batch)
+        });
         // A rescan among the facts is the backend saying it lost the path set,
         // and it is what the entry publishes an overflow for. The account is
         // where that report survives the reconcile that clears it: the trust
@@ -3398,6 +3433,396 @@ mod tests {
     }
 
     #[test]
+    fn invalid_vault_config_refuses_attachment_with_a_typed_core_error() {
+        let f = Fixture::new("invalid-vault-config");
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+        let (ops, _) = f.ops(2);
+
+        let error = match ops.attach(&f.registration(), &ProgressReporter::disconnected()) {
+            Ok(_) => panic!("invalid vault config attached"),
+            Err(error) => error,
+        };
+        let JobFailure::Reload(error) = error else {
+            panic!("invalid vault config was not a reload error");
+        };
+        assert_eq!(error.file(), crate::ReloadFile::Config);
+        assert_eq!(error.stage(), crate::ReloadStage::Parse);
+    }
+
+    #[test]
+    fn invalid_vault_config_is_retained_when_attach_cannot_start() {
+        let f = Fixture::watcherless("invalid-vault-config-status");
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+
+        let error = wait_until(
+            "the retained config parse error",
+            lifecycle_budget(),
+            || {
+                let inspection = host.inspect(&name).expect("the served vault");
+                inspection
+                    .last_reload_error
+                    .map(Observed::Met)
+                    .unwrap_or_else(|| {
+                        Observed::Pending(format!("the state is {:?}", inspection.trust))
+                    })
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        assert_eq!(error.file(), crate::ReloadFile::Config);
+        assert_eq!(error.stage(), crate::ReloadStage::Parse);
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert!(matches!(
+            inspection.trust,
+            norn_wire::TrustState::Untrusted { .. }
+        ));
+        assert_eq!(inspection.active_fingerprints, None);
+
+        fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
+        let _retry = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert!(inspection.active_fingerprints.is_some());
+        assert_eq!(inspection.last_reload_error, None);
+    }
+
+    #[test]
+    fn invalid_explicit_reload_keeps_ready_and_retains_the_typed_error() {
+        let f = Fixture::new("invalid-explicit-reload");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        let active = host.inspect(&name).unwrap().active_fingerprints;
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# candidate that must not activate\n",
+        )
+        .unwrap();
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+        let refusal = host.reload(&name).expect_err("invalid TOML reloaded");
+        let crate::ReloadRefusal::Core(error) = refusal else {
+            panic!("invalid TOML returned {refusal:?}");
+        };
+
+        assert_eq!(error.file(), crate::ReloadFile::Config);
+        assert_eq!(error.stage(), crate::ReloadStage::Parse);
+        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
+        assert_eq!(inspection.active_fingerprints, active);
+        assert_eq!(inspection.last_reload_error, Some(error));
+
+        fs::write(f.vault().join(".norn/config.toml"), "").unwrap();
+        host.reload(&name).expect("the corrected config reload");
+        let inspection = host.inspect(&name).expect("the served vault");
+        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
+        assert_ne!(inspection.active_fingerprints, active);
+        assert_eq!(inspection.last_reload_error, None);
+    }
+
+    #[test]
+    fn config_only_reload_dispatches_without_lane_one_derivation() {
+        let f = Fixture::new("config-only-reload");
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 1\n",
+        )
+        .unwrap();
+        let receiver = Arc::new(RecordingEngineConfig {
+            name: "sample",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+            .with_engine_config_receiver(receiver.clone());
+        let evidence = Arc::clone(&ops.evidence);
+        let host = crate::Host::new(
+            registry,
+            ops,
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+        let evidence_before = evidence.read();
+
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 2\n",
+        )
+        .unwrap();
+        host.reload(&name).expect("the config-only reload");
+
+        let after = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+        let reload_evidence = evidence.read().since(evidence_before);
+        assert_eq!(before.schema, after.schema);
+        assert_ne!(before.config, after.config);
+        assert_eq!(reload_evidence.changesets_applied, 0);
+        assert_eq!(reload_evidence.documents_upserted, 0);
+        assert_eq!(reload_evidence.documents_deleted, 0);
+        assert_eq!(reload_evidence.findings_discarded, 0);
+        assert_eq!(host.state(&name), answered(norn_wire::TrustState::Ready));
+        let seen = receiver.seen.lock().unwrap();
+        assert!(seen.iter().all(|(vault, _)| vault == &name));
+        let values = seen
+            .iter()
+            .map(|(_, section)| {
+                section
+                    .as_ref()
+                    .and_then(|section| section.table().get("value"))
+                    .and_then(|value| value.as_integer())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, [Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn schema_reload_revalidates_lane_one_before_it_returns_ready() {
+        let f = Fixture::new("schema-reload");
+        fs::write(f.vault().join("note.md"), "---\ntitle: : :\n---\n# body\n").unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let derived = dirs.derived_dir(&name);
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        let before = host.inspect(&name).unwrap().active_fingerprints.unwrap();
+
+        fs::write(
+            f.vault().join(".norn/schema.yaml"),
+            "version: 1\n# explicit reload\n",
+        )
+        .unwrap();
+        host.reload(&name).expect("the schema reload");
+
+        let inspection = host.inspect(&name).unwrap();
+        let after = inspection.active_fingerprints.unwrap();
+        assert_eq!(inspection.trust, norn_wire::TrustState::Ready);
+        assert_ne!(before.schema, after.schema);
+        assert_eq!(before.config, after.config);
+        drop(lease);
+        drop(host);
+
+        let mut store = Store::open(derived.join("store.sqlite3")).unwrap();
+        let findings = findings_at(&mut store, "note.md");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].vault_schema_fingerprint,
+            after.schema.to_string()
+        );
+    }
+
+    #[test]
+    fn authored_drift_is_fingerprinted_on_demand_without_parsing() {
+        let f = Fixture::new("authored-drift");
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Current)
+        );
+
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.broken\n").unwrap();
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::ReloadPending),
+            "the drift query parsed invalid TOML instead of comparing bytes"
+        );
+
+        fs::remove_file(f.vault().join(".norn/schema.yaml")).unwrap();
+        let Some(crate::AuthoredDrift::Unreadable(error)) = host.authored_drift(&name) else {
+            panic!("a missing schema was not reported as unreadable");
+        };
+        assert_eq!(error.file(), crate::ReloadFile::Schema);
+        assert_eq!(error.stage(), crate::ReloadStage::Read);
+    }
+
+    struct RecordingEngineConfig {
+        name: &'static str,
+        seen: std::sync::Mutex<Vec<(VaultName, Option<norn_config::vault::EngineConfig>)>>,
+    }
+
+    impl EngineConfigReceiver for RecordingEngineConfig {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn receive(&self, vault: &VaultName, config: Option<&norn_config::vault::EngineConfig>) {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((vault.clone(), config.cloned()));
+        }
+    }
+
+    #[test]
+    fn attachment_dispatches_present_and_absent_engine_sections() {
+        let f = Fixture::new("engine-config-dispatch");
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nlimit = 4\n\n[engine.unclaimed]\nfuture = true\n",
+        )
+        .unwrap();
+        let present = Arc::new(RecordingEngineConfig {
+            name: "sample",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let absent = Arc::new(RecordingEngineConfig {
+            name: "other",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+            .with_engine_config_receiver(present.clone())
+            .with_engine_config_receiver(absent.clone());
+
+        let attachment = ops
+            .attach(&f.registration(), &ProgressReporter::disconnected())
+            .expect("the attachment");
+
+        let present = present.seen.lock().unwrap();
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].0, attachment.registration.name);
+        assert_eq!(
+            present[0]
+                .1
+                .as_ref()
+                .and_then(|section| section.table().get("limit"))
+                .and_then(|value| value.as_integer()),
+            Some(4)
+        );
+        let absent = absent.seen.lock().unwrap();
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].0, attachment.registration.name);
+        assert_eq!(absent[0].1, None);
+        drop(absent);
+        ops.detach(&attachment.registration.name.clone(), attachment);
+    }
+
+    #[test]
+    fn restart_reads_current_config_on_first_demand() {
+        let f = Fixture::new("restart-config");
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 1\n",
+        )
+        .unwrap();
+        let registration = f.registration();
+        let name = registration.name.clone();
+        let policy = crate::LifecyclePolicy {
+            idle_after: Duration::from_secs(60),
+            worker_slots: 1,
+            watch_poll_interval: Duration::from_secs(60),
+        };
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let first = crate::Host::new(
+            crate::RegistryRead::from_entries([registration.clone()]),
+            ProductionEntryOps::new(dirs.clone(), ProductionPolicy::new(2, 2).unwrap()),
+            policy,
+        )
+        .unwrap();
+        let lease = first.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&first, &name, norn_wire::TrustState::Ready);
+        drop(lease);
+        drop(first);
+
+        fs::write(
+            f.vault().join(".norn/config.toml"),
+            "[engine.sample]\nvalue = 2\n",
+        )
+        .unwrap();
+        let receiver = Arc::new(RecordingEngineConfig {
+            name: "sample",
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let second = crate::Host::new(
+            crate::RegistryRead::from_entries([registration]),
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap())
+                .with_engine_config_receiver(receiver.clone()),
+            policy,
+        )
+        .unwrap();
+        let inspection = second.inspect(&name).expect("the served vault");
+        assert_eq!(inspection.trust, norn_wire::TrustState::Unattached);
+        assert_eq!(inspection.active_fingerprints, None);
+
+        let _lease = second.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&second, &name, norn_wire::TrustState::Ready);
+        let seen = receiver.seen.lock().unwrap();
+        assert_eq!(seen[0].0, name);
+        assert_eq!(
+            seen[0]
+                .1
+                .as_ref()
+                .and_then(|section| section.table().get("value"))
+                .and_then(|value| value.as_integer()),
+            Some(2)
+        );
+    }
+
+    #[test]
     fn page_two_merge_inserts_changes_and_prunes_across_boundaries() {
         let f = Fixture::new("page-two");
         for (path, body) in [("a.md", "a"), ("c.md", "c"), ("e.md", "e"), ("g.md", "g")] {
@@ -3775,22 +4200,11 @@ mod tests {
         ops.detach(&name, attachment);
     }
 
-    /// **The bar on the re-derivation leg of a schema change.** A re-pin
-    /// discards every finding keyed by the fingerprint it replaced, and the
-    /// paths those findings sit at are not paths a schema batch names — so the
-    /// increment such a batch would otherwise run reaches none of them. The
-    /// reconcile that re-pins is therefore the reconcile that records them
-    /// again, which is the whole vault's re-derivation.
-    ///
-    /// Both envelopes a schema change arrives in carry it: the bare
-    /// invalidation an edit to the configured source reports, and the schema
-    /// rescan the backend reports when it loses the exact fact.
-    ///
-    /// The forbidden shape is a hand edit to the schema file leaving the
-    /// findings table empty until unrelated work happens to touch those paths.
+    /// Watcher facts never activate a vault-schema edit. The active schema pin
+    /// and its derived findings stay unchanged until an explicit reload.
     #[test]
-    fn a_schema_edit_re_derives_the_findings_its_re_pin_discarded() {
-        let f = Fixture::new("schema-repin-heal");
+    fn schema_watcher_facts_do_not_activate_an_authored_edit() {
+        let f = Fixture::new("schema-watch-inert");
         fs::write(f.vault().join("bad.md"), UNDECODABLE).unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
@@ -3798,74 +4212,53 @@ mod tests {
         let before = findings_at(&mut attachment.store, "bad.md");
         assert_eq!(before.len(), 1, "the quarantine was not recorded at attach");
 
-        // A hand edit to the schema file, reconciled under the envelope the
-        // caller names.
         let edit = |attachment: &mut ProductionAttachment, bytes: &str, batch: norn_fs::Batch| {
             fs::write(f.vault().join(".norn/schema.yaml"), bytes).unwrap();
             ops.reconcile(&name, attachment, ReconcileWork { batch }, &progress)
                 .unwrap();
         };
 
-        // The envelope an edit to the in-vault schema reports: the schema is
-        // invalidated, and the vault paths such a batch also names are not
-        // paths a finding sits at.
         edit(
             &mut attachment,
             "version: 1\n# edited by hand\n",
             norn_fs::Batch::schema_change(),
         );
-
         let after = findings_at(&mut attachment.store, "bad.md");
-        assert_eq!(after.len(), 1, "the schema edit discarded a live finding");
-        assert_eq!(finding_total(&mut attachment.store), 1);
-        assert_ne!(
-            after[0].vault_schema_fingerprint, before[0].vault_schema_fingerprint,
-            "the edit did not move the pin, so this proves nothing"
-        );
-        assert!(
-            after[0].generation > before[0].generation,
-            "the finding standing here was never re-derived"
-        );
-        assert_eq!(after[0].detail, before[0].detail);
+        assert_eq!(after, before, "a schema invalidation activated the edit");
 
-        // The other envelope: the backend lost the schema's own facts and says
-        // only that the source partition is dirty.
         edit(
             &mut attachment,
             "version: 1\n# edited again\n",
             norn_fs::Batch::rescan(RescanScope::Schema),
         );
-
         let rescanned = findings_at(&mut attachment.store, "bad.md");
-        assert_eq!(
-            rescanned.len(),
-            1,
-            "the schema rescan discarded a live finding"
-        );
-        assert_eq!(finding_total(&mut attachment.store), 1);
-        assert_ne!(
-            rescanned[0].vault_schema_fingerprint, after[0].vault_schema_fingerprint,
-            "the edit did not move the pin, so this proves nothing"
-        );
-        assert!(
-            rescanned[0].generation > after[0].generation,
-            "the finding standing here was never re-derived"
-        );
+        assert_eq!(rescanned, before, "a schema rescan activated the edit");
+        ops.detach(&name, attachment);
+    }
 
-        // The same bytes written again are a schema event and not a schema
-        // change: the re-pin discards nothing, so nothing is re-derived.
-        edit(
-            &mut attachment,
-            "version: 1\n# edited again\n",
-            norn_fs::Batch::schema_change(),
-        );
+    #[test]
+    fn control_file_watcher_facts_do_not_reach_the_lifecycle() {
+        let f = Fixture::new("control-watch-filter");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        attachment.subscription.take();
+        let paths = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+        let mut controls = norn_fs::Batch::schema_change();
+        controls.merge(norn_fs::Batch::rescan(RescanScope::Schema));
+        controls.merge(norn_fs::Batch::vault_change(
+            paths
+                .normalize(Path::new(norn_config::IN_VAULT_SCHEMA_PATH))
+                .unwrap(),
+        ));
+        controls.merge(norn_fs::Batch::vault_change(
+            paths
+                .normalize(Path::new(norn_config::IN_VAULT_CONFIG_PATH))
+                .unwrap(),
+        ));
+        attachment.heal_observed = controls;
 
-        let again = findings_at(&mut attachment.store, "bad.md");
-        assert_eq!(again.len(), 1);
-        assert_eq!(
-            again[0].generation, rescanned[0].generation,
-            "a re-pin that changed nothing re-derived the vault"
-        );
+        assert_eq!(ops.poll(&name, &mut attachment).unwrap(), None);
         ops.detach(&name, attachment);
     }
 
@@ -6654,15 +7047,10 @@ mod tests {
             "version: 1\n# edited by hand\n",
         )
         .unwrap();
-        ops.reconcile(
-            &name,
-            &mut attachment,
-            ReconcileWork {
-                batch: norn_fs::Batch::schema_change(),
-            },
-            &progress,
-        )
-        .unwrap();
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
+        );
 
         let after = findings_at(&mut attachment.store, "note.md");
         assert_eq!(
@@ -8442,7 +8830,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_schema_markdown_invalidation_never_indexes_the_schema() {
+    fn explicit_reload_never_indexes_a_configured_markdown_schema() {
         let f = Fixture::new("schema-markdown");
         let schema = f.vault().join(".norn/schema.md");
         fs::write(&schema, "version: one").unwrap();
@@ -8455,24 +8843,9 @@ mod tests {
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&registration, &progress).unwrap();
         fs::write(&schema, "version: two").unwrap();
-        // The outcome here is that nothing arrives, so what the wait is for is
-        // the invalidation itself: the schema edit has been reported and
-        // reconciled by the time the row is read. A wait for the store to stay
-        // empty would be met by the first look, before the watcher had
-        // reported anything at all.
-        reconcile_until(
-            &ops,
-            &name,
-            &mut attachment,
-            &progress,
-            "the schema invalidation to be reported and reconciled",
-            |_, absorbed| {
-                if absorbed.saw(SCHEMA_INVALIDATED) {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("no batch has carried the schema invalidation")
-                }
-            },
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress).unwrap(),
+            ReloadOutcome::SchemaChanged
         );
         assert!(stored(&mut attachment, ".norn/schema.md").is_none());
         ops.detach(&name, attachment);
@@ -9077,13 +9450,6 @@ mod tests {
         Budget::new(Duration::from_secs(15), Duration::from_millis(250))
     }
 
-    /// The fact a batch carrying a schema invalidation notes about itself.
-    ///
-    /// A condition that waits for the invalidation asks for it by this name,
-    /// which is also the line a failing wait renders — so the state a case
-    /// waited for and the state a reader sees are one string.
-    const SCHEMA_INVALIDATED: &str = "the schema was invalidated";
-
     /// The fact a batch carrying a vault-wide rescan notes about itself.
     ///
     /// A rescan is the backend saying the exact path set was lost, so it names
@@ -9122,13 +9488,9 @@ mod tests {
     /// failures that read it.
     ///
     /// Every fact here is read twice over. A condition asks for one by name —
-    /// [`SCHEMA_INVALIDATED`] where the invalidation itself is the outcome, and
-    /// the roots and [`VAULT_RESCAN`] through [`absorbed_covers`] where the
-    /// outcome is that a path was invalidated at all. A failure renders all of
-    /// them, and that is the other half of why they are noted: a wait that
-    /// expires over a change that never arrived reads very differently from one
-    /// that expires over a change reported as a rescan, and neither reads at
-    /// all from a bare count.
+    /// The roots and [`VAULT_RESCAN`] reach [`absorbed_covers`], where the
+    /// outcome is that a path was invalidated. A failure renders all of them,
+    /// so a missing change differs from a change reported as a rescan.
     fn note_batch(batch: &norn_fs::Batch, absorbed: &mut norn_testkit::wait::Absorbed) {
         for root in batch.vault_roots() {
             absorbed.note(root_fact(root.as_path()));
@@ -9138,9 +9500,6 @@ mod tests {
                 RescanScope::Vault => VAULT_RESCAN.to_owned(),
                 RescanScope::Schema => "a schema rescan".to_owned(),
             });
-        }
-        if batch.schema_dirty() {
-            absorbed.note(SCHEMA_INVALIDATED);
         }
     }
 
