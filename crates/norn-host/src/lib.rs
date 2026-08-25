@@ -6,6 +6,7 @@
 //! host decides *when* attach, reconciliation and detach happen, while the
 //! filesystem and store crates remain the only owners of those effects.
 
+mod derivation;
 mod evidence;
 mod lifecycle;
 mod production;
