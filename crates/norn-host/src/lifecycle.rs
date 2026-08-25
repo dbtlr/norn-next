@@ -4763,12 +4763,12 @@ mod tests {
         ));
         let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
         wait_for_state(&host, &reloaded, TrustState::Ready);
-        *ops.continuous_handoff_poll_for.lock().unwrap() = Some(reloaded.clone());
 
         let reloading = Arc::clone(&host);
         let reload_name = reloaded.clone();
         let reload = thread::spawn(move || reloading.reload(&reload_name));
         wait_for_flag("reload_started", &ops.reload_started);
+        *ops.continuous_handoff_poll_for.lock().unwrap() = Some(reloaded.clone());
         let _sibling_lease = host.demand(&sibling, AttachMode::Durable).unwrap();
         ops.reload_release.store(true, Ordering::SeqCst);
 
