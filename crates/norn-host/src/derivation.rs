@@ -1,25 +1,454 @@
-//! The per-document derivation act: bytes in, one document's derived facts
-//! and verdicts out.
+//! The per-document derivation act: bytes in, one document's derived facts,
+//! verdicts, and the changeset entries they imply out.
 //!
-//! This module is pure — no IO, no store access.
+//! This module is pure — no IO, no store access. It decides what a job writes;
+//! the job decides when to write it. It also owns the closed cause vocabulary
+//! and the two discard sides read off it — which finding kinds a re-derivation
+//! by spelling or by bytes takes.
 
 use std::path::Path;
 
 use norn_store::{
-    BlockFact, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact, LinkFact, LinkFamily,
-    Span, TagFact, TagSource,
+    BlockFact, Change, DiscardScope, DocumentFacts, DocumentPath, FrontmatterValue, HeadingFact,
+    LinkFact, LinkFamily, Provenance, Span, TagFact, TagSource,
 };
-use norn_text::{Document, SourceSpan, Value};
+use norn_text::{BlockRefusal, Document, SourceSpan, Value};
+use norn_wire::{FindingKind, FindingScope};
 
-use crate::production::{Undecodable, UnreadBlock};
+/// Why a path the vault holds produces no document facts.
+///
+/// One variant per finding kind, which is how a reader tells a name the store
+/// cannot hold from bytes the parser cannot read. Every one of them leaves the
+/// deriving act with nothing to store: no identity to hold a row under, or no
+/// text to read facts out of.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Undecodable {
+    /// The path bytes are not UTF-8.
+    PathBytes,
+    /// The path is UTF-8 and is not a document path.
+    PathSpelling,
+    /// The document's bytes are not UTF-8.
+    BodyBytes,
+}
+
+impl Undecodable {
+    /// The finding kind, which is the cause class a reader dispatches on.
+    ///
+    /// The vocabulary is the wire's, so a kind recorded in the findings table
+    /// is the same string every surface advertises and filters by.
+    const fn kind(self) -> FindingKind {
+        match self {
+            Undecodable::PathBytes => FindingKind::PathBytesNotUtf8,
+            Undecodable::PathSpelling => FindingKind::PathNamesNoDocument,
+            Undecodable::BodyBytes => FindingKind::BodyBytesNotUtf8,
+        }
+    }
+
+    /// The cause as the finding's message states it.
+    const fn statement(self) -> &'static str {
+        match self {
+            Undecodable::PathBytes => "its path bytes are not UTF-8",
+            Undecodable::PathSpelling => "its path names no document",
+            Undecodable::BodyBytes => "its bytes are not UTF-8",
+        }
+    }
+
+    /// What an act has to read to conclude this cause.
+    ///
+    /// The match is exhaustive because the answer is what a finding of this
+    /// cause discards at its subject: a cause added without a side here has no
+    /// scope to file under, so the next variant states its side or nothing
+    /// compiles.
+    const fn decided(self) -> Decided {
+        match self {
+            // [`document_path`] reads the name and opens nothing, so these two
+            // are concluded wherever a path is in hand.
+            Undecodable::PathBytes | Undecodable::PathSpelling => Decided::BySpelling,
+            // This is read out of the file the place names, so concluding it
+            // means having opened it.
+            Undecodable::BodyBytes => Decided::ByBytes,
+        }
+    }
+}
+
+/// Why a document that derives carries no frontmatter value.
+///
+/// The block was read by nothing, so the document's fields are unknown: it is
+/// the vault's own defect and not a shape of a document. The row still holds
+/// every fact the act could derive — identity, body, headings, links, body
+/// tags — and this cause is what a finding beside that row states, because a
+/// row alone would answer *this document has no tags, no title, no aliases*
+/// about fields nothing ever read.
+///
+/// One variant per way [`norn_text::BlockRefusal`] leaves a block unread, each
+/// fixed by a different edit to the document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnreadBlock {
+    /// The block opens and never closes.
+    Unclosed,
+    /// Nothing read the block: it is not well-formed, or it is well-formed and
+    /// says something no value can be made of — a key written twice, a merge
+    /// directive naming no mapping.
+    Unreadable,
+    /// The block is past [`norn_text::FRONTMATTER_MAX_BYTES`], so the text
+    /// layer refuses it unparsed rather than paying a read that grows with the
+    /// block's own length.
+    TooLarge,
+}
+
+impl UnreadBlock {
+    /// The cause behind the state the text layer reports.
+    ///
+    /// The match carries no wildcard, so a new way to leave a block unread
+    /// arrives here as a cause rather than as silence on a derived row.
+    const fn of(refusal: &BlockRefusal) -> Self {
+        match refusal {
+            BlockRefusal::Unclosed => UnreadBlock::Unclosed,
+            BlockRefusal::Unreadable { .. } => UnreadBlock::Unreadable,
+            BlockRefusal::TooLarge { .. } => UnreadBlock::TooLarge,
+        }
+    }
+
+    /// The finding kind, which is the cause class a reader dispatches on.
+    pub(crate) const fn kind(self) -> FindingKind {
+        match self {
+            UnreadBlock::Unclosed => FindingKind::FrontmatterUnclosed,
+            UnreadBlock::Unreadable => FindingKind::FrontmatterUnreadable,
+            UnreadBlock::TooLarge => FindingKind::FrontmatterTooLarge,
+        }
+    }
+
+    /// The cause as the finding's message states it.
+    const fn statement(self) -> &'static str {
+        match self {
+            UnreadBlock::Unclosed => "its frontmatter block never closes",
+            UnreadBlock::Unreadable => "its frontmatter block is not well-formed",
+            UnreadBlock::TooLarge => "its frontmatter block is past the bound that is read",
+        }
+    }
+}
+
+/// Why a finding this crate records stands where it stands.
+///
+/// The two families differ in what the deriving act left behind, which is what
+/// [`FindingKind::scope`] says about the kind each records under: an
+/// undecodable path leaves no row, so its finding is about the place; an unread
+/// block leaves the row it could derive, so its finding is about the document
+/// standing at that place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Cause {
+    /// Nothing about the path is derivable.
+    Undecodable(Undecodable),
+    /// The document derives and its frontmatter block was read by nothing.
+    UnreadBlock(UnreadBlock),
+}
+
+impl Cause {
+    /// The finding kind this cause is recorded under.
+    pub(crate) const fn kind(self) -> FindingKind {
+        match self {
+            Cause::Undecodable(cause) => cause.kind(),
+            Cause::UnreadBlock(cause) => cause.kind(),
+        }
+    }
+
+    /// What an act has to read to conclude this cause.
+    pub(crate) const fn decided(self) -> Decided {
+        match self {
+            Cause::Undecodable(cause) => cause.decided(),
+            // A block is read out of the document's own bytes, so concluding
+            // that nothing read it means having opened them.
+            Cause::UnreadBlock(_) => Decided::ByBytes,
+        }
+    }
+
+    /// The finding's message: the subject, what happened to it, and the cause.
+    pub(crate) fn message(self, subject: &DocumentPath) -> String {
+        match self {
+            Cause::Undecodable(cause) => format!(
+                "`{}` is quarantined: {}",
+                subject.as_str(),
+                cause.statement()
+            ),
+            Cause::UnreadBlock(cause) => format!(
+                "`{}` derives without its frontmatter: {}",
+                subject.as_str(),
+                cause.statement()
+            ),
+        }
+    }
+}
+
+/// What an act read to conclude a cause, which is what a finding of that cause
+/// replaces at the place it is filed at.
+///
+/// One place holds findings from both sides at once, because a rendering names
+/// a place rather than an identity: the content findings there are about the
+/// document the place names, and the spelling findings there are about the
+/// refused spellings that render onto it. An act concludes one side of that
+/// place and says nothing about the other, so its discard takes one side and
+/// leaves the other standing — a finding a job deleted without re-filing it
+/// would be a true statement gone until an unrelated vault heal.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum Decided {
+    /// The spelling alone decides it: the act read paths and opened no bytes,
+    /// so what it concludes is what the grammar says about the names it read.
+    BySpelling,
+    /// The document's own bytes decide it: the act opened the file the place
+    /// names, so it concludes what those bytes say and nothing about the other
+    /// spellings rendering there.
+    ByBytes,
+}
+
+impl Decided {
+    /// The kinds an act of this side re-derives at the place it files at, which
+    /// is exactly what recording its finding discards there.
+    ///
+    /// Every quarantine files through this one mapping — the merge walk's
+    /// refused spellings and refused documents, the sweep of a poisoned root,
+    /// the reading of a vacated one, and the dirty-path loop — so a job that
+    /// read both sides of a place re-derives both and takes neither, and the
+    /// two scopes tell apart only where an act reaches one side alone.
+    pub(crate) const fn rederives(self) -> DiscardScope<'static> {
+        match self {
+            Decided::BySpelling => DiscardScope::Kinds(&SPELLING_KINDS),
+            Decided::ByBytes => DiscardScope::Kinds(&CONTENT_KINDS),
+        }
+    }
+
+    /// Whether two sides are the same one, which is the comparison a `const`
+    /// context has instead of `PartialEq`.
+    const fn same(self, other: Decided) -> bool {
+        matches!(
+            (self, other),
+            (Decided::BySpelling, Decided::BySpelling) | (Decided::ByBytes, Decided::ByBytes)
+        )
+    }
+}
+
+/// Every cause a finding this crate records states, which is what the two
+/// sides below are read off.
+///
+/// A cause absent from this list has its kind in neither side, so a finding of
+/// it discards nothing it re-derives and stands beside its own previous copy at
+/// every heal. Three things hold the list to the enums: [`Undecodable::decided`]
+/// is exhaustive, so the next variant states its side or nothing compiles; the
+/// classification below holds every kind the registry advertises to exactly one
+/// of this list and [`KINDS_NO_CAUSE_CARRIES`]; and the scope agreement beside
+/// it holds each cause to a kind that stands where that cause leaves a row or
+/// leaves none. A cause minted under a kind an older cause already carries is
+/// reached by neither side, and the ADR that closes both cause sets is what
+/// stands in front of one.
+const CAUSES: [Cause; 6] = [
+    Cause::Undecodable(Undecodable::PathBytes),
+    Cause::Undecodable(Undecodable::PathSpelling),
+    Cause::Undecodable(Undecodable::BodyBytes),
+    Cause::UnreadBlock(UnreadBlock::Unclosed),
+    Cause::UnreadBlock(UnreadBlock::Unreadable),
+    Cause::UnreadBlock(UnreadBlock::TooLarge),
+];
+
+/// The finding kinds no cause above carries.
+///
+/// Quarantine and the unread block are the only producers recording findings
+/// today, so the list is empty. A kind minted for another producer — an
+/// ambiguity a resolution reads, a field a schema refuses — is named here, which
+/// is the one line that keeps the classification below a reading of the registry
+/// rather than a claim that every kind the registry holds is this crate's.
+const KINDS_NO_CAUSE_CARRIES: [FindingKind; 0] = [];
+
+// Every kind [`FindingKind::ALL`] advertises is carried by one cause or is
+// named as no cause's, and no two causes carry one kind. The registry is a
+// general one, so a kind minted for another producer is a growth this crate
+// answers by classifying it rather than by widening a side no act re-derives.
+const _: () = {
+    let mut index = 0;
+    while index < FindingKind::ALL.len() {
+        let kind = FindingKind::ALL[index];
+        assert!(
+            causes_carrying(kind) + times_named_uncarried(kind) == 1,
+            "a finding kind is carried by no cause and named as no producer's, \
+             or is claimed twice"
+        );
+        index += 1;
+    }
+};
+
+// Every cause records under a kind whose scope matches what the act deriving it
+// leaves at the subject. A cause that left no row filed under a document-scoped
+// kind would stand beside a row that is not there; one that left a row filed
+// under a place-scoped kind would be withheld by the very row it is about, so
+// nothing would ever report it.
+const _: () = {
+    let mut index = 0;
+    while index < CAUSES.len() {
+        assert!(
+            scope_agrees(CAUSES[index]),
+            "a cause records under a kind whose scope disagrees with what its \
+             deriving act leaves at the subject"
+        );
+        index += 1;
+    }
+};
+
+/// Whether a cause's kind stands where that cause leaves the subject.
+const fn scope_agrees(cause: Cause) -> bool {
+    matches!(
+        (cause, cause.kind().scope()),
+        (Cause::Undecodable(_), FindingScope::Place)
+            | (Cause::UnreadBlock(_), FindingScope::Document)
+    )
+}
+
+/// Whether two kinds are the same one, which is the comparison a `const`
+/// context has instead of `PartialEq`.
+const fn same_kind(left: FindingKind, right: FindingKind) -> bool {
+    let (left, right) = (left.as_str().as_bytes(), right.as_str().as_bytes());
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// How many causes in [`CAUSES`] record findings under this kind.
+const fn causes_carrying(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if same_kind(CAUSES[index].kind(), kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// How many times [`KINDS_NO_CAUSE_CARRIES`] names this kind.
+const fn times_named_uncarried(kind: FindingKind) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < KINDS_NO_CAUSE_CARRIES.len() {
+        if same_kind(KINDS_NO_CAUSE_CARRIES[index], kind) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// How many causes [`Cause::decided`] puts on one side.
+const fn decided_count(decided: Decided) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if CAUSES[index].decided().same(decided) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// The kinds one side re-derives: every cause on that side, as the kind it is
+/// recorded under.
+const fn decided_kinds<const N: usize>(decided: Decided) -> [FindingKind; N] {
+    let mut kinds = [FindingKind::PathBytesNotUtf8; N];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < CAUSES.len() {
+        if CAUSES[index].decided().same(decided) {
+            kinds[filled] = CAUSES[index].kind();
+            filled += 1;
+        }
+        index += 1;
+    }
+    assert!(
+        filled == N,
+        "the side holds a different count of causes than it filled"
+    );
+    kinds
+}
+
+/// The kinds a spelling alone decides, which is what an act that opens no bytes
+/// replaces at the place it files at.
+const SPELLING_KINDS: [FindingKind; decided_count(Decided::BySpelling)] =
+    decided_kinds(Decided::BySpelling);
+
+/// The kinds a document's own bytes decide, which is what an act that opened
+/// them replaces at the place those bytes are read at.
+const CONTENT_KINDS: [FindingKind; decided_count(Decided::ByBytes)] =
+    decided_kinds(Decided::ByBytes);
+
+/// Every side a place is read on, which is what a prune asks its account for one
+/// at a time.
+///
+/// A job that read a spelling and found no document concluded one side of the
+/// place and nothing about the other, so the two are taken separately: what a
+/// prune takes on a side is what an act of that side would have re-derived
+/// there.
+pub(crate) const SIDES: [Decided; 2] = [Decided::BySpelling, Decided::ByBytes];
+
+// Every cause reads its place on a side the prune asks about. A cause on a side
+// absent here is one no prune ever concludes the absence of, which is a finding
+// standing at a place nothing accounts for.
+const _: () = {
+    let mut index = 0;
+    while index < CAUSES.len() {
+        assert!(
+            sides_reading(CAUSES[index].decided()) == 1,
+            "a cause reads its place on a side the prune does not take"
+        );
+        index += 1;
+    }
+};
+
+/// How many of [`SIDES`] are this one.
+const fn sides_reading(decided: Decided) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < SIDES.len() {
+        if SIDES[index].same(decided) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+/// Every kind a walk of a place can conclude, which is what the page a prune
+/// reads its scope through selects on.
+///
+/// The sides are what a prune *takes*, one at a time; this is what makes a
+/// subject worth reading at all. It is [`CAUSES`] whole — the two sides together
+/// — and a kind minted for another producer is outside it, because a producer
+/// that never walks a place is one whose findings no walk can conclude.
+pub(crate) const WALKED_KINDS: [FindingKind; CAUSES.len()] = walked_kinds();
+
+/// [`CAUSES`] read as the kinds they record under.
+const fn walked_kinds() -> [FindingKind; CAUSES.len()] {
+    let mut kinds = [FindingKind::PathBytesNotUtf8; CAUSES.len()];
+    let mut index = 0;
+    while index < CAUSES.len() {
+        kinds[index] = CAUSES[index].kind();
+        index += 1;
+    }
+    kinds
+}
 
 /// One document held out of derived state, and why.
 #[derive(Clone, Debug)]
 pub(crate) struct Quarantine {
-    pub(crate) cause: Undecodable,
+    cause: Undecodable,
     /// The decoder's own account of the refusal, which the finding carries in
     /// its detail beside the spelling it was read from.
-    pub(crate) problem: String,
+    problem: String,
 }
 
 /// One document derived without its frontmatter, and why.
@@ -136,6 +565,94 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
     })
 }
 
+/// One finding a plan asks a job to file: the subject it stands at, the cause
+/// it states, and the formatted detail — the spelling this finding was read
+/// from, and the reader's own account of the refusal where there is one.
+///
+/// The cause rides with it because it is what decides how much of the subject
+/// recording the finding replaces, and whether a document row at the subject
+/// withholds it.
+#[derive(Debug)]
+pub(crate) struct PlannedFinding {
+    pub(crate) subject: DocumentPath,
+    pub(crate) cause: Cause,
+    pub(crate) detail: String,
+}
+
+/// One document's planned outcome: a change and a finding, each present when
+/// the observation implies one.
+///
+/// The ordering that lands the change before the finding it stands beside is
+/// enforced by the flush path, not by this type.
+#[derive(Debug)]
+pub(crate) struct Plan {
+    pub(crate) change: Option<Change>,
+    pub(crate) finding: Option<PlannedFinding>,
+}
+
+/// Plan what one document's bytes write, taking with them the row they can no
+/// longer account for.
+///
+/// `stored` is the row standing at this path, which every caller already knows:
+/// the merge reads it off the page it is walking and the scoped paths read it by
+/// key. The store holds only what it can represent, so a document that stops
+/// decoding leaves nothing behind but the finding — and the row's death is a
+/// **quarantine**, because the file is still there.
+///
+/// A document that decodes and whose frontmatter block was read by nothing
+/// **keeps its row**: the facts the act could derive are derived, and the
+/// finding planned beside them is what says the fields are unknown rather than
+/// absent.
+///
+/// `path` is the spelling as the vault holds it, which is what a quarantine's
+/// subject is rendered from where the grammar admits no document path.
+pub(crate) fn plan_document(
+    path: &Path,
+    spelling: &str,
+    bytes: &[u8],
+    hash: String,
+    stored: Option<&DocumentPath>,
+) -> Plan {
+    match map_document(spelling, bytes, hash) {
+        Ok(derived) => {
+            let subject = derived.facts.path.clone();
+            Plan {
+                change: Some(Change::Upsert(derived.facts)),
+                finding: derived.unread_frontmatter.map(|unread| {
+                    let detail = match unread.problem {
+                        Some(problem) => format!("{path:?}: {problem}"),
+                        None => format!("{path:?}"),
+                    };
+                    PlannedFinding {
+                        subject,
+                        cause: Cause::UnreadBlock(unread.cause),
+                        detail,
+                    }
+                }),
+            }
+        }
+        Err(quarantine) => Plan {
+            change: stored.map(|row| Change::Death {
+                path: row.clone(),
+                provenance: Provenance::Quarantine,
+            }),
+            finding: Some(plan_quarantine(path, quarantine)),
+        },
+    }
+}
+
+/// Plan the finding that says why a path contributes no facts.
+///
+/// The subject is the place the path occupies — its own spelling where the
+/// grammar admits one, and a rendering of it where the grammar does not.
+pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFinding {
+    PlannedFinding {
+        subject: DocumentPath::rendered(path),
+        cause: Cause::Undecodable(quarantine.cause),
+        detail: format!("{path:?}: {}", quarantine.problem),
+    }
+}
+
 fn map_link(link: norn_text::Link) -> LinkFact {
     LinkFact {
         family: match link.family {
@@ -177,6 +694,63 @@ fn map_value(value: &Value) -> FrontmatterValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The two discard sides partition the causes.** The sides are read off
+    /// [`CAUSES`] through [`Cause::decided`], so a cause whose kind falls out of
+    /// both is a cause no act re-derives — which is a copy of that finding per
+    /// heal — and a kind in both is one side taking the other's work.
+    ///
+    /// The kinds this crate records are a subset of the registry rather than
+    /// the whole of it: what holds the two apart is the classification beside
+    /// [`CAUSES`], which a kind minted for another producer is named in.
+    #[test]
+    fn the_two_discard_sides_partition_the_causes() {
+        let mut carried: Vec<&str> = CAUSES.iter().map(|cause| cause.kind().as_str()).collect();
+        carried.sort_unstable();
+
+        let mut scoped: Vec<&str> = SPELLING_KINDS
+            .iter()
+            .chain(CONTENT_KINDS.iter())
+            .map(FindingKind::as_str)
+            .collect();
+        scoped.sort_unstable();
+        assert_eq!(scoped, carried, "a cause the two scopes do not partition");
+
+        // A prune reads neither side: an unaccounted place holds nothing a walk
+        // files there, so what it takes is every cause a walk can conclude — the
+        // two sides together and nothing else.
+        let mut walked: Vec<&str> = WALKED_KINDS.iter().map(FindingKind::as_str).collect();
+        walked.sort_unstable();
+        assert_eq!(
+            walked, carried,
+            "the walked-scope prune takes a kind no walk concludes, or leaves one it does"
+        );
+
+        let registry: Vec<&str> = FindingKind::ALL.iter().map(FindingKind::as_str).collect();
+        for kind in &carried {
+            assert!(
+                registry.contains(kind),
+                "`{kind}` is a cause's kind the registry does not advertise"
+            );
+        }
+
+        // Which side a cause discards on and where its findings may stand are
+        // different questions, and every cause that leaves a row answers the
+        // second one the same way: an act that opened a document's bytes and
+        // derived a row from them files beside that row.
+        for cause in CAUSES {
+            let expected = match cause {
+                Cause::Undecodable(_) => FindingScope::Place,
+                Cause::UnreadBlock(_) => FindingScope::Document,
+            };
+            assert_eq!(
+                cause.kind().scope(),
+                expected,
+                "`{}` stands somewhere its deriving act does not leave it",
+                cause.kind()
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
