@@ -665,6 +665,16 @@ impl<A: SnapshotSource> EntryState<A> {
         self.coverage.park_by(leg, attachment);
     }
 
+    /// Park coverage retained after a reload failure, restoring the reader if
+    /// schema activation closed it. A validation failure leaves the old reader
+    /// standing, so that handle is preserved instead of minted again.
+    fn park_failed_reload(&mut self, leg: u64, attachment: A) {
+        if self.reader.is_none() {
+            self.reader = attachment.open_reader().map(Arc::new);
+        }
+        self.coverage.park_by(leg, attachment);
+    }
+
     /// Let go of the reader this entry's coverage minted, because that
     /// coverage is on its way to [`EntryOps::detach`]. A handle the entry
     /// keeps past that is one every later read runs against a closed store.
@@ -3381,7 +3391,7 @@ fn run_reload_job<O: EntryOps>(
         }
         Err(JobFailure::Reload(error)) => {
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.coverage.park_by(epoch, attachment);
+            state.park_failed_reload(epoch, attachment);
             let ready = state.trust == TrustState::Ready;
             let detail = state.record_reload_error(error.clone());
             if !ready {
@@ -3411,7 +3421,7 @@ fn run_reload_job<O: EntryOps>(
             let failure = JobFailure::WatcherTerminal(error.clone());
             let reclassify = root_moved(&error);
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.coverage.park_by(epoch, attachment);
+            state.park_failed_reload(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(watcher_lost(error));
@@ -3426,7 +3436,7 @@ fn run_reload_job<O: EntryOps>(
         Err(JobFailure::Environmental(detail)) => {
             let failure = JobFailure::Environmental(detail.clone());
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-            state.coverage.park_by(epoch, attachment);
+            state.park_failed_reload(epoch, attachment);
             state.require_recovery();
             state.pending.merge(Batch::rescan(RescanScope::Vault));
             state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
@@ -3691,6 +3701,7 @@ mod tests {
         reconciles: AtomicUsize,
         reload_supported: std::sync::atomic::AtomicBool,
         reload_schema_changed: std::sync::atomic::AtomicBool,
+        reload_schema_apply_failure: std::sync::atomic::AtomicBool,
         block_reload: std::sync::atomic::AtomicBool,
         reload_started: std::sync::atomic::AtomicBool,
         reload_release: std::sync::atomic::AtomicBool,
@@ -3954,6 +3965,14 @@ mod tests {
             }
             if self.reload_schema_changed.load(Ordering::SeqCst) {
                 progress.begin_schema_reload();
+                if self
+                    .reload_schema_apply_failure
+                    .swap(false, Ordering::SeqCst)
+                {
+                    return Err(EntryReloadFailure::Runtime(JobFailure::Reload(
+                        ReloadError::SchemaApply("the candidate could not be pinned".into()),
+                    )));
+                }
                 Ok(ReloadOutcome::SchemaChanged)
             } else {
                 Ok(ReloadOutcome::ConfigOnly)
@@ -4796,6 +4815,32 @@ mod tests {
 
         drop(host);
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_schema_reload_keeps_a_reader_through_recovery() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        ops.reload_schema_apply_failure
+            .store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _initial_lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let failure = ReloadError::SchemaApply("the candidate could not be pinned".into());
+        assert_eq!(host.reload(&name), Err(ReloadRefusal::Core(failure)));
+        assert!(
+            host.begin_read(&name).is_some(),
+            "retained coverage lost its reader after schema reload failed"
+        );
+
+        let _recovery_lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        let read = host
+            .begin_read(&name)
+            .expect("recovery to leave the retained coverage readable");
+        assert_eq!(read.trust(), &TrustState::Ready);
     }
 
     /// A contended attach parks the entry and schedules nothing behind it.
