@@ -1,7 +1,7 @@
 //! The registry file: which vaults exist on this machine, and where.
 //!
 //! **This module is host-only.** What is here is the registry's *shape and
-//! storage* — the five fields an entry carries, how they are written down, and
+//! storage* — the four fields an entry carries, how they are written down, and
 //! the locked read-modify-write that changes them. The registry's *semantics*
 //! are the orchestrator's: which entries are being served, what attaching one
 //! means, whether two entries point at the same tree, what happens when a root
