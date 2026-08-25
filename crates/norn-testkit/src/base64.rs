@@ -88,7 +88,8 @@ pub fn decode(text: &str) -> Result<Vec<u8>, Base64Error> {
     }
     let groups = bytes.len() / 4;
     let mut out = Vec::with_capacity(groups * 3);
-    for (index, group) in bytes.chunks_exact(4).enumerate() {
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for (index, group) in chunks.iter().enumerate() {
         let last = index + 1 == groups;
         let padding = group.iter().filter(|byte| **byte == PAD).count();
         if padding > 0 {
