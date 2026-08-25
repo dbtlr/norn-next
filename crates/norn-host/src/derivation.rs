@@ -2,7 +2,9 @@
 //! verdicts, and the changeset entries they imply out.
 //!
 //! This module is pure — no IO, no store access. It decides what a job writes;
-//! the job decides when to write it.
+//! the job decides when to write it. It also owns the closed cause vocabulary
+//! and the two discard sides read off it — which finding kinds a re-derivation
+//! by spelling or by bytes takes.
 
 use std::path::Path;
 
@@ -439,13 +441,14 @@ const fn walked_kinds() -> [FindingKind; CAUSES.len()] {
     }
     kinds
 }
+
 /// One document held out of derived state, and why.
 #[derive(Clone, Debug)]
 pub(crate) struct Quarantine {
-    pub(crate) cause: Undecodable,
+    cause: Undecodable,
     /// The decoder's own account of the refusal, which the finding carries in
     /// its detail beside the spelling it was read from.
-    pub(crate) problem: String,
+    problem: String,
 }
 
 /// One document derived without its frontmatter, and why.
@@ -563,22 +566,25 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
 }
 
 /// One finding a plan asks a job to file: the subject it stands at, the cause
-/// it states, and the reader's own account of the refusal where there is one.
+/// it states, and the formatted detail — the spelling this finding was read
+/// from, and the reader's own account of the refusal where there is one.
 ///
 /// The cause rides with it because it is what decides how much of the subject
 /// recording the finding replaces, and whether a document row at the subject
 /// withholds it.
+#[derive(Debug)]
 pub(crate) struct PlannedFinding {
     pub(crate) subject: DocumentPath,
     pub(crate) cause: Cause,
-    pub(crate) problem: Option<String>,
+    pub(crate) detail: String,
 }
 
-/// What one document observation asks a changeset to hold.
+/// One document's planned outcome: a change and a finding, each present when
+/// the observation implies one.
 ///
-/// The change lands before the finding: a changeset entry discards the findings
-/// recorded about the path it names, so a finding written ahead of the increment
-/// is a finding the increment takes.
+/// The ordering that lands the change before the finding it stands beside is
+/// enforced by the flush path, not by this type.
+#[derive(Debug)]
 pub(crate) struct Plan {
     pub(crate) change: Option<Change>,
     pub(crate) finding: Option<PlannedFinding>,
@@ -612,10 +618,16 @@ pub(crate) fn plan_document(
             let subject = derived.facts.path.clone();
             Plan {
                 change: Some(Change::Upsert(derived.facts)),
-                finding: derived.unread_frontmatter.map(|unread| PlannedFinding {
-                    subject,
-                    cause: Cause::UnreadBlock(unread.cause),
-                    problem: unread.problem,
+                finding: derived.unread_frontmatter.map(|unread| {
+                    let detail = match unread.problem {
+                        Some(problem) => format!("{path:?}: {problem}"),
+                        None => format!("{path:?}"),
+                    };
+                    PlannedFinding {
+                        subject,
+                        cause: Cause::UnreadBlock(unread.cause),
+                        detail,
+                    }
                 }),
             }
         }
@@ -637,7 +649,7 @@ pub(crate) fn plan_quarantine(path: &Path, quarantine: Quarantine) -> PlannedFin
     PlannedFinding {
         subject: DocumentPath::rendered(path),
         cause: Cause::Undecodable(quarantine.cause),
-        problem: Some(quarantine.problem),
+        detail: format!("{path:?}: {}", quarantine.problem),
     }
 }
 

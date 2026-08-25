@@ -2144,14 +2144,12 @@ struct Pending<'s> {
     bound: usize,
 }
 
-/// A finding this scope has derived and not yet recorded, with the cause it
-/// states.
+/// A finding this scope has derived and not yet recorded: the store-facing
+/// record awaiting flush, alongside the cause the recording needs.
 ///
-/// The cause rides along because it is what decides how much of the subject
-/// recording the finding replaces: [`Cause::decided`] says what an act had to
-/// read to conclude it, and an act re-derives what it read and no more. It also
-/// says whether a document row at the subject withholds the finding, through
-/// the scope of the kind it records under.
+/// What the cause decides — how much of the subject recording the finding
+/// replaces, and whether a document row withholds it — is [`PlannedFinding`]'s
+/// to state.
 struct Queued {
     finding: FindingFacts,
     cause: Cause,
@@ -2189,8 +2187,8 @@ impl<'s> Pending<'s> {
 
     /// Derive a document, taking with it the row it can no longer account for.
     ///
-    /// The changeset entry and the finding are both queued here, and the flush
-    /// that lands them lands the row first.
+    /// The changeset entry and the finding are each queued here when the plan
+    /// carries one.
     fn rederive(
         &mut self,
         path: &Path,
@@ -2204,20 +2202,20 @@ impl<'s> Pending<'s> {
             self.push(change);
         }
         if let Some(finding) = finding {
-            self.file(path, finding);
+            self.file(finding);
         }
     }
 
     /// File the finding that says why a path contributes no facts.
     fn quarantine(&mut self, path: &Path, quarantine: Quarantine) {
-        self.file(path, plan_quarantine(path, quarantine));
+        self.file(plan_quarantine(path, quarantine));
     }
 
-    /// Queue one planned finding, read from `path`.
+    /// Queue one planned finding.
     ///
-    /// Since a rendering is not injective, the detail carries the spelling this
-    /// finding was read from, escaped, so two paths filed at one place stay
-    /// tellable apart.
+    /// Since a rendering is not injective, the plan already formatted the
+    /// detail to carry the spelling this finding was read from, escaped, so
+    /// two paths filed at one place stay tellable apart.
     ///
     /// The cause is carried to the record because it says what the act that
     /// derived this finding read — which is what the record replaces at the
@@ -2229,16 +2227,12 @@ impl<'s> Pending<'s> {
     /// unaccounted would delete a true statement about the spelling standing
     /// there. A document-scoped finding accounts for nothing this way — the row
     /// its act wrote at the same subject is what a walk reads it by.
-    fn file(&mut self, path: &Path, planned: PlannedFinding) {
+    fn file(&mut self, planned: PlannedFinding) {
         let PlannedFinding {
             subject,
             cause,
-            problem,
+            detail,
         } = planned;
-        let detail = match problem {
-            Some(problem) => format!("{path:?}: {problem}"),
-            None => format!("{path:?}"),
-        };
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());
         }

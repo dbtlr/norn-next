@@ -53,7 +53,7 @@ use norn_store::IncrementOutcome;
 /// One host's cumulative account of what its jobs spent and did.
 ///
 /// Every field is a running total. A caller that wants what one job cost takes a
-/// [reading](JobEvidence::read) before and after it and subtracts.
+/// reading (`JobEvidence::read`) before and after it and subtracts.
 #[derive(Debug, Default)]
 pub struct JobEvidence {
     document_opens: AtomicU64,
