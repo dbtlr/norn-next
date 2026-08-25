@@ -1,10 +1,38 @@
-//! The per-document derivation act: bytes in, one document's derived facts,
-//! verdicts, and the changeset entries they imply out.
+//! Lane 1's per-document derivation act: one document's observation in, the
+//! changeset entry and the finding it implies out.
 //!
-//! This module is pure — no IO, no store access. It decides what a job writes;
-//! the job decides when to write it. It also owns the closed cause vocabulary
-//! and the two discard sides read off it — which finding kinds a re-derivation
-//! by spelling or by bytes takes.
+//! An observation is a path, the bytes standing at it, the content hash of
+//! those bytes, and the stored row that path replaces. A [`Plan`] is what comes
+//! back. The module is pure — no IO, no store handle — so it decides what a job
+//! writes and the job decides when to write it. Equal observations plan equal
+//! writes, and that determinism is what lets incremental maintenance equal a
+//! from-zero rebuild over the same tree: both runs read the same observations,
+//! so both plan the same writes. Accumulating plans, bounding a changeset,
+//! reading bytes, walking a vault and timing any of it are orchestration's.
+//!
+//! This module also owns the closed cause vocabulary and the two discard sides
+//! read off it — which finding kinds a re-derivation by spelling or by bytes
+//! takes.
+//!
+//! **The end-state input set is wider than this one.** A lane-1 projection
+//! keyed on the vault schema derives under the pinned schema, so the planner
+//! takes that pin beside the document. The vault schema's content model — the
+//! layer the `#tag` facet graduates into — adds the parameter when it lands.
+//! Until then a plan is a function of the document alone.
+//!
+//! **Findings are minted here and nowhere else.** [`plan_document`] and
+//! [`plan_quarantine`] are [`PlannedFinding`]'s two constructors, and they are
+//! what holds a finding's subject and its cause coherent: the subject is the
+//! place the act read, and the cause is what the act concluded there. Code
+//! outside this module consumes plans; it does not build them.
+//!
+//! **The death vocabulary spans the seam by design.** A death planned here
+//! always answers a verdict on a document that is still on disk, which is
+//! [`Provenance::Quarantine`]: the file stands and the row can no longer
+//! account for it. A death answering an absence instead — a path a walk no
+//! longer finds ([`Provenance::HealPrune`]), a removal the watcher reports
+//! ([`Provenance::WatcherRemoval`]) — is concluded where the tree is read,
+//! which is orchestration.
 
 use std::path::Path;
 
@@ -21,6 +49,8 @@ use norn_wire::{FindingKind, FindingScope};
 /// cannot hold from bytes the parser cannot read. Every one of them leaves the
 /// deriving act with nothing to store: no identity to hold a row under, or no
 /// text to read facts out of.
+// Crate-visible because [`Cause::Undecodable`] carries it in a field reachable
+// at that visibility, which anything narrower puts under `private_interfaces`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Undecodable {
     /// The path bytes are not UTF-8.
@@ -572,7 +602,12 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
 /// The cause rides with it because it is what decides how much of the subject
 /// recording the finding replaces, and whether a document row at the subject
 /// withholds it.
-#[derive(Debug)]
+///
+/// The subject and the cause agree because [`plan_document`] and
+/// [`plan_quarantine`] are the only two acts that mint one: each states the
+/// cause it concluded at the place it read. A caller receives findings and
+/// records them; it does not assemble them.
+#[derive(Debug, PartialEq)]
 pub(crate) struct PlannedFinding {
     pub(crate) subject: DocumentPath,
     pub(crate) cause: Cause,
@@ -584,7 +619,7 @@ pub(crate) struct PlannedFinding {
 ///
 /// The ordering that lands the change before the finding it stands beside is
 /// enforced by the flush path, not by this type.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct Plan {
     pub(crate) change: Option<Change>,
     pub(crate) finding: Option<PlannedFinding>,
@@ -597,7 +632,9 @@ pub(crate) struct Plan {
 /// the merge reads it off the page it is walking and the scoped paths read it by
 /// key. The store holds only what it can represent, so a document that stops
 /// decoding leaves nothing behind but the finding — and the row's death is a
-/// **quarantine**, because the file is still there.
+/// **quarantine**, because the file is still there. That is the one death
+/// vocabulary this act reaches: a death answering an absence is concluded where
+/// the tree is read, which is orchestration.
 ///
 /// A document that decodes and whose frontmatter block was read by nothing
 /// **keeps its row**: the facts the act could derive are derived, and the
@@ -691,6 +728,9 @@ fn map_value(value: &Value) -> FrontmatterValue {
     }
 }
 
+// The direct [`map_document`] and [`plan_document`] cases live here; the two in
+// `production.rs` sit with the oversized-block fixture they read their sources
+// from.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +807,236 @@ mod tests {
         let path = Path::new("notes/bad\\name.md");
         let quarantine = document_path(path).expect_err("a backslash names no document");
         assert_eq!(quarantine.cause, Undecodable::PathSpelling);
+    }
+
+    /// **A quarantine files at the place it read and takes only a row that
+    /// stands there.** The subject is the rendered place rather than an
+    /// identity, because a spelling the grammar refuses names none. The change
+    /// is the row the observation replaces: an observation that replaces no row
+    /// plans no death, and a death it does plan is a
+    /// [`Provenance::Quarantine`], because the file the row cannot account for
+    /// is still on disk.
+    #[test]
+    fn a_quarantine_files_at_the_rendered_place_and_takes_only_a_row_that_stands() {
+        for (spelling, bytes, cause) in [
+            (
+                "note.md",
+                b"# heading\n\xff".as_slice(),
+                Undecodable::BodyBytes,
+            ),
+            (
+                "notes/bad\\name.md",
+                b"# heading\n".as_slice(),
+                Undecodable::PathSpelling,
+            ),
+        ] {
+            let path = Path::new(spelling);
+            let hash = || norn_fs::ContentHash::of(bytes).to_string();
+
+            let unheld = plan_document(path, spelling, bytes, hash(), None);
+            let finding = unheld
+                .finding
+                .expect("a refused document states why it contributes no facts");
+            assert_eq!(finding.cause, Cause::Undecodable(cause));
+            assert_eq!(
+                finding.subject,
+                DocumentPath::rendered(path),
+                "the finding stands somewhere other than the place the act read"
+            );
+            assert_eq!(
+                unheld.change, None,
+                "a quarantine took a row the store does not hold"
+            );
+
+            let stored = DocumentPath::new("note.md").expect("a document path");
+            let held = plan_document(path, spelling, bytes, hash(), Some(&stored));
+            assert_eq!(
+                held.change,
+                Some(Change::Death {
+                    path: stored,
+                    provenance: Provenance::Quarantine,
+                }),
+                "the row a refused document leaves behind died some other way"
+            );
+        }
+
+        // The third verdict is concluded before there is a spelling to plan
+        // from — `plan_document` takes one — so it reaches a plan through
+        // [`document_path`], and the finding says the same two things.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let path = Path::new(std::ffi::OsStr::from_bytes(b"bad-\xff.md"));
+            let quarantine =
+                document_path(path).expect_err("non-UTF-8 path bytes name no document");
+            let finding = plan_quarantine(path, quarantine);
+            assert_eq!(
+                finding.cause,
+                Cause::Undecodable(Undecodable::PathBytes),
+                "path bytes that are not UTF-8 filed under another cause"
+            );
+            assert_eq!(finding.subject, DocumentPath::rendered(path));
+        }
+    }
+
+    /// **A block nothing read keeps the document's row and states the
+    /// absence.** Every way a block goes unread plans the upsert of the facts
+    /// the act could derive and a finding of that cause's own kind. The detail
+    /// carries the spelling the block was read from — escaped, because a
+    /// rendering is not injective — and the reader's account of the refusal
+    /// where the cause is not the whole of it. A block that never closes has
+    /// nothing to add, so its detail is the spelling alone.
+    #[test]
+    fn an_unread_block_plans_an_upsert_and_a_finding_naming_the_spelling_it_read() {
+        let too_large = format!(
+            "---\nk: {}\n---\n# heading\n",
+            "a".repeat(norn_text::FRONTMATTER_MAX_BYTES)
+        );
+        for (source, cause, states_a_problem) in [
+            (
+                "---\ntitle: note\n# heading\n".to_string(),
+                UnreadBlock::Unclosed,
+                false,
+            ),
+            (
+                "---\ntitle: : :\n---\n# heading\n".to_string(),
+                UnreadBlock::Unreadable,
+                true,
+            ),
+            (too_large, UnreadBlock::TooLarge, true),
+        ] {
+            let bytes = source.as_bytes();
+            let hash = || norn_fs::ContentHash::of(bytes).to_string();
+            let problem = map_document("note.md", bytes, hash())
+                .expect("a document whose block went unread still derives")
+                .unread_frontmatter
+                .expect("the block was read by nothing")
+                .problem;
+            assert_eq!(
+                problem.is_some(),
+                states_a_problem,
+                "{cause:?} accounts for its refusal another way"
+            );
+
+            let plan = plan_document(Path::new("note.md"), "note.md", bytes, hash(), None);
+            assert!(
+                matches!(plan.change, Some(Change::Upsert(_))),
+                "{cause:?} cost the document the row it derives"
+            );
+            let finding = plan.finding.expect("the unknown fields are stated");
+            assert_eq!(finding.cause, Cause::UnreadBlock(cause));
+            let expected = match &problem {
+                Some(problem) => format!("\"note.md\": {problem}"),
+                None => "\"note.md\"".to_string(),
+            };
+            assert_eq!(
+                finding.detail, expected,
+                "{cause:?} details its refusal in another shape"
+            );
+        }
+    }
+
+    /// **A document that derives is planned from its own bytes alone.** The
+    /// upsert carries exactly the facts the act derived, and the finding beside
+    /// it — where the block went unread — stands at those facts' own identity.
+    /// The row the observation replaces decides nothing in this arm: an
+    /// identity that still derives takes no death.
+    #[test]
+    fn a_document_that_derives_upserts_its_facts_and_plans_no_death() {
+        let stored = DocumentPath::new("note.md").expect("a document path");
+
+        let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
+        let hash = norn_fs::ContentHash::of(whole).to_string();
+        let derived = map_document("note.md", whole, hash.clone()).expect("a document derives");
+        let plan = plan_document(Path::new("note.md"), "note.md", whole, hash, Some(&stored));
+        assert_eq!(
+            plan.change,
+            Some(Change::Upsert(derived.facts)),
+            "the upsert carries something other than the facts the act derived"
+        );
+        assert_eq!(
+            plan.finding, None,
+            "a document that derives whole states a cause"
+        );
+
+        let unread = b"---\ntitle: note\n# Heading\n".as_slice();
+        let hash = norn_fs::ContentHash::of(unread).to_string();
+        let derived = map_document("note.md", unread, hash.clone()).expect("a document derives");
+        let plan = plan_document(Path::new("note.md"), "note.md", unread, hash, Some(&stored));
+        assert!(
+            matches!(plan.change, Some(Change::Upsert(_))),
+            "a block nothing read cost the document its row"
+        );
+        assert_eq!(
+            plan.finding.expect("the unknown fields are stated").subject,
+            derived.facts.path,
+            "a derived document's finding stands at another identity"
+        );
+    }
+
+    /// **What a side re-derives is the kinds of the causes that side decides.**
+    /// An act that opened nothing concludes what the grammar says about the
+    /// names it read, so filing one of those verdicts replaces the path kinds
+    /// and nothing else. An act that opened a document's bytes concludes what
+    /// those bytes say — the body verdict and every unread block — and says
+    /// nothing about the other spellings rendering onto the same place.
+    #[test]
+    fn a_side_rederives_the_kinds_of_the_causes_it_decides() {
+        let rederived = |side: Decided| {
+            let DiscardScope::Kinds(kinds) = side.rederives() else {
+                panic!("{side:?} replaces every kind standing at the place");
+            };
+            let mut kinds: Vec<&str> = kinds.iter().map(FindingKind::as_str).collect();
+            kinds.sort_unstable();
+            kinds
+        };
+        assert_eq!(
+            rederived(Decided::BySpelling),
+            [
+                "document/path-bytes-not-utf8",
+                "document/path-names-no-document"
+            ]
+        );
+        assert_eq!(
+            rederived(Decided::ByBytes),
+            [
+                "document/body-bytes-not-utf8",
+                "document/frontmatter-too-large",
+                "document/frontmatter-unclosed",
+                "document/frontmatter-unreadable"
+            ]
+        );
+    }
+
+    /// **A second reading of one observation plans the same writes.** The act
+    /// reads its arguments and nothing else — no clock, no store, no tree — so
+    /// two readings of one document agree on the change and on the finding.
+    /// That is what lets incremental maintenance land the derived state a
+    /// from-zero rebuild over the same tree lands.
+    #[test]
+    fn a_second_reading_of_one_observation_plans_the_same_writes() {
+        let stored = DocumentPath::new("note.md").expect("a document path");
+        for source in [
+            b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice(),
+            b"---\ntitle: note\n# Heading\n".as_slice(),
+            b"# Heading\n\xff".as_slice(),
+        ] {
+            let plan = || {
+                plan_document(
+                    Path::new("note.md"),
+                    "note.md",
+                    source,
+                    norn_fs::ContentHash::of(source).to_string(),
+                    Some(&stored),
+                )
+            };
+            assert_eq!(
+                plan(),
+                plan(),
+                "two readings of one observation planned different writes"
+            );
+        }
     }
 
     /// **A key written twice reaches the same degradation whichever spelling
