@@ -389,8 +389,9 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    bytes
-        .chunks_exact(2)
+    let (chunks, _) = bytes.as_chunks::<2>();
+    chunks
+        .iter()
         .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
         .collect()
 }
