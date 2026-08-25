@@ -107,16 +107,15 @@ pub trait EntryOps: Send + Sync + 'static {
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure>;
-    /// Read, validate, and apply the two authored vault control files.
+    /// Read, validate, and apply the two authored vault control files. The
+    /// default reports unsupported, which does not change the vault state.
     fn reload(
         &self,
         _: &VaultName,
         _: &mut Self::Attachment,
         _: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, JobFailure> {
-        Err(JobFailure::Environmental(
-            "vault reload is not supported by this entry adapter".to_owned(),
-        ))
+    ) -> Result<ReloadOutcome, EntryReloadFailure> {
+        Err(EntryReloadFailure::Unsupported)
     }
     /// The core fingerprints active in this attachment, where it has them.
     fn active_fingerprints(&self, _: &Self::Attachment) -> Option<ActiveFingerprints> {
@@ -291,6 +290,19 @@ pub enum JobFailure {
     WatcherTerminal(WatchError),
     LostMaintainership,
     MaintainerContended(MaintainerIdentity),
+}
+
+/// A reload adapter's answer before the lifecycle applies failure policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EntryReloadFailure {
+    Unsupported,
+    Runtime(JobFailure),
+}
+
+impl From<JobFailure> for EntryReloadFailure {
+    fn from(failure: JobFailure) -> Self {
+        Self::Runtime(failure)
+    }
 }
 
 /// The immediate answer to client demand. Warming never blocks the caller.
@@ -784,6 +796,7 @@ enum Job {
     Reconcile(VaultName, u64),
     Maintenance(VaultName, u64),
     Reload(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
+    ReloadReconcile(VaultName, u64, mpsc::SyncSender<Result<(), ReloadRefusal>>),
     Detach(VaultName, u64),
 }
 
@@ -796,6 +809,7 @@ impl Job {
             | Self::Reconcile(_, epoch)
             | Self::Maintenance(_, epoch)
             | Self::Reload(_, epoch, _)
+            | Self::ReloadReconcile(_, epoch, _)
             | Self::Detach(_, epoch) => *epoch,
         }
     }
@@ -808,6 +822,7 @@ impl Job {
             | Self::Reconcile(name, _)
             | Self::Maintenance(name, _)
             | Self::Reload(name, _, _)
+            | Self::ReloadReconcile(name, _, _)
             | Self::Detach(name, _) => name,
         }
     }
@@ -2489,6 +2504,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
         | Job::Reconcile(name, _)
         | Job::Maintenance(name, _)
         | Job::Reload(name, _, _)
+        | Job::ReloadReconcile(name, _, _)
         | Job::Detach(name, _) => name,
     };
     let entry = shared.entries.get(name)?;
@@ -3084,151 +3100,10 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             }
         },
         Job::Reload(name, epoch, reply) => {
-            let mut attachment = {
-                let mut state = entry.gate.lock().expect("entry gate poisoned");
-                if !state.claim.stands_at(epoch) {
-                    let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
-                    return None;
-                }
-                state.pin();
-                let Some(attachment) = state.coverage.take(epoch) else {
-                    state.unpin();
-                    state.claim.end_job_leg(epoch);
-                    state.claim.release();
-                    let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
-                    return None;
-                };
-                attachment
-            };
-            let mut result = shared
-                .ops
-                .reload(&name, &mut attachment, &reporter(entry, epoch));
-            if matches!(result, Ok(ReloadOutcome::SchemaChanged)) {
-                loop {
-                    let observed = drain_observed(&shared.ops, &name, &mut attachment);
-                    match observed {
-                        Ok((batch, false)) if batch.is_empty() => break,
-                        Ok((batch, _)) => {
-                            result = shared
-                                .ops
-                                .reconcile(
-                                    &name,
-                                    &mut attachment,
-                                    ReconcileWork { batch },
-                                    &reporter(entry, epoch),
-                                )
-                                .map(|()| ReloadOutcome::SchemaChanged);
-                            if result.is_err() {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            result = Err(error);
-                            break;
-                        }
-                    }
-                }
-            }
-            let mut state = entry.gate.lock().expect("entry gate poisoned");
-            state.unpin();
-            if !state.claim.stands_at(epoch) {
-                drop(state);
-                let _ = reply.send(Err(ReloadRefusal::Unavailable(TrustState::Unattached)));
-                return Some(attachment);
-            }
-            let response = match result {
-                Ok(outcome) => {
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-                    state.last_reload_error = None;
-                    state.clear_rung_requirements();
-                    match outcome {
-                        ReloadOutcome::ConfigOnly => {
-                            state.coverage.park_by(epoch, attachment);
-                        }
-                        ReloadOutcome::SchemaChanged => {
-                            state.remint_coverage(epoch, attachment);
-                        }
-                    }
-                    state.trust = TrustState::Ready;
-                    Ok(())
-                }
-                Err(JobFailure::Reload(error)) => {
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-                    state.coverage.park_by(epoch, attachment);
-                    let ready = state.trust == TrustState::Ready;
-                    let detail = state.record_reload_error(error.clone());
-                    if !ready {
-                        state.require_recovery();
-                        state.pending.merge(Batch::rescan(RescanScope::Vault));
-                        state.trust =
-                            TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
-                    }
-                    Err(ReloadRefusal::Core(error))
-                }
-                Err(error @ JobFailure::LostMaintainership) => {
-                    begin_release(&mut state);
-                    drop(state);
-                    finish_release(shared, entry, &name, epoch, Some(attachment));
-                    let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
-                    return None;
-                }
-                Err(JobFailure::MaintainerContended(incumbent)) => {
-                    let error = JobFailure::MaintainerContended(incumbent.clone());
-                    state.maintainer_contended = Some(incumbent);
-                    begin_release(&mut state);
-                    drop(state);
-                    finish_release(shared, entry, &name, epoch, Some(attachment));
-                    let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
-                    return None;
-                }
-                Err(JobFailure::WatcherTerminal(error)) => {
-                    let failure = JobFailure::WatcherTerminal(error.clone());
-                    let reclassify = root_moved(&error);
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-                    state.coverage.park_by(epoch, attachment);
-                    state.require_recovery();
-                    state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust = TrustState::untrusted(watcher_lost(error));
-                    state.claim.end_job_leg(epoch);
-                    state.claim.release();
-                    drop(state);
-                    if reclassify {
-                        park_on_current_classification(shared, &name);
-                    }
-                    let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
-                    return None;
-                }
-                Err(JobFailure::Environmental(detail)) => {
-                    let failure = JobFailure::Environmental(detail.clone());
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-                    state.coverage.park_by(epoch, attachment);
-                    state.require_recovery();
-                    state.pending.merge(Batch::rescan(RescanScope::Vault));
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
-                    Err(ReloadRefusal::Runtime(failure))
-                }
-                Err(JobFailure::StoreDamaged(detail)) => {
-                    let failure = JobFailure::StoreDamaged(detail.clone());
-                    state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
-                    state.coverage.park_by(epoch, attachment);
-                    state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
-                    let next = state
-                        .claim
-                        .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
-                    drop(state);
-                    let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
-                    dispatch_handoff(shared, entry, epoch, next);
-                    return None;
-                }
-            };
-            state.claim.end_job_leg(epoch);
-            state.claim.release();
-            drop(state);
-            let _ = reply.send(response);
-            None
+            run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Activate)
+        }
+        Job::ReloadReconcile(name, epoch, reply) => {
+            run_reload_job(shared, entry, name, epoch, reply, ReloadStep::Reconcile)
         }
         Job::Maintenance(name, epoch) => {
             let mut attachment = {
@@ -3372,6 +3247,206 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ReloadStep {
+    Activate,
+    Reconcile,
+}
+
+/// Run one bounded turn of an explicit reload.
+///
+/// A schema reload keeps its reply while watcher facts remain. Each saturated
+/// drain hands the claim to a new turn, so unrelated vault work can run before
+/// this vault continues. The reply succeeds only after this vault is Ready.
+fn run_reload_job<O: EntryOps>(
+    shared: &Arc<Shared<O>>,
+    entry: &Arc<Entry<O::Attachment>>,
+    name: VaultName,
+    epoch: u64,
+    reply: mpsc::SyncSender<Result<(), ReloadRefusal>>,
+    step: ReloadStep,
+) -> Option<O::Attachment> {
+    let (mut attachment, work) = {
+        let mut state = entry.gate.lock().expect("entry gate poisoned");
+        if !state.claim.stands_at(epoch) {
+            let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+            return None;
+        }
+        state.pin();
+        let Some(attachment) = state.coverage.take(epoch) else {
+            state.unpin();
+            state.claim.release();
+            let _ = reply.send(Err(ReloadRefusal::Unavailable(state.trust.clone())));
+            return None;
+        };
+        let work = match step {
+            ReloadStep::Activate => Batch::default(),
+            ReloadStep::Reconcile => std::mem::take(&mut state.pending),
+        };
+        (attachment, work)
+    };
+
+    let mut unsupported = false;
+    let mut result = match step {
+        ReloadStep::Activate => {
+            match shared
+                .ops
+                .reload(&name, &mut attachment, &reporter(entry, epoch))
+            {
+                Ok(outcome) => Ok(outcome),
+                Err(EntryReloadFailure::Unsupported) => {
+                    unsupported = true;
+                    Ok(ReloadOutcome::ConfigOnly)
+                }
+                Err(EntryReloadFailure::Runtime(failure)) => Err(failure),
+            }
+        }
+        ReloadStep::Reconcile if work.is_empty() => Ok(ReloadOutcome::SchemaChanged),
+        ReloadStep::Reconcile => shared
+            .ops
+            .reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork { batch: work },
+                &reporter(entry, epoch),
+            )
+            .map(|()| ReloadOutcome::SchemaChanged),
+    };
+    let mut observed = Batch::default();
+    let mut handoff_saturated = false;
+    if !unsupported && matches!(result, Ok(ReloadOutcome::SchemaChanged)) {
+        match drain_observed(&shared.ops, &name, &mut attachment) {
+            Ok((batch, saturated)) => {
+                observed = batch;
+                handoff_saturated = saturated;
+            }
+            Err(error) => result = Err(error),
+        }
+    }
+
+    let mut state = entry.gate.lock().expect("entry gate poisoned");
+    state.unpin();
+    if !state.claim.stands_at(epoch) {
+        drop(state);
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(TrustState::Unattached)));
+        return Some(attachment);
+    }
+    if state.detach_in_flight {
+        let trust = state.trust.clone();
+        drop(state);
+        let _ = reply.send(Err(ReloadRefusal::Unavailable(trust)));
+        return Some(attachment);
+    }
+    if unsupported {
+        state.coverage.park_by(epoch, attachment);
+        state.claim.release();
+        drop(state);
+        let _ = reply.send(Err(ReloadRefusal::Unsupported));
+        return None;
+    }
+    if matches!(result, Ok(ReloadOutcome::SchemaChanged))
+        && (handoff_saturated || !observed.is_empty())
+    {
+        state.pending.merge(observed);
+        state.coverage.park_by(epoch, attachment);
+        let next = state
+            .claim
+            .hand_on(|epoch| Job::ReloadReconcile(name.clone(), epoch, reply));
+        drop(state);
+        dispatch_handoff(shared, entry, epoch, next);
+        return None;
+    }
+
+    let response = match result {
+        Ok(outcome) => {
+            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            state.last_reload_error = None;
+            state.clear_rung_requirements();
+            match outcome {
+                ReloadOutcome::ConfigOnly => {
+                    state.coverage.park_by(epoch, attachment);
+                }
+                ReloadOutcome::SchemaChanged => {
+                    state.remint_coverage(epoch, attachment);
+                }
+            }
+            state.trust = TrustState::Ready;
+            Ok(())
+        }
+        Err(JobFailure::Reload(error)) => {
+            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            state.coverage.park_by(epoch, attachment);
+            let ready = state.trust == TrustState::Ready;
+            let detail = state.record_reload_error(error.clone());
+            if !ready {
+                state.require_recovery();
+                state.pending.merge(Batch::rescan(RescanScope::Vault));
+                state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+            }
+            Err(ReloadRefusal::Core(error))
+        }
+        Err(error @ JobFailure::LostMaintainership) => {
+            begin_release(&mut state);
+            drop(state);
+            finish_release(shared, entry, &name, epoch, Some(attachment));
+            let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+            return None;
+        }
+        Err(JobFailure::MaintainerContended(incumbent)) => {
+            let error = JobFailure::MaintainerContended(incumbent.clone());
+            state.maintainer_contended = Some(incumbent);
+            begin_release(&mut state);
+            drop(state);
+            finish_release(shared, entry, &name, epoch, Some(attachment));
+            let _ = reply.send(Err(ReloadRefusal::Runtime(error)));
+            return None;
+        }
+        Err(JobFailure::WatcherTerminal(error)) => {
+            let failure = JobFailure::WatcherTerminal(error.clone());
+            let reclassify = root_moved(&error);
+            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            state.coverage.park_by(epoch, attachment);
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            state.trust = TrustState::untrusted(watcher_lost(error));
+            state.claim.release();
+            drop(state);
+            if reclassify {
+                park_on_current_classification(shared, &name);
+            }
+            let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+            return None;
+        }
+        Err(JobFailure::Environmental(detail)) => {
+            let failure = JobFailure::Environmental(detail.clone());
+            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            state.coverage.park_by(epoch, attachment);
+            state.require_recovery();
+            state.pending.merge(Batch::rescan(RescanScope::Vault));
+            state.trust = TrustState::untrusted(UntrustedReason::environmental_refusal(detail));
+            Err(ReloadRefusal::Runtime(failure))
+        }
+        Err(JobFailure::StoreDamaged(detail)) => {
+            let failure = JobFailure::StoreDamaged(detail.clone());
+            state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+            state.coverage.park_by(epoch, attachment);
+            state.require_rebuild();
+            state.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+            let next = state
+                .claim
+                .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
+            drop(state);
+            let _ = reply.send(Err(ReloadRefusal::Runtime(failure)));
+            dispatch_handoff(shared, entry, epoch, next);
+            return None;
+        }
+    };
+    state.claim.release();
+    drop(state);
+    let _ = reply.send(response);
+    None
 }
 
 const HANDOFF_BATCH_LIMIT: usize = 8;
@@ -3610,6 +3685,11 @@ mod tests {
         recovers: AtomicUsize,
         rebuilds: AtomicUsize,
         reconciles: AtomicUsize,
+        reload_supported: std::sync::atomic::AtomicBool,
+        reload_schema_changed: std::sync::atomic::AtomicBool,
+        block_reload: std::sync::atomic::AtomicBool,
+        reload_started: std::sync::atomic::AtomicBool,
+        reload_release: std::sync::atomic::AtomicBool,
         terminal_attach: std::sync::atomic::AtomicBool,
         terminal_recover: std::sync::atomic::AtomicBool,
         terminal_reconcile: std::sync::atomic::AtomicBool,
@@ -3690,6 +3770,7 @@ mod tests {
         /// race a watcher poll for the same batches; see `ON_JOB_THREAD`.
         handoff_poll_batches: AtomicUsize,
         handoff_rescan_poll_batches: AtomicUsize,
+        continuous_handoff_poll_for: Mutex<Option<VaultName>>,
         terminal_poll: Mutex<Option<WatchError>>,
         environmental_poll: std::sync::atomic::AtomicBool,
         contend_poll: std::sync::atomic::AtomicBool,
@@ -3853,6 +3934,28 @@ mod tests {
             Ok(())
         }
 
+        fn reload(
+            &self,
+            _: &VaultName,
+            _: &mut FakeCoverage,
+            progress: &ProgressReporter<FakeCoverage>,
+        ) -> Result<ReloadOutcome, EntryReloadFailure> {
+            ON_JOB_THREAD.with(|flag| flag.set(true));
+            if !self.reload_supported.load(Ordering::SeqCst) {
+                return Err(EntryReloadFailure::Unsupported);
+            }
+            if self.block_reload.load(Ordering::SeqCst) {
+                self.reload_started.store(true, Ordering::SeqCst);
+                wait_for_release("reload_release", &self.reload_release);
+            }
+            if self.reload_schema_changed.load(Ordering::SeqCst) {
+                progress.begin_schema_reload();
+                Ok(ReloadOutcome::SchemaChanged)
+            } else {
+                Ok(ReloadOutcome::ConfigOnly)
+            }
+        }
+
         fn poll(
             &self,
             name: &VaultName,
@@ -3894,6 +3997,16 @@ mod tests {
                 return Err(JobFailure::LostMaintainership);
             }
             let on_job_thread = ON_JOB_THREAD.with(Cell::get);
+            if on_job_thread
+                && self
+                    .continuous_handoff_poll_for
+                    .lock()
+                    .expect("continuous handoff poll poisoned")
+                    .as_ref()
+                    == Some(name)
+            {
+                return Ok(Some(Batch::default()));
+            }
             let (empty, rescans) = if on_job_thread {
                 (
                     &self.handoff_poll_batches,
@@ -4578,6 +4691,107 @@ mod tests {
         }
         wait_for_state(&host, &name, TrustState::Ready);
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unsupported_reload_leaves_a_ready_vault_unchanged() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(host.reload(&name), Err(ReloadRefusal::Unsupported));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.recovery_required);
+        assert!(state.pending.is_empty());
+        assert!(state.coverage.in_hand());
+    }
+
+    #[test]
+    fn a_release_window_opened_over_reload_closes_at_the_job_epilogue() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let reloading = Arc::clone(&host);
+        let reload_name = name.clone();
+        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        wait_for_flag("reload_started", &ops.reload_started);
+        let entry = host.shared.entries.get(&name).unwrap();
+        begin_release(&mut entry.gate.lock().unwrap());
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            reload.join().unwrap(),
+            Err(ReloadRefusal::Unavailable(releasing()))
+        );
+        wait_for_state(&host, &name, TrustState::Ready);
+        assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.detach_in_flight);
+        assert!(state.coverage.in_hand());
+    }
+
+    #[test]
+    fn saturated_reload_hands_the_claim_on_before_it_continues() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        ops.reload_schema_changed.store(true, Ordering::SeqCst);
+        ops.block_reload.store(true, Ordering::SeqCst);
+        let reloaded = VaultName::new("reloaded").unwrap();
+        let sibling = VaultName::new("sibling").unwrap();
+        let base = temp_base("reload-handoff");
+        let reloaded_root = base.join("reloaded");
+        let sibling_root = base.join("sibling");
+        let host = Arc::new(host_over_roots(
+            Arc::clone(&ops),
+            &[
+                (&reloaded, reloaded_root.as_path()),
+                (&sibling, sibling_root.as_path()),
+            ],
+            1,
+        ));
+        let _reloaded_lease = host.demand(&reloaded, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &reloaded, TrustState::Ready);
+        *ops.continuous_handoff_poll_for.lock().unwrap() = Some(reloaded.clone());
+
+        let reloading = Arc::clone(&host);
+        let reload_name = reloaded.clone();
+        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        wait_for_flag("reload_started", &ops.reload_started);
+        let _sibling_lease = host.demand(&sibling, AttachMode::Durable).unwrap();
+        ops.reload_release.store(true, Ordering::SeqCst);
+
+        let sibling_ready = wait_until(
+            "the sibling to attach between bounded reload turns",
+            lifecycle_wait_budget(),
+            || match host.state(&sibling) {
+                Ok(TrustState::Ready) => Observed::Met(()),
+                state => Observed::pending(format!("the sibling state is {state:?}")),
+            },
+        );
+        assert!(matches!(
+            host.state(&reloaded),
+            Ok(TrustState::Warming { .. })
+        ));
+        *ops.continuous_handoff_poll_for.lock().unwrap() = None;
+        reload.join().unwrap().expect("the reload to become Ready");
+        sibling_ready.unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(host.state(&reloaded), answered(TrustState::Ready));
+        assert_eq!(
+            ops.reconciles.load(Ordering::SeqCst),
+            0,
+            "an empty saturated drain ran an empty reconcile"
+        );
+
+        drop(host);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// A contended attach parks the entry and schedules nothing behind it.
@@ -10780,7 +10994,9 @@ mod tests {
             Job::Recover(..) => Some(DemandedWork::Recover),
             Job::Rebuild(..) => Some(DemandedWork::Rebuild),
             Job::Reconcile(..) => Some(DemandedWork::Reconcile),
-            Job::Maintenance(..) | Job::Reload(..) | Job::Detach(..) => None,
+            Job::Maintenance(..) | Job::Reload(..) | Job::ReloadReconcile(..) | Job::Detach(..) => {
+                None
+            }
         }
     }
 

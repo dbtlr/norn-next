@@ -20,8 +20,9 @@ mod reload;
 #[cfg(feature = "induced-failure")]
 pub use evidence::{EvidenceReading, JobEvidence};
 pub use lifecycle::{
-    Demand, DemandLease, EntryOps, Healing, Host, HostError, JobFailure, LifecyclePolicy,
-    LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork, SnapshotSource,
+    Demand, DemandLease, EntryOps, EntryReloadFailure, Healing, Host, HostError, JobFailure,
+    LifecyclePolicy, LifecyclePolicyError, ProgressReporter, ReadHold, ReconcileWork,
+    SnapshotSource,
 };
 /// One vault's registration: the name it is served under, its root, and where
 /// its schema is read from.

@@ -98,6 +98,7 @@ pub enum ReloadOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReloadRefusal {
     UnknownVault,
+    Unsupported,
     Unavailable(TrustState),
     Core(ReloadError),
     Runtime(JobFailure),
@@ -141,12 +142,7 @@ impl ReloadCandidate {
             Path::new(IN_VAULT_CONFIG_PATH),
         )
         .map_err(ReloadError::ConfigRead)?;
-        Ok(ActiveFingerprints {
-            schema: schema.content_hash(),
-            config: config.as_ref().map_or(ConfigFingerprint::Missing, |read| {
-                ConfigFingerprint::File(read.content_hash())
-            }),
-        })
+        Ok(fingerprints(&schema, config.as_ref()))
     }
 
     pub(crate) fn read(registration: &Registration) -> Result<Self, ReloadError> {
@@ -165,13 +161,7 @@ impl ReloadCandidate {
         .map_err(ReloadError::ConfigRead)?;
         let parsed = VaultConfig::parse(config.as_ref().map(norn_fs::ReadAndHash::bytes))
             .map_err(ReloadError::ConfigParse)?;
-        let config_fingerprint = config.as_ref().map_or(ConfigFingerprint::Missing, |read| {
-            ConfigFingerprint::File(read.content_hash())
-        });
-        let fingerprints = ActiveFingerprints {
-            schema: schema.content_hash(),
-            config: config_fingerprint,
-        };
+        let fingerprints = fingerprints(&schema, config.as_ref());
         let (schema_bytes, _) = schema.into_parts();
         Ok(Self {
             schema_bytes,
@@ -190,6 +180,18 @@ impl ReloadCandidate {
 
     pub(crate) fn fingerprints(&self) -> ActiveFingerprints {
         self.fingerprints
+    }
+}
+
+fn fingerprints(
+    schema: &norn_fs::ReadAndHash,
+    config: Option<&norn_fs::ReadAndHash>,
+) -> ActiveFingerprints {
+    ActiveFingerprints {
+        schema: schema.content_hash(),
+        config: config.map_or(ConfigFingerprint::Missing, |read| {
+            ConfigFingerprint::File(read.content_hash())
+        }),
     }
 }
 

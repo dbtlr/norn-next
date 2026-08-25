@@ -646,8 +646,11 @@ impl EntryOps for ProductionEntryOps {
         name: &VaultName,
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
-    ) -> Result<ReloadOutcome, JobFailure> {
+    ) -> Result<ReloadOutcome, crate::EntryReloadFailure> {
         let _job = self.evidence.attributing();
+        if !attachment.maintainership.still_current().map_err(effect)? {
+            return Err(JobFailure::LostMaintainership.into());
+        }
         let candidate =
             ReloadCandidate::read(&attachment.registration).map_err(JobFailure::Reload)?;
         let schema_changed =
@@ -3451,7 +3454,7 @@ mod tests {
 
     #[test]
     fn invalid_vault_config_is_retained_when_attach_cannot_start() {
-        let f = Fixture::watcherless("invalid-vault-config-status");
+        let f = Fixture::new("invalid-vault-config-status");
         fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
         let registration = f.registration();
         let name = registration.name.clone();
@@ -3646,6 +3649,28 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(values, [Some(1), Some(2)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_checks_maintainership_before_it_reads_the_candidate() {
+        let f = Fixture::new("reload-lost-maintainership");
+        let (ops, name) = f.ops(64);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let lock = attachment.maintainership.path().to_path_buf();
+
+        fs::remove_file(&lock).unwrap();
+        fs::write(&lock, "replacement lock identity").unwrap();
+        fs::write(f.vault().join(".norn/config.toml"), "[engine.sample\n").unwrap();
+
+        assert_eq!(
+            ops.reload(&name, &mut attachment, &progress),
+            Err(crate::EntryReloadFailure::Runtime(
+                JobFailure::LostMaintainership
+            ))
+        );
+        ops.detach(&name, attachment);
     }
 
     #[test]
