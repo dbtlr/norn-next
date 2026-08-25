@@ -2228,11 +2228,7 @@ impl<'s> Pending<'s> {
     /// there. A document-scoped finding accounts for nothing this way — the row
     /// its act wrote at the same subject is what a walk reads it by.
     fn file(&mut self, planned: PlannedFinding) {
-        let PlannedFinding {
-            subject,
-            cause,
-            detail,
-        } = planned;
+        let (subject, cause, detail) = planned.into_parts();
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());
         }
@@ -6146,6 +6142,9 @@ mod tests {
     /// The same block at the bound reaches the parser, so the refusal above is
     /// the bound and not the shape. What the parser then says about it is the
     /// other way a block goes unread, and the posture is the same one.
+    // A direct [`map_document`] case, kept here rather than in `derivation`'s
+    // suite because it reads its source from [`unclosed_flow_nest`], this
+    // module's fixture for a block sized against the bound.
     #[test]
     fn a_frontmatter_block_at_the_bound_is_read_and_refused_for_its_shape() {
         let source = unclosed_flow_nest(norn_text::FRONTMATTER_MAX_BYTES);
@@ -6171,6 +6170,9 @@ mod tests {
     /// derive, carries no frontmatter projection, and names its cause — so no
     /// derived row answers *this document has no tags, no title, no aliases*
     /// about fields nothing read.
+    // A direct [`map_document`] case, kept here rather than in `derivation`'s
+    // suite because its third source comes from [`unclosed_flow_nest`], this
+    // module's fixture for a block sized against the bound.
     #[test]
     fn every_wholly_unread_block_derives_its_body_facts_and_names_its_cause() {
         for (source, cause, kind) in [
