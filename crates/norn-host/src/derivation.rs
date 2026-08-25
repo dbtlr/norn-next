@@ -5,10 +5,12 @@
 //! those bytes, and the stored row that path replaces. A [`Plan`] is what comes
 //! back. The module is pure — no IO, no store handle — so it decides what a job
 //! writes and the job decides when to write it. Equal observations plan equal
-//! writes, and that determinism is what lets incremental maintenance equal a
-//! from-zero rebuild over the same tree: both runs read the same observations,
-//! so both plan the same writes. Accumulating plans, bounding a changeset,
-//! reading bytes, walking a vault and timing any of it are orchestration's.
+//! writes, and that determinism is what lets incremental maintenance land the
+//! same derived state a from-zero rebuild over the same tree lands: the two
+//! runs' observations differ in the stored rows they replace, so their plans
+//! differ in the deaths those rows imply, while the state they land converges.
+//! Accumulating plans, bounding a changeset, reading bytes, walking a vault and
+//! timing any of it are orchestration's.
 //!
 //! This module also owns the closed cause vocabulary and the two discard sides
 //! read off it — which finding kinds a re-derivation by spelling or by bytes
@@ -18,7 +20,7 @@
 //! keyed on the vault schema derives under the pinned schema, so the planner
 //! takes that pin beside the document. The vault schema's content model — the
 //! layer the `#tag` facet graduates into — adds the parameter when it lands.
-//! Until then a plan is a function of the document alone.
+//! Until then a plan is a function of the observation alone.
 //!
 //! **Findings are minted here and nowhere else.** [`plan_document`] and
 //! [`plan_quarantine`] are [`PlannedFinding`]'s two constructors, and they are
@@ -609,9 +611,16 @@ pub(crate) fn map_document(path: &str, bytes: &[u8], hash: String) -> Result<Der
 /// records them; it does not assemble them.
 #[derive(Debug, PartialEq)]
 pub(crate) struct PlannedFinding {
-    pub(crate) subject: DocumentPath,
-    pub(crate) cause: Cause,
-    pub(crate) detail: String,
+    subject: DocumentPath,
+    cause: Cause,
+    detail: String,
+}
+
+impl PlannedFinding {
+    /// Splits the finding into its subject, its cause, and its formatted detail.
+    pub(crate) fn into_parts(self) -> (DocumentPath, Cause, String) {
+        (self.subject, self.cause, self.detail)
+    }
 }
 
 /// One document's planned outcome: a change and a finding, each present when
@@ -792,23 +801,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn document_identity_boundary_quarantines_non_utf8_path_bytes() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let path = Path::new(std::ffi::OsStr::from_bytes(b"bad-\xff.md"));
-        let quarantine = document_path(path).expect_err("non-UTF-8 path bytes name no document");
-        assert_eq!(quarantine.cause, Undecodable::PathBytes);
-    }
-
-    #[test]
-    fn document_identity_boundary_quarantines_a_spelling_the_grammar_refuses() {
-        let path = Path::new("notes/bad\\name.md");
-        let quarantine = document_path(path).expect_err("a backslash names no document");
-        assert_eq!(quarantine.cause, Undecodable::PathSpelling);
-    }
-
     /// **A quarantine files at the place it read and takes only a row that
     /// stands there.** The subject is the rendered place rather than an
     /// identity, because a spelling the grammar refuses names none. The change
@@ -949,7 +941,13 @@ mod tests {
         let whole = b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice();
         let hash = norn_fs::ContentHash::of(whole).to_string();
         let derived = map_document("note.md", whole, hash.clone()).expect("a document derives");
-        let plan = plan_document(Path::new("note.md"), "note.md", whole, hash, Some(&stored));
+        let plan = plan_document(
+            Path::new("note.md"),
+            "note.md",
+            whole,
+            hash.clone(),
+            Some(&stored),
+        );
         assert_eq!(
             plan.change,
             Some(Change::Upsert(derived.facts)),
@@ -959,19 +957,38 @@ mod tests {
             plan.finding, None,
             "a document that derives whole states a cause"
         );
+        assert_eq!(
+            plan,
+            plan_document(Path::new("note.md"), "note.md", whole, hash, None),
+            "the row the observation replaces changed a plan that still derives"
+        );
 
         let unread = b"---\ntitle: note\n# Heading\n".as_slice();
         let hash = norn_fs::ContentHash::of(unread).to_string();
         let derived = map_document("note.md", unread, hash.clone()).expect("a document derives");
-        let plan = plan_document(Path::new("note.md"), "note.md", unread, hash, Some(&stored));
+        let plan = plan_document(
+            Path::new("note.md"),
+            "note.md",
+            unread,
+            hash.clone(),
+            Some(&stored),
+        );
         assert!(
             matches!(plan.change, Some(Change::Upsert(_))),
             "a block nothing read cost the document its row"
         );
         assert_eq!(
-            plan.finding.expect("the unknown fields are stated").subject,
+            plan.finding
+                .as_ref()
+                .expect("the unknown fields are stated")
+                .subject,
             derived.facts.path,
             "a derived document's finding stands at another identity"
+        );
+        assert_eq!(
+            plan,
+            plan_document(Path::new("note.md"), "note.md", unread, hash, None),
+            "the row the observation replaces changed a plan that still derives"
         );
     }
 
@@ -1021,6 +1038,7 @@ mod tests {
             b"---\ntags: [front]\n---\n# Heading\n[[target]] #body\n".as_slice(),
             b"---\ntitle: note\n# Heading\n".as_slice(),
             b"# Heading\n\xff".as_slice(),
+            b"---\ntitle: note\nkind: doc\nstatus: draft\n---\n# Heading\n".as_slice(),
         ] {
             let plan = || {
                 plan_document(

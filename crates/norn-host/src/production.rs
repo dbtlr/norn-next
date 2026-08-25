@@ -2228,11 +2228,7 @@ impl<'s> Pending<'s> {
     /// there. A document-scoped finding accounts for nothing this way — the row
     /// its act wrote at the same subject is what a walk reads it by.
     fn file(&mut self, planned: PlannedFinding) {
-        let PlannedFinding {
-            subject,
-            cause,
-            detail,
-        } = planned;
+        let (subject, cause, detail) = planned.into_parts();
         if cause.kind().scope() == FindingScope::Place {
             self.account.filed.insert(&subject, cause.decided());
         }
