@@ -93,6 +93,107 @@ impl Embedder for CountingEmbedder {
     }
 }
 
+/// The stub embedder with a one-shot side effect: the first `embed` call
+/// opens its own handle on the store and applies a changeset, so a drain in
+/// progress meets a store that moved between its page read and a later
+/// fetch — the reading the deferred arm answers.
+pub struct InterferingEmbedder {
+    inner: StubEmbedder,
+    store_path: PathBuf,
+    interference: DocumentFacts,
+    fired: std::sync::atomic::AtomicBool,
+}
+
+impl InterferingEmbedder {
+    pub fn new(store_path: PathBuf, interference: DocumentFacts) -> Arc<Self> {
+        Arc::new(InterferingEmbedder {
+            inner: StubEmbedder::new(),
+            store_path,
+            interference,
+            fired: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+}
+
+impl Embedder for InterferingEmbedder {
+    fn model(&self) -> &Model {
+        self.inner.model()
+    }
+
+    fn dimensions(&self) -> std::num::NonZeroUsize {
+        self.inner.dimensions()
+    }
+
+    fn embed(&self, text: &str) -> Result<Embedding, EmbedError> {
+        if !self.fired.swap(true, Ordering::Relaxed) {
+            let mut store = Store::open(&self.store_path).expect("a second handle on the store");
+            write_document(&mut store, &self.interference);
+        }
+        self.inner.embed(text)
+    }
+}
+
+/// An embedder that always refuses, for the refusal path.
+pub struct RefusingEmbedder {
+    inner: StubEmbedder,
+}
+
+impl RefusingEmbedder {
+    pub fn new() -> Arc<Self> {
+        Arc::new(RefusingEmbedder {
+            inner: StubEmbedder::new(),
+        })
+    }
+}
+
+impl Embedder for RefusingEmbedder {
+    fn model(&self) -> &Model {
+        self.inner.model()
+    }
+
+    fn dimensions(&self) -> std::num::NonZeroUsize {
+        self.inner.dimensions()
+    }
+
+    fn embed(&self, _text: &str) -> Result<Embedding, EmbedError> {
+        Err(EmbedError::runtime(
+            self.inner.model().clone(),
+            "the harness refuses every input",
+        ))
+    }
+}
+
+/// An embedder that answers one value short of its promise, for the width
+/// guard.
+pub struct NarrowEmbedder {
+    inner: StubEmbedder,
+}
+
+impl NarrowEmbedder {
+    pub fn new() -> Arc<Self> {
+        Arc::new(NarrowEmbedder {
+            inner: StubEmbedder::new(),
+        })
+    }
+}
+
+impl Embedder for NarrowEmbedder {
+    fn model(&self) -> &Model {
+        self.inner.model()
+    }
+
+    fn dimensions(&self) -> std::num::NonZeroUsize {
+        self.inner.dimensions()
+    }
+
+    fn embed(&self, text: &str) -> Result<Embedding, EmbedError> {
+        let embedding = self.inner.embed(text)?;
+        let mut values = embedding.values().to_vec();
+        values.pop();
+        Ok(Embedding::new(embedding.model().clone(), values))
+    }
+}
+
 /// A document path, or a panic naming what was wrong with it.
 pub fn path(text: &str) -> DocumentPath {
     DocumentPath::new(text)

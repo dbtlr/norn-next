@@ -53,7 +53,7 @@ fn a_discarded_sidecar_starts_over() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(embedder.calls(), 2);
     let epoch = engine.epoch().to_string();
 
@@ -61,7 +61,7 @@ fn a_discarded_sidecar_starts_over() {
     assert_ne!(engine.epoch(), epoch, "a rebuild mints a new epoch");
     assert_eq!(engine.projection().expect("a projection"), Vec::new());
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(
         report.embedded, 2,
         "the drain refills what the discard emptied"
@@ -79,7 +79,7 @@ fn the_sidecar_and_the_store_are_separate_files() {
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
 
     let mut engine = scratch.engine(CountingEmbedder::new());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     drop(engine);
 
     // The store is untouched by everything the engine did.

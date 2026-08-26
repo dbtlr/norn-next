@@ -1,7 +1,10 @@
 //! Drain semantics: triage by fingerprint, cursors that persist, epochs that
 //! reconcile, deaths that retract.
 
-use crate::common::{CountingEmbedder, Scratch, document, path, record_death, write_document};
+use crate::common::{
+    CountingEmbedder, InterferingEmbedder, Scratch, document, path, recompute, record_death,
+    write_document,
+};
 use norn_store::FrontmatterValue;
 
 /// An empty store drains to an empty sidecar; the drain after it is the
@@ -12,11 +15,11 @@ fn an_empty_store_settles_immediately() {
     let mut store = scratch.store();
     let mut engine = scratch.engine(CountingEmbedder::new());
 
-    let first = engine.drain(&mut store).expect("a drain");
+    let first = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(first.rescan, "a fresh sidecar has no recorded epoch");
     assert_eq!(first.embedded, 0);
 
-    let second = engine.drain(&mut store).expect("a drain");
+    let second = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(second.is_settled(), "{second:?}");
 }
 
@@ -31,11 +34,11 @@ fn derived_documents_are_embedded_once() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 2);
     assert_eq!(embedder.calls(), 2);
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(report.is_settled(), "{report:?}");
     assert_eq!(embedder.calls(), 2, "a settled drain recomputes nothing");
 }
@@ -51,7 +54,7 @@ fn a_frontmatter_only_edit_does_not_reembed() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(embedder.calls(), 1);
 
     let mut edited = document("docs/a.md", "hash-2", "alpha\n");
@@ -61,7 +64,7 @@ fn a_frontmatter_only_edit_does_not_reembed() {
     )]));
     write_document(&mut store, &edited);
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.skipped_current, 1, "{report:?}");
     assert_eq!(report.embedded, 0);
     assert_eq!(
@@ -80,14 +83,14 @@ fn a_body_edit_reembeds() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     let before = engine.projection().expect("a projection");
 
     write_document(
         &mut store,
         &document("docs/a.md", "hash-2", "alpha rewritten\n"),
     );
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 1);
     assert_eq!(embedder.calls(), 2);
 
@@ -108,10 +111,10 @@ fn a_death_retracts_and_a_rederivation_reembeds() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
 
     record_death(&mut store, "docs/a.md");
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.retracted, 1, "{report:?}");
     let held: Vec<String> = engine
         .projection()
@@ -125,7 +128,7 @@ fn a_death_retracts_and_a_rederivation_reembeds() {
         &mut store,
         &document("docs/a.md", "hash-3", "alpha reborn\n"),
     );
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 1);
     assert_eq!(engine.projection().expect("a projection").len(), 2);
 }
@@ -141,13 +144,13 @@ fn the_cursor_survives_an_engine_reopen() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder);
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     drop(engine);
 
     write_document(&mut store, &document("docs/c.md", "hash-3", "charlie\n"));
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(!report.rescan, "the recorded epoch still names this store");
     assert_eq!(report.embedded, 1, "{report:?}");
     assert_eq!(
@@ -169,7 +172,7 @@ fn a_store_rebuild_rescans_but_recomputes_nothing() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(embedder.calls(), 2);
 
     let mut store = store
@@ -178,7 +181,7 @@ fn a_store_rebuild_rescans_but_recomputes_nothing() {
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
     write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(report.rescan, "a moved epoch is a rescan");
     assert_eq!(report.reconciled_away, 0);
     assert_eq!(report.skipped_current, 2, "{report:?}");
@@ -197,24 +200,29 @@ fn a_rescan_reconciles_paths_the_new_lifetime_does_not_hold() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
 
     let mut store = store
         .discard_and_reopen()
         .expect("a store rebuilt from zero");
     write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert!(report.rescan);
     assert_eq!(report.reconciled_away, 1, "{report:?}");
-    let held: Vec<String> = engine
-        .projection()
-        .expect("a projection")
-        .into_iter()
-        .map(|row| row.path)
-        .collect();
-    assert_eq!(held, vec!["docs/b.md".to_string()]);
-    assert_eq!(embedder.calls(), 2, "the surviving body did not change");
+    let held = engine.projection().expect("a projection");
+    assert_eq!(
+        held,
+        recompute(&mut store, embedder.as_ref()),
+        "the reconciled sidecar holds the bar"
+    );
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].path, "docs/b.md");
+    assert_eq!(
+        embedder.calls(),
+        3,
+        "the bar's own recompute is the third call"
+    );
 }
 
 /// The drain pages: a working set past one page arrives whole.
@@ -232,19 +240,66 @@ fn a_drain_pages_past_its_page_bound() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder.clone());
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 300);
-    assert_eq!(engine.projection().expect("a projection").len(), 300);
+    let held = engine.projection().expect("a projection");
+    assert_eq!(held.len(), 300);
+    assert_eq!(
+        held,
+        recompute(&mut store, embedder.as_ref()),
+        "the bar holds across the document page seam"
+    );
 
     // And the path type stays honest across the page seam.
-    assert!(
-        engine
-            .projection()
-            .expect("a projection")
-            .iter()
-            .all(|row| {
-                path(&row.path);
-                true
-            })
+    assert!(held.iter().all(|row| {
+        path(&row.path);
+        true
+    }));
+
+    // Every path dies, so the retraction loop crosses its own page seam too.
+    for serial in 0..300 {
+        record_death(&mut store, &format!("docs/{serial:03}.md"));
+    }
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.retracted, 300);
+    assert_eq!(engine.projection().expect("a projection"), Vec::new());
+    assert_eq!(
+        recompute(&mut store, embedder.as_ref()),
+        Vec::new(),
+        "the bar agrees: nothing stands"
+    );
+}
+
+/// The deferred arm, reached for real: a writer lands a newer version of a
+/// page-mate between the page read and its fetch, so the fetch answers at a
+/// generation past the feed row's. The stale reading is dropped, and the
+/// successor — at its strictly higher generation — converges on a later
+/// drain.
+#[test]
+fn a_row_superseded_mid_drain_is_deferred_and_converges() {
+    let scratch = Scratch::new("deferred");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-a1", "alpha\n"));
+    write_document(&mut store, &document("docs/b.md", "hash-b1", "bravo\n"));
+
+    // Embedding a.md rewrites b.md through the embedder's own store handle,
+    // after the page holding both was already read.
+    let embedder = InterferingEmbedder::new(
+        scratch.store_path(),
+        document("docs/b.md", "hash-b2", "bravo rewritten\n"),
+    );
+    let mut engine = scratch.engine(embedder.clone());
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 1, "{report:?}");
+    assert_eq!(report.deferred, 1, "{report:?}");
+
+    // The deferred row's successor stands at a higher generation than the
+    // advanced cursor, so the next drain consumes it and the bar closes.
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 1, "{report:?}");
+    assert_eq!(
+        engine.projection().expect("a projection"),
+        recompute(&mut store, embedder.as_ref()),
+        "the deferral converged"
     );
 }

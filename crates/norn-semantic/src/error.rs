@@ -27,6 +27,14 @@ pub enum EngineError {
     /// The embedder was asked and produced nothing. Carries the document the
     /// input came from, because the model's own refusal does not know it.
     Embed { path: String, error: EmbedError },
+    /// The embedder answered at a width other than the one it promises.
+    /// Refused at the write, because a narrow row would decode cleanly and
+    /// then score against a prefix of every query.
+    WrongWidth {
+        path: String,
+        promised: usize,
+        produced: usize,
+    },
     /// The sidecar file's own contents are wrong. Discarding and rebuilding
     /// the sidecar is the resolution — derived state is rebuildable by
     /// construction, and the wholesale rebuild is the permanent
@@ -40,7 +48,10 @@ impl EngineError {
     pub fn sidecar_damage(&self) -> Option<&str> {
         match self {
             EngineError::SidecarDamaged { what } => Some(what),
-            EngineError::Db(_) | EngineError::Store(_) | EngineError::Embed { .. } => None,
+            EngineError::Db(_)
+            | EngineError::Store(_)
+            | EngineError::Embed { .. }
+            | EngineError::WrongWidth { .. } => None,
         }
     }
 }
@@ -52,6 +63,17 @@ impl fmt::Display for EngineError {
             EngineError::Store(error) => write!(f, "the lane-1 store refused: {error}"),
             EngineError::Embed { path, error } => {
                 write!(f, "embedding `{path}` failed: {error}")
+            }
+            EngineError::WrongWidth {
+                path,
+                promised,
+                produced,
+            } => {
+                write!(
+                    f,
+                    "embedding `{path}` produced {produced} values and the model promises \
+                     {promised}"
+                )
             }
             EngineError::SidecarDamaged { what } => {
                 write!(f, "the sidecar is damaged: {what}")

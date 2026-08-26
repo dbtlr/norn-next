@@ -17,7 +17,9 @@ fn the_settled_sidecar_equals_a_from_zero_recompute() {
 
     write_document(&mut store, &document("docs/a.md", "hash-a1", "alpha\n"));
     write_document(&mut store, &document("docs/b.md", "hash-b1", "bravo\n"));
-    engine.drain(&mut store).expect("a drain mid-history");
+    engine
+        .drain(&mut store.feed_read())
+        .expect("a drain mid-history");
 
     write_document(
         &mut store,
@@ -25,7 +27,9 @@ fn the_settled_sidecar_equals_a_from_zero_recompute() {
     );
     write_document(&mut store, &document("docs/c.md", "hash-c1", "charlie\n"));
     record_death(&mut store, "docs/a.md");
-    engine.drain(&mut store).expect("a drain mid-history");
+    engine
+        .drain(&mut store.feed_read())
+        .expect("a drain mid-history");
 
     write_document(
         &mut store,
@@ -35,8 +39,10 @@ fn the_settled_sidecar_equals_a_from_zero_recompute() {
     write_document(&mut store, &document("docs/d.md", "hash-d1", "delta\n"));
 
     // Settle: drain until the reading is all-zero.
-    engine.drain(&mut store).expect("a drain");
-    let settled = engine.drain(&mut store).expect("the settling drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
+    let settled = engine
+        .drain(&mut store.feed_read())
+        .expect("the settling drain");
     assert!(settled.is_settled(), "{settled:?}");
 
     let held = engine.projection().expect("a projection");
@@ -60,7 +66,7 @@ fn the_bar_refutes_a_tampered_row() {
 
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
     write_document(&mut store, &document("docs/b.md", "hash-2", "bravo\n"));
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(
         engine.projection().expect("a projection"),
         recompute(&mut store, embedder.as_ref()),
@@ -86,10 +92,63 @@ fn the_bar_refutes_a_tampered_row() {
         norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
     }
 
-    let engine = scratch.engine(embedder.clone());
+    // The tampered values survive a further drain: the recorded input hash
+    // still matches the feed, so triage keeps the row and cannot self-heal
+    // it. The bar is what reports silent value corruption — nothing else
+    // does.
+    let mut engine = scratch.engine(embedder.clone());
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 0, "{report:?}");
     assert_ne!(
         engine.projection().expect("a projection"),
         recompute(&mut store, embedder.as_ref()),
         "a tampered value survives settle and the bar reports it"
+    );
+}
+
+/// A tampered *input hash* is the other refutation — and the one the drain
+/// can heal, because the recorded hash disagreeing with the feed is exactly
+/// the staleness test.
+#[test]
+fn the_bar_refutes_a_tampered_input_hash_and_a_drain_heals_it() {
+    let scratch = Scratch::new("refute-hash");
+    let mut store = scratch.store();
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder.clone());
+
+    write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
+    engine.drain(&mut store.feed_read()).expect("a drain");
+
+    drop(engine);
+    match norn_db::connect(&scratch.sidecar_path()).expect("connecting to the sidecar") {
+        norn_db::Attempt::Connected(connection) => {
+            let changed = connection
+                .execute(
+                    "UPDATE document_vectors SET input_hash = 'not-any-body' WHERE path = ?1",
+                    params!["docs/a.md"],
+                )
+                .expect("tampering with a recorded input");
+            assert_eq!(changed, 1);
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
+    }
+
+    let mut engine = scratch.engine(embedder.clone());
+    assert_ne!(
+        engine.projection().expect("a projection"),
+        recompute(&mut store, embedder.as_ref()),
+        "the bar reports the drifted input record"
+    );
+
+    // A consumed row is presented again only when the feed moves. When it
+    // is, the drifted hash is exactly what triage looks for, so the row
+    // re-embeds and the bar closes again.
+    write_document(&mut store, &document("docs/a.md", "hash-2", "alpha\n"));
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 1, "{report:?}");
+    assert_eq!(
+        engine.projection().expect("a projection"),
+        recompute(&mut store, embedder.as_ref()),
+        "the staleness key heals what the feed presents"
     );
 }

@@ -28,7 +28,7 @@ fn nearest_answers_in_a_total_order_under_a_bound() {
 
     let embedder = CountingEmbedder::new();
     let mut engine = scratch.engine(embedder);
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
 
     let neighbors = engine.nearest("alpha", 3).expect("an answer");
     assert_eq!(neighbors.len(), 3);
@@ -50,6 +50,78 @@ fn nearest_answers_in_a_total_order_under_a_bound() {
     assert_eq!(top[0], neighbors[0]);
 }
 
+/// Equal scores answer in path order: two documents with one body embed to
+/// one vector, and the tie is broken by the path, not by arrival order.
+#[test]
+fn equal_scores_answer_in_path_order() {
+    let scratch = Scratch::new("ties");
+    let mut store = scratch.store();
+    write_document(
+        &mut store,
+        &document("docs/twin-b.md", "hash-1", "same body\n"),
+    );
+    write_document(
+        &mut store,
+        &document("docs/twin-a.md", "hash-2", "same body\n"),
+    );
+
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    engine.drain(&mut store.feed_read()).expect("a drain");
+
+    let neighbors = engine.nearest("same", 2).expect("an answer");
+    assert_eq!(neighbors.len(), 2);
+    assert_eq!(
+        neighbors[0].score, neighbors[1].score,
+        "one body is one vector: {neighbors:?}"
+    );
+    assert_eq!(neighbors[0].path, "docs/twin-a.md");
+    assert_eq!(neighbors[1].path, "docs/twin-b.md");
+}
+
+/// A row under another model — placed out of band, since no open leaves one
+/// behind — is not the engine's to answer with or project.
+#[test]
+fn a_foreign_models_row_is_not_answered_with() {
+    let scratch = Scratch::new("foreign-row");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
+
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder);
+    engine.drain(&mut store.feed_read()).expect("a drain");
+    drop(engine);
+
+    match norn_db::connect(&scratch.sidecar_path()).expect("connecting to the sidecar") {
+        norn_db::Attempt::Connected(connection) => {
+            connection
+                .execute(
+                    "INSERT INTO document_vectors
+                         (path, model_id, model_version, input_hash, dimensions, embedding)
+                     VALUES ('docs/foreign.md', 'other-model', '9', 'hash-x', 1, zeroblob(4))",
+                    [],
+                )
+                .expect("planting a foreign row");
+        }
+        norn_db::Attempt::Unreadable { detail } => panic!("the sidecar is unreadable: {detail}"),
+    }
+
+    let engine = scratch.engine(CountingEmbedder::new());
+    let held: Vec<String> = engine
+        .projection()
+        .expect("a projection")
+        .into_iter()
+        .map(|row| row.path)
+        .collect();
+    assert_eq!(held, vec!["docs/a.md".to_string()]);
+    let answer = engine.nearest("alpha", 10).expect("an answer");
+    assert!(
+        answer
+            .iter()
+            .all(|neighbor| neighbor.path != "docs/foreign.md"),
+        "{answer:?}"
+    );
+}
+
 /// A sidecar written for one model is not adopted by another: the cursors
 /// are model-blind, so the open resolves a moved model by the
 /// wholesale-rebuild floor — fresh sidecar, full recompute, answers under
@@ -61,7 +133,7 @@ fn a_moved_model_rebuilds_the_sidecar_from_zero() {
     write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
 
     let mut engine = scratch.engine(CountingEmbedder::new());
-    engine.drain(&mut store).expect("a drain");
+    engine.drain(&mut store.feed_read()).expect("a drain");
     let before = engine.projection().expect("a projection");
     assert_eq!(before.len(), 1);
     drop(engine);
@@ -86,7 +158,7 @@ fn a_moved_model_rebuilds_the_sidecar_from_zero() {
         "nothing of the old model survives into the new sidecar"
     );
 
-    let report = engine.drain(&mut store).expect("a drain");
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
     assert_eq!(report.embedded, 1, "{report:?}");
     let after = engine.projection().expect("a projection");
     assert_eq!(after.len(), 1);

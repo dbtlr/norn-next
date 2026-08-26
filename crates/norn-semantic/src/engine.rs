@@ -6,7 +6,7 @@ use std::sync::Arc;
 use norn_db::Database;
 use norn_db::rusqlite::{OptionalExtension, params};
 use norn_embed::{Embedder, Model};
-use norn_store::{DocumentPath, FeedCursor, Store};
+use norn_store::{DocumentPath, FeedCursor, FeedRead};
 
 use crate::ddl;
 use crate::error::{self, EngineError};
@@ -23,8 +23,15 @@ const DRAIN_PAGE: usize = 256;
 /// consumes the store's change feed through consumer-owned cursors recorded
 /// in its own sidecar, embeds changed bodies through the embedder, retracts
 /// deaths, and answers vector-nearest over what it holds. It never touches
-/// vault files: every input is a committed lane-1 record (ADR 0021), and
-/// everything it derives is rebuildable from them.
+/// vault files: every input reaches it through [`FeedRead`], the store's
+/// read-only lane-2 surface, so a committed lane-1 record is the only thing
+/// it can consume and nothing it derives can enter the store.
+///
+/// **One engine writes one sidecar.** Nothing inside serializes two engines
+/// over one path: a second writer could interleave with the read-triage-
+/// commit sequence and land an older embedding over a newer one. The owner
+/// that composes engines holds one per sidecar, the same discipline the
+/// store states for its own requests.
 pub struct Engine {
     database: Database,
     embedder: Arc<dyn Embedder>,
@@ -38,12 +45,14 @@ pub struct Engine {
 /// work the same way.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DrainReport {
-    /// The recorded store epoch did not match, so the cursors were reset and
-    /// the feed rescanned from the start.
+    /// The store lifetime moved: the recorded epoch did not match at entry —
+    /// the cursors were reset and the feed rescanned — or the epoch moved
+    /// mid-drain, in which case this drain's reading is not a settled one
+    /// and the next drain reconciles.
     pub rescan: bool,
-    /// Sidecar rows removed by the rescan's reconcile: their paths no longer
-    /// stand in the store, and the store's own tombstones did not survive
-    /// into its new lifetime to say so.
+    /// Paths the rescan's reconcile removed: they no longer stand in the
+    /// store, and the store's own tombstones did not survive into its new
+    /// lifetime to say so.
     pub reconciled_away: u64,
     /// Documents whose body was embedded and written.
     pub embedded: u64,
@@ -58,7 +67,13 @@ pub struct DrainReport {
 }
 
 impl DrainReport {
-    /// Whether the drain found nothing to do — the settled state.
+    /// Whether the drain found nothing to do.
+    ///
+    /// A reading of this drain's work, not a proof of convergence: a
+    /// converged sidecar can still report work (a rescan re-triages every
+    /// row it kept), and quiescence holds only until the next write. What an
+    /// all-zero reading does say is that this drain observed one store
+    /// lifetime end to end and nothing in it was new.
     pub fn is_settled(&self) -> bool {
         *self == DrainReport::default()
     }
@@ -105,11 +120,10 @@ impl Engine {
         self.database.epoch()
     }
 
-    /// The model this engine embeds with. The sidecar records it: opening
-    /// under a different model rebuilds from zero — the migration floor —
-    /// and every projection and answer scopes to it, so the model columns in
-    /// the key stay honest even against rows an evolution may one day leave
-    /// behind.
+    /// The model this engine embeds with. The sidecar records it — opening
+    /// under a different model rebuilds from zero — and every projection and
+    /// answer scopes to it, so a row is never read under a model that did
+    /// not produce it.
     pub fn model(&self) -> &Model {
         self.embedder.model()
     }
@@ -148,41 +162,44 @@ impl Engine {
     ///    equals the recorded `input_hash` is current and costs no body read.
     ///    A changed one is fetched; a fetch that comes back at a different
     ///    generation (or gone) was superseded mid-drain and is deferred — the
-    ///    feed presents the successor at its own generation, so nothing is
-    ///    lost by not acting on the stale reading.
-    /// 3. **Tombstones after documents**, so within one drain a death is the
-    ///    last word on its path.
+    ///    feed presents the successor at its own strictly-higher generation,
+    ///    so nothing is lost by not acting on the stale reading.
+    /// 3. **Tombstones.** The two feeds are disjoint over stored paths at
+    ///    any snapshot, so the order between the loops carries no hazard; a
+    ///    death or rebirth landing between them lands at a generation a
+    ///    later page or the next drain presents.
     ///
     /// Every page commits its writes and its advanced cursor in one sidecar
     /// transaction: progress recorded is exactly progress written, and a
-    /// replayed page is an idempotent set of upserts and deletes.
-    pub fn drain(&mut self, store: &mut Store) -> Result<DrainReport, EngineError> {
+    /// replayed page is an idempotent set of upserts and deletes. The
+    /// guarantee that a hash is never written beside values it does not
+    /// describe is the drain's own — the generation check carries it even
+    /// against a writer interleaving through a store handle this borrow does
+    /// not cover.
+    pub fn drain(&mut self, feed: &mut FeedRead<'_>) -> Result<DrainReport, EngineError> {
         let mut report = DrainReport::default();
-        let store_epoch = store.epoch().to_string();
+        let store_epoch = feed.epoch().to_string();
         let recorded: Option<String> = self.get_meta(ddl::meta::OBSERVED_STORE_EPOCH)?;
         if recorded.as_deref() != Some(store_epoch.as_str()) {
             report.rescan = true;
-            report.reconciled_away = self.reconcile(store, &store_epoch)?;
+            report.reconciled_away = self.reconcile(feed, &store_epoch)?;
         }
 
         let mut cursor = self.read_cursor(ddl::meta::DOCUMENT_CURSOR)?;
         loop {
-            let page = store
-                .begin_request()
-                .changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
+            let page = feed.changed_documents_after(cursor.as_ref(), DRAIN_PAGE)?;
             let Some((last, _)) = page.last() else { break };
             let advanced = last.clone();
             let full = page.len() == DRAIN_PAGE;
 
             let mut writes: Vec<(String, String, Vec<u8>, usize)> = Vec::new();
-            let mut request = store.begin_request();
             for (_, document) in &page {
                 let current: Option<String> = self.row_input_hash(document.path.as_str())?;
                 if current.as_deref() == Some(document.body_hash.as_str()) {
                     report.skipped_current += 1;
                     continue;
                 }
-                let fetched = request.stored_facts(&document.path)?;
+                let fetched = feed.stored_facts(&document.path)?;
                 match fetched {
                     Some(facts) if facts.document.generation == document.generation => {
                         let embedding = self.embedder.embed(&facts.body).map_err(|error| {
@@ -191,6 +208,14 @@ impl Engine {
                                 error,
                             }
                         })?;
+                        let promised = self.embedder.dimensions().get();
+                        if embedding.dimensions() != promised {
+                            return Err(EngineError::WrongWidth {
+                                path: document.path.as_str().to_string(),
+                                promised,
+                                produced: embedding.dimensions(),
+                            });
+                        }
                         writes.push((
                             document.path.as_str().to_string(),
                             document.body_hash.clone(),
@@ -216,9 +241,7 @@ impl Engine {
 
         let mut cursor = self.read_cursor(ddl::meta::TOMBSTONE_CURSOR)?;
         loop {
-            let page = store
-                .begin_request()
-                .changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
+            let page = feed.changed_tombstones_after(cursor.as_ref(), DRAIN_PAGE)?;
             let Some((last, _)) = page.last() else { break };
             let advanced = last.clone();
             let full = page.len() == DRAIN_PAGE;
@@ -232,6 +255,15 @@ impl Engine {
             if !full {
                 break;
             }
+        }
+
+        // The lifetime is re-read at exit: a store discarded and rebuilt
+        // mid-drain restarts its generations below the cursors, so both
+        // loops read empty pages and the work counts above say nothing. The
+        // recorded epoch moves only inside `reconcile`, so the next drain
+        // reconciles; this flag keeps the reading from claiming settle.
+        if feed.epoch() != store_epoch {
+            report.rescan = true;
         }
 
         Ok(report)
@@ -273,10 +305,13 @@ impl Engine {
     /// The `limit` nearest paths to `text`, under this engine's model.
     ///
     /// The score is the dot product against the query's embedding, and the
-    /// order is total: score descending, then path ascending, so equal scores
-    /// answer the same way on every run. A scan of the model's rows is the
-    /// floor implementation — the index that makes this sublinear is a
-    /// storage mechanic that arrives with the need that proves it.
+    /// order is total: score descending under `total_cmp` — which ranks a
+    /// non-finite score a model produced above every finite one, and answers
+    /// it deterministically rather than hiding it — then path ascending, so
+    /// equal scores answer the same way on every run. A scan of the model's
+    /// rows is the floor implementation — the index that makes this
+    /// sublinear is a storage mechanic that arrives with the need that
+    /// proves it.
     pub fn nearest(&self, text: &str, limit: usize) -> Result<Vec<Neighbor>, EngineError> {
         let query = self
             .embedder
@@ -304,8 +339,12 @@ impl Engine {
 
     /// Remove rows whose paths the store no longer holds, reset both cursors,
     /// and record `store_epoch` — the one-transaction answer to an epoch that
-    /// moved.
-    fn reconcile(&mut self, store: &mut Store, store_epoch: &str) -> Result<u64, EngineError> {
+    /// moved. Counts the paths removed, the unit retraction counts in.
+    fn reconcile(
+        &mut self,
+        feed: &mut FeedRead<'_>,
+        store_epoch: &str,
+    ) -> Result<u64, EngineError> {
         let held: Vec<String> = {
             let connection = self.database.connection();
             let mut statement = connection
@@ -319,13 +358,12 @@ impl Engine {
         };
 
         let mut dead: Vec<String> = Vec::new();
-        let request = store.begin_request();
         for path in held {
             let parsed =
                 DocumentPath::new(&path).map_err(|problem| EngineError::SidecarDamaged {
                     what: format!("`{path}` is held and is not a document path: {problem}"),
                 })?;
-            if request.stored_document(&parsed)?.is_none() {
+            if feed.stored_document(&parsed)?.is_none() {
                 dead.push(path);
             }
         }
@@ -333,15 +371,13 @@ impl Engine {
         let transaction = self
             .database
             .immediate_transaction("reconciling the sidecar")?;
-        let mut removed = 0_u64;
         for path in &dead {
-            removed += transaction
+            transaction
                 .execute(
                     "DELETE FROM document_vectors WHERE path = ?1",
                     params![path],
                 )
-                .map_err(|error| error::sql("reconciling a dead path away", error))?
-                as u64;
+                .map_err(|error| error::sql("reconciling a dead path away", error))?;
         }
         norn_db::meta::put_meta(&transaction, ddl::meta::DOCUMENT_CURSOR, "")?;
         norn_db::meta::put_meta(&transaction, ddl::meta::TOMBSTONE_CURSOR, "")?;
@@ -349,7 +385,7 @@ impl Engine {
         transaction
             .commit()
             .map_err(|error| error::sql("committing the reconcile", error))?;
-        Ok(removed)
+        Ok(dead.len() as u64)
     }
 
     /// One page's writes and its advanced cursor, in one transaction.
@@ -507,9 +543,10 @@ fn decode(blob: &[u8], dimensions: i64) -> Result<Vec<f32>, EngineError> {
         .collect())
 }
 
-/// The dot product, accumulated in declaration order. Widths are equal by
-/// construction — every row and every query come from one embedder — and a
-/// zip stops at the shorter side rather than judging it.
+/// The dot product, accumulated in declaration order. Widths are equal
+/// because the drain's write path holds every embedding to the embedder's
+/// promised width; the zip stops at the shorter side rather than judging it
+/// a second time.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }

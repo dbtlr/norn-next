@@ -34,8 +34,20 @@
 //!
 //! What this crate derives answers queries and nothing else. No edge from
 //! here reaches findings, plans, or repair — the crates that decide those
-//! cannot name this one — so inferred state can be wrong, stale, or
-//! model-versioned without any of that becoming a correctness input.
+//! cannot name this one — and the engine's one store surface is
+//! [`norn_store::FeedRead`], a handle with no write verb, so inferred state
+//! cannot enter the tables the correctness path trusts. Inferred state can
+//! therefore be wrong, stale, or model-versioned without any of that
+//! becoming a correctness input.
+//!
+//! # Who calls this
+//!
+//! The consuming layer is the host's composition: `norn-host` registers the
+//! engine, delivers its config section, relays the wake, and exposes
+//! vector-nearest as a capability. That wiring is the crate-map edge
+//! `norn-host → norn-semantic`, and until it lands no product code reaches
+//! this crate — the suites under `tests/` are its whole call graph. An
+//! unreached path here routes to that layer, not to removal.
 //!
 //! # Where to start
 //!

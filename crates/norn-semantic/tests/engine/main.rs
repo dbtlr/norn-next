@@ -5,5 +5,6 @@ mod common;
 
 mod convergence;
 mod drain;
+mod errors;
 mod lifecycle;
 mod nearest;

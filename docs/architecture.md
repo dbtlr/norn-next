@@ -807,10 +807,10 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
      `norn-store`'s own API, which exposes what they need, so testkit opens no connection
      itself.
    - **Among product crates, `norn-host` and `norn-semantic` alone link `norn-store`** — the
-     host as the lane-1 writer, the engine as a feed reader — and the engine is itself
-     composed only by the host, so in the shipped artifact everything that reaches the
-     substrate reaches it under the host's composition. `norn-testkit` also depends on
-     `norn-store`, but it never ships.
+     host as the lane-1 writer, the engine as a feed reader through the read-only feed-read
+     handle. Nothing links `norn-semantic` today; its composer is the `norn-host →
+     norn-semantic` edge, which arrives with the host wiring. `norn-testkit` also depends
+     on `norn-store`, but it never ships.
    - The host is likewise the plan executor: one applier, per invariant 4.
 3. **`norn-wire` has zero workspace dependencies and zero effects.** Nothing crosses the
    client/host seam that is not a wire type — no untyped JSON value, no JSON-in-a-string.
@@ -862,12 +862,14 @@ authoritative mapping of invariant to mechanism is the harness's code, not this 
     own protocol
     needs; [the file-mechanics split](#two-spellings-of-the-file-mechanics-and-the-discipline-both-keep)
     records what diverges between the two spellings and what must stay aligned across them.
-12. **`norn-embed` is blind.** No `embed → store` and no `embed → fs` edge exists; vector
-    state lives in a lane-2 engine's sidecar database, never in the lane-1 store
-    ([ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)). Semantic search
-    stays a query surface and never a
-    correctness input, because the inference crate structurally cannot reach findings or
-    plans.
+12. **Inference cannot reach findings or plans.** No `embed → store` and no `embed → fs`
+    edge exists; vector state lives in a lane-2 engine's sidecar database, never in the
+    lane-1 store ([ADR 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)). The
+    engine that holds inferred state needs a store edge to read the feed, so an absent edge
+    cannot carry that half: `norn-semantic` reads lane-1 only through `norn-store`'s
+    feed-read handle, a surface with no write verb, and naming any wider store surface in
+    that crate is the act review refuses. Semantic search therefore stays a query surface
+    and never a correctness input.
 13. **The orchestrator is protocol-blind.** `norn-host` depends on no protocol or serving
     crate; requests reach it only as `norn-wire` types, and every refusal about a vault's
     derived state leaves as `norn-wire`'s one envelope. The host spells no reason code of its

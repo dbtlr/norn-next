@@ -313,12 +313,24 @@ pub const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         number: 12,
-        claim: "norn-embed is blind: no embed-to-store and no embed-to-fs edge, so inference \
-                cannot reach findings or plans",
-        mechanisms: &[Mechanism::Edge(EdgeClaim::Absent(&[
-            ("norn-embed", "norn-store"),
-            ("norn-embed", "norn-fs"),
-        ]))],
+        claim: "inference cannot reach findings or plans: norn-embed has no store or fs edge, \
+                and the engine holding inferred state reads lane-1 only through the feed-read \
+                handle, a surface with no write verb",
+        mechanisms: &[
+            Mechanism::Edge(EdgeClaim::Absent(&[
+                ("norn-embed", "norn-store"),
+                ("norn-embed", "norn-fs"),
+            ])),
+            // The engine's store edge must exist for reads, so no absent
+            // edge can carry this half. The partition is the FeedRead type:
+            // the engine's source names no other store surface, and naming
+            // `Request` or `Store` in norn-semantic is the act a review
+            // refuses.
+            Mechanism::Review(
+                "whether norn-semantic names any norn-store surface beyond FeedRead and the \
+                 types its methods return",
+            ),
+        ],
     },
     Invariant {
         number: 13,
