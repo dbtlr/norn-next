@@ -73,7 +73,8 @@ impl DrainReport {
     /// drain reads one store lifetime, because the handle's epoch is pinned
     /// at its open and the feed borrow is exclusive; a store file replaced
     /// underneath a live handle is the maintainer singleton's to prevent
-    /// (ADR 0012), not this reading's to detect.
+    /// (ADR 0016, one maintainer per derived store), not this reading's to
+    /// detect.
     pub fn is_settled(&self) -> bool {
         *self == DrainReport::default()
     }

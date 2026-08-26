@@ -8,8 +8,9 @@
 //! its subject — they arrange lane-1 state as harness, the same carve-out
 //! `norn-testkit` holds.
 
-/// The crate's source, whole. A new module joins this list or the build
-/// breaks the include below when the file moves.
+/// The crate's source, whole. A moved file breaks its include; an added
+/// module is caught by the coverage gate below, which reads `lib.rs`'s own
+/// `mod` lines.
 const SOURCES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../../src/lib.rs")),
     ("src/ddl.rs", include_str!("../../src/ddl.rs")),
@@ -32,6 +33,30 @@ const FORBIDDEN: &[&str] = &[
     "discard_findings",
     "IncrementProvenance",
 ];
+
+/// Every module `lib.rs` declares is in [`SOURCES`], so a new file cannot
+/// slip beneath the two gates above.
+#[test]
+fn the_gate_reads_every_module_the_crate_declares() {
+    let (_, lib) = SOURCES
+        .iter()
+        .find(|(file, _)| *file == "src/lib.rs")
+        .expect("lib.rs is a source");
+    for line in lib.lines() {
+        let Some(module) = line
+            .trim()
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        else {
+            continue;
+        };
+        let expected = format!("src/{module}.rs");
+        assert!(
+            SOURCES.iter().any(|(file, _)| *file == expected),
+            "`{expected}` is declared and the firewall gate does not read it"
+        );
+    }
+}
 
 #[test]
 fn the_engines_source_names_no_store_surface_beyond_the_feed_read_handle() {
@@ -57,13 +82,18 @@ fn the_engines_store_imports_are_the_feed_read_set() {
     let allowed = ["DocumentPath", "FeedCursor", "FeedRead", "StoreError"];
     for (file, source) in SOURCES {
         for line in source.lines() {
-            let Some(list) = line
-                .trim()
-                .strip_prefix("use norn_store::")
-                .map(|rest| rest.trim_matches(|c| c == '{' || c == '}' || c == ';'))
-            else {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("use norn_store::") else {
                 continue;
             };
+            // A wrapped import would put its items on lines this prefix
+            // match never sees, so a use that does not close on its own
+            // line is refused outright rather than silently passed.
+            assert!(
+                trimmed.ends_with(';'),
+                "{file} wraps a norn-store use across lines, which this gate cannot read"
+            );
+            let list = rest.trim_matches(|c| c == '{' || c == '}' || c == ';');
             for item in list.split(',') {
                 let item = item.trim();
                 assert!(
