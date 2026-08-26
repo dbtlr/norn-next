@@ -86,7 +86,7 @@ pub use facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, DocumentFacts, FeedDocument, FeedTombstone,
     FindingFacts, HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport,
     Provenance, SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder,
-    StoredTombstone, TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    StoredTombstone, TagFact, TagSource, VaultSchemaPin,
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;

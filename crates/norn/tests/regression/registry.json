@@ -820,10 +820,9 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the capabilities are relied on now: crates/norn-store/src/ddl/fts.rs leans on the full-text index and crates/norn-store/src/ddl/vectors.rs on the vector table. The capability this class was mined from is not one of them — crates/norn-store/src/json.rs projects a value tree to canonical JSON of its own rather than through the engine's JSON aggregation — and no declaration records that as the alternative the property's second arm asks for. The probe has no home either: crates/norn-host/tests/counter_gate.rs reaches the index over a generated tree as a reader inside a counter bar, not as a probe of the capability at corpus scale.",
+        "reason": "the capability is relied on now: crates/norn-store/src/ddl/fts.rs leans on the full-text index. The capability this class was mined from is not it — crates/norn-store/src/json.rs projects a value tree to canonical JSON of its own rather than through the engine's JSON aggregation — and no declaration records that as the alternative the property's second arm asks for. The probe has no home either: crates/norn-host/tests/counter_gate.rs reaches the index over a generated tree as a reader inside a counter bar, not as a probe of the capability at corpus scale.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/fts.rs" },
-          { "present": "crates/norn-store/src/ddl/vectors.rs" },
           { "present": "crates/norn-store/src/json.rs" },
           { "present": "crates/norn-host/tests/counter_gate.rs" }
         ]

@@ -83,7 +83,6 @@ pub(crate) enum Counter {
     TombstonesRecorded,
     FindingsWritten,
     FindingsDiscarded,
-    VectorsWritten,
     VaultSchemaPins,
 }
 
@@ -101,7 +100,6 @@ impl Counter {
         Counter::TombstonesRecorded,
         Counter::FindingsWritten,
         Counter::FindingsDiscarded,
-        Counter::VectorsWritten,
         Counter::VaultSchemaPins,
     ];
 
@@ -120,7 +118,6 @@ impl Counter {
             Counter::TombstonesRecorded => "tombstones_recorded",
             Counter::FindingsWritten => "findings_written",
             Counter::FindingsDiscarded => "findings_discarded",
-            Counter::VectorsWritten => "vectors_written",
             Counter::VaultSchemaPins => "vault_schema_pins",
         }
     }

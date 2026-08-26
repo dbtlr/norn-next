@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, DerivationCounters, DocumentFacts, DocumentPath,
     FindingFacts, FrontmatterValue, HeadingFact, IncrementOutcome, IncrementProvenance, LinkFact,
-    LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, VectorFacts, suffix_probe,
+    LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
 use norn_wire::{FindingKind, Severity};
@@ -329,16 +329,5 @@ pub fn violation(at: &str) -> FindingFacts {
         candidates_total: 0,
         message: "the `status` field is required".to_string(),
         detail: Some(r#"{"field":"status"}"#.to_string()),
-    }
-}
-
-pub fn vector(at: &str, hash: &str) -> VectorFacts {
-    VectorFacts {
-        path: path(at),
-        model_id: "stub".to_string(),
-        model_version: "1".to_string(),
-        content_hash: hash.to_string(),
-        dimensions: 4,
-        embedding: vec![0, 1, 2, 3, 4, 5, 6, 7],
     }
 }

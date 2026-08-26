@@ -485,19 +485,6 @@ pub struct IndexedTerm {
     pub occurrences: u64,
 }
 
-/// One document's embedding under one model.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VectorFacts {
-    pub path: DocumentPath,
-    pub model_id: String,
-    pub model_version: String,
-    /// The content hash the embedding was computed over, which is what makes a
-    /// stale vector findable.
-    pub content_hash: String,
-    pub dimensions: u32,
-    pub embedding: Vec<u8>,
-}
-
 /// The pinned vault-schema projection.
 ///
 /// Derived state: the file the bytes came from is the sole authority, and this
@@ -551,7 +538,6 @@ pub struct PillarReport {
     pub tombstones: u64,
     pub findings: u64,
     pub finding_candidates: u64,
-    pub vectors: u64,
     /// Rows in the migration ledger. Zero through the pre-release build, where
     /// a store schema change is a rebuild rather than a migration.
     pub migrations_applied: u64,

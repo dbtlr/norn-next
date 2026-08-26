@@ -1162,7 +1162,7 @@ fn a_composed_changeset_recomputes_nothing_it_was_handed() {
             ("tombstones_recorded", 1),
         ]
     );
-    for minted in ["findings_written", "vectors_written", "vault_schema_pins"] {
+    for minted in ["findings_written", "vault_schema_pins"] {
         assert_eq!(
             composed.get(minted),
             0,

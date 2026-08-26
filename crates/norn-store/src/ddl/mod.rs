@@ -59,7 +59,6 @@ pub(crate) mod fts;
 pub(crate) mod meta;
 pub(crate) mod migrations;
 pub(crate) mod tombstones;
-pub(crate) mod vectors;
 
 /// The store schema version, pinned at 1 through the pre-release build.
 ///
@@ -73,8 +72,8 @@ pub const STORE_SCHEMA_VERSION: i64 = 1;
 /// The areas, in execution order. `meta` is first, and it is the substrate's
 /// table rather than this tree's, because it is what an open reads to decide
 /// whether the rest is trustworthy; `documents` precedes everything that
-/// references it; the pillars come last because two of them (full text,
-/// vectors) are defined over rows the earlier areas own.
+/// references it; the pillars come last because one of them (full text) is
+/// defined over rows the earlier areas own.
 ///
 /// An area is a function rather than a slice of literals because a statement
 /// may carry a bound the Rust API also states — `finding_candidates`'s rank
@@ -86,7 +85,6 @@ const AREAS: &[fn() -> Vec<String>] = &[
     facts::statements,
     tombstones::statements,
     fts::statements,
-    vectors::statements,
     findings::statements,
     migrations::statements,
 ];
