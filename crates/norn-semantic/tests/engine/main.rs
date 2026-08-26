@@ -6,5 +6,6 @@ mod common;
 mod convergence;
 mod drain;
 mod errors;
+mod firewall;
 mod lifecycle;
 mod nearest;

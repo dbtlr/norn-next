@@ -94,22 +94,41 @@ impl Embedder for CountingEmbedder {
 }
 
 /// The stub embedder with a one-shot side effect: the first `embed` call
-/// opens its own handle on the store and applies a changeset, so a drain in
-/// progress meets a store that moved between its page read and a later
-/// fetch — the reading the deferred arm answers.
+/// opens its own handle on the store and applies the given change, so a
+/// drain in progress meets a store that moved between its page read and a
+/// later fetch — the readings the deferred arm answers.
 pub struct InterferingEmbedder {
     inner: StubEmbedder,
     store_path: PathBuf,
-    interference: DocumentFacts,
+    effect: Box<dyn Fn(&mut Store) + Send + Sync>,
     fired: std::sync::atomic::AtomicBool,
 }
 
 impl InterferingEmbedder {
-    pub fn new(store_path: PathBuf, interference: DocumentFacts) -> Arc<Self> {
+    /// An embedder whose first call rewrites `interference` behind the
+    /// drain's back.
+    pub fn rewriting(store_path: PathBuf, interference: DocumentFacts) -> Arc<Self> {
+        Self::with_effect(
+            store_path,
+            Box::new(move |store| write_document(store, &interference)),
+        )
+    }
+
+    /// An embedder whose first call records the death of `at` behind the
+    /// drain's back.
+    pub fn killing(store_path: PathBuf, at: &str) -> Arc<Self> {
+        let at = at.to_string();
+        Self::with_effect(store_path, Box::new(move |store| record_death(store, &at)))
+    }
+
+    fn with_effect(
+        store_path: PathBuf,
+        effect: Box<dyn Fn(&mut Store) + Send + Sync>,
+    ) -> Arc<Self> {
         Arc::new(InterferingEmbedder {
             inner: StubEmbedder::new(),
             store_path,
-            interference,
+            effect,
             fired: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -127,7 +146,7 @@ impl Embedder for InterferingEmbedder {
     fn embed(&self, text: &str) -> Result<Embedding, EmbedError> {
         if !self.fired.swap(true, Ordering::Relaxed) {
             let mut store = Store::open(&self.store_path).expect("a second handle on the store");
-            write_document(&mut store, &self.interference);
+            (self.effect)(&mut store);
         }
         self.inner.embed(text)
     }

@@ -45,10 +45,8 @@ pub struct Engine {
 /// work the same way.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DrainReport {
-    /// The store lifetime moved: the recorded epoch did not match at entry —
-    /// the cursors were reset and the feed rescanned — or the epoch moved
-    /// mid-drain, in which case this drain's reading is not a settled one
-    /// and the next drain reconciles.
+    /// The recorded store epoch did not match at entry, so the cursors were
+    /// reset and the feed rescanned from the start.
     pub rescan: bool,
     /// Paths the rescan's reconcile removed: they no longer stand in the
     /// store, and the store's own tombstones did not survive into its new
@@ -71,9 +69,11 @@ impl DrainReport {
     ///
     /// A reading of this drain's work, not a proof of convergence: a
     /// converged sidecar can still report work (a rescan re-triages every
-    /// row it kept), and quiescence holds only until the next write. What an
-    /// all-zero reading does say is that this drain observed one store
-    /// lifetime end to end and nothing in it was new.
+    /// row it kept), and quiescence holds only until the next write. The
+    /// drain reads one store lifetime, because the handle's epoch is pinned
+    /// at its open and the feed borrow is exclusive; a store file replaced
+    /// underneath a live handle is the maintainer singleton's to prevent
+    /// (ADR 0012), not this reading's to detect.
     pub fn is_settled(&self) -> bool {
         *self == DrainReport::default()
     }
@@ -257,15 +257,6 @@ impl Engine {
             }
         }
 
-        // The lifetime is re-read at exit: a store discarded and rebuilt
-        // mid-drain restarts its generations below the cursors, so both
-        // loops read empty pages and the work counts above say nothing. The
-        // recorded epoch moves only inside `reconcile`, so the next drain
-        // reconciles; this flag keeps the reading from claiming settle.
-        if feed.epoch() != store_epoch {
-            report.rescan = true;
-        }
-
         Ok(report)
     }
 
@@ -306,12 +297,12 @@ impl Engine {
     ///
     /// The score is the dot product against the query's embedding, and the
     /// order is total: score descending under `total_cmp` — which ranks a
-    /// non-finite score a model produced above every finite one, and answers
-    /// it deterministically rather than hiding it — then path ascending, so
-    /// equal scores answer the same way on every run. A scan of the model's
-    /// rows is the floor implementation — the index that makes this
-    /// sublinear is a storage mechanic that arrives with the need that
-    /// proves it.
+    /// non-finite score a model produced by its sign, a positive one above
+    /// every finite score and a negative one below, deterministically rather
+    /// than hidden — then path ascending, so equal scores answer the same
+    /// way on every run. A scan of the model's rows is the floor
+    /// implementation — the index that makes this sublinear is a storage
+    /// mechanic that arrives with the need that proves it.
     pub fn nearest(&self, text: &str, limit: usize) -> Result<Vec<Neighbor>, EngineError> {
         let query = self
             .embedder
@@ -320,6 +311,14 @@ impl Engine {
                 path: "the query".to_string(),
                 error,
             })?;
+        let promised = self.embedder.dimensions().get();
+        if query.dimensions() != promised {
+            return Err(EngineError::WrongWidth {
+                path: "the query".to_string(),
+                promised,
+                produced: query.dimensions(),
+            });
+        }
         let mut scored: Vec<Neighbor> = self
             .projection()?
             .into_iter()
@@ -544,9 +543,9 @@ fn decode(blob: &[u8], dimensions: i64) -> Result<Vec<f32>, EngineError> {
 }
 
 /// The dot product, accumulated in declaration order. Widths are equal
-/// because the drain's write path holds every embedding to the embedder's
-/// promised width; the zip stops at the shorter side rather than judging it
-/// a second time.
+/// because both operands are held to the embedder's promised width — every
+/// row at the drain's write, the query at its embed; the zip stops at the
+/// shorter side rather than judging it a second time.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }

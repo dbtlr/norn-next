@@ -284,7 +284,7 @@ fn a_row_superseded_mid_drain_is_deferred_and_converges() {
 
     // Embedding a.md rewrites b.md through the embedder's own store handle,
     // after the page holding both was already read.
-    let embedder = InterferingEmbedder::new(
+    let embedder = InterferingEmbedder::rewriting(
         scratch.store_path(),
         document("docs/b.md", "hash-b2", "bravo rewritten\n"),
     );
@@ -301,5 +301,51 @@ fn a_row_superseded_mid_drain_is_deferred_and_converges() {
         engine.projection().expect("a projection"),
         recompute(&mut store, embedder.as_ref()),
         "the deferral converged"
+    );
+}
+
+/// The deferred arm's other half: the fetch comes back empty because the
+/// document died mid-drain. Its successor is a tombstone at a generation
+/// past the tombstone cursor, and the same drain's second loop retracts the
+/// row the path holds from an earlier drain.
+#[test]
+fn a_death_mid_drain_defers_and_the_same_drain_retracts_it() {
+    let scratch = Scratch::new("mid-drain-death");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-a1", "alpha\n"));
+    write_document(&mut store, &document("docs/b.md", "hash-b1", "bravo\n"));
+
+    let mut engine = scratch.engine(CountingEmbedder::new());
+    engine
+        .drain(&mut store.feed_read())
+        .expect("the first drain");
+    drop(engine);
+
+    write_document(
+        &mut store,
+        &document("docs/a.md", "hash-a2", "alpha edited\n"),
+    );
+    write_document(
+        &mut store,
+        &document("docs/b.md", "hash-b2", "bravo edited\n"),
+    );
+
+    // Embedding the edited a.md kills b.md through the embedder's own store
+    // handle, after the page holding both edits was already read. Same
+    // model, so the reopened engine adopts the sidecar and its cursors.
+    let embedder = InterferingEmbedder::killing(scratch.store_path(), "docs/b.md");
+    let mut engine = scratch.engine(embedder.clone());
+    let report = engine.drain(&mut store.feed_read()).expect("a drain");
+    assert_eq!(report.embedded, 1, "{report:?}");
+    assert_eq!(report.deferred, 1, "{report:?}");
+    assert_eq!(
+        report.retracted, 1,
+        "the death's tombstone stands past the tombstone cursor, so this \
+         same drain consumes it: {report:?}"
+    );
+    assert_eq!(
+        engine.projection().expect("a projection"),
+        recompute(&mut store, embedder.as_ref()),
+        "the dropped reading converged as a retraction"
     );
 }

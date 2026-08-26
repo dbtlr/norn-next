@@ -60,6 +60,29 @@ fn an_off_width_embedding_is_refused() {
     assert_eq!(engine.projection().expect("a projection"), Vec::new());
 }
 
+/// A narrow *query* is refused the same way a narrow row is: an off-width
+/// operand on either side would score prefixes.
+#[test]
+fn an_off_width_query_is_refused() {
+    let scratch = Scratch::new("narrow-query");
+    let mut store = scratch.store();
+    write_document(&mut store, &document("docs/a.md", "hash-1", "alpha\n"));
+
+    let embedder = CountingEmbedder::new();
+    let mut engine = scratch.engine(embedder);
+    engine.drain(&mut store.feed_read()).expect("a drain");
+    drop(engine);
+
+    // Same model identity, narrow answers: the sidecar is adopted, and the
+    // narrowness surfaces at the query rather than at open.
+    let engine = scratch.engine(NarrowEmbedder::new());
+    let error = engine.nearest("alpha", 1).expect_err("a narrow query");
+    let EngineError::WrongWidth { path, .. } = &error else {
+        panic!("the narrow query was not refused as one: {error:?}");
+    };
+    assert_eq!(path, "the query");
+}
+
 /// A corrupted recorded cursor is a damaged sidecar: the refusal says so
 /// through [`EngineError::sidecar_damage`], and discarding recovers — the
 /// rebuilt sidecar re-derives everything from the feed.

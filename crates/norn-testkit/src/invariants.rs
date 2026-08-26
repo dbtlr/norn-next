@@ -325,10 +325,13 @@ pub const INVARIANTS: &[Invariant] = &[
             // edge can carry this half. The partition is the FeedRead type:
             // the engine's source names no other store surface, and naming
             // `Request` or `Store` in norn-semantic is the act a review
-            // refuses.
+            // refuses. The engine's own suite mechanizes the check — a
+            // source gate over exactly those names — so the review confirms
+            // a gate rather than remembering a rule.
             Mechanism::Review(
-                "whether norn-semantic names any norn-store surface beyond FeedRead and the \
-                 types its methods return",
+                "whether norn-semantic's source (its suites arrange lane-1 state as harness, \
+                 like the testkit) names any norn-store surface beyond FeedRead and the types \
+                 its methods return",
             ),
         ],
     },
