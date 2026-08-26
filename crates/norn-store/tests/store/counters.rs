@@ -11,7 +11,7 @@
 //! `norn-testkit` owns the assertions over them.
 
 use crate::common::{
-    Scratch, document, document_with_every_fact, path, record_death, snapshot, vector, violation,
+    Scratch, document, document_with_every_fact, path, record_death, snapshot, violation,
     write_document,
 };
 use norn_store::Provenance;
@@ -131,9 +131,6 @@ fn a_request_that_only_reads_finishes_at_zero() {
     warming
         .record_finding(&violation(subject.as_str()))
         .expect("recording a finding");
-    warming
-        .store_vector(&vector(subject.as_str(), "hash-1"))
-        .expect("storing a vector");
     assert!(!warming.finish().is_all_zero());
 
     let mut warm = store.begin_request();

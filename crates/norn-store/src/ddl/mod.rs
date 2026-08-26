@@ -37,15 +37,16 @@
 //! question the vault schema asks, so a finding derived under one schema says
 //! nothing under another.
 //!
-//! # Foreign keys are the wholesale-replacement mechanism
+//! # Foreign keys are the death-cascade mechanism
 //!
 //! A **parse-fact** row exists only as long as the document it was read from, so
-//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`, and so
-//! does a vector. Two operations rely on it: a hard delete removes the document
-//! row and the cascade takes everything derived from it, and a re-derivation
-//! replaces one document's fact rows wholesale. `PRAGMA foreign_keys` is off by
-//! default in SQLite and is turned on per connection, which is why the store
-//! opens every connection through one place.
+//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. One
+//! operation relies on it: a hard delete removes the document row and the
+//! cascade takes everything derived from it. A re-derivation replaces one
+//! document's fact rows through explicit per-table deletes instead — the row
+//! itself is updated in place, so the cascade never fires for one. `PRAGMA
+//! foreign_keys` is off by default in SQLite and is turned on per connection,
+//! which is why the store opens every connection through one place.
 //!
 //! `findings` is deliberately outside that: a finding is keyed by path and class
 //! and outlives its subject, so no document delete reaches it and its lifecycle is
@@ -59,7 +60,6 @@ pub(crate) mod fts;
 pub(crate) mod meta;
 pub(crate) mod migrations;
 pub(crate) mod tombstones;
-pub(crate) mod vectors;
 
 /// The store schema version, pinned at 1 through the pre-release build.
 ///
@@ -73,8 +73,8 @@ pub const STORE_SCHEMA_VERSION: i64 = 1;
 /// The areas, in execution order. `meta` is first, and it is the substrate's
 /// table rather than this tree's, because it is what an open reads to decide
 /// whether the rest is trustworthy; `documents` precedes everything that
-/// references it; the pillars come last because two of them (full text,
-/// vectors) are defined over rows the earlier areas own.
+/// references it; the pillars come last because one of them (full text) is
+/// defined over rows the earlier areas own.
 ///
 /// An area is a function rather than a slice of literals because a statement
 /// may carry a bound the Rust API also states — `finding_candidates`'s rank
@@ -86,7 +86,6 @@ const AREAS: &[fn() -> Vec<String>] = &[
     facts::statements,
     tombstones::statements,
     fts::statements,
-    vectors::statements,
     findings::statements,
     migrations::statements,
 ];

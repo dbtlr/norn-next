@@ -1,6 +1,6 @@
 [package]
 name = "norn-store"
-description = "An SDK for talking to SQL — the store schema, the DDL fingerprint, the four pillars and the database-side heal rung"
+description = "An SDK for talking to SQL — the store schema, the DDL fingerprint, the three pillars and the database-side heal rung"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

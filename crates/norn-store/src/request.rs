@@ -12,7 +12,7 @@
 //! changeset lands whole or not at all** — that entry point states the shape of
 //! the guarantee in full. Every other write here is whole on its own: a finding
 //! and its candidate and class rows, a schema pin and the discard the new key
-//! implies, a vector. So a request that performed three acts and then failed has
+//! implies. So a request that performed three acts and then failed has
 //! three whole acts at rest, and what a request never was is a way to group them
 //! into one.
 //!
@@ -24,8 +24,8 @@
 //! correct and the only shape in which a fact row's ordinal means what it says.
 //!
 //! **The document row keeps its identity across a re-derivation.** It is updated
-//! rather than replaced, which is what lets a vector reference a document that
-//! has been re-read since.
+//! rather than replaced, so deleting a `documents` row keeps exactly one
+//! meaning — the document died — and the cascade fires only for a death.
 //!
 //! What is *not* here is retention: when a tombstone has outlived the disorder
 //! it was recorded to survive is a policy over generations, and nothing in this
@@ -76,7 +76,7 @@ use crate::facts::{
     BlockFact, CANDIDATE_HEAD, CandidateFact, FeedDocument, FeedTombstone, FindingFacts,
     HeadingFact, IndexedTerm, Invalidation, LinkFact, LinkFamily, PillarReport, Provenance,
     SchemaPin, Span, StoredDocument, StoredFacts, StoredFinding, StoredPathOrder, StoredTombstone,
-    TagFact, TagSource, VaultSchemaPin, VectorFacts,
+    TagFact, TagSource, VaultSchemaPin,
 };
 use crate::increment::{self, Change, IncrementOutcome, IncrementProvenance};
 use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
@@ -487,59 +487,6 @@ impl<'a> Request<'a> {
         Ok(Invalidation {
             findings_discarded: discarded,
         })
-    }
-
-    /// Store one document's embedding under one model.
-    ///
-    /// An embedding for a `(document, model, version)` that already has one
-    /// replaces it: a vector is a pure function of its inputs, so a second
-    /// answer for the same inputs is the same answer recomputed.
-    pub fn store_vector(&mut self, vector: &VectorFacts) -> Result<(), StoreError> {
-        let transaction = self
-            .store
-            .database
-            .immediate_transaction("opening the vector transaction")?;
-        let generation = norn_db::meta::next_generation(&transaction)?;
-        let document: Option<i64> = transaction
-            .query_row(
-                "SELECT id FROM documents WHERE path = ?1",
-                params![vector.path.as_str()],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error::sql("reading a document row", error))?;
-        let Some(document) = document else {
-            return Err(StoreError::UnknownDocument {
-                path: vector.path.as_str().to_string(),
-            });
-        };
-        transaction
-            .execute(
-                "INSERT INTO document_vectors (
-                     document, model_id, model_version, content_hash, dimensions, embedding,
-                     generation
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(document, model_id, model_version) DO UPDATE SET
-                     content_hash = excluded.content_hash,
-                     dimensions   = excluded.dimensions,
-                     embedding    = excluded.embedding,
-                     generation   = excluded.generation",
-                params![
-                    document,
-                    vector.model_id,
-                    vector.model_version,
-                    vector.content_hash,
-                    vector.dimensions,
-                    vector.embedding,
-                    generation,
-                ],
-            )
-            .map_err(|error| error::sql("writing a vector", error))?;
-        transaction
-            .commit()
-            .map_err(|error| error::sql("committing a vector", error))?;
-        self.counters.add(Counter::VectorsWritten, 1);
-        Ok(())
     }
 
     /// Pin the vault schema's projection — the bytes, their fingerprint, and the
@@ -1188,7 +1135,6 @@ impl<'a> Request<'a> {
             tombstones: count("SELECT count(*) FROM tombstones")?,
             findings: count("SELECT count(*) FROM findings")?,
             finding_candidates: count("SELECT count(*) FROM finding_candidates")?,
-            vectors: count("SELECT count(*) FROM document_vectors")?,
             migrations_applied: count("SELECT count(*) FROM migrations")?,
         })
     }

@@ -402,7 +402,6 @@ fn a_derived_path_form_has_one_home() {
         "document_tags_name",
         "findings_generation",
         "findings_document",
-        "document_vectors_model",
     ] {
         assert!(
             !declared
@@ -431,26 +430,6 @@ fn a_derived_path_form_has_one_home() {
             "`{present}` is not declared, and a statement in this build reads it"
         );
     }
-}
-
-/// `document_vectors` is a rowid table. Its primary key is a uniqueness
-/// constraint; making it the storage order too puts the embedding blob inside the
-/// index B-tree, so every key comparison walks overflow chains and `count(*)` —
-/// which is what the pillar report asks for — reads every leaf.
-#[test]
-fn the_vector_table_keeps_its_rows_behind_a_rowid() {
-    let declared = ddl::statements()
-        .into_iter()
-        .find(|statement| statement.contains("CREATE TABLE document_vectors"))
-        .expect("the vector table");
-    assert!(
-        declared.contains("PRIMARY KEY (document, model_id, model_version)"),
-        "{declared}"
-    );
-    assert!(
-        !declared.contains("WITHOUT ROWID"),
-        "the embedding blob is stored inside the primary key's B-tree: {declared}"
-    );
 }
 
 /// A delete is hard: the document row goes, the cascade takes everything derived

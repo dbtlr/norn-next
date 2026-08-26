@@ -53,12 +53,12 @@
 //!   stopped deriving: it reads that off its own censuses and asks
 //!   [`tombstones`] for a row at each, which is why that drain is public here
 //!   and outside the projection.
-//! - **Document vectors.** No derivation writes `document_vectors`. The store
-//!   accepts a vector through its own writer and no host job calls it, so the
-//!   table is empty in every store this comparator reads and projecting it
-//!   would compare one empty table against another. The embedding layer is what
-//!   extends the projection to cover it, at the point where two derivations
-//!   converging on the same vectors becomes a claim.
+//! - **Document vectors.** The store holds no vector state: embeddings are
+//!   lane-2 engine state in a sidecar database ([ADR
+//!   0021](../../../docs/decisions/0021-derived-indexes-split-into-two-lanes.md)),
+//!   outside the lane-1 projection this comparator reads. Two derivations
+//!   converging on the same vectors is the engine's own convergence bar, judged
+//!   against the sidecar rather than here.
 //!
 //! # Equality is never vacuous here
 //!

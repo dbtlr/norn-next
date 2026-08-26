@@ -54,8 +54,6 @@ pub enum StoreError {
     /// says the file's own contents are wrong; discarding and rebuilding is the
     /// resolution, and the host decides when to reach for it.
     Damaged { what: String },
-    /// An operation names a document the store does not hold.
-    UnknownDocument { path: String },
     /// A bounded shape was handed more than it holds. The bound is the
     /// contract, so exceeding it is refused rather than truncated: a silently
     /// truncated payload is indistinguishable from a complete one.
@@ -90,9 +88,6 @@ impl fmt::Display for StoreError {
                 message,
             } => write!(f, "{operation} on {} failed: {message}", path.display()),
             StoreError::Damaged { what } => write!(f, "the store is damaged: {what}"),
-            StoreError::UnknownDocument { path } => {
-                write!(f, "no document is stored at `{path}`")
-            }
             StoreError::Bound { what, limit, given } => {
                 write!(f, "{what} holds at most {limit}, and {given} were given")
             }
@@ -127,7 +122,6 @@ impl StoreError {
             StoreError::Path { .. }
             | StoreError::Sql { .. }
             | StoreError::Lifecycle { .. }
-            | StoreError::UnknownDocument { .. }
             | StoreError::Bound { .. } => None,
         }
     }

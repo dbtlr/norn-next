@@ -1,4 +1,4 @@
-//! The four pillars: full text, vectors, findings, migrations.
+//! The three pillars: full text, findings, migrations.
 //!
 //! Each is exercised against a real database, because a pillar's DDL is only
 //! worth what a write and a read of it prove. The findings cases carry the most
@@ -8,7 +8,7 @@
 
 use crate::common::{
     Scratch, ambiguity, ambiguity_for_target, class, classes, document, document_with_every_fact,
-    drained, path, record_death, vector, violation, write_document, write_documents,
+    drained, path, record_death, violation, write_document, write_documents,
 };
 use norn_store::{
     CANDIDATE_HEAD, CandidateFact, DiscardScope, ExplainedStatement, Provenance, StoreError,
@@ -325,61 +325,6 @@ fn a_sub_fingerprint_that_does_not_describe_its_column_is_damage() {
             "the damage does not name the row it was found at: {what}"
         );
     }
-}
-
-/// A vector is identified by its document and its model, replaced when it is
-/// recomputed, and taken by the cascade when its document dies.
-#[test]
-fn a_vector_belongs_to_a_document_and_a_model() {
-    let scratch = Scratch::new("vectors");
-    let mut store = scratch.open();
-    let subject = path("docs/norn/glossary.md");
-
-    let mut request = store.begin_request();
-    write_document(
-        &mut request,
-        &document(subject.as_str(), "hash-1", "a body\n"),
-    );
-    request
-        .store_vector(&vector(subject.as_str(), "hash-1"))
-        .expect("storing a vector");
-    assert_eq!(request.pillars().expect("a pillar report").vectors, 1);
-
-    // The same model and version for the same document is the same vector
-    // recomputed, not a second one.
-    request
-        .store_vector(&vector(subject.as_str(), "hash-2"))
-        .expect("recomputing a vector");
-    assert_eq!(request.pillars().expect("a pillar report").vectors, 1);
-
-    // Another version of the same model is a different vector.
-    let mut upgraded = vector(subject.as_str(), "hash-2");
-    upgraded.model_version = "2".to_string();
-    request.store_vector(&upgraded).expect("storing a vector");
-    assert_eq!(request.pillars().expect("a pillar report").vectors, 2);
-    assert_eq!(request.counters().get("vectors_written"), Some(3));
-
-    record_death(&mut request, &subject, Provenance::PlanDelete);
-    assert_eq!(request.pillars().expect("a pillar report").vectors, 0);
-
-    request.finish();
-    store.verify_integrity().expect("after the cascade");
-}
-
-/// A vector for a document the store does not hold is refused. Nothing is
-/// embedded that nothing has derived.
-#[test]
-fn a_vector_for_an_unknown_document_is_refused() {
-    let scratch = Scratch::new("vector-unknown");
-    let mut store = scratch.open();
-    let error = store
-        .begin_request()
-        .store_vector(&vector("never/derived.md", "hash-1"))
-        .expect_err("a vector for nothing");
-    assert!(
-        matches!(error, StoreError::UnknownDocument { .. }),
-        "{error:?}"
-    );
 }
 
 /// A finding keeps the head of its candidates and the number there really were.
@@ -2011,7 +1956,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
     );
 
     // The bar is over a store an operation could really have produced. A fixture
-    // that populated the four pillars into a state the operational-validity leg
+    // that populated the three pillars into a state the operational-validity leg
     // forbids would be measuring a shape no reader ever drains, and the pillar
     // this one could get wrong is the findings: a place-scoped finding standing
     // beside a live document row. The request's borrow of the store ends at its
@@ -2890,9 +2835,6 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
     request
         .record_finding(&violation(subject.as_str()))
         .expect("recording a finding");
-    request
-        .store_vector(&vector(subject.as_str(), "hash-1"))
-        .expect("storing a vector");
     assert_eq!(
         request
             .stored_findings(&subject)
@@ -2931,7 +2873,6 @@ fn a_vault_schema_change_discards_findings_and_nothing_else() {
     );
     let pillars = request.pillars().expect("a pillar report");
     assert_eq!(pillars.documents, 1);
-    assert_eq!(pillars.vectors, 1, "a schema edit reached the vectors");
     assert_eq!(pillars.findings, 0);
     assert_eq!(pillars.finding_candidates, 0);
 }
