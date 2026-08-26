@@ -1121,7 +1121,7 @@ graph LR
     reg --> v1
     subgraph v1["vault entry (per registered vault, lazy attach)"]
       watcher["watcher (norn-fs facts)"] --> orch["host orchestration — scoped increments (via norn-store)"]
-      workers["workers — applier · planners · embeddings"] --> orch
+      workers["workers — applier · planners"] --> orch
       orch --> db[("SQLite — FTS5 · findings · migrations")]
       reads["read builders (norn-store)"] --> db
     end

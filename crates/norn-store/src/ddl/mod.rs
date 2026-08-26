@@ -40,8 +40,8 @@
 //! # Foreign keys are the wholesale-replacement mechanism
 //!
 //! A **parse-fact** row exists only as long as the document it was read from, so
-//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`, and so
-//! does a vector. Two operations rely on it: a hard delete removes the document
+//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. Two
+//! operations rely on it: a hard delete removes the document
 //! row and the cascade takes everything derived from it, and a re-derivation
 //! replaces one document's fact rows wholesale. `PRAGMA foreign_keys` is off by
 //! default in SQLite and is turned on per connection, which is why the store

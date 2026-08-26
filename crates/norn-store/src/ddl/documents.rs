@@ -4,11 +4,12 @@
 //! instead, so every query over this table reads the vault as it stands and no
 //! predicate has to remember to exclude the dead.
 //!
-//! A re-derivation **updates** the row in place and keeps its `id`. That is
-//! what lets a finding or a vector reference a document across a
-//! re-derivation, and it is why identity is a rowid with a unique `path`
-//! rather than the path itself: the path is the document's name, and a name is
-//! not an identity.
+//! A re-derivation **updates** the row in place and keeps its `id`, so
+//! deleting a row keeps exactly one meaning — the document died. A
+//! delete-and-reinsert would read as a death and an arrival at the schema
+//! seam, firing the cascade over fact rows the changeset replaces explicitly.
+//! Identity is a rowid with a unique `path` rather than the path itself: the
+//! path is the document's name, and a name is not an identity.
 //!
 //! # The path is stored two ways, both derived from one
 //!

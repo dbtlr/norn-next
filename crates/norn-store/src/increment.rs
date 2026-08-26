@@ -41,13 +41,6 @@ pub enum Change {
     /// — see [`crate::ddl::tombstones`]. Within one changeset the order of
     /// entries carries this: a death then a rewrite of one path ends live with
     /// no tombstone, and a rewrite then a death ends dead with one.
-    ///
-    /// **An embedding is not replaced.** A vector is keyed by
-    /// `(document, model, version)` and survives the re-derivation of the
-    /// document it was computed over, because computing a new one is an async
-    /// worker's job rather than this act's. So a vector is **eventually
-    /// consistent** with the body, and the `content_hash` it carries is how a
-    /// reader tells one that has caught up from one that has not.
     Upsert(DocumentFacts),
     /// A path's death, recorded with how it was learned.
     ///
@@ -313,8 +306,8 @@ impl<'t> Statements<'t> {
         };
         Ok(Statements {
             // The document row keeps its identity across a re-derivation: it is
-            // updated rather than replaced, which is what lets a vector
-            // reference a document that has been re-read since.
+            // updated rather than replaced, so a deleted row means a death and
+            // the cascade fires only for one.
             upsert_document: prepared(
                 "INSERT INTO documents (
                      path, suffix_key, content_hash, byte_length, body, body_hash, body_offset,

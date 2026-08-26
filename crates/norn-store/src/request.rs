@@ -12,7 +12,7 @@
 //! changeset lands whole or not at all** — that entry point states the shape of
 //! the guarantee in full. Every other write here is whole on its own: a finding
 //! and its candidate and class rows, a schema pin and the discard the new key
-//! implies, a vector. So a request that performed three acts and then failed has
+//! implies. So a request that performed three acts and then failed has
 //! three whole acts at rest, and what a request never was is a way to group them
 //! into one.
 //!
@@ -24,8 +24,8 @@
 //! correct and the only shape in which a fact row's ordinal means what it says.
 //!
 //! **The document row keeps its identity across a re-derivation.** It is updated
-//! rather than replaced, which is what lets a vector reference a document that
-//! has been re-read since.
+//! rather than replaced, so deleting a `documents` row keeps exactly one
+//! meaning — the document died — and the cascade fires only for a death.
 //!
 //! What is *not* here is retention: when a tombstone has outlived the disorder
 //! it was recorded to survive is a policy over generations, and nothing in this

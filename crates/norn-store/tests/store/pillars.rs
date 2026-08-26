@@ -1,4 +1,4 @@
-//! The four pillars: full text, vectors, findings, migrations.
+//! The three pillars: full text, findings, migrations.
 //!
 //! Each is exercised against a real database, because a pillar's DDL is only
 //! worth what a write and a read of it prove. The findings cases carry the most
@@ -1956,7 +1956,7 @@ fn a_paged_reader_costs_a_line_in_the_rows_it_drained() {
     );
 
     // The bar is over a store an operation could really have produced. A fixture
-    // that populated the four pillars into a state the operational-validity leg
+    // that populated the three pillars into a state the operational-validity leg
     // forbids would be measuring a shape no reader ever drains, and the pillar
     // this one could get wrong is the findings: a place-scoped finding standing
     // beside a live document row. The request's borrow of the store ends at its
