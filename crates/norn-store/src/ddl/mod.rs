@@ -37,15 +37,16 @@
 //! question the vault schema asks, so a finding derived under one schema says
 //! nothing under another.
 //!
-//! # Foreign keys are the wholesale-replacement mechanism
+//! # Foreign keys are the death-cascade mechanism
 //!
 //! A **parse-fact** row exists only as long as the document it was read from, so
-//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. Two
-//! operations rely on it: a hard delete removes the document
-//! row and the cascade takes everything derived from it, and a re-derivation
-//! replaces one document's fact rows wholesale. `PRAGMA foreign_keys` is off by
-//! default in SQLite and is turned on per connection, which is why the store
-//! opens every connection through one place.
+//! every one of them carries `REFERENCES documents(id) ON DELETE CASCADE`. One
+//! operation relies on it: a hard delete removes the document row and the
+//! cascade takes everything derived from it. A re-derivation replaces one
+//! document's fact rows through explicit per-table deletes instead — the row
+//! itself is updated in place, so the cascade never fires for one. `PRAGMA
+//! foreign_keys` is off by default in SQLite and is turned on per connection,
+//! which is why the store opens every connection through one place.
 //!
 //! `findings` is deliberately outside that: a finding is keyed by path and class
 //! and outlives its subject, so no document delete reaches it and its lifecycle is
