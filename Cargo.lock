@@ -462,6 +462,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "norn-semantic"
+version = "0.0.0"
+dependencies = [
+ "norn-db",
+ "norn-embed",
+ "norn-store",
+]
+
+[[package]]
 name = "norn-store"
 version = "0.0.0"
 dependencies = [

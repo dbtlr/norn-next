@@ -274,15 +274,16 @@ pub const INVARIANTS: &[Invariant] = &[
         number: 8,
         claim: "two vault-effect seams and only two: in the shipped product norn-fs and \
                 norn-store are the only crates that touch a vault",
-        // The database half is the shape of the allowlist: only the host
-        // links the store into a running process, and the testkit never
-        // ships. The filesystem half has no edge to hold it — norn-client has
-        // machine-local filesystem effects and no norn-fs edge — so the
-        // filesystem rule and its use-site allows are what carry it.
+        // The database half is the shape of the allowlist: the host links the
+        // store as the lane-1 writer, the engine as a feed reader composed
+        // only by the host, and the testkit never ships. The filesystem half
+        // has no edge to hold it — norn-client has machine-local filesystem
+        // effects and no norn-fs edge — so the filesystem rule and its
+        // use-site allows are what carry it.
         mechanisms: &[
             Mechanism::Edge(EdgeClaim::OnlyDependents {
                 on: "norn-store",
-                from: &["norn-host", "norn-testkit"],
+                from: &["norn-host", "norn-semantic", "norn-testkit"],
             }),
             Mechanism::Lint("std::fs disallowed workspace-wide"),
         ],
