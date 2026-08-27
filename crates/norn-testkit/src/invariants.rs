@@ -274,15 +274,16 @@ pub const INVARIANTS: &[Invariant] = &[
         number: 8,
         claim: "two vault-effect seams and only two: in the shipped product norn-fs and \
                 norn-store are the only crates that touch a vault",
-        // The database half is the shape of the allowlist: only the host
-        // links the store into a running process, and the testkit never
-        // ships. The filesystem half has no edge to hold it — norn-client has
-        // machine-local filesystem effects and no norn-fs edge — so the
-        // filesystem rule and its use-site allows are what carry it.
+        // The database half is the shape of the allowlist: the host links the
+        // store as the lane-1 writer, the engine as a feed reader composed
+        // only by the host, and the testkit never ships. The filesystem half
+        // has no edge to hold it — norn-client has machine-local filesystem
+        // effects and no norn-fs edge — so the filesystem rule and its
+        // use-site allows are what carry it.
         mechanisms: &[
             Mechanism::Edge(EdgeClaim::OnlyDependents {
                 on: "norn-store",
-                from: &["norn-host", "norn-testkit"],
+                from: &["norn-host", "norn-semantic", "norn-testkit"],
             }),
             Mechanism::Lint("std::fs disallowed workspace-wide"),
         ],
@@ -312,12 +313,27 @@ pub const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         number: 12,
-        claim: "norn-embed is blind: no embed-to-store and no embed-to-fs edge, so inference \
-                cannot reach findings or plans",
-        mechanisms: &[Mechanism::Edge(EdgeClaim::Absent(&[
-            ("norn-embed", "norn-store"),
-            ("norn-embed", "norn-fs"),
-        ]))],
+        claim: "inference cannot reach findings or plans: norn-embed has no store or fs edge, \
+                and the engine holding inferred state reads lane-1 only through the feed-read \
+                handle, a surface with no write verb",
+        mechanisms: &[
+            Mechanism::Edge(EdgeClaim::Absent(&[
+                ("norn-embed", "norn-store"),
+                ("norn-embed", "norn-fs"),
+            ])),
+            // The engine's store edge must exist for reads, so no absent
+            // edge can carry this half. The partition is the FeedRead type:
+            // the engine's source names no other store surface, and naming
+            // `Request` or `Store` in norn-semantic is the act a review
+            // refuses. The engine's own suite mechanizes the check — a
+            // source gate over exactly those names — so the review confirms
+            // a gate rather than remembering a rule.
+            Mechanism::Review(
+                "whether norn-semantic's source (its suites arrange lane-1 state as harness, \
+                 like the testkit) names any norn-store surface beyond FeedRead and the types \
+                 its methods return",
+            ),
+        ],
     },
     Invariant {
         number: 13,

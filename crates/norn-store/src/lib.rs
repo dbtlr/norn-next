@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! An SDK for talking to SQL.
 //!
-//! This crate is the first effect seam: it owns the store schema, the four
+//! This crate is the first effect seam: it owns the store schema, the three
 //! pillars, what the database-side heal rung means for derived state, and the
 //! derivation counters. **No other crate reaches the derived database**,
 //! harness included — what a test or a gate needs from the substrate, it gets
@@ -73,6 +73,7 @@ mod error;
 mod facts;
 #[cfg(feature = "induced-failure")]
 mod faults;
+mod feed;
 mod hash;
 mod increment;
 mod json;
@@ -90,6 +91,7 @@ pub use facts::{
 };
 #[cfg(feature = "induced-failure")]
 pub use faults::induced_failure;
+pub use feed::FeedRead;
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
 pub use norn_db::{EmittedPlan, PlanStep};

@@ -1,0 +1,24 @@
+[package]
+name = "norn-semantic"
+description = "The first lane-2 engine — a semantic sidecar over norn-db, fed by the store's change feed, embedding through norn-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The dependency allowlist (docs/architecture.md) carries `norn-semantic ->
+# norn-db`, `norn-semantic -> norn-store` and `norn-semantic -> norn-embed`,
+# and nothing else out of this crate.
+#
+# `norn-db` is the substrate the sidecar database runs on — the engine is its
+# second client (ADR 0022), and the driver is reached through that crate's
+# re-export, never declared here. `norn-store` is the lane-1 record the engine
+# derives from: the change feed, and the stored facts a changed document's
+# body is fetched through. `norn-embed` is the blind text-in-vector-out seam;
+# the engine is the crate that decides what gets embedded, and the embedder
+# never learns where the text came from or where the vector goes.
+[dependencies]
+norn-db = { path = "../norn-db" }
+norn-embed = { path = "../norn-embed" }
+norn-store = { path = "../norn-store" }
