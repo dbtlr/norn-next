@@ -754,7 +754,7 @@ impl EntryOps for ProductionEntryOps {
 
     fn rebuild(
         &self,
-        _: &VaultName,
+        name: &VaultName,
         attachment: Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
@@ -767,7 +767,15 @@ impl EntryOps for ProductionEntryOps {
         let _job = self.evidence.attributing();
         self.evidence.count_rebuild();
         match attachment.maintainership.still_current() {
-            Ok(true) => self.rung_three(attachment, progress),
+            Ok(true) => {
+                // The rebuilt store is a new epoch, which is exactly the
+                // reading a cursor must not sleep through: the drain's
+                // rescan reconciles and re-triages here, not at whenever the
+                // next leg happens to commit.
+                let mut rebuilt = self.rung_three(attachment, progress)?;
+                self.drain_semantic(name, &mut rebuilt);
+                Ok(rebuilt)
+            }
             Ok(false) => {
                 release(attachment);
                 Err(JobFailure::LostMaintainership)
@@ -816,7 +824,13 @@ impl EntryOps for ProductionEntryOps {
         Ok(())
     }
 
-    fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
+    fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+        // The engine goes back with the rest of the entry's resources: an
+        // idled-out or deregistered vault holds no open sidecar connection
+        // and answers nothing. Its sidecar file is retained state.
+        if let Some(semantic) = &self.semantic {
+            semantic.detach(name);
+        }
         release(attachment);
     }
 }
@@ -3390,6 +3404,102 @@ mod tests {
                 .expect("the re-enabling reload");
             let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
             assert_eq!(answer.len(), 1);
+        }
+
+        /// A detach gives the engine back with the entry's other resources:
+        /// no open sidecar, no answers — and the sidecar file stays, because
+        /// it is retained state the next delivery adopts.
+        #[test]
+        fn a_detach_gives_the_engine_back_and_keeps_its_sidecar() {
+            let f = Fixture::new("semantic-detach");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert!(matches!(engines.status(&name), SemanticStatus::On { .. }));
+
+            ops.detach(&name, attachment);
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(
+                engines.nearest(&name, "anything", 5),
+                Err(SemanticRefusal::Disabled)
+            );
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            assert!(
+                fs::metadata(dirs.derived_dir(&name).join("semantic.sqlite3")).is_ok(),
+                "retained state outlives the entry"
+            );
+        }
+
+        /// The store-rebuild leg drains: the rebuilt store's new epoch is
+        /// exactly the reading a cursor must not sleep through, and the
+        /// engine reconciles on the same leg rather than at some later
+        /// commit.
+        #[test]
+        fn a_store_rebuild_leg_drains_the_new_epoch() {
+            let f = Fixture::new("semantic-rebuild");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                1
+            );
+
+            let _rebuilt = ops
+                .rebuild(&name, attachment, &ProgressReporter::disconnected())
+                .expect("the rung-3 rebuild");
+            assert_eq!(
+                engines.status(&name),
+                SemanticStatus::On {
+                    last_drain_error: None
+                }
+            );
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                1,
+                "the drain reconciled against the rebuilt store's epoch"
+            );
+        }
+
+        /// A reconcile's rescan heal drains on the same leg.
+        #[test]
+        fn a_reconcile_rescan_drains_new_documents() {
+            let f = Fixture::new("semantic-reconcile");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork {
+                    batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                },
+                &ProgressReporter::disconnected(),
+            )
+            .expect("the rescan reconcile");
+            assert_eq!(
+                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                2,
+                "the rescan's drain carried the new document"
+            );
         }
 
         /// New lane-1 work reaches the engine through the leg that derived
