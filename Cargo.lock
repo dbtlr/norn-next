@@ -451,6 +451,7 @@ name = "norn-host"
 version = "0.0.0"
 dependencies = [
  "norn-config",
+ "norn-db",
  "norn-embed",
  "norn-fixtures",
  "norn-fs",

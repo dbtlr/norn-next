@@ -82,7 +82,9 @@ const ABANDONED: &str = "a panic abandoned the engine mid-operation";
 /// What a status read reports for one vault.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticStatus {
-    /// No section stands for this vault, so no engine does.
+    /// No engine stands for this vault here and now: no delivered section
+    /// enables one, or the vault is not attached. A slot fact, not an
+    /// authoring fact — the serving surface composes the config beside it.
     Off,
     On {
         last_drain_error: Option<String>,
@@ -101,8 +103,11 @@ pub enum SemanticStatus {
 /// typed so that mapping stays derivable rather than parsed from prose.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticRefusal {
-    /// No section enables the engine for this vault.
-    Disabled,
+    /// No engine stands for this vault: no delivered section enables one,
+    /// or the vault is not attached. Which of the two is the serving
+    /// surface's to say — it composes the config and entry state this
+    /// slot-gated reading deliberately does not.
+    NoEngine,
     /// The engine took itself out of service; the detail is the slot's.
     SelfDisabled { detail: String },
     /// The engine is running and this answer failed.
@@ -112,11 +117,8 @@ pub enum SemanticRefusal {
 impl std::fmt::Display for SemanticRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SemanticRefusal::Disabled => {
-                write!(
-                    f,
-                    "no engine section enables semantic search for this vault"
-                )
+            SemanticRefusal::NoEngine => {
+                write!(f, "no semantic engine stands for this vault")
             }
             SemanticRefusal::SelfDisabled { detail } => {
                 write!(f, "the semantic engine is out of service: {detail}")
@@ -184,7 +186,7 @@ impl SemanticEngines {
         limit: usize,
     ) -> Result<Vec<Neighbor>, SemanticRefusal> {
         let Some(slot) = self.slot(vault) else {
-            return Err(SemanticRefusal::Disabled);
+            return Err(SemanticRefusal::NoEngine);
         };
         let slot = tolerant(&slot);
         match &*slot {
@@ -284,9 +286,11 @@ impl EngineConfigReceiver for SemanticEngines {
     ///
     /// A running engine re-delivered an enabling section is kept as it
     /// stands — its sidecar, cursors and diagnostics are retained state, and
-    /// re-opening them would say a reload changed something it did not. A
-    /// refused or self-disabled slot is re-attempted from scratch, because a
-    /// delivery is exactly the author's next try.
+    /// re-opening them would say a reload changed something it did not.
+    /// Keep-versus-reopen has no observable difference today (the sidecar is
+    /// adopted either way), so the choice is stated here rather than tested.
+    /// A refused or self-disabled slot is re-attempted from scratch, because
+    /// a delivery is exactly the author's next try.
     ///
     /// The map lock is never held across the engine open: the open touches
     /// the filesystem, and holding the map through it would couple every
