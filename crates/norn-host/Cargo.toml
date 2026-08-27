@@ -25,6 +25,7 @@ induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }
 norn-fs = { path = "../norn-fs" }
+norn-semantic = { path = "../norn-semantic" }
 norn-store = { path = "../norn-store" }
 norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }

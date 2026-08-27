@@ -285,6 +285,13 @@ pub const INVARIANTS: &[Invariant] = &[
                 on: "norn-store",
                 from: &["norn-host", "norn-semantic", "norn-testkit"],
             }),
+            // The engine's own reach folds back under the host: nothing else
+            // may compose it, so its feed reads happen only inside the
+            // host's legs.
+            Mechanism::Edge(EdgeClaim::OnlyDependents {
+                on: "norn-semantic",
+                from: &["norn-host"],
+            }),
             Mechanism::Lint("std::fs disallowed workspace-wide"),
         ],
     },
