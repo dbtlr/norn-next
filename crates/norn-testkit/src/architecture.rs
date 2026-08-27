@@ -96,6 +96,7 @@ pub const ALLOWED_EDGES: &[(&str, &str)] = &[
     ("norn-host", "norn-fs"),
     ("norn-host", "norn-embed"),
     ("norn-host", "norn-config"),
+    ("norn-host", "norn-semantic"),
     ("norn-client", "norn-wire"),
     ("norn-client", "norn-console"),
     ("norn-client", "norn-config"),

@@ -42,12 +42,16 @@
 //!
 //! # Who calls this
 //!
-//! The consuming layer is the host's composition: `norn-host` registers the
-//! engine, delivers its config section, relays the wake, and exposes
-//! vector-nearest as a capability. That wiring is the crate-map edge
-//! `norn-host → norn-semantic`, and until it lands no product code reaches
-//! this crate — the suites under `tests/` are its whole call graph. An
-//! unreached path here routes to that layer, not to removal.
+//! The host's composition: `norn-host` opens one engine per enabled vault at
+//! config delivery — the enable act — relays a drain after each leg that
+//! commits lane-1 work, and answers vector-nearest through its semantic
+//! capability. [`Settings`] is the engine owning what its
+//! `[engine.semantic]` section means; the host hands the table over and
+//! defines nothing past the handoff. What does not exist yet is the layer
+//! that composes that capability into a running product — the serving
+//! surface, whose verbs the verb charter owns — so the call graph above this
+//! crate today is the host's own suite. An unreached path here routes to
+//! that layer, not to removal.
 //!
 //! # Where to start
 //!
@@ -58,8 +62,10 @@
 mod ddl;
 mod engine;
 mod error;
+mod settings;
 mod sidecar;
 
 pub use engine::{DrainReport, Engine, Neighbor, VectorRow};
 pub use error::EngineError;
+pub use settings::{SectionError, Settings};
 pub use sidecar::SidecarOutcome;

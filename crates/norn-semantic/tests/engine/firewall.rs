@@ -16,6 +16,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("src/ddl.rs", include_str!("../../src/ddl.rs")),
     ("src/engine.rs", include_str!("../../src/engine.rs")),
     ("src/error.rs", include_str!("../../src/error.rs")),
+    ("src/settings.rs", include_str!("../../src/settings.rs")),
     ("src/sidecar.rs", include_str!("../../src/sidecar.rs")),
 ];
 

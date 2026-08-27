@@ -13,6 +13,7 @@ mod production;
 mod refusal;
 mod registry;
 mod reload;
+mod semantic;
 
 /// **The harness-reachable readers of a host's own account.** Every job writes
 /// the account whatever features are on; reading it is what this feature opens,
@@ -57,8 +58,4 @@ pub use reload::{
     ActiveFingerprints, AuthoredDrift, ConfigFingerprint, EngineConfigReceiver, ReloadError,
     ReloadFile, ReloadOutcome, ReloadRefusal, ReloadStage, VaultInspection,
 };
-
-// `norn-embed` is a declared architecture edge that no module consumes yet.
-// The witness keeps the dependency allowlist and manifest in agreement.
-#[allow(unused_imports)]
-use norn_embed as _;
+pub use semantic::{SemanticEngines, SemanticRefusal, SemanticStatus};

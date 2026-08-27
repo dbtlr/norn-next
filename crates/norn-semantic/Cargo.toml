@@ -22,3 +22,7 @@ publish.workspace = true
 norn-db = { path = "../norn-db" }
 norn-embed = { path = "../norn-embed" }
 norn-store = { path = "../norn-store" }
+# The engine owns its config section's meaning; the host hands the parsed
+# table over and defines nothing past the handoff. `toml` is the syntax that
+# table arrives in.
+toml = { workspace = true }

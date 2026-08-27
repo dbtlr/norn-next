@@ -124,6 +124,12 @@ pub struct ProductionEntryOps {
     /// here decides anything: see [`crate::evidence`].
     evidence: Arc<JobEvidence>,
     engine_config_receivers: Vec<Arc<dyn EngineConfigReceiver>>,
+    /// The semantic engines this host composes, where it composes them. Named
+    /// beside the generic receiver list because the ops also relay the
+    /// post-leg drain — the one engine seam the receiver dispatch cannot
+    /// carry, since a drain needs the leg's own store handle. A second engine
+    /// is what generalizes this field into a seam.
+    semantic: Option<Arc<crate::semantic::SemanticEngines>>,
 }
 
 pub struct ProductionAttachment {
@@ -183,6 +189,7 @@ impl ProductionEntryOps {
             policy,
             evidence: Arc::new(JobEvidence::default()),
             engine_config_receivers: Vec::new(),
+            semantic: None,
         }
     }
 
@@ -190,6 +197,24 @@ impl ProductionEntryOps {
     pub fn with_engine_config_receiver(mut self, receiver: Arc<dyn EngineConfigReceiver>) -> Self {
         self.engine_config_receivers.push(receiver);
         self
+    }
+
+    /// Composes the semantic engines: their config sections dispatch through
+    /// the receiver set, and every leg that commits lane-1 work relays a
+    /// drain to them afterwards.
+    pub fn with_semantic(mut self, engines: Arc<crate::semantic::SemanticEngines>) -> Self {
+        self.semantic = Some(Arc::clone(&engines));
+        self.engine_config_receivers.push(engines);
+        self
+    }
+
+    /// The post-leg nudge: lane-1 work just committed, so the vault's engine
+    /// pulls the feed on this same worker leg. Engine trouble never fails
+    /// the leg — the engines retain their own diagnostics.
+    fn drain_semantic(&self, name: &VaultName, attachment: &mut ProductionAttachment) {
+        if let Some(semantic) = &self.semantic {
+            semantic.drain(name, &mut attachment.store.feed_read());
+        }
     }
 
     fn dispatch_config(&self, vault: &VaultName, config: &norn_config::vault::VaultConfig) {
@@ -577,18 +602,19 @@ impl EntryOps for ProductionEntryOps {
         // rather than being reported, because an attach that reported it would
         // be answered by another attach that opened the same file and met the
         // same page.
-        let attached = match self.synchronize_and_heal(&mut attachment, progress) {
+        let mut attached = match self.synchronize_and_heal(&mut attachment, progress) {
             Ok(()) => Ok(attachment),
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
         }?;
         self.dispatch_config(&registration.name, candidate.config());
+        self.drain_semantic(&registration.name, &mut attached);
         Ok(attached)
     }
 
     fn reconcile(
         &self,
-        _: &VaultName,
+        name: &VaultName,
         attachment: &mut Self::Attachment,
         work: ReconcileWork,
         progress: &ProgressReporter<Self::Attachment>,
@@ -601,7 +627,9 @@ impl EntryOps for ProductionEntryOps {
         // watcher facts are inert; only an explicit vault reload can replace
         // the active pin.
         if work.batch.rescans().contains(&RescanScope::Vault) {
-            return self.heal(attachment, progress);
+            self.heal(attachment, progress)?;
+            self.drain_semantic(name, attachment);
+            return Ok(());
         }
         let healing = progress.healing();
         scoped_increment(
@@ -611,12 +639,14 @@ impl EntryOps for ProductionEntryOps {
             self.policy,
             &healing,
             &exclusions(&attachment.registration, &attachment._shadows),
-        )
+        )?;
+        self.drain_semantic(name, attachment);
+        Ok(())
     }
 
     fn recover(
         &self,
-        _: &VaultName,
+        name: &VaultName,
         attachment: &mut Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<(), JobFailure> {
@@ -639,6 +669,7 @@ impl EntryOps for ProductionEntryOps {
         attachment.controls = candidate;
         self.dispatch_config(&attachment.registration.name, attachment.controls.config());
         self.synchronize_and_heal(attachment, progress)?;
+        self.drain_semantic(name, attachment);
         Ok(())
     }
 
@@ -659,6 +690,7 @@ impl EntryOps for ProductionEntryOps {
         if !schema_changed {
             self.dispatch_config(name, candidate.config());
             attachment.controls = candidate;
+            self.drain_semantic(name, attachment);
             return Ok(ReloadOutcome::ConfigOnly);
         }
 
@@ -674,6 +706,7 @@ impl EntryOps for ProductionEntryOps {
         attachment.controls = candidate;
         self.dispatch_config(name, attachment.controls.config());
         self.heal_under_coverage(attachment, progress)?;
+        self.drain_semantic(name, attachment);
         Ok(ReloadOutcome::SchemaChanged)
     }
 
@@ -721,7 +754,7 @@ impl EntryOps for ProductionEntryOps {
 
     fn rebuild(
         &self,
-        _: &VaultName,
+        name: &VaultName,
         attachment: Self::Attachment,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
@@ -730,11 +763,21 @@ impl EntryOps for ProductionEntryOps {
         // leg consumed and calls no detach for it. Both refusals below
         // therefore give the resources back through [`release`] rather than by
         // dropping the attachment, which would release the maintainer lock
-        // ahead of the watch it is declared before.
+        // ahead of the watch it is declared before — and the engine goes back
+        // with them, since no detach will come to give it back later.
         let _job = self.evidence.attributing();
         self.evidence.count_rebuild();
-        match attachment.maintainership.still_current() {
-            Ok(true) => self.rung_three(attachment, progress),
+        let rebuilt = match attachment.maintainership.still_current() {
+            Ok(true) => {
+                // The rebuilt store is a new epoch, which is exactly the
+                // reading a cursor must not sleep through: the drain's
+                // rescan reconciles and re-triages here, not at whenever the
+                // next leg happens to commit.
+                self.rung_three(attachment, progress).map(|mut rebuilt| {
+                    self.drain_semantic(name, &mut rebuilt);
+                    rebuilt
+                })
+            }
             Ok(false) => {
                 release(attachment);
                 Err(JobFailure::LostMaintainership)
@@ -744,7 +787,13 @@ impl EntryOps for ProductionEntryOps {
                 release(attachment);
                 Err(failure)
             }
+        };
+        if rebuilt.is_err()
+            && let Some(semantic) = &self.semantic
+        {
+            semantic.detach(name);
         }
+        rebuilt
     }
 
     /// Maintenance is due when either act's own clock is up. Which acts then
@@ -783,7 +832,13 @@ impl EntryOps for ProductionEntryOps {
         Ok(())
     }
 
-    fn detach(&self, _: &VaultName, attachment: Self::Attachment) {
+    fn detach(&self, name: &VaultName, attachment: Self::Attachment) {
+        // The engine goes back with the rest of the entry's resources: an
+        // idled-out or deregistered vault holds no open sidecar connection
+        // and answers nothing. Its sidecar file is retained state.
+        if let Some(semantic) = &self.semantic {
+            semantic.detach(name);
+        }
         release(attachment);
     }
 }
@@ -3191,6 +3246,402 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((vault.clone(), config.cloned()));
+        }
+    }
+
+    mod semantic {
+        //! The composed engine: delivery enables, legs drain, nearest
+        //! answers, and engine trouble never blocks lane 1.
+
+        use super::*;
+        use crate::semantic::{SemanticEngines, SemanticRefusal, SemanticStatus};
+
+        fn engines_and_ops(f: &Fixture) -> (Arc<SemanticEngines>, ProductionEntryOps) {
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let engines = SemanticEngines::new(dirs.clone());
+            let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(64, 2).unwrap())
+                .with_semantic(Arc::clone(&engines));
+            (engines, ops)
+        }
+
+        /// Delivery at attach is the enable act: the sidecar opens beside the
+        /// store, the attach's own corpus is drained, and nearest answers.
+        #[test]
+        fn an_engine_section_enables_at_attach_and_nearest_answers() {
+            let f = Fixture::new("semantic-attach");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let _attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert_eq!(
+                engines.status(&name),
+                SemanticStatus::On {
+                    last_drain_error: None
+                }
+            );
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            assert!(
+                fs::metadata(dirs.derived_dir(&name).join("semantic.sqlite3")).is_ok(),
+                "the sidecar stands beside the store"
+            );
+            let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
+            assert_eq!(answer.len(), 1);
+            assert_eq!(answer[0].path, "docs/alpha.md");
+        }
+
+        /// No section, no engine: the status is off and the refusal says so.
+        #[test]
+        fn no_section_leaves_the_engine_off() {
+            let f = Fixture::new("semantic-off");
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let _attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with no engine section");
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(
+                engines.nearest(&name, "anything", 5),
+                Err(SemanticRefusal::NoEngine)
+            );
+        }
+
+        /// A section the engine refuses puts the engine — and only the
+        /// engine — out of service: the vault attaches and serves lane 1.
+        #[test]
+        fn a_refused_section_self_disables_and_lane_one_stands() {
+            let f = Fixture::new("semantic-refused");
+            fs::write(
+                f.vault().join(".norn/config.toml"),
+                "[engine.semantic]\nenabled = \"yes\"\n",
+            )
+            .unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let _attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("engine trouble never blocks lane 1");
+            let SemanticStatus::SelfDisabled { detail } = engines.status(&name) else {
+                panic!(
+                    "the refused section did not self-disable: {:?}",
+                    engines.status(&name)
+                );
+            };
+            assert!(detail.contains("boolean"), "{detail}");
+            assert!(matches!(
+                engines.nearest(&name, "anything", 5),
+                Err(SemanticRefusal::SelfDisabled { .. })
+            ));
+        }
+
+        /// `enabled = false` keeps the section and switches the engine off.
+        #[test]
+        fn enabled_false_leaves_the_engine_off() {
+            let f = Fixture::new("semantic-disabled");
+            fs::write(
+                f.vault().join(".norn/config.toml"),
+                "[engine.semantic]\nenabled = false\n",
+            )
+            .unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let _attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("a deliberate disable attaches");
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+        }
+
+        /// A reload's delivery is the same enable act, in both directions —
+        /// and the post-leg drain converges the corpus that was already
+        /// derived before the engine existed.
+        #[test]
+        fn a_reload_delivery_enables_disables_and_drains() {
+            let f = Fixture::new("semantic-reload");
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with no engine section");
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let outcome = ops
+                .reload(&name, &mut attachment, &ProgressReporter::disconnected())
+                .expect("the enabling reload");
+            assert_eq!(outcome, ReloadOutcome::ConfigOnly);
+            assert_eq!(
+                engines.status(&name),
+                SemanticStatus::On {
+                    last_drain_error: None
+                }
+            );
+            let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
+            assert_eq!(
+                answer.len(),
+                1,
+                "the reload's drain caught the standing corpus"
+            );
+
+            fs::write(
+                f.vault().join(".norn/config.toml"),
+                "[engine.semantic]\nenabled = false\n",
+            )
+            .unwrap();
+            ops.reload(&name, &mut attachment, &ProgressReporter::disconnected())
+                .expect("the disabling reload");
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5),
+                Err(SemanticRefusal::NoEngine)
+            );
+
+            // Re-enabling adopts the retained sidecar and its cursors: the
+            // corpus answers again without new lane-1 work.
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            ops.reload(&name, &mut attachment, &ProgressReporter::disconnected())
+                .expect("the re-enabling reload");
+            let answer = engines.nearest(&name, "alpha", 5).expect("an answer");
+            assert_eq!(answer.len(), 1);
+        }
+
+        /// A detach gives the engine back with the entry's other resources:
+        /// no open sidecar, no answers — and the sidecar file stays, because
+        /// it is retained state the next delivery adopts.
+        #[test]
+        fn a_detach_gives_the_engine_back_and_keeps_its_sidecar() {
+            let f = Fixture::new("semantic-detach");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert!(matches!(engines.status(&name), SemanticStatus::On { .. }));
+
+            ops.detach(&name, attachment);
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(
+                engines.nearest(&name, "anything", 5),
+                Err(SemanticRefusal::NoEngine)
+            );
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            assert!(
+                fs::metadata(dirs.derived_dir(&name).join("semantic.sqlite3")).is_ok(),
+                "retained state outlives the entry"
+            );
+        }
+
+        /// The store-rebuild leg drains: the rebuilt store's new epoch is
+        /// exactly the reading a cursor must not sleep through, and the
+        /// engine reconciles on the same leg rather than at some later
+        /// commit.
+        #[test]
+        fn a_store_rebuild_leg_drains_the_new_epoch() {
+            let f = Fixture::new("semantic-rebuild");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                1
+            );
+
+            let _rebuilt = ops
+                .rebuild(&name, attachment, &ProgressReporter::disconnected())
+                .expect("the rung-3 rebuild");
+            assert_eq!(
+                engines.status(&name),
+                SemanticStatus::On {
+                    last_drain_error: None
+                }
+            );
+            assert_eq!(
+                engines.nearest(&name, "alpha", 5).expect("an answer").len(),
+                1,
+                "the drain reconciled against the rebuilt store's epoch"
+            );
+        }
+
+        /// The ordinary watcher-driven increment — production's
+        /// most-travelled leg — drains what it derived.
+        #[test]
+        fn an_ordinary_increment_leg_drains() {
+            let f = Fixture::new("semantic-increment");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+            let batch = norn_fs::Batch::vault_change(
+                normalizer.normalize(Path::new("docs/beta.md")).unwrap(),
+            );
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork { batch },
+                &ProgressReporter::disconnected(),
+            )
+            .expect("the scoped increment");
+            assert_eq!(
+                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                2,
+                "the increment's drain carried the new document"
+            );
+        }
+
+        /// Damage met by a drain resolves inline by the engine's rebuild
+        /// floor: the slot stays running, the rebuilt sidecar converges on
+        /// the same leg, and the diagnostic clears.
+        #[test]
+        fn drain_time_damage_resolves_by_the_rebuild_floor() {
+            let f = Fixture::new("semantic-damage");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+
+            // An out-of-band writer corrupts the recorded cursor — a
+            // position the next drain must refuse as sidecar damage. The
+            // substrate is the one opener, in suites as in the product.
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            let sidecar = dirs.derived_dir(&name).join("semantic.sqlite3");
+            match norn_db::connect(&sidecar).expect("connecting to the sidecar") {
+                norn_db::Attempt::Connected(connection) => {
+                    connection
+                        .execute(
+                            "UPDATE meta SET value = 'no separator here' \
+                             WHERE key = 'document_cursor'",
+                            [],
+                        )
+                        .expect("corrupting the recorded cursor");
+                }
+                norn_db::Attempt::Unreadable { detail } => {
+                    panic!("the sidecar is unreadable: {detail}")
+                }
+            }
+
+            // The next leg's drain meets the damage. Without the rebuild
+            // floor, beta never lands and the diagnostic sticks; with it,
+            // the rebuilt sidecar converges on this same leg.
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            let normalizer = norn_fs::PathNormalizer::detect(&f.vault()).unwrap();
+            let batch = norn_fs::Batch::vault_change(
+                normalizer.normalize(Path::new("docs/beta.md")).unwrap(),
+            );
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork { batch },
+                &ProgressReporter::disconnected(),
+            )
+            .expect("engine damage never fails the leg");
+            assert_eq!(
+                engines.status(&name),
+                SemanticStatus::On {
+                    last_drain_error: None
+                },
+                "the rebuild resolved the damage and the diagnostic cleared"
+            );
+            assert_eq!(
+                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                2,
+                "the rebuilt sidecar converged on the same leg"
+            );
+        }
+
+        /// A reconcile's rescan heal drains on the same leg.
+        #[test]
+        fn a_reconcile_rescan_drains_new_documents() {
+            let f = Fixture::new("semantic-reconcile");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            ops.reconcile(
+                &name,
+                &mut attachment,
+                ReconcileWork {
+                    batch: norn_fs::Batch::rescan(RescanScope::Vault),
+                },
+                &ProgressReporter::disconnected(),
+            )
+            .expect("the rescan reconcile");
+            assert_eq!(
+                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                2,
+                "the rescan's drain carried the new document"
+            );
+        }
+
+        /// New lane-1 work reaches the engine through the leg that derived
+        /// it: a schema reload's heal derives the new document, and the same
+        /// leg's drain carries it into the sidecar.
+        #[test]
+        fn a_healing_legs_drain_carries_new_documents() {
+            let f = Fixture::new("semantic-heal-drain");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            fs::create_dir_all(f.vault().join("docs")).unwrap();
+            fs::write(f.vault().join("docs/alpha.md"), "alpha alpha\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let mut attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert_eq!(
+                engines.nearest(&name, "beta", 5).expect("an answer").len(),
+                1
+            );
+
+            fs::write(f.vault().join("docs/beta.md"), "beta beta\n").unwrap();
+            fs::write(
+                f.vault().join(".norn/schema.yaml"),
+                "version: 1\nfields:\n  status:\n    type: string\n",
+            )
+            .unwrap();
+            let outcome = ops
+                .reload(&name, &mut attachment, &ProgressReporter::disconnected())
+                .expect("the schema reload");
+            assert_eq!(outcome, ReloadOutcome::SchemaChanged);
+            let answer = engines.nearest(&name, "beta", 5).expect("an answer");
+            assert_eq!(answer.len(), 2, "{answer:?}");
+            assert_eq!(answer[0].path, "docs/beta.md");
         }
     }
 

@@ -25,6 +25,7 @@ induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
 norn-config = { path = "../norn-config" }
 norn-embed = { path = "../norn-embed" }
 norn-fs = { path = "../norn-fs" }
+norn-semantic = { path = "../norn-semantic" }
 norn-store = { path = "../norn-store" }
 norn-text = { path = "../norn-text" }
 norn-wire = { path = "../norn-wire" }
@@ -36,6 +37,10 @@ serde_yaml = { workspace = true }
 # size-independence pair — which is why the allowlist does not describe it: dev
 # edges cycle by construction and the architecture gate reads and discards them.
 [dev-dependencies]
+# The semantic suite tampers with a sidecar out of band — a cursor a drain
+# must refuse — and the substrate is the one crate that opens a connection,
+# in suites as in the product.
+norn-db = { path = "../norn-db" }
 norn-fixtures = { path = "../norn-fixtures" }
 norn-store = { path = "../norn-store", features = ["induced-failure"] }
 norn-testkit = { path = "../norn-testkit" }

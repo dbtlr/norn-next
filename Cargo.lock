@@ -451,9 +451,11 @@ name = "norn-host"
 version = "0.0.0"
 dependencies = [
  "norn-config",
+ "norn-db",
  "norn-embed",
  "norn-fixtures",
  "norn-fs",
+ "norn-semantic",
  "norn-store",
  "norn-testkit",
  "norn-text",
@@ -468,6 +470,7 @@ dependencies = [
  "norn-db",
  "norn-embed",
  "norn-store",
+ "toml",
 ]
 
 [[package]]
