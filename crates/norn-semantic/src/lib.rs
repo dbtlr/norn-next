@@ -68,4 +68,7 @@ mod sidecar;
 pub use engine::{DrainReport, Engine, Neighbor, VectorRow};
 pub use error::EngineError;
 pub use settings::{SectionError, Settings};
-pub use sidecar::SidecarOutcome;
+// How an open ended up with its database, and why a rebuild happened, are the
+// open ceremony's own vocabulary: the engine is one client of that ceremony,
+// and a sidecar's verdict reads by the same reasoning as a store's.
+pub use norn_db::{OpenOutcome as SidecarOutcome, RebuildReason};
