@@ -29,9 +29,10 @@
 //! the need that proves them. `dimensions` is stored beside the blob because
 //! the blob's own bytes do not say how many values they hold.
 
-/// The engine schema version, pinned at 1 through the pre-release build. A
-/// DDL change is detected as a DDL fingerprint mismatch — the open takes that
-/// fingerprint over [`statements`] — and resolved by rebuilding from zero,
+/// The engine schema version, pinned at 1 through the pre-release build. The
+/// open compares this version first and the DDL fingerprint — its digest of
+/// [`statements`] — second, so with the version pinned a DDL change is
+/// detected as a fingerprint mismatch and resolved by rebuilding from zero,
 /// which consumes no version numbers.
 pub(crate) const ENGINE_SCHEMA_VERSION: i64 = 1;
 

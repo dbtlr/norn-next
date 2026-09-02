@@ -77,9 +77,10 @@ use crate::schema::schema_digest;
 /// str` for the same reason [`DbError::Sql`] carries one: an operation is
 /// named from a fixed vocabulary rather than built out of data.
 ///
-/// **[`crate::schema_operations`] is the only spelling.** The fields are
-/// private and the macro builds all five from one noun, so a set cannot name
-/// five different things or leave one act labelled for another schema.
+/// **[`crate::schema_operations`] is the spelling every client uses.** The
+/// macro builds all five labels from one noun, so a set it spells names one
+/// schema throughout; [`Operations::spelled`] stays reachable for the macro's
+/// sake, and a set built by hand carries whatever nouns its caller wrote.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Operations {
     /// Reading one of the pinned scalars the mechanics verdict is taken over.
@@ -122,8 +123,8 @@ impl Operations {
 ///
 /// `norn_db::schema_operations!("store schema")` reads as "creating the store
 /// schema" at the statement that failed, "committing the store schema" at the
-/// commit, and so on. One noun spells all five, and it is the only way to make
-/// an [`Operations`], so no two of them can drift.
+/// commit, and so on. One noun spells all five, so a set the macro makes
+/// cannot drift between its labels.
 #[macro_export]
 macro_rules! schema_operations {
     ($noun:literal) => {
