@@ -1854,6 +1854,10 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// The retained internal status facts for one served vault.
+    ///
+    /// This is the seam the vault status verb Layer 3's verb charter places reads
+    /// through — the trust state beside the retained reload diagnostics, on
+    /// demand; nothing in this crate outside its own cases reaches it yet.
     pub fn inspect(&self, name: &VaultName) -> Option<VaultInspection> {
         self.shared.entries.get(name).map(|entry| {
             let state = entry.gate.lock().expect("entry gate poisoned");
@@ -1866,6 +1870,12 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// Compare the authored control files with the active fingerprints now.
+    ///
+    /// The drift reading the vault status verb reports — current, reload
+    /// pending, unreadable, or inactive while the entry holds no active
+    /// fingerprints yet — computed on demand because watcher events activate
+    /// neither control file. Same consumer as [`Host::inspect`]; nothing in this
+    /// crate outside its own cases reaches it yet.
     pub fn authored_drift(&self, name: &VaultName) -> Option<AuthoredDrift> {
         let entry = self.shared.entries.get(name)?;
         let active = entry
@@ -1886,6 +1896,12 @@ impl<O: EntryOps> Host<O> {
     }
 
     /// Request one explicit reload and wait until the vault has its outcome.
+    ///
+    /// This is the seam the vault reload verb Layer 3's verb charter places lands
+    /// on. Watcher events activate neither control file, so an edited schema
+    /// reaches the store's pin only through this reload or through the fresh
+    /// read an attach or a recovery leg makes for itself; nothing in this crate
+    /// outside its own cases reaches it yet.
     pub fn reload(&self, name: &VaultName) -> Result<(), ReloadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
             return Err(ReloadRefusal::UnknownVault);

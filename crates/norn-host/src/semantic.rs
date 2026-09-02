@@ -38,9 +38,12 @@
 //! entry's custody claim); a lifecycle that relaxed that would need delivery
 //! to mutate in place rather than replace.
 //!
-//! Every slot lock tolerates poison: a panic that escaped the engine ends as
-//! the slot's own self-disabled state, never as a second panic on a worker
-//! leg or a caller's thread.
+//! Every slot lock tolerates poison: a panic that escaped the engine never
+//! becomes a second panic on a worker leg or a caller's thread. What it leaves
+//! depends on where it escaped — an engine borrowed for an ordinary drain or a
+//! nearest answer stays in the slot, and an engine taken out for the
+//! sidecar-damage rebuild is abandoned, which every later reader answers as
+//! the self-disabled state.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -61,8 +64,10 @@ const SIDECAR_FILE: &str = "semantic.sqlite3";
 /// One vault's engine, or the typed reason it is not running.
 enum Slot {
     Running {
-        /// `None` only when a panic escaped mid-operation and abandoned the
-        /// engine; every reader maps that reading to a self-disabled answer.
+        /// `None` only when a panic escaped the sidecar-damage rebuild, which
+        /// takes the engine out of the slot to discard and reopen it; every
+        /// reader maps that reading to a self-disabled answer. A panic inside an
+        /// ordinary drain or a nearest answer borrows, and leaves the engine here.
         engine: Option<Engine>,
         /// The most recent drain's failure, cleared by the next drain that
         /// succeeds. Latency, never correctness: the rows the failed drain
