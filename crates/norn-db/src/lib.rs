@@ -15,14 +15,23 @@
 //!
 //! A statement list arrives from the crate that owns what the statements mean,
 //! and comes back out as a fingerprint. Nothing here reads a document, a vault,
-//! a wire type or a lane, and no verdict about a client's schema is taken here:
-//! this crate opens, mints, digests, hands back and removes, and whether a
-//! disagreement is a rebuild is read one layer up.
+//! a wire type or a lane.
+//!
+//! **The mechanics verdict is taken here, and the client's own is not.**
+//! Whether a database is one this build wrote — it holds a `meta` table, the
+//! pinned version, the DDL fingerprint, the schema digest and an epoch agree —
+//! is a fact about the machinery every client shares, so [`open`] reads it once
+//! and types the disagreement as a [`RebuildReason`]. What a client's *own*
+//! pinned keys mean is not knowable here: the client takes that verdict through
+//! [`Client::adopt`], and answers keep, rebuild or refuse.
 //!
 //! # Where to start
 //!
 //! - [`connect`] — the one place a connection is opened, and [`Database`], the
 //!   handle that binds an open connection to its file and its epoch.
+//! - [`open`] — the ceremony every database runs: connect, judge, and create,
+//!   adopt or rebuild; with [`Schema`], what a client hands it, and [`Client`],
+//!   the two callbacks it hands back.
 //! - [`meta`] — the pinned scalars an open reads before it trusts anything
 //!   else, the mechanics keys among them, and the read and write of one.
 //! - [`digest`] and [`schema_digest`] — which statement list produced this
@@ -47,6 +56,7 @@
 
 pub use rusqlite;
 
+mod ceremony;
 mod database;
 mod error;
 #[cfg(feature = "induced-failure")]
@@ -55,6 +65,9 @@ pub mod meta;
 mod plan;
 mod schema;
 
+pub use ceremony::{
+    Adoption, Client, OpenOutcome, Operations, RebuildReason, Schema, open, rebuild,
+};
 pub use database::{Attempt, Database, connect, mint_an_epoch, prepare_parent, remove_database};
 pub use error::{DbError, damage_or_fail, is_damaged, sql, sql_at_statement};
 pub use plan::{EmittedPlan, PlanStep, emitted_plan};
