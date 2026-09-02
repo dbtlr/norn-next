@@ -91,8 +91,9 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the seam exists and the pairing is structural: crates/norn-store/src/request.rs takes a plan of the SQL a reader emitted, and crates/norn-testkit/src/explain.rs holds a plan together with that statement so no assertion can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it.",
+        "reason": "the seam exists and the pairing is structural: crates/norn-db/src/plan.rs builds the pair, holding a statement together with the plan SQLite reported for it, crates/norn-store/src/request.rs names and binds the SQL a reader emits and hands that pair out, and crates/norn-testkit/src/explain.rs carries it to an assertion so no claim can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it.",
         "grounds": [
+          { "present": "crates/norn-db/src/plan.rs" },
           { "present": "crates/norn-store/src/request.rs" },
           { "present": "crates/norn-testkit/src/explain.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" }

@@ -28,12 +28,26 @@
 //!
 //! # What it does not close over
 //!
-//! **The product's own source.** That is what the candidate SHA is for, and
-//! folding it in here would make every commit a new suite and the five-run count
-//! unreachable by construction. The two values are recorded side by side in the
-//! ledger and answer different questions: the SHA says what was certified, and
-//! this says what certified it. A file that holds both — a fault seam inside a
-//! product module — is a file to split rather than a reason to widen this list.
+//! **The candidate's own behavior source.** That is what the candidate SHA is
+//! for, and folding it in here would make every commit a new suite and the
+//! five-run count unreachable by construction. The two values are recorded side
+//! by side in the ledger and answer different questions: the SHA says what was
+//! certified, and this says what certified it.
+//!
+//! **The test is a file's whole content, not the crate it compiles in.** A file
+//! in a product crate is in where all of it is instrument or seam: the arming
+//! surfaces, the fault seams, the plan handout and the step-count instrument all
+//! ship inside product crates and are all listed below, because none of them is
+//! behavior a candidate is certified *for* — they are how a case reaches a
+//! condition and how a reading is taken. A file holding both is a file to split
+//! rather than a reason to widen this list. **One entry below is such a file.**
+//! `crates/norn-store/src/request.rs` holds the step-count and plan instrument
+//! the work bars are read through beside the request behavior a candidate is
+//! certified for; its entry stands because the instrument the bars read lives
+//! inside it, and an edit anywhere in that file moves this digest. And a product
+//! module that a seam is merely *read at* stays out: the substrate's own open and
+//! pinned-scalar reads carry the behavior the candidate SHA answers for, and
+//! listing them here would fold that behavior into the suite's identity.
 //!
 //! **The runner image's own version.** A lane names a runner label, and the
 //! label is in this digest because it is workflow text; the image that label
@@ -164,15 +178,44 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         why: "the write protocol's fault seam: the stages a publication can be failed at and how",
     },
     ManifestFile {
+        path: "crates/norn-fs/src/walk/faults.rs",
+        why: "the walk's fault seam: the one window a paging stat can be made to differ in, and \
+              the three answers a foreign writer leaves there — the name gone, the machine \
+              refusing, another kind standing at it",
+    },
+    ManifestFile {
+        path: "crates/norn-fs/src/watch/faults.rs",
+        why: "the watcher's fault seam: the three boundaries coverage can be failed at, the \
+              answers each carries, and the rule that decides which delivery a stream arm stands \
+              in place of — which is what makes an armed case land on the delivery it names",
+    },
+    ManifestFile {
         path: "crates/norn-store/src/faults.rs",
-        why: "the store's fault seam: the arms a rung-2 or rung-3 case is reached through, and \
-              the points the store's own paths read them at",
+        why: "the whole arming surface a suite calls, in the vocabulary of what it is testing: \
+              the changeset tears an increment checks and the store schema a creation is refused \
+              at are armed and read here, and the two driver-seam arrangements are forwarded to \
+              norn-db's arms. Which failures a rung-2 or rung-3 case may ask for is this file's \
+              answer",
+    },
+    ManifestFile {
+        path: "crates/norn-db/src/faults.rs",
+        why: "the driver seam's arms: the process-wide page cap that makes the engine report a \
+              full disk, the one-shot arrangement that makes a pinned-scalar read report a busy \
+              database, and the helper an open applies the cap through. What a case may arrange \
+              at this seam, and what the engine then does, is authored here",
     },
     ManifestFile {
         path: "crates/norn-store/src/request.rs",
-        why: "the instrument the work bar reads — the step count a drain is judged by and the \
-              plan a statement reports — so a reading taken through a different instrument is a \
+        why: "the instrument a work reading is taken through: the virtual-machine steps the paged \
+              readers accumulate as a drain runs, and which named statement a plan bar is asked \
+              about and how it is bound. A reading taken through a different instrument is a \
               different reading",
+    },
+    ManifestFile {
+        path: "crates/norn-db/src/plan.rs",
+        why: "how a statement's plan is taken and paired with the SQL it was taken of, which is \
+              the pairing every plan bar is judged off. A plan reported by a different rule is a \
+              different bar over the same reader",
     },
     // The certification suites themselves. Every case a qualifying run
     // executes is authored in one of these files, so an assertion loosened is

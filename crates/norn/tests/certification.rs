@@ -177,9 +177,13 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/churn.rs",
         "crates/norn-testkit/src/work.rs",
         "crates/norn-store/src/request.rs",
+        "crates/norn-db/src/plan.rs",
         // The seams every rung-2 and rung-3 case is reached through.
         "crates/norn-fs/src/faults.rs",
+        "crates/norn-fs/src/walk/faults.rs",
+        "crates/norn-fs/src/watch/faults.rs",
         "crates/norn-store/src/faults.rs",
+        "crates/norn-db/src/faults.rs",
         // Every suite a case in the inventory is carried by, and the bars in
         // them.
         "crates/norn-host/tests/churn.rs",

@@ -26,8 +26,10 @@
 //! `norn-db`'s feature of the same name, so a shipped build carries none of this
 //! and none of the reads into it: the call sites in `store.rs`, `increment.rs`
 //! and the substrate are gated on the same feature and compile to nothing
-//! without it. No other crate reaches a store's database, so a store's own crate
-//! is the only place either an arrangement or its arming surface can live.
+//! without it. Nothing above this crate reaches a store's database, so a store's
+//! own crate is where the arming surface a suite calls has to live. The
+//! substrate beneath it reaches the same database, which is why the two
+//! arrangements met there are armed in `norn-db` and re-exposed from here.
 //!
 //! # Reaching it from outside
 //!
@@ -50,11 +52,13 @@ use crate::store::Store;
 ///
 /// Every function here puts the database, or the connection to it, in a state no
 /// store operation produces, and each of them exists because a rung, a refusal or
-/// a verification cannot be reached from outside otherwise — no other crate
-/// reaches the derived database, so the only way to arrange either is through
-/// the crate that owns it. **Nothing in a product path calls any of this.** The
-/// module is hidden from the documentation and every name in it says what it
-/// does.
+/// a verification cannot be reached from outside otherwise — nothing above this
+/// crate reaches a store's database, so a suite arranges through this surface
+/// rather than by writing into the file itself. Two of them are armed at the
+/// driver seam below and forwarded from here, which keeps every arrangement a
+/// suite makes in one vocabulary. **Nothing in a product path calls any of
+/// this.** The module is hidden from the documentation and every name in it says
+/// what it does.
 ///
 /// The whole module lives behind the `induced-failure` feature, off by
 /// default, so a shipped build carries none of the hooks these arrangements
