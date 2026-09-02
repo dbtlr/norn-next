@@ -1415,8 +1415,17 @@ mod tests {
         for crate_dir in crates {
             let crate_dir = crate_dir.expect("reading a crates entry").path();
             let baselines = crate_dir.join("tests/baselines/mod.rs");
-            let Ok(text) = std::fs::read_to_string(&baselines) else {
-                continue;
+            // Only an absent file is a crate with no baselines; any other read
+            // failure is a file the sweep cannot rule out, which must not read
+            // as safe.
+            let text = match std::fs::read_to_string(&baselines) {
+                Ok(text) => text,
+                Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(problem) => panic!(
+                    "reading {}: {problem} — a baselines file the sweep cannot read may hold an \
+                     unregistered bar",
+                    baselines.display()
+                ),
             };
             let file = baselines
                 .strip_prefix(&root)
