@@ -361,10 +361,12 @@
       "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log"],
       "binding": {
         "status": "dormant",
-        "reason": "the derived store and part of its identity exist: crates/norn-config/src/lib.rs keys a vault's derived-state directory by the state base, the build channel and the registered vault name, and crates/norn-store/src/store.rs rebuilds from zero rather than opening a file whose store-schema version or DDL fingerprint is not this build's, with destructive recovery never requiring a successful open. That keying contradicts this property rather than lagging it: identity excludes the vault root by design, so that moving a root does not orphan what was derived from it, while the property names root as a coordinate. One of the two has to move and neither has been ruled on, so re-deriving this clause is a design judgment rather than a restatement. Two further clauses have no subject: the vault schema is projected into the store as derived state rather than folded into the identity that chooses the directory, and no config identity exists to fold in at all; and no open declares a read-only intent, so the clause about a read-only-intent open having a write or wipe effect has no site to hold.",
+        "reason": "the derived store and part of its identity exist: crates/norn-config/src/lib.rs keys a vault's derived-state directory by the state base, the build channel and the registered vault name, and crates/norn-store/src/store.rs rebuilds from zero rather than opening a file whose store-schema version or DDL fingerprint is not this build's, with destructive recovery never requiring a successful open. That keying contradicts this property rather than lagging it: identity excludes the vault root by design, so that moving a root does not orphan what was derived from it, while the property names root as a coordinate. One of the two has to move and neither has been ruled on, so re-deriving this clause is a design judgment rather than a restatement. A config identity now exists and is not folded in, by design: crates/norn-host/src/reload.rs fingerprints both vault control files and the host retains the pair as the active fingerprints, while the vault schema is projected into the store as derived state and the config file cannot invalidate lane-1 state at all, so neither reaches the identity that chooses the directory. A second identity site stands beside the first: crates/norn-semantic/src/ddl.rs keys an engine's sidecar by model id, model version and the store epoch it observed, so 'computed one way at every site' now has two sites to hold across. No open declares a read-only intent, so the clause about a read-only-intent open having a write or wipe effect has no site to hold.",
         "grounds": [
           { "present": "crates/norn-config/src/lib.rs" },
-          { "present": "crates/norn-store/src/store.rs" }
+          { "present": "crates/norn-store/src/store.rs" },
+          { "present": "crates/norn-host/src/reload.rs" },
+          { "present": "crates/norn-semantic/src/ddl.rs" }
         ]
       }
     },
@@ -546,10 +548,11 @@
       "sources": ["NRN-126", "NRN-122", "NRN-439", "NRN-524", "NRN-529", "NRN-117", "NRN-351", "NRN-a61"],
       "binding": {
         "status": "dormant",
-        "reason": "the core of this property is carried: crates/norn-host/tests/churn.rs settles a live attachment through ordinary editing, atomic replacement, a case flip, validity crossings, an external tool's catch-up and an active heal, then compares what it converged on against a derivation from zero over the same final tree, field by field. Two clauses name nothing — there is no configuration to edit and no alias table to change — and the invalidation half is narrower than the property: crates/norn-store/src/facts.rs keys invalidation to the vault schema pin, so no derived table carries a key a config change would re-derive it by.",
+        "reason": "the core of this property is carried: crates/norn-host/tests/churn.rs settles a live attachment through ordinary editing, atomic replacement, a case flip, validity crossings, an external tool's catch-up and an active heal, then compares what it converged on against a derivation from zero over the same final tree, field by field. A configuration now exists to edit — the optional per-vault config file crates/norn-config/src/vault.rs parses — and by design it is inert to lane-1 derived state: an explicit reload that changes only the config re-derives nothing, so a config edit is not a case this property can bind; no alias table exists to change. The invalidation half is narrower than the property: crates/norn-store/src/facts.rs keys invalidation to the vault schema pin, the one key lane-1 state carries, so no derived table carries a key a config change would re-derive it by.",
         "grounds": [
           { "present": "crates/norn-host/tests/churn.rs" },
-          { "present": "crates/norn-store/src/facts.rs" }
+          { "present": "crates/norn-store/src/facts.rs" },
+          { "present": "crates/norn-config/src/vault.rs" }
         ]
       }
     },
@@ -806,9 +809,9 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "every pragma is set explicitly rather than inherited: crates/norn-store/src/store.rs sets the journal mode, the synchronous level and foreign-key enforcement at open, and reads the journal mode back at that same open, refusing as damaged a database that answers anything but WAL. The assertion clause is therefore carried for one pragma of three, by the production path rather than by a case: the synchronous level and foreign-key enforcement are set and never read back, and no suite reads any of the three. Statistics collection does not exist at all, on a schedule or otherwise, so there is no ANALYZE to hold to a declared one.",
+        "reason": "every pragma is set explicitly rather than inherited: crates/norn-db/src/database.rs sets the journal mode, the synchronous level and foreign-key enforcement at every connect — one spelling for the lane-1 store and for every engine sidecar — and reads the journal mode back at that same connect, refusing as damaged a database that answers anything but WAL. The assertion clause is therefore carried for one pragma of three, by the substrate path rather than by a case: the synchronous level and foreign-key enforcement are set and never read back, and no suite reads any of the three. Statistics collection does not exist at all, on a schedule or otherwise, so there is no ANALYZE to hold to a declared one.",
         "grounds": [
-          { "present": "crates/norn-store/src/store.rs" }
+          { "present": "crates/norn-db/src/database.rs" }
         ]
       }
     },

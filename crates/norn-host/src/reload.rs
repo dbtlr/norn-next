@@ -106,6 +106,10 @@ pub enum ReloadRefusal {
 }
 
 /// The retained core reload facts for one served vault.
+///
+/// Read through [`crate::Host::inspect`] by the vault status verb the Layer 3
+/// verb charter places; retained here so that consumer finds them without
+/// re-reading a control file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultInspection {
     pub trust: TrustState,
@@ -114,6 +118,10 @@ pub struct VaultInspection {
 }
 
 /// The authored control-file state relative to the active fingerprints.
+///
+/// Answered through [`crate::Host::authored_drift`] for the same vault status
+/// verb: the reading that says a reload is pending, since no watcher event ever
+/// will.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthoredDrift {
     Inactive,
