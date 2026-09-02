@@ -1872,9 +1872,10 @@ impl<O: EntryOps> Host<O> {
     /// Compare the authored control files with the active fingerprints now.
     ///
     /// The drift reading the vault status verb reports — current, reload
-    /// pending, or unreadable — computed on demand because watcher events
-    /// activate neither control file. Same consumer as [`Host::inspect`]; nothing
-    /// in this crate outside its own cases reaches it yet.
+    /// pending, unreadable, or inactive while the entry holds no active
+    /// fingerprints yet — computed on demand because watcher events activate
+    /// neither control file. Same consumer as [`Host::inspect`]; nothing in this
+    /// crate outside its own cases reaches it yet.
     pub fn authored_drift(&self, name: &VaultName) -> Option<AuthoredDrift> {
         let entry = self.shared.entries.get(name)?;
         let active = entry
