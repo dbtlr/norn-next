@@ -268,6 +268,7 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
             })
             .collect(),
         result: RunResult::Passed,
+        unauthored_exit_bars: Vec::new(),
         classification: Classification::Qualifying,
     };
     assert_eq!(sound.problems(&root), Vec::<String>::new());

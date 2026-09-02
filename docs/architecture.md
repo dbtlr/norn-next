@@ -46,12 +46,12 @@ The invariant is *measured*, not asserted:
   profile's tree costs, and its ceiling is authored. The other is the host's
   own: the highest resident set the load's process reaches while working that
   tree, sampled from the moment the attachment is ready, so it is the peak the
-  hour sustains and not the attach's. **That one has no ceiling yet** — no run
-  before the one that records the reading measured it, and under [ADR
-  0007](decisions/0007-authored-measurement-thresholds.md) a threshold is an
-  authored constraint with stated grounds, so the reading is recorded and
-  barred against nothing until calibration runs on the scheduled platform
-  produce grounds for a ceiling. **A third reading is missing rather than
+  hour sustains and not the attach's. Its ceiling is authored off calibration
+  runs of the scheduled lane per [ADR
+  0007](decisions/0007-authored-measurement-thresholds.md), and the
+  qualification ledger refuses a qualifying verdict while any named exit bar
+  sits unauthored — so a recalibration window records readings without its
+  green runs counting toward lockdown's five. **A third reading is missing rather than
   deferred**: the attach and heal at ≥5k are ahead of the first sample, and the
   per-PR attach ceiling covers that phase only at 2k. A baseline moves only by
   a reviewed edit, and the downward direction of that movement is review-held

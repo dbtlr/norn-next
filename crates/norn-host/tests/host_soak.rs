@@ -48,14 +48,15 @@
 //! that a local `--ignored` run is usable; the workflow passes an hour.
 //!
 //! **The peak resident set is recorded every run and barred only where a
-//! ceiling is authored.** [`baselines::SOAK_PEAK_RSS_CEILING_BYTES`] is `None`
-//! until calibration runs of the scheduled lane produce readings to author one
-//! from, and the reading lands in the run's table meanwhile — a recorded
-//! measurement with no bar over it, which is the state a bar is authored out
-//! of. It is the peak of the *load*: the child samples itself from inside the
-//! churn loop, which it reaches once the attachment is ready, so the attach and
-//! the heal over the ≥5k tree are ahead of the first sample and outside the
-//! series.
+//! ceiling is authored.** [`baselines::SOAK_PEAK_RSS_CEILING_BYTES`] carries
+//! the ceiling; a build that un-authors it back to `None` for recalibration
+//! records the reading and bars nothing — and the ledger stamps every such
+//! run's record non-qualifying, so calibration runs are never counted toward
+//! the five (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to
+//! the constant by a test beside it). It is the peak of the *load*: the child
+//! samples itself from inside the churn loop, which it reaches once the
+//! attachment is ready, so the attach and the heal over the ≥5k tree are ahead
+//! of the first sample and outside the series.
 //!
 //! Running this needs `/proc` or its BSD equivalent, so the case is present on
 //! Linux and macOS and absent elsewhere. The scheduled lane runs it on Linux.
@@ -294,6 +295,30 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         baselines::mebibytes(head),
         baselines::mebibytes(tail),
         samples.len()
+    );
+}
+
+/// **The ledger's armed claim is held to the constant it claims about.**
+///
+/// [`norn_testkit::certification::ledger::NAMED_EXIT_BARS`] is what stamps a
+/// run's record non-qualifying while a named exit bar is unauthored, and the
+/// value it makes that claim about lives here in
+/// [`baselines::SOAK_PEAK_RSS_CEILING_BYTES`]. Two files, one fact — so this
+/// holds them together: un-authoring the ceiling without disarming the
+/// registry, or the reverse, fails a pull request rather than letting a
+/// calibration run stamp itself qualifying.
+#[test]
+fn the_ledgers_armed_claim_matches_the_authored_ceiling() {
+    let bar = norn_testkit::certification::ledger::NAMED_EXIT_BARS
+        .iter()
+        .find(|bar| bar.name == "soak-host-peak-rss-ceiling")
+        .expect("the ledger names the soak host-peak ceiling among its exit bars");
+    assert_eq!(
+        bar.armed,
+        baselines::SOAK_PEAK_RSS_CEILING_BYTES.is_some(),
+        "the ledger claims the soak host-peak ceiling is {} and the constant reads {:?}",
+        if bar.armed { "armed" } else { "unarmed" },
+        baselines::SOAK_PEAK_RSS_CEILING_BYTES
     );
 }
 
