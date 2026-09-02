@@ -99,6 +99,14 @@ jobs:
       # for that crate.
       - name: Lint the induced-failure targets
         run: cargo clippy --locked -p norn-host --all-targets --features induced-failure -- -D warnings
+      # rustdoc is its own compiler pass: a public doc that links a private
+      # item, or an intra-doc link that resolves to nothing, is a warning only
+      # this pass sees, and no lint above reads it. Denied here so the doc
+      # lane cannot drift red on main between reviews.
+      - name: Document
+        run: cargo doc --locked --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Test
         run: .github/scripts/flake-tripwire.sh cargo test --locked --workspace
       # Four crates declare an `induced-failure` feature, and the workspace test
