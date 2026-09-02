@@ -12,11 +12,17 @@
 //!
 //! A script writes bytes, renames names and removes places. It never opens a
 //! store, never attaches a host and never reads a derived row, so what it says
-//! about a tree is true of the tree whatever any host did with it. The one
-//! norn-shaped thing a script carries is a **declaration**: [`Script::places_without_rows`]
-//! names the places the workload put content at that no document row stands for
-//! — bytes no decoder accepts, a name norn cannot spell — because a suite
-//! judging convergence has to know which places it must *not* find a row at.
+//! about a tree is true of the tree whatever any host did with it.
+//!
+//! Two norn-shaped things cross that line, and each is *handed in* rather than
+//! invented here. The first is a **declaration**:
+//! [`Script::places_without_rows`] names the places the workload put content at
+//! that no document row stands for — bytes no decoder accepts, a name norn
+//! cannot spell — because a suite judging convergence has to know which places
+//! it must *not* find a row at. The second is a vault's own **schema bytes**
+//! ([`SchemaGround`]): what counts as a schema belongs to the crate that reads
+//! one, so a workload that replaces a declaration is given the spelling to
+//! write rather than composing it.
 //!
 //! # Determinism
 //!
@@ -40,12 +46,15 @@
 //! is data rather than a procedure: a suite may apply one whole, apply it a step
 //! at a time around its own waits, or interleave two. They are
 //! [`ordinary_editing`], [`atomic_replacement`] with [`case_flip`] and
-//! [`case_rename_parent`] beside it, [`burst`], [`validity_transitions`] and
-//! [`external_tools`].
+//! [`case_rename_parent`] beside it, [`burst`], [`validity_transitions`] with
+//! [`schema_replacement`] behind it, and [`external_tools`].
 //!
-//! Each of them is a [`Phased`] pair rather than one script, because an edit is
+//! Each family is a [`Phased`] pair rather than one script, because an edit is
 //! only an edit against a row a host already holds — see that type for why a
 //! workload that landed whole would say nothing but "files appeared".
+//! [`schema_replacement`] is a bare [`Script`] instead: it is a third phase
+//! applied over a settled pair, and what makes its one act an act against
+//! standing state is the pair that ran before it.
 //!
 //! # The writes here are foreign on purpose
 //!
@@ -910,6 +919,22 @@ pub fn burst(seed: u64) -> Phased {
     )
 }
 
+/// Where a vault's own schema declaration sits, and the spelling that replaces
+/// the standing one.
+///
+/// A schema is a vault's own declaration rather than something a script can
+/// invent: the bytes that count as one belong to the crate that reads them, so
+/// a suite hands them in. **The replacement has to differ from the declaration
+/// standing at `at`.** Bytes that match it are the same declaration written
+/// twice, and a host reading them has nothing to re-pin — so a workload built
+/// on them states a schema change and applies none.
+pub struct SchemaGround<'a> {
+    /// The vault-relative place the declaration sits at.
+    pub at: &'a str,
+    /// The declaration that replaces the standing one.
+    pub replacement: &'a [u8],
+}
+
 /// **Family 4. Transitions between readable, quarantined and valid states.**
 ///
 /// Four documents, each crossing a boundary in the direction the others do not:
@@ -925,6 +950,9 @@ pub fn burst(seed: u64) -> Phased {
 /// *unmake* something for: a row it holds goes, a finding it filed clears, a
 /// row it holds loses its frontmatter projection. Each phase declares the place
 /// that derives no row while it stands, and those are two different places.
+///
+/// [`schema_replacement`] is this family's third phase, and it is a script of
+/// its own rather than a step here — see it for why.
 pub fn validity_transitions(seed: u64, oversized: &[u8]) -> Phased {
     let mut ink = Ink::new(seed);
     let opening = Script::new(
@@ -997,6 +1025,32 @@ pub fn validity_transitions(seed: u64, oversized: &[u8]) -> Phased {
     )
     .without_rows_at("churn/states/souring.md");
     Phased::new(opening, changing)
+}
+
+/// **Family 4's third phase: the vault's own declaration replaced.**
+///
+/// One act, and it is a phase of its own rather than a step of
+/// [`validity_transitions`]'s changing script, because the two are converged by
+/// different means. A document act reaches a host as a watcher report; a
+/// control file's bytes reach it only when a suite asks for them, and the act
+/// that answers re-derives the whole vault. A phase carrying both would settle
+/// its crossings through that whole-vault act and say nothing about the
+/// incremental path they are there to exercise.
+///
+/// `ground` says where the declaration sits and what replaces it, and the
+/// replacement has to differ from the bytes standing there — see
+/// [`SchemaGround`].
+pub fn schema_replacement(ground: SchemaGround<'_>) -> Script {
+    Script::new(
+        "the vault's own schema declaration, replaced",
+        vec![Step::new(
+            "replace the vault's schema declaration",
+            Act::Write {
+                at: ground.at.to_string(),
+                bytes: ground.replacement.to_vec(),
+            },
+        )],
+    )
 }
 
 /// **Family 5. What external tools do to a vault.**

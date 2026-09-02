@@ -52,8 +52,9 @@
 //! [`SuffixProbe`], which is a set of index bounds, and read exactly the class it
 //! opens. [`Request::emitted_plan`] hands a named statement's own SQL and its
 //! query plan out, because a plan bar over hand-copied SQL judges a string
-//! nobody runs — and no crate outside this one reaches the database to take a
-//! plan itself.
+//! nobody runs. The explain is the substrate's — `norn-db` holds the connection
+//! and reports the plan — and the statement is this crate's, so a caller above
+//! never reaches a database to judge one.
 //!
 //! Compiling request parameters into SQL — predicates, sorts, pages, the query
 //! shapes that carry `EXPLAIN` bars — is the read builders' job, and they
@@ -1207,11 +1208,12 @@ impl<'a> Request<'a> {
     /// reported for **that** statement.
     ///
     /// A plan bar is worth something only against the SQL that actually ran, and
-    /// no crate outside this one may take a plan of its own. So the store hands
-    /// the pair out: the crate chooses the statement, the caller judges the
-    /// plan. It is deliberately not a way to explain arbitrary SQL — the
-    /// statements are named, and each of them carries the parameters its own
-    /// execution site binds.
+    /// no caller above this crate holds a connection to take a plan of its own.
+    /// So the store hands the pair out: this crate names the statement and binds
+    /// it as its execution site does, the substrate reports the plan for it, and
+    /// the caller judges that. It is deliberately not a way to explain arbitrary
+    /// SQL — the statements are named, and each of them carries the parameters
+    /// its own execution site binds.
     ///
     /// **An explain is a report about a statement rather than a run of it**, so
     /// what taking one steps is not work [`Request::read_steps`] attributes to
@@ -1341,8 +1343,8 @@ impl<'a> Request<'a> {
     ///   `floor + coefficient × rows` distinguishes a reader that seeks from one
     ///   that scans, whatever the engine's constant factor. That is a harness
     ///   judgment about execution cost, and it lives here for the same reason
-    ///   [`Request::emitted_plan`] does — no crate outside this one may open a
-    ///   connection and measure a statement of its own.
+    ///   [`Request::emitted_plan`] does — the statements are this crate's, and
+    ///   no caller above it holds a connection to measure one.
     ///
     /// # What it counts
     ///
