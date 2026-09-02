@@ -178,21 +178,6 @@ pub(crate) fn sql(operation: &'static str, error: rusqlite::Error) -> StoreError
     norn_db::sql(operation, error).into()
 }
 
-/// The refusal for a driver error met while running one statement out of a
-/// list, naming the statement it was met at.
-///
-/// The damage decision is [`sql`]'s and is taken first: a code describing the
-/// file's own contents is damage whichever statement met it, so naming the
-/// statement is a detail added to a refusal rather than a second policy about
-/// what a refusal means.
-pub(crate) fn sql_at_statement(
-    operation: &'static str,
-    statement: &str,
-    error: rusqlite::Error,
-) -> StoreError {
-    norn_db::sql_at_statement(operation, statement, error).into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,33 +215,6 @@ mod tests {
             assert_eq!(error.damage(), None, "{code}: {error:?}");
             assert!(matches!(error, StoreError::Sql { .. }), "{code}: {error:?}");
         }
-    }
-
-    /// The statement a refusal names is a detail about the refusal, not a
-    /// second policy about it: a corrupt page met while the statement list runs
-    /// is damage exactly as it is anywhere else, and every other code is the
-    /// refused operation with the statement named in its message.
-    #[test]
-    fn a_statement_named_in_a_refusal_does_not_change_what_the_refusal_says() {
-        let damaged = sql_at_statement(
-            "creating the store schema",
-            "CREATE TABLE documents (\n  path TEXT\n)",
-            failure(rusqlite::ffi::SQLITE_CORRUPT),
-        );
-        assert!(damaged.damage().is_some(), "{damaged:?}");
-
-        let refused = sql_at_statement(
-            "creating the store schema",
-            "CREATE TABLE documents (\n  path TEXT\n)",
-            failure(rusqlite::ffi::SQLITE_FULL),
-        );
-        let StoreError::Sql { message, .. } = &refused else {
-            panic!("a full disk is the refused operation it was: {refused:?}");
-        };
-        assert!(
-            message.starts_with("`CREATE TABLE documents (`"),
-            "the statement is not named: {message}"
-        );
     }
 
     /// A changeset entry's refusal is the entry's own, and the position it sat

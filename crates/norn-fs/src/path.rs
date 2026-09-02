@@ -130,10 +130,10 @@ impl PathNormalizer {
     ///
     /// The root's own entries are read once for the whole call: the walk over
     /// them and the hardlink question every candidate among them asks are
-    /// served by [`DirNames`] from one scan, so a wide root full of alternate
+    /// served by `DirNames` from one scan, so a wide root full of alternate
     /// spellings costs one listing rather than one per candidate. The probe
     /// against the root's entry in its parent asks the parent one question per
-    /// call, so that one streams through [`listing_holds`] and keeps nothing.
+    /// call, so that one streams through `listing_holds` and keeps nothing.
     pub fn detect(root: &Path) -> Result<Self, NormalizerError> {
         if let (Some(parent), Some(name)) = (root.parent(), root.file_name())
             && same_device(root, parent)

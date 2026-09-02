@@ -68,7 +68,12 @@ enum Slot {
         /// takes the engine out of the slot to discard and reopen it; every
         /// reader maps that reading to a self-disabled answer. A panic inside an
         /// ordinary drain or a nearest answer borrows, and leaves the engine here.
-        engine: Option<Engine>,
+        ///
+        /// Behind a box, so that a slot costs what a self-disabled one costs:
+        /// an engine carries its open connection and its outcome, and every
+        /// slot in the map would otherwise be that wide whether it holds an
+        /// engine or a refusal.
+        engine: Option<Box<Engine>>,
         /// The most recent drain's failure, cleared by the next drain that
         /// succeeds. Latency, never correctness: the rows the failed drain
         /// did not write are still owed by the cursor, and the next nudge
@@ -244,7 +249,7 @@ impl SemanticEngines {
                 match taken.discard_and_reopen() {
                     Ok(mut rebuilt) => {
                         let outcome = rebuilt.drain(feed);
-                        *engine = Some(rebuilt);
+                        *engine = Some(Box::new(rebuilt));
                         *last_drain_error = match outcome {
                             Ok(_) => None,
                             Err(after) => Some(format!(
@@ -335,7 +340,7 @@ impl EngineConfigReceiver for SemanticEngines {
         let sidecar = self.dirs.derived_dir(vault).join(SIDECAR_FILE);
         let slot = match Engine::open(&sidecar, Arc::new(StubEmbedder::new())) {
             Ok(engine) => Slot::Running {
-                engine: Some(engine),
+                engine: Some(Box::new(engine)),
                 last_drain_error: None,
             },
             Err(error) => Slot::SelfDisabled {

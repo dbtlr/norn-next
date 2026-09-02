@@ -10,7 +10,8 @@ use norn_store::{DocumentPath, FeedCursor, FeedRead};
 
 use crate::ddl;
 use crate::error::{self, EngineError};
-use crate::sidecar::{self, SidecarOutcome};
+use crate::sidecar;
+use norn_db::{OpenOutcome as SidecarOutcome, RebuildReason};
 
 /// How many feed rows one page asks for. Bounded well under the store's page
 /// cap; the drain loops pages, so the bound shapes memory rather than reach.
@@ -142,9 +143,9 @@ impl Engine {
         Ok(Engine {
             database: Database::adopt(connection, &path)?,
             embedder,
-            outcome: SidecarOutcome::RebuiltFromZero {
+            outcome: SidecarOutcome::RebuiltFromZero(RebuildReason::Client {
                 detail: "discarded by its owner".to_string(),
-            },
+            }),
         })
     }
 

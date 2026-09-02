@@ -38,7 +38,7 @@ pub enum Change {
     /// row, or a tombstone, or neither — never both. The clear is
     /// trigger-carried, like the full-text index: `tombstones_clear_on_derive`
     /// fires on the document insert, so every writer of `documents` upholds it
-    /// — see [`crate::ddl::tombstones`]. Within one changeset the order of
+    /// — see the `ddl::tombstones` statements. Within one changeset the order of
     /// entries carries this: a death then a rewrite of one path ends live with
     /// no tombstone, and a rewrite then a death ends dead with one.
     Upsert(DocumentFacts),
