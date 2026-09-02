@@ -74,7 +74,7 @@ use std::time::{Duration, Instant};
 use norn_fs::{CaseSensitivity, ContentHash, PathNormalizer};
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
-use norn_host::{AttachMode, DemandLease, ProductionEntryOps};
+use norn_host::{AttachMode, DemandLease, ProductionEntryOps, ReloadRefusal};
 use norn_store::{DocumentPath, Provenance, Store, class_probe};
 use norn_testkit::churn::{self, Act, Applied, Folding, Script, Step};
 use norn_testkit::equivalence::{
@@ -83,7 +83,7 @@ use norn_testkit::equivalence::{
 use norn_testkit::fidelity;
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Convergence, Observed, wait_until};
-use norn_wire::{FindingKind, TrustState, WarmingPhase};
+use norn_wire::{FindingKind, TrustState, VaultName, WarmingPhase};
 
 /// The profile every case churns over.
 ///
@@ -129,6 +129,16 @@ const SETTLING: Convergence = Convergence::new(
 /// means an entry that never publishes a walk at all, rather than a machine
 /// that lost a few races.
 const CATCHING_A_HEAL: Duration = Duration::from_secs(60);
+
+/// The bytes the validity workload replaces the vault's schema declaration
+/// with.
+///
+/// A schema is opaque to derivation — it is read, hashed and pinned, and no
+/// document is judged against it — so what makes this a schema *change* is that
+/// the bytes differ from the ones the attachment pinned. The pin is what
+/// discards every finding derived under the old fingerprint, and the heal that
+/// follows it is what derives them again.
+const REPLACEMENT_SCHEMA: &[u8] = b"version: 1\n# a second declaration\n";
 
 /// A document whose frontmatter block is past the bound the text layer reads.
 ///
@@ -337,7 +347,8 @@ fn a_burst_converges_on_the_last_bytes_written() {
     churned.assert_maintenance_is_bracketed(&BURST_OPENS);
 }
 
-/// **Family 4.** Documents crossing between readable, quarantined and degraded.
+/// **Family 4.** Documents crossing between readable, quarantined and degraded,
+/// and a schema replacement under them.
 ///
 /// Four boundaries are crossed, each in the direction the others are not: a
 /// readable document becomes bytes no decoder accepts, an undecodable one
@@ -353,72 +364,145 @@ fn a_burst_converges_on_the_last_bytes_written() {
 /// away, the recovery gives one back, and the two read-bound crossings move the
 /// frontmatter projection of rows that stand throughout.
 ///
+/// **The crossings are judged before the schema is replaced, and the phases are
+/// separate for that reason.** What converges a crossing is the increment a
+/// watcher report drives; what converges a replaced declaration is a re-pin,
+/// which empties the findings pillar of every fingerprint it replaced and heals
+/// the whole vault to fill it again. A single phase carrying both would settle
+/// its crossings through that whole-vault act, and the findings read below
+/// would say what a walk from the tree derives rather than what the incremental
+/// path left. So the crossings are read off the watcher-settled store, and the
+/// schema replacement is a third phase over it.
+///
+/// **That third phase is activated by an explicit reload.** A watcher report
+/// about a control file is inert, so the bytes it writes sit in the tree until
+/// the reload reads them — see [`When::SettledThroughAReload`]. The pin is what
+/// the case then asserts, against the replacement bytes *and* against the pin
+/// the crossings settled under: a replacement equal to the standing declaration
+/// is one a host re-pins nothing for, and a bar naming only the constant would
+/// hold over it.
+///
+/// **No work bound.** A schema re-pin is a vault-scope act by contract: it
+/// discards every finding keyed by the fingerprint it replaces — the ones
+/// beside standing rows as much as the ones at places no row stands — and only
+/// a walk of the whole vault derives them again. A changed-set bound over the
+/// phase that drives one would be a bound against that contract.
 #[test]
 fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     let oversized = oversized_frontmatter();
     let workload = churn::validity_transitions(53, &oversized);
-    let mut churned = churn_the_vault("churn-validity", &workload);
+    let churned = attach_and_churn(sandbox("churn-validity"), workload.opening(), When::Settled)
+        .then(workload.changing(), When::Settled);
+
+    // Everything the crossings are about, read off the store the watcher
+    // reports settled — and the pin they settled under, which the replacement
+    // below has to move off. The store is let go before the next phase, because
+    // the host that runs it is the writer of this same database.
+    let pinned_under_the_crossings = {
+        let mut store = churned.vault.store();
+        let projection = StoreProjection::read(&mut store).expect("projecting the churned store");
+
+        // The quarantined place: no row, and the cause named at the path.
+        assert!(
+            projection.document("churn/states/souring.md").is_none(),
+            "a document row stands where the workload left bytes no decoder accepts"
+        );
+        assert_eq!(
+            kinds_at(&projection, "churn/states/souring.md"),
+            vec![FindingKind::BodyBytesNotUtf8.as_str().to_string()],
+            "the quarantined place carries another cause"
+        );
+
+        // The place that came back: a row, and nothing standing at it.
+        let recovered = projection
+            .document("churn/states/recovering.md")
+            .expect("the document that stopped being undecodable derives a row");
+        assert!(
+            !recovered.body.is_empty(),
+            "the recovered document derived an empty body"
+        );
+        assert!(
+            kinds_at(&projection, "churn/states/recovering.md").is_empty(),
+            "a finding stands at a place that reads"
+        );
+
+        // The row flip the content size drives, in both directions. A block
+        // past the bound leaves the row standing with no frontmatter
+        // projection; a block inside it leaves a projection and no finding.
+        let degraded = projection
+            .document("churn/states/steady.md")
+            .expect("a document whose block went unread keeps its row");
+        assert!(
+            degraded.frontmatter.is_none(),
+            "the document past the read bound carries a frontmatter projection"
+        );
+        assert_eq!(
+            kinds_at(&projection, "churn/states/steady.md"),
+            vec![FindingKind::FrontmatterTooLarge.as_str().to_string()],
+            "the document past the read bound carries another cause"
+        );
+        let shortened = projection
+            .document("churn/states/overlong.md")
+            .expect("the document brought back inside the bound keeps its row");
+        assert!(
+            shortened.frontmatter.is_some(),
+            "the document inside the read bound carries no frontmatter projection"
+        );
+        assert!(
+            kinds_at(&projection, "churn/states/overlong.md").is_empty(),
+            "a finding stands beside a block that reads"
+        );
+
+        projection
+            .vault_schema()
+            .expect("an attachment pins the vault schema")
+            .bytes
+            .clone()
+    };
+    // The row the quarantine took away, and the death the increment owed for
+    // it: both are the watcher path's, asked for here rather than after the
+    // re-pin, where a whole-vault walk would answer for them instead.
+    churned.assert_rows_were_taken_away();
+    churned.assert_the_deaths_were_recorded();
+
+    let mut churned = churned.then(
+        &churn::schema_replacement(churn::SchemaGround {
+            at: ".norn/schema.yaml",
+            replacement: REPLACEMENT_SCHEMA,
+        }),
+        When::SettledThroughAReload,
+    );
+
+    // The declaration the phase wrote is the one the store pins, and it is not
+    // the one the crossings were derived under. The second half is what a
+    // replacement that only *named* itself a change would fail: bytes equal to
+    // the standing declaration take the reload's unchanged-schema path, and
+    // nothing is re-pinned, discarded or healed.
+    let mut store = churned.vault.store();
+    let repinned = StoreProjection::read(&mut store)
+        .expect("projecting the churned store")
+        .vault_schema()
+        .expect("an attachment pins the vault schema")
+        .bytes
+        .clone();
+    assert_eq!(
+        repinned, REPLACEMENT_SCHEMA,
+        "the store pinned bytes the vault no longer holds"
+    );
+    assert_ne!(
+        repinned, pinned_under_the_crossings,
+        "the pin did not move, so the replacement is the declaration the crossings already \
+         settled under and this case drove no re-pin at all"
+    );
+    drop(store);
 
     // One document stands past the frontmatter read bound at the end — the one
     // the workload pushed past it — and it carries a finding beside the row it
     // kept. The document that started past the bound was brought back inside
-    // it.
+    // it. Every finding here was discarded by the re-pin and derived again by
+    // the heal that followed it, so an equivalence that holds is the pillar
+    // having been refilled.
     churned.judge(workload.changing().name(), 1);
-    churned.assert_rows_were_taken_away();
-
-    let mut store = churned.vault.store();
-    let projection = StoreProjection::read(&mut store).expect("projecting the churned store");
-
-    // The quarantined place: no row, and the cause named at the path.
-    assert!(
-        projection.document("churn/states/souring.md").is_none(),
-        "a document row stands where the workload left bytes no decoder accepts"
-    );
-    assert_eq!(
-        kinds_at(&projection, "churn/states/souring.md"),
-        vec![FindingKind::BodyBytesNotUtf8.as_str().to_string()],
-        "the quarantined place carries another cause"
-    );
-
-    // The place that came back: a row, and nothing standing at it.
-    let recovered = projection
-        .document("churn/states/recovering.md")
-        .expect("the document that stopped being undecodable derives a row");
-    assert!(
-        !recovered.body.is_empty(),
-        "the recovered document derived an empty body"
-    );
-    assert!(
-        kinds_at(&projection, "churn/states/recovering.md").is_empty(),
-        "a finding stands at a place that reads"
-    );
-
-    // The row flip the content size drives, in both directions. A block past
-    // the bound leaves the row standing with no frontmatter projection; a block
-    // inside it leaves a projection and no finding.
-    let degraded = projection
-        .document("churn/states/steady.md")
-        .expect("a document whose block went unread keeps its row");
-    assert!(
-        degraded.frontmatter.is_none(),
-        "the document past the read bound carries a frontmatter projection"
-    );
-    assert_eq!(
-        kinds_at(&projection, "churn/states/steady.md"),
-        vec![FindingKind::FrontmatterTooLarge.as_str().to_string()],
-        "the document past the read bound carries another cause"
-    );
-    let shortened = projection
-        .document("churn/states/overlong.md")
-        .expect("the document brought back inside the bound keeps its row");
-    assert!(
-        shortened.frontmatter.is_some(),
-        "the document inside the read bound carries no frontmatter projection"
-    );
-    assert!(
-        kinds_at(&projection, "churn/states/overlong.md").is_empty(),
-        "a finding stands beside a block that reads"
-    );
 }
 
 /// **Family 5, first shape.** A synchronization client catching up after a
@@ -945,6 +1029,20 @@ enum When {
     Before,
     /// After a host has reached `Ready` over the tree as it stands.
     Settled,
+    /// The same, and then an explicit reload once the phase has settled.
+    ///
+    /// **A phase running against a standing attachment activates a control-file
+    /// edit this way and no other.** A watcher report about `.norn/schema.yaml`
+    /// is inert, so bytes written there stand unread until a reload asks for
+    /// them; the reload re-pins the declaration and heals under it before it
+    /// returns. A phase that changes a control file and does not ask is a phase
+    /// whose store still holds the declaration its attachment pinned.
+    ///
+    /// The other activations are the fresh reads an attach or a recovery leg
+    /// makes for itself, and neither is available to a phase here: a phase
+    /// landing before anything attaches is [`When::Before`], and a recovery is
+    /// a rung this suite does not climb.
+    SettledThroughAReload,
     /// While an attach heal is still running.
     DuringTheHeal,
 }
@@ -1066,7 +1164,9 @@ impl Churned {
             _ => (self.vault.host(), None),
         };
         let held = match when {
-            When::Settled => Some(attach::attach_and_wait(&host, self.vault.name())),
+            When::Settled | When::SettledThroughAReload => {
+                Some(attach::attach_and_wait(&host, self.vault.name()))
+            }
             When::DuringTheHeal => None,
             When::Before => unreachable!("the pre-attach arm returned above"),
         };
@@ -1083,6 +1183,15 @@ impl Churned {
         };
         self.retake_the_census(script, &opened, &applied);
         settle(&self.vault, &host, &self.census, &applied);
+        // After the settle, so the reload runs over a tree the host has already
+        // caught up with. A phase reloading writes a control file, which the
+        // settle's own reading of the tree covers and no watcher report ever
+        // will; asking before that reading would put the re-pin's whole-vault
+        // heal in front of the acts of whatever phase was still landing, which
+        // is a different case from the one a reload states.
+        if when == When::SettledThroughAReload {
+            reload(&host, self.vault.name(), &applied);
+        }
         #[cfg(feature = "induced-failure")]
         {
             self.maintenance = host.evidence().since(before);
@@ -1121,8 +1230,8 @@ impl Churned {
         assert!(
             script.steps().is_empty() || self.census != *opened,
             "`{}` applied {} steps and the tree reads exactly as it did before them — same \
-             places and same hashes — so this phase asks the host for nothing and \
-             every claim after it holds over a vault nothing changed\n{applied}",
+             places, same hashes, same schema declaration — so this phase asks the host for \
+             nothing and every claim after it holds over a vault nothing changed\n{applied}",
             script.name(),
             applied.steps()
         );
@@ -1735,6 +1844,41 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ap
     .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
 }
 
+/// **The reload.** Ask the host to activate the vault's control files as the
+/// workload left them, and wait until it has.
+///
+/// The call is the whole act: it re-pins a changed declaration and heals the
+/// vault under the new fingerprint before it returns, so a phase that reloads is
+/// converged over the replacement by the time a bar reads the store. Nothing is
+/// waited on afterwards for the same reason.
+///
+/// **One refusal is retried and the rest are raised.** `Unavailable` is the
+/// answer to every reason an entry cannot take the request *at this moment*,
+/// and it collapses four of them: the entry is not `Ready`, its coverage is not
+/// in hand, it already holds a job, or a detach is in flight. A host polling
+/// its watcher every few tens of milliseconds holds a job often, which is the
+/// one this retry is sized for — but the retry absorbs the others on the same
+/// terms, so an entry that fell untrusted, rebuilt and came back `Ready` inside
+/// the budget is a reload this suite waits through rather than a failure. What
+/// it does not absorb is a reload the host answered: a refusal carrying a typed
+/// reload error or a job failure is raised where it happened, beside the steps
+/// that really ran. A condition that never clears is the budget's, and the
+/// failure names the state the entry was last seen in.
+fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
+    wait_until(
+        "the explicit reload to activate the vault's control files",
+        SETTLING.budget_for(applied.steps()),
+        || match host.reload(name) {
+            Ok(()) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(trust)) => {
+                Observed::pending(format!("the entry is {trust:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}\n{applied}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
+}
+
 // ---------------------------------------------------------------------------
 // The census
 // ---------------------------------------------------------------------------
@@ -1763,8 +1907,9 @@ fn settle(vault: &attach::Vault, host: &attach::ServingHost, census: &Census, ap
 /// asks the directory itself what spelling it renders there.
 ///
 /// **Two readings are compared for equality**, which is how a phase that
-/// applied acts and moved nothing is caught: the places, the hashes and the
-/// places that derive none all take part.
+/// applied acts and moved nothing is caught: the places, the hashes, the places
+/// that derive none and the vault's schema declaration all take part, because
+/// each of them is something a changing phase may be the only mover of.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Census {
     /// What the volume does with case, which is what makes two spellings one
@@ -1776,6 +1921,21 @@ struct Census {
     without_rows: BTreeSet<String>,
     /// Each identity's spelling on disk, which is what a failure names.
     spellings: BTreeMap<String, String>,
+    /// The vault's own schema declaration, as the tree holds it.
+    ///
+    /// **A schema replacement changes no path and no hash**, so a reading that
+    /// stopped at the two above is a reading a phase replacing a declaration
+    /// leaves untouched — and the claim that a non-empty phase moved the tree
+    /// would pass for a phase that wrote the standing declaration back over
+    /// itself. That is the shape a schema-replacing phase fails as, and it is
+    /// the shape it should fail as: a re-pin is what the phase exists to drive,
+    /// and bytes equal to the ones already there drive none.
+    ///
+    /// **The store is not asked about it here.** What a host has pinned moves
+    /// only when a reload is asked for, and a reload runs the re-pin before it
+    /// returns, so nothing about the pin is ever outstanding at a settle. A
+    /// wait on it would be a wait on an act that has already finished.
+    schema: Option<Vec<u8>>,
 }
 
 /// A path as its identity on a volume with this case behavior.
@@ -1870,6 +2030,7 @@ fn census(root: &Path, folding: Folding) -> Census {
         rows: BTreeMap::new(),
         without_rows: BTreeSet::new(),
         spellings: BTreeMap::new(),
+        schema: std::fs::read(root.join(".norn/schema.yaml")).ok(),
     };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
