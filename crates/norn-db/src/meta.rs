@@ -57,13 +57,17 @@ pub const DDL_FINGERPRINT: &str = "ddl_fingerprint";
 /// The digest of the schema this database held when it was created.
 pub const SCHEMA_DIGEST: &str = "schema_digest";
 
-/// The global write sequence every write draws its stamp from.
+/// The global write sequence a derived row draws its stamp from.
 ///
-/// It is a **global write sequence**, not a per-derivation one: every write in
-/// the database draws from it, so two rows anywhere are comparable, and a
-/// single derivation touching two tables stamps both with the same number.
-/// **Generation orders; a timestamp only informs** — a clock can move
-/// backwards and a generation cannot.
+/// It is a **global write sequence**, not a per-derivation one: every
+/// derivation in the database draws from it, so two rows anywhere are
+/// comparable, and a single derivation touching two tables stamps both with
+/// the same number. **Generation orders; a timestamp only informs** — a clock
+/// can move backwards and a generation cannot.
+///
+/// A pinned scalar is not a derivation and takes none: [`put_meta`] writes the
+/// value it was handed, so a key a client reconciles at open moves no counter
+/// and orders nothing.
 pub const WRITE_GENERATION: &str = "write_generation";
 
 /// The identity this database carries from creation to discard.

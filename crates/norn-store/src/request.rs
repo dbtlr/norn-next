@@ -957,7 +957,7 @@ impl<'a> Request<'a> {
     /// what it is now, never both. Disjoint over **stored paths**: the store
     /// never folds case, so on a folding volume one vault *place* can stand
     /// live under one spelling and dead under another — a consumer that keys
-    /// by place carries that fold itself, as [`crate::ddl::documents`] rules.
+    /// by place carries that fold itself, as the `ddl::documents` statements rule.
     ///
     /// **Should a merge ever present both at one position, the document is
     /// what is true now.** A death deletes the document row, so a document
