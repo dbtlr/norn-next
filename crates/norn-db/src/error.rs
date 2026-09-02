@@ -194,6 +194,33 @@ mod tests {
         }
     }
 
+    /// The statement a refusal names is a detail about the refusal, not a
+    /// second policy about it: a corrupt page met while a statement list runs
+    /// is damage exactly as it is anywhere else, and every other code is the
+    /// refused operation with the statement named in its message.
+    #[test]
+    fn a_statement_named_in_a_refusal_does_not_change_what_the_refusal_says() {
+        let damaged = sql_at_statement(
+            "creating the store schema",
+            "CREATE TABLE documents (\n  path TEXT\n)",
+            failure(rusqlite::ffi::SQLITE_CORRUPT),
+        );
+        assert!(matches!(damaged, DbError::Damaged { .. }), "{damaged:?}");
+
+        let refused = sql_at_statement(
+            "creating the store schema",
+            "CREATE TABLE documents (\n  path TEXT\n)",
+            failure(rusqlite::ffi::SQLITE_FULL),
+        );
+        let DbError::Sql { message, .. } = &refused else {
+            panic!("a full disk is the refused operation it was: {refused:?}");
+        };
+        assert!(
+            message.starts_with("`CREATE TABLE documents (`"),
+            "the statement is not named: {message}"
+        );
+    }
+
     /// A value the pinned-scalar column cannot produce is part of the shape,
     /// so it reads as a file this build did not write rather than as a broken
     /// environment.

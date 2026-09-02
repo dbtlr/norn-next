@@ -32,35 +32,28 @@
 //!
 //! The connection, the pragmas the store schema is designed to be read under —
 //! write-ahead logging and the foreign keys the cascade depends on among them —
-//! the pinned-scalar mechanics, the store epoch and the database file's
-//! lifecycle are `norn-db`'s. What is decided here is what a reading of those
-//! mechanics *means* for derived state: whether the shape in front of an open
-//! is the one this build writes, which rung a disagreement is, and whether the
-//! file outlives the store.
+//! the pinned-scalar mechanics, the store epoch, the database file's lifecycle
+//! and the open ceremony over all of them are `norn-db`'s. What is decided here
+//! is what a reading of those mechanics *means* for derived state: which rung a
+//! disagreement is, what the store's own keys say, and whether the file
+//! outlives the store.
 //!
 //! # The database-side heal rung
 //!
-//! Rung 3 is *discard and rebuild*, and this is where it lives. An open reads
-//! four things out of `meta` — the store schema version, the DDL fingerprint,
-//! the digest of the schema the database was created holding, and the store
-//! epoch — and rebuilds from zero when any of them disagrees with this build or
-//! is absent, or when the file is not a database at all. The rebuild is the
-//! whole file: it is removed, along with the sidecars a journal leaves beside
-//! it, and created again from the statement list.
+//! Rung 3 is *discard and rebuild*, and what it means for derived state is
+//! decided here. The act is [`norn_db::open`]: it reads the store schema
+//! version, the DDL fingerprint, the digest of the schema the database was
+//! created holding, and the store epoch, and it rebuilds from zero when any of
+//! them disagrees with this build or is absent, or when the file is not a
+//! database at all. The rebuild is the whole file — removed, along with the
+//! sidecars a journal leaves beside it, and created again from the statement
+//! list, which mints a new epoch: see [`Store::epoch`].
 //!
-//! The third read is what the first two cannot answer. A fingerprint is compared
-//! against a value the database reports about *itself*, so a dropped index, table
-//! or trigger leaves it matching — and a dropped `documents_path` forks every
-//! path into duplicate rows. The schema digest is taken over `sqlite_schema`, so
-//! it is a statement about what is actually there.
-//!
-//! The fourth is not about shape at all. Create mints an epoch, so a database
-//! that agrees with this build about every part of its shape and records none
-//! was written by something else — and it is what every consumer's record of
-//! progress is keyed by, so an open that adopted it would let a cursor into a
-//! discarded database read as a position in this one. A rebuild re-runs create,
-//! which is why a new epoch follows a discard rather than being arranged for it:
-//! see [`Store::epoch`].
+//! What this crate hands that ceremony is the statement list, the version it
+//! pins, and the store's own pinned key — the mode, which decides whether the
+//! file outlives the handle and is the one reading an open may refuse over.
+//! What it takes back is [`OpenOutcome`]: the rung the state was at, with a
+//! typed [`RebuildReason`] where the answer was a rebuild.
 //!
 //! **Rung 3 is for damaged state, never for a hostile environment.** A full
 //! disk, a revoked permission, a parent directory that cannot be created, a
@@ -70,11 +63,10 @@
 //! database destroys work to fix nothing. One policy decides which is which —
 //! [`norn_db::is_damaged`] — and every read an open performs goes through it.
 
-use std::fmt;
 use std::path::Path;
 
 use norn_db::rusqlite::{self, Connection};
-use norn_db::{Attempt, Database, meta};
+use norn_db::{Adoption, Database, OpenOutcome, meta};
 use norn_wire::{FindingKind, Severity};
 
 use crate::ddl;
@@ -133,56 +125,6 @@ impl StoreMode {
     }
 }
 
-/// How an open ended up with the database it handed back.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OpenOutcome {
-    /// There was no database, so one was created.
-    Created,
-    /// The database was the shape this build writes, and was opened as it stood.
-    Reused,
-    /// The database was not usable and was rebuilt from zero — heal rung 3.
-    RebuiltFromZero(RebuildReason),
-}
-
-/// Why a database was discarded and rebuilt.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RebuildReason {
-    /// The DDL fingerprint differs from this build's, which pre-release means
-    /// the DDL was edited. It consumes no version number: the store schema
-    /// version is pinned, and a development-time shape change is resolved by
-    /// rebuilding rather than by minting a version.
-    DdlFingerprint {
-        expected: String,
-        found: Option<String>,
-    },
-    /// The store schema version is not the one this build pins.
-    StoreSchemaVersion { expected: i64, found: Option<i64> },
-    /// The file is not a store this build wrote: not a database, corrupt pages,
-    /// a schema that carries no `meta` table to ask, or a schema that no longer
-    /// holds what the statement list created.
-    Damaged { detail: String },
-}
-
-impl fmt::Display for RebuildReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RebuildReason::DdlFingerprint { expected, found } => write!(
-                f,
-                "the DDL fingerprint is {} and this build writes {expected}",
-                found.as_deref().unwrap_or("absent")
-            ),
-            RebuildReason::StoreSchemaVersion { expected, found } => match found {
-                Some(found) => write!(
-                    f,
-                    "the store schema version is {found} and this build pins {expected}"
-                ),
-                None => write!(f, "the store schema version is absent"),
-            },
-            RebuildReason::Damaged { detail } => write!(f, "{detail}"),
-        }
-    }
-}
-
 /// One vault's derived state.
 #[derive(Debug)]
 pub struct Store {
@@ -218,27 +160,7 @@ impl Store {
     }
 
     fn open_in_mode(path: &Path, mode: StoreMode) -> Result<Self, StoreError> {
-        norn_db::prepare_parent(path)?;
-        let (connection, outcome) = match norn_db::connect(path)? {
-            Attempt::Connected(connection) => match inspect(&connection)? {
-                Verdict::Fresh => {
-                    create(&connection, mode)?;
-                    (connection, OpenOutcome::Created)
-                }
-                Verdict::Usable => {
-                    adopt_mode(&connection, path, mode)?;
-                    (connection, OpenOutcome::Reused)
-                }
-                Verdict::Rebuild(reason) => {
-                    drop(connection);
-                    (rebuild(path, mode)?, OpenOutcome::RebuiltFromZero(reason))
-                }
-            },
-            Attempt::Unreadable { detail } => (
-                rebuild(path, mode)?,
-                OpenOutcome::RebuiltFromZero(RebuildReason::Damaged { detail }),
-            ),
-        };
+        let (connection, outcome) = norn_db::open(path, &store_schema(), &StoreClient { mode })?;
         Ok(Store {
             database: Database::adopt(connection, path)?,
             mode,
@@ -623,229 +545,102 @@ impl Drop for Store {
     }
 }
 
-/// What inspecting a connected database concluded.
-enum Verdict {
-    /// No schema at all: a new file, or an empty one.
-    Fresh,
-    /// The shape this build writes.
-    Usable,
-    Rebuild(RebuildReason),
-}
-
-/// Read the store schema this database carries, and decide whether it is the
-/// one this build writes.
+/// The statement list this build writes, and what the ceremony calls it.
 ///
-/// Every read here fails the same way: through [`rebuild_or_fail`], so one policy
-/// decides whether a driver error describes a damaged file or a broken
-/// environment. That matters most for the `meta` reads — a busy database, a
-/// revoked permission or an I/O error on one of them is not evidence that the
-/// stored state is wrong.
-fn inspect(connection: &Connection) -> Result<Verdict, StoreError> {
-    let objects: i64 =
-        match connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0)) {
-            Ok(count) => count,
-            Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-        };
-    if objects == 0 {
-        return Ok(Verdict::Fresh);
-    }
-
-    let expected_fingerprint = ddl::fingerprint();
-    let has_meta: i64 = match connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'meta'",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(count) => count,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
-    if has_meta == 0 {
-        return Ok(Verdict::Rebuild(RebuildReason::Damaged {
-            detail: "the database holds tables and no `meta` table, so it is not a store this \
-                     build wrote"
-                .to_string(),
-        }));
-    }
-
-    let version: Option<i64> =
-        match norn_db::meta::read_meta(connection, meta::STORE_SCHEMA_VERSION) {
-            Ok(version) => version,
-            Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-        };
-    if version != Some(ddl::STORE_SCHEMA_VERSION) {
-        return Ok(Verdict::Rebuild(RebuildReason::StoreSchemaVersion {
-            expected: ddl::STORE_SCHEMA_VERSION,
-            found: version,
-        }));
-    }
-
-    let found: Option<String> = match norn_db::meta::read_meta(connection, meta::DDL_FINGERPRINT) {
-        Ok(found) => found,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
-    if found.as_deref() != Some(expected_fingerprint.as_str()) {
-        return Ok(Verdict::Rebuild(RebuildReason::DdlFingerprint {
-            expected: expected_fingerprint,
-            found,
-        }));
-    }
-
-    let recorded: Option<String> = match norn_db::meta::read_meta(connection, meta::SCHEMA_DIGEST) {
-        Ok(recorded) => recorded,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
-    let holds = match norn_db::schema_digest(connection) {
-        Ok(digest) => digest,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
-    if recorded.as_deref() != Some(holds.as_str()) {
-        return Ok(Verdict::Rebuild(RebuildReason::Damaged {
-            detail: format!(
-                "the database holds a schema digesting {holds} and it was created holding {}, so \
-                 an object it was created with has been changed or removed",
-                recorded.as_deref().unwrap_or("nothing recorded")
-            ),
-        }));
-    }
-
-    // The epoch is the last gate because it is the one the three above cannot
-    // ask. Create writes it, so a database that agrees with this build about
-    // every part of its shape and records no epoch was written by something
-    // else — and it is the reading a consumer's whole record of progress is
-    // keyed by, so an open that handed it back absent would let a cursor from a
-    // discarded database read as a position in this one.
-    let epoch: Option<String> = match norn_db::meta::read_meta(connection, meta::STORE_EPOCH) {
-        Ok(epoch) => epoch,
-        Err(error) => return rebuild_or_fail(error).map(Verdict::Rebuild),
-    };
-    if epoch.is_none() {
-        return Ok(Verdict::Rebuild(RebuildReason::Damaged {
-            detail: "the database records no store epoch, so it is not a store this build wrote"
-                .to_string(),
-        }));
-    }
-    Ok(Verdict::Usable)
-}
-
-/// Which rung a driver error met while reading the store schema belongs to.
-///
-/// The policy is the substrate's — a code about the file's own contents, or a
-/// value the pinned-scalar column cannot produce, says the file is not one this
-/// build wrote — and what is decided here is what that reading means: a rebuild
-/// reason, or the refused operation the environment made of it.
-fn rebuild_or_fail(error: rusqlite::Error) -> Result<RebuildReason, StoreError> {
-    match norn_db::damage_or_fail("reading the store schema", error) {
-        Ok(detail) => Ok(RebuildReason::Damaged { detail }),
-        Err(refused) => Err(refused.into()),
+/// The version is pinned and the fingerprint is taken over the list, so a DDL
+/// edit moves the fingerprint and an open resolves it by rebuilding.
+fn store_schema() -> norn_db::Schema {
+    norn_db::Schema {
+        operations: norn_db::schema_operations!("store schema"),
+        version: ddl::STORE_SCHEMA_VERSION,
+        statements: ddl::statements(),
+        fingerprint: ddl::fingerprint(),
     }
 }
 
-/// Remove the database and create it again from the statement list.
-fn rebuild(path: &Path, mode: StoreMode) -> Result<Connection, StoreError> {
-    norn_db::remove_database(path)?;
-    match norn_db::connect(path)? {
-        Attempt::Connected(connection) => {
-            create(&connection, mode)?;
-            Ok(connection)
-        }
-        Attempt::Unreadable { detail } => Err(StoreError::Damaged {
-            what: format!("a database rebuilt from zero is still not readable: {detail}"),
-        }),
-    }
+/// What the open ceremony asks this crate, once it has judged the mechanics.
+///
+/// Two keys are the store's own: the mode, which decides whether the file
+/// outlives the handle, and the write generation every derivation draws its
+/// stamp from. The ceremony writes neither and reads neither — it hands the
+/// create transaction over for them, and hands the database over to be
+/// judged by them.
+struct StoreClient {
+    mode: StoreMode,
 }
 
-/// Run the whole statement list, and record what was run.
-///
-/// One transaction: a half-created store schema is a store schema nothing can
-/// inspect, and the pinned values written at the end are what say the list
-/// finished. The schema digest is taken after the statements ran, so it is a
-/// reading of the database rather than a second reading of the list.
-fn create(connection: &Connection, mode: StoreMode) -> Result<(), StoreError> {
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| error::sql("opening the store schema transaction", error))?;
-    for statement in ddl::statements() {
-        #[cfg(feature = "induced-failure")]
-        let armed = crate::faults::failure_armed_for_the_store_schema(connection);
-        #[cfg(not(feature = "induced-failure"))]
-        let armed: Option<rusqlite::Error> = None;
-        let ran = match armed {
-            Some(error) => Err(error),
-            None => transaction.execute_batch(&statement),
-        };
-        ran.map_err(|error| {
-            error::sql_at_statement("creating the store schema", &statement, error)
-        })?;
-    }
-    let digest = norn_db::schema_digest(&transaction)
-        .map_err(|error| error::sql("digesting the schema", error))?;
-    norn_db::meta::put_meta(
-        &transaction,
-        meta::STORE_SCHEMA_VERSION,
-        ddl::STORE_SCHEMA_VERSION,
-    )?;
-    norn_db::meta::put_meta(&transaction, meta::DDL_FINGERPRINT, ddl::fingerprint())?;
-    norn_db::meta::put_meta(&transaction, meta::SCHEMA_DIGEST, digest)?;
-    norn_db::meta::put_meta(&transaction, ddl::meta::STORE_MODE, mode.as_str())?;
-    norn_db::meta::put_meta(&transaction, meta::WRITE_GENERATION, 0_i64)?;
-    norn_db::meta::put_meta(
-        &transaction,
-        meta::STORE_EPOCH,
-        norn_db::mint_an_epoch(&transaction)?,
-    )?;
-    transaction
-        .commit()
-        .map_err(|error| error::sql("committing the store schema", error))
-}
+impl norn_db::Client for StoreClient {
+    type Error = StoreError;
 
-/// Reconcile the mode a database records with the mode it is being opened in.
-///
-/// A throwaway open over a durable store is refused: adopting it would arm a
-/// teardown that deletes a registered vault's whole derived state when the store
-/// drops. **A throwaway open over a `store_mode` row that is absent or
-/// unreadable is refused the same way.** Create always records the mode, so a
-/// missing or unrecognized row is out-of-band tampering rather than a database
-/// this crate ever produces, and the conservative reading is the refusal: the
-/// alternative is arming delete-on-drop over a database whose own record does
-/// not say it is disposable.
-///
-/// The other direction is adoption, and it is safe unconditionally: a durable
-/// open deletes nothing, so it takes over a throwaway store's leftovers or an
-/// unrecorded mode exactly as it takes over its own kind. Disposable derived
-/// state is rebuildable and the file is no longer anybody's to delete.
-///
-/// The arms are written out explicitly, mode by recorded mode, rather than
-/// folded behind a wildcard — a wildcard is how the throwaway-and-absent case
-/// went unnoticed the first time.
-fn adopt_mode(connection: &Connection, path: &Path, mode: StoreMode) -> Result<(), StoreError> {
-    let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
-        .as_deref()
-        .and_then(StoreMode::from_str);
-    match (mode, recorded) {
-        (StoreMode::Throwaway, Some(StoreMode::Durable)) => Err(StoreError::Lifecycle {
-            operation: "opening a throwaway store",
-            path: path.to_path_buf(),
-            message:
-                "the database is a durable store, and a throwaway store deletes its file when \
-                      it closes"
+    fn record(&self, transaction: &Connection) -> Result<(), StoreError> {
+        norn_db::meta::put_meta(transaction, ddl::meta::STORE_MODE, self.mode.as_str())?;
+        norn_db::meta::put_meta(transaction, meta::WRITE_GENERATION, 0_i64)?;
+        Ok(())
+    }
+
+    /// Reconcile the mode a database records with the mode it is being opened
+    /// in.
+    ///
+    /// A throwaway open over a durable store is refused: adopting it would arm
+    /// a teardown that deletes a registered vault's whole derived state when
+    /// the store drops. **A throwaway open over a `store_mode` row that is
+    /// absent or unreadable is refused the same way.** Create always records
+    /// the mode, so a missing or unrecognized row is out-of-band tampering
+    /// rather than a database this crate ever produces, and the conservative
+    /// reading is the refusal: the alternative is arming delete-on-drop over a
+    /// database whose own record does not say it is disposable.
+    ///
+    /// The other direction is adoption, and it is safe unconditionally: a
+    /// durable open deletes nothing, so it takes over a throwaway store's
+    /// leftovers or an unrecorded mode exactly as it takes over its own kind.
+    /// Disposable derived state is rebuildable and the file is no longer
+    /// anybody's to delete.
+    ///
+    /// **A mode this store cannot adopt is a refusal rather than a rebuild.**
+    /// The database is sound and the caller asked for the wrong thing about
+    /// it, so nothing is discarded.
+    ///
+    /// The arms are written out explicitly, mode by recorded mode, rather than
+    /// folded behind a wildcard — a wildcard is how the throwaway-and-absent
+    /// case went unnoticed the first time.
+    fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
+        let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
+            .as_deref()
+            .and_then(StoreMode::from_str);
+        match (self.mode, recorded) {
+            (StoreMode::Throwaway, Some(StoreMode::Durable)) => Err(StoreError::Lifecycle {
+                operation: "opening a throwaway store",
+                path: path.to_path_buf(),
+                message:
+                    "the database is a durable store, and a throwaway store deletes its file when \
+                          it closes"
+                        .to_string(),
+            }),
+            (StoreMode::Throwaway, None) => Err(StoreError::Lifecycle {
+                operation: "opening a throwaway store",
+                path: path.to_path_buf(),
+                message: "the database does not record itself as a throwaway store, and a \
+                          throwaway store deletes its file when it closes"
                     .to_string(),
-        }),
-        (StoreMode::Throwaway, None) => Err(StoreError::Lifecycle {
-            operation: "opening a throwaway store",
-            path: path.to_path_buf(),
-            message: "the database does not record itself as a throwaway store, and a throwaway \
-                      store deletes its file when it closes"
-                .to_string(),
-        }),
-        (StoreMode::Throwaway, Some(StoreMode::Throwaway)) => {
-            norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
-                .map_err(StoreError::from)
+            }),
+            (StoreMode::Throwaway, Some(StoreMode::Throwaway))
+            | (StoreMode::Durable, Some(StoreMode::Throwaway))
+            | (StoreMode::Durable, None) => {
+                norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, self.mode.as_str())?;
+                Ok(Adoption::Keep)
+            }
+            (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(Adoption::Keep),
         }
-        (StoreMode::Durable, Some(StoreMode::Durable)) => Ok(()),
-        (StoreMode::Durable, Some(StoreMode::Throwaway)) | (StoreMode::Durable, None) => {
-            norn_db::meta::put_meta(connection, ddl::meta::STORE_MODE, mode.as_str())
-                .map_err(StoreError::from)
-        }
+    }
+
+    /// The condition an arrangement armed for this database's creation, which
+    /// is how the statement list's error path is reached at all: a create
+    /// writes over whatever was on disk, so damage cannot be arranged there.
+    /// The arm and the surface that arms it are this crate's, because no other
+    /// crate reaches a store's database.
+    #[cfg(feature = "induced-failure")]
+    fn armed_failure(&self, connection: &Connection) -> Option<norn_db::rusqlite::Error> {
+        crate::faults::failure_armed_for_the_store_schema(connection)
     }
 }
 
@@ -855,39 +650,4 @@ fn quoted<'a>(values: impl Iterator<Item = &'a str>) -> String {
         .map(|value| format!("'{value}'"))
         .collect::<Vec<String>>()
         .join(", ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn failure(code: i32) -> rusqlite::Error {
-        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)
-    }
-
-    /// The damage policy an open reads every value through. Only a code about
-    /// the file's own contents authorizes discarding it.
-    #[test]
-    fn only_a_corrupt_file_is_a_reason_to_rebuild() {
-        for code in [
-            rusqlite::ffi::SQLITE_CORRUPT,
-            // The extended code FTS5 reports a failed integrity check as.
-            rusqlite::ffi::SQLITE_CORRUPT | (1 << 8),
-            rusqlite::ffi::SQLITE_NOTADB,
-        ] {
-            let verdict = rebuild_or_fail(failure(code)).expect("a rebuild reason");
-            assert!(matches!(verdict, RebuildReason::Damaged { .. }), "{code}");
-        }
-        for code in [
-            rusqlite::ffi::SQLITE_BUSY,
-            rusqlite::ffi::SQLITE_READONLY,
-            rusqlite::ffi::SQLITE_IOERR,
-            rusqlite::ffi::SQLITE_LOCKED,
-            rusqlite::ffi::SQLITE_PERM,
-        ] {
-            let error = rebuild_or_fail(failure(code))
-                .expect_err("an environment failure is reported, never resolved by a rebuild");
-            assert!(matches!(error, StoreError::Sql { .. }), "{code}: {error:?}");
-        }
-    }
 }

@@ -17,6 +17,19 @@
 //! so one reading of them serves every client and every client's disagreement
 //! reads as the same typed reason.
 //!
+//! The digest is what the fingerprint cannot answer. A fingerprint is compared
+//! against a value the database reports about *itself*, so a dropped index,
+//! table or trigger leaves it matching — and an index a client's writes depend
+//! on for uniqueness leaves duplicate rows behind when it goes. The schema
+//! digest is taken over `sqlite_schema`, so it is a statement about what is
+//! actually there.
+//!
+//! The epoch is not about shape at all. Create mints one, so a database that
+//! agrees about every part of its shape and records none was written by
+//! something else — and it is what every consumer's record of progress is keyed
+//! by, so an open that adopted it would let a cursor into a discarded database
+//! read as a position in this one.
+//!
 //! **The verdict over a client's own keys is the client's**, taken through
 //! [`Client::adopt`] once the mechanics call the database usable. Whether a
 //! file outlives its handle, which model a projection was computed under: what

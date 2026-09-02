@@ -94,7 +94,10 @@ pub use faults::induced_failure;
 pub use feed::FeedRead;
 pub use increment::{Change, IncrementOutcome, IncrementProvenance};
 pub use json::{FrontmatterValue, MAX_FRONTMATTER_DEPTH, canonical_json};
-pub use norn_db::{EmittedPlan, PlanStep};
+// The open ceremony's own vocabulary, which is this crate's too: a store is
+// one client of that ceremony, and the rung a disagreement names is the same
+// rung whichever database met it.
+pub use norn_db::{EmittedPlan, OpenOutcome, PlanStep, RebuildReason};
 pub use path::{
     ClassKey, DirectoryPrefix, DocumentPath, RENDERED_MARKER, SuffixProbe, class_probe,
     suffix_probe,
@@ -102,6 +105,4 @@ pub use path::{
 pub use request::{
     DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, Request, SubjectScope,
 };
-pub use store::{
-    OpenOutcome, RebuildReason, RecordedStoreSchema, SnapshotReader, Store, StoreMode,
-};
+pub use store::{RecordedStoreSchema, SnapshotReader, Store, StoreMode};
