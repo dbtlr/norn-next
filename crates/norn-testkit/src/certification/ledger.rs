@@ -1415,6 +1415,12 @@ mod tests {
         let crates = std::fs::read_dir(root.join("crates")).expect("listing the crates directory");
         for crate_dir in crates {
             let crate_dir = crate_dir.expect("reading a crates entry").path();
+            // A non-directory entry under crates/ (Finder litter, a stray
+            // file) is not a crate; skipping it keeps the read-failure panic
+            // below meaning what it says.
+            if !crate_dir.is_dir() {
+                continue;
+            }
             for spelling in ["tests/baselines/mod.rs", "tests/baselines.rs"] {
                 let baselines = crate_dir.join(spelling);
                 // Only an absent file is a crate with no baselines; any other

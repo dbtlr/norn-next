@@ -54,10 +54,10 @@ The invariant is *measured*, not asserted:
   green runs counting toward lockdown's five. **A third reading is missing
   rather than deferred**: the attach and heal at ≥5k are ahead of the first
   sample, and the per-PR attach ceiling covers that phase only at 2k. A
-  baseline moves only by
-  a reviewed edit, and the downward direction of that movement is review-held
-  rather than mechanized — nothing here fails a raised baseline, so this is a
-  place this section's own rule applies: a review-held invariant rots quietly.
+  baseline moves only by a reviewed edit, and the downward direction of that
+  movement is review-held rather than mechanized — nothing here fails a raised
+  baseline, so this is a place this section's own rule applies: a review-held
+  invariant rots quietly.
 - The mechanized form is a flat-slope requirement, and it runs in the same
   lane: a host attaches the ≥5k profile's vault and works it under a nightly
   mixed load while sampling its own resident set, and the run compares the
@@ -191,9 +191,9 @@ was armed, and it came off the schedule**; anything else is non-qualifying with 
 reason, and the check that a record's stated verdict is the one its contents imply is what
 a campaign counts through. The scheduled lane writes a record every run and uploads it —
 except after a `timeout-minutes` kill, which stops the step that writes one, so a scheduled
-run with no
-record is how the campaign reads a timeout. Counting five consecutive qualifying scheduled
-runs over one frozen candidate is read off those records, and manual runs never advance it.
+run with no record is how the campaign reads a timeout. Counting five consecutive
+qualifying scheduled runs over one frozen candidate is read off those records, and manual
+runs never advance it.
 
 **Two scheduled lanes run the certification cases**, and each leaves a record of what its
 own machine did. The Linux lane carries the measurements and the hour-long load; the macOS
