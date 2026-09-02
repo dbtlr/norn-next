@@ -212,8 +212,8 @@ pub enum NonQualifying {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "verdict")]
 pub enum Classification {
-    /// The run ran the required suite, passed it, and its preflight admitted the
-    /// host.
+    /// The run ran the required suite, passed it, its preflight admitted the
+    /// host, every named exit bar was armed, and it came off the schedule.
     Qualifying,
     /// The run does not count, for exactly one typed reason.
     NonQualifying { reason: NonQualifying },
@@ -293,8 +293,8 @@ pub struct ExitBar {
 ///
 /// The refusal below only reaches the bars this list names, so a bar nobody
 /// registered would fail open — green runs under it would qualify. What holds
-/// the list exhaustive is a test that scans every crate's `tests/baselines/`
-/// file for `Option`-typed constants: an `Option` band *is* the
+/// the list exhaustive is a test that scans every crate's baselines file for
+/// public `Option`-typed constants: an `Option` band *is* the
 /// authored-or-calibrating spelling, so each one must have an entry here whose
 /// pointer names it, and each entry's pointer must resolve to one.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[ExitBar {
@@ -1404,8 +1404,9 @@ mod tests {
     /// green runs would qualify — the fail-open direction — so the registry is
     /// held exhaustive against the baselines files themselves, and each
     /// entry's pointer is held to a constant that exists. The files are found
-    /// rather than listed, so a new crate's baselines join the sweep by
-    /// existing.
+    /// rather than listed — every crate's `tests/baselines/mod.rs` or
+    /// `tests/baselines.rs` — and the sweep reads public constants, which is
+    /// what a band asserted by more than one binary is.
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the checkout's own baselines files.
     fn every_option_typed_baseline_is_a_registered_exit_bar() {
@@ -1414,33 +1415,35 @@ mod tests {
         let crates = std::fs::read_dir(root.join("crates")).expect("listing the crates directory");
         for crate_dir in crates {
             let crate_dir = crate_dir.expect("reading a crates entry").path();
-            let baselines = crate_dir.join("tests/baselines/mod.rs");
-            // Only an absent file is a crate with no baselines; any other read
-            // failure is a file the sweep cannot rule out, which must not read
-            // as safe.
-            let text = match std::fs::read_to_string(&baselines) {
-                Ok(text) => text,
-                Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(problem) => panic!(
-                    "reading {}: {problem} — a baselines file the sweep cannot read may hold an \
-                     unregistered bar",
-                    baselines.display()
-                ),
-            };
-            let file = baselines
-                .strip_prefix(&root)
-                .expect("a baselines path under the workspace root")
-                .to_string_lossy()
-                .replace('\\', "/");
-            for line in text.lines() {
-                let Some(rest) = line.trim().strip_prefix("pub const ") else {
-                    continue;
+            for spelling in ["tests/baselines/mod.rs", "tests/baselines.rs"] {
+                let baselines = crate_dir.join(spelling);
+                // Only an absent file is a crate with no baselines; any other
+                // read failure is a file the sweep cannot rule out, which must
+                // not read as safe.
+                let text = match std::fs::read_to_string(&baselines) {
+                    Ok(text) => text,
+                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(problem) => panic!(
+                        "reading {}: {problem} — a baselines file the sweep cannot read may hold \
+                         an unregistered bar",
+                        baselines.display()
+                    ),
                 };
-                let Some((name, ty)) = rest.split_once(':') else {
-                    continue;
-                };
-                if ty.trim_start().starts_with("Option<") {
-                    option_bars.push(format!("{file}::{}", name.trim()));
+                let file = baselines
+                    .strip_prefix(&root)
+                    .expect("a baselines path under the workspace root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                for line in text.lines() {
+                    let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                        continue;
+                    };
+                    let Some((name, ty)) = rest.split_once(':') else {
+                        continue;
+                    };
+                    if ty.trim_start().starts_with("Option<") {
+                        option_bars.push(format!("{file}::{}", name.trim()));
+                    }
                 }
             }
         }
