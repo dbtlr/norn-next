@@ -79,11 +79,22 @@ impl norn_db::Client for SidecarClient<'_> {
     /// model was embedding — so adopting them under a new model would skip
     /// everything the old one consumed. A moved model is resolved by the
     /// wholesale-rebuild floor: fresh sidecar, full recompute.
+    ///
+    /// A model key that will not read at all reaches the same floor. The value
+    /// is part of the shape, so a key holding something no reader of this build
+    /// wrote says the file came from somewhere else — and the only reading that
+    /// leaves the sidecar in place is one the environment refused.
     fn adopt(&self, connection: &Connection, _path: &Path) -> Result<Adoption, EngineError> {
-        let recorded_id: Option<String> =
-            norn_db::meta::get_meta(connection, ddl::meta::ENGINE_MODEL_ID)?;
-        let recorded_version: Option<String> =
-            norn_db::meta::get_meta(connection, ddl::meta::ENGINE_MODEL_VERSION)?;
+        let recorded_id = match read_model_key(connection, ddl::meta::ENGINE_MODEL_ID) {
+            Reading::Value(value) => value,
+            Reading::Damaged(detail) => return Ok(Adoption::Rebuild { detail }),
+            Reading::Refused(error) => return Err(error),
+        };
+        let recorded_version = match read_model_key(connection, ddl::meta::ENGINE_MODEL_VERSION) {
+            Reading::Value(value) => value,
+            Reading::Damaged(detail) => return Ok(Adoption::Rebuild { detail }),
+            Reading::Refused(error) => return Err(error),
+        };
         if recorded_id.as_deref() == Some(self.model.id())
             && recorded_version.as_deref() == Some(self.model.version())
         {
@@ -98,5 +109,33 @@ impl norn_db::Client for SidecarClient<'_> {
                 self.model.version(),
             ),
         })
+    }
+}
+
+/// What reading one of the sidecar's own pinned keys produced.
+enum Reading {
+    /// The value the key holds, or `None` where the key is not set.
+    Value(Option<String>),
+    /// The key holds something no reader of this build wrote, named as the
+    /// detail a rebuild carries.
+    Damaged(String),
+    /// The environment refused the read.
+    Refused(EngineError),
+}
+
+/// Read one of the sidecar's own pinned keys under the same damage policy the
+/// mechanics verdict is taken under.
+///
+/// A value the column cannot produce is part of the shape, so it says the file
+/// was written by something else and resolves as a rebuild. A busy database, a
+/// revoked permission or an I/O error says nothing about the shape and is
+/// reported as the refused read it was.
+fn read_model_key(connection: &Connection, key: &str) -> Reading {
+    match norn_db::meta::read_meta::<String>(connection, key) {
+        Ok(value) => Reading::Value(value),
+        Err(error) => match norn_db::damage_or_fail("reading the sidecar schema", error) {
+            Ok(detail) => Reading::Damaged(detail),
+            Err(refused) => Reading::Refused(refused.into()),
+        },
     }
 }
