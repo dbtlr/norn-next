@@ -1,9 +1,10 @@
 //! The scheduled soak lane's host workload: a long mixed load over an attached
 //! vault, and the two shapes a leak takes.
 //!
-//! **Lockdown is counted over a nightly mixed load showing three things: zero
-//! counter violations, a flat memory slope, and no file-descriptor growth.**
-//! This case is that load and those three assertions. A load that runs for an
+//! **Lockdown is counted over a nightly mixed load showing four things: zero
+//! counter violations, a flat memory slope, no file-descriptor growth, and a
+//! peak resident set under its authored ceiling.**
+//! This case is that load and those four assertions. A load that runs for an
 //! hour is how a cost paid once per reconciliation becomes visible: a
 //! descriptor a subscription never closes, a buffer a heal never releases, and
 //! a warm read that starts deriving all show as a trend rather than as a

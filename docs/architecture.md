@@ -51,8 +51,9 @@ The invariant is *measured*, not asserted:
   0007](decisions/0007-authored-measurement-thresholds.md), and the
   qualification ledger refuses a qualifying verdict while any named exit bar
   sits unauthored — so a recalibration window records readings without its
-  green runs counting toward lockdown's five. **A third reading is missing rather than
-  deferred**: the attach and heal at ≥5k are ahead of the first sample, and the
+  green runs counting toward lockdown's five. **A third reading is missing
+  rather than deferred**: the attach and heal at ≥5k are ahead of the first
+  sample, and the
   per-PR attach ceiling covers that phase only at 2k. A baseline moves only by
   a reviewed edit, and the downward direction of that movement is review-held
   rather than mechanized — nothing here fails a raised baseline, so this is a
@@ -182,12 +183,14 @@ SHA answers for. It is a reading of the working tree, so a qualifying run is one
 clean checkout; neither it nor the record answers for the image a runner label resolved to
 on the day. The **qualification ledger** is what one run leaves behind: the candidate, both
 digests, the platform, the environmental preflight's verdict, an outcome per required case,
-and a classification whose non-qualifying reasons are a closed vocabulary — suite change,
-product failure, harness failure, timeout, manual dispatch, cancellation, environment. **A
-run is qualifying when it ran the required suite, passed it, a preflight admitted the host,
-and it came off the schedule**; anything else is non-qualifying with one typed reason, and
-the check that a record's stated verdict is the one its contents imply is what a campaign
-counts through. The scheduled lane writes a record every run and uploads it — except after a
+the named exit bars the build had unauthored, and a classification whose non-qualifying
+reasons are a closed vocabulary — suite change, product failure, harness failure, timeout,
+manual dispatch, cancellation, unauthored exit bar, environment. **A run is qualifying when
+it ran the required suite, passed it, a preflight admitted the host, every named exit bar
+was armed, and it came off the schedule**; anything else is non-qualifying with one typed
+reason, and the check that a record's stated verdict is the one its contents imply is what
+a campaign counts through. The scheduled lane writes a record every run and uploads it —
+except after a
 `timeout-minutes` kill, which stops the step that writes one, so a scheduled run with no
 record is how the campaign reads a timeout. Counting five consecutive qualifying scheduled
 runs over one frozen candidate is read off those records, and manual runs never advance it.

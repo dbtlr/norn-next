@@ -194,10 +194,12 @@ pub enum NonQualifying {
     ManualDispatch,
     /// The run was cancelled. It never happened.
     Cancellation,
-    /// A bar the exit checklist names was unauthored when the run passed. The
-    /// suite recorded the reading and held nothing against it, so the run
-    /// evaluated less than the exit asks — green under an unarmed bar is a
-    /// calibration run, and five of them certify nothing.
+    /// A bar the layer's exit contract names was unauthored in the build this
+    /// run came from: somewhere in that build's suite a reading is recorded
+    /// with nothing held against it, so a green run evaluated less than the
+    /// exit asks. It is stamped from the build rather than from what this
+    /// lane's own steps ran — a calibration window makes every lane's runs
+    /// calibration runs, and five of them certify nothing.
     UnauthoredExitBar,
     /// The host refused the run, the environment broke underneath it, or the
     /// run cannot say which machine it was: no preflight verdict, or no answer
@@ -287,11 +289,14 @@ pub struct ExitBar {
     pub armed: bool,
 }
 
-/// Every bar the exit checklist names.
+/// Every bar the layer's exit contract names.
 ///
-/// Closed like [`NonQualifying`], and for the same reason: an exit bar nobody
-/// registered is one a run can pass without evaluating, and the refusal below
-/// only reaches the bars this list names.
+/// The refusal below only reaches the bars this list names, so a bar nobody
+/// registered would fail open — green runs under it would qualify. What holds
+/// the list exhaustive is a test that scans every crate's `tests/baselines/`
+/// file for `Option`-typed constants: an `Option` band *is* the
+/// authored-or-calibrating spelling, so each one must have an entry here whose
+/// pointer names it, and each entry's pointer must resolve to one.
 pub const NAMED_EXIT_BARS: &[ExitBar] = &[ExitBar {
     name: "soak-host-peak-rss-ceiling",
     authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
@@ -356,7 +361,9 @@ pub struct Record {
     /// — [`unauthored_exit_bars`] as the writer's build computed it. Carried in
     /// the record rather than recomputed at read time, so a record classifies
     /// the same from its own contents however far the baselines have moved
-    /// since; empty is the only value a qualifying run carries.
+    /// since; empty is the only value a qualifying run carries. Required at
+    /// parse: a record without it was written by an earlier schema and is
+    /// refused whole, the same reading an unknown field gets.
     pub unauthored_exit_bars: Vec<String>,
     pub classification: Classification,
 }
@@ -546,6 +553,13 @@ impl Record {
     /// The claims check over an explicit bar registry, which is what lets a
     /// test hold a record against a build whose bars are unarmed without
     /// un-authoring a real one.
+    ///
+    /// The bar check is the counting side's own guard, independent of the
+    /// record's carried list: a record claiming every bar was armed is still
+    /// refused by a build that knows one is not. In real states the manifest
+    /// recomputation below refuses the same records — un-authoring a bar edits
+    /// a manifest entry — so this is the belt over that braces, reachable on
+    /// its own only through a record whose carried list was tampered with.
     fn qualifying_claims_against(&self, workspace_root: &Path, bars: &[ExitBar]) -> Vec<String> {
         let mut problems = Vec::new();
         for bar in bars.iter().filter(|bar| !bar.armed) {
@@ -1382,6 +1396,66 @@ mod tests {
                 .any(|problem| problem.contains("`soak-host-peak-rss-ceiling` unauthored")),
             "{problems:?}"
         );
+    }
+
+    /// **An `Option`-typed baseline is an exit bar, and every one is
+    /// registered.** A band authored `None` that nobody added to
+    /// [`super::NAMED_EXIT_BARS`] would stamp nothing into any record and its
+    /// green runs would qualify — the fail-open direction — so the registry is
+    /// held exhaustive against the baselines files themselves, and each
+    /// entry's pointer is held to a constant that exists. The files are found
+    /// rather than listed, so a new crate's baselines join the sweep by
+    /// existing.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the checkout's own baselines files.
+    fn every_option_typed_baseline_is_a_registered_exit_bar() {
+        let root = workspace_root();
+        let mut option_bars = Vec::new();
+        let crates = std::fs::read_dir(root.join("crates")).expect("listing the crates directory");
+        for crate_dir in crates {
+            let crate_dir = crate_dir.expect("reading a crates entry").path();
+            let baselines = crate_dir.join("tests/baselines/mod.rs");
+            let Ok(text) = std::fs::read_to_string(&baselines) else {
+                continue;
+            };
+            let file = baselines
+                .strip_prefix(&root)
+                .expect("a baselines path under the workspace root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            for line in text.lines() {
+                let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                    continue;
+                };
+                let Some((name, ty)) = rest.split_once(':') else {
+                    continue;
+                };
+                if ty.trim_start().starts_with("Option<") {
+                    option_bars.push(format!("{file}::{}", name.trim()));
+                }
+            }
+        }
+        assert!(
+            !option_bars.is_empty(),
+            "the sweep found no Option-typed baseline at all, so it is reading the wrong tree"
+        );
+        for pointer in &option_bars {
+            assert!(
+                super::NAMED_EXIT_BARS
+                    .iter()
+                    .any(|bar| bar.authored_at == pointer.as_str()),
+                "`{pointer}` is an Option-typed baseline with no exit-bar entry; a bar nobody \
+                 registered fails open — its calibration runs would qualify"
+            );
+        }
+        for bar in super::NAMED_EXIT_BARS {
+            assert!(
+                option_bars.iter().any(|pointer| pointer == bar.authored_at),
+                "`{}` names no Option-typed constant in any baselines file, so the registry \
+                 points a reader at nothing",
+                bar.authored_at
+            );
+        }
     }
 
     #[test]

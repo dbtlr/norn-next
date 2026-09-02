@@ -260,6 +260,14 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
         path: "crates/norn-store/tests/store/pillars.rs",
         why: "the work bar's authored floor, coefficient and row count",
     },
+    ManifestFile {
+        path: "crates/norn-host/tests/host_soak.rs",
+        why: "the scheduled lane's host workload and the comparisons that apply the soak bars: \
+              the peak ceiling, the slope ratio and the descriptor allowance are enforced here, \
+              and the test holding the ledger's armed claim to the authored ceiling sits beside \
+              them. A comparison deleted with the digest standing would count runs that \
+              evaluated less",
+    },
     // The recorded baselines. A measurement lane compares against these rather
     // than against a history, so a baseline edited is a bar moved.
     ManifestFile {
