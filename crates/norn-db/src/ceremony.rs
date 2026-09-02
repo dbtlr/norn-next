@@ -11,9 +11,9 @@
 //!
 //! **The mechanics verdict is this crate's.** Five readings answer whether the
 //! file is a database this build wrote at all: it holds a `meta` table, the
-//! store schema version is the pinned one, the DDL fingerprint is this
-//! statement list's, the schema digest is the one create recorded, and it
-//! carries an epoch. Those are facts about the machinery every client shares,
+//! schema version is the pinned one, the DDL fingerprint is this statement
+//! list's, the schema digest is the one create recorded, and it carries an
+//! epoch. Those are facts about the machinery every client shares,
 //! so one reading of them serves every client and every client's disagreement
 //! reads as the same typed reason.
 //!
@@ -60,39 +60,70 @@ use crate::error::{self, DbError};
 use crate::meta;
 use crate::schema::schema_digest;
 
-/// The operation each refusal the ceremony reports names.
+/// The five acts a ceremony can be refused at, each named for one schema.
 ///
 /// A refusal names the act it refused, because a bare driver message says
 /// which constraint failed and never which write. The labels are `&'static
 /// str` for the same reason [`DbError::Sql`] carries one: an operation is
 /// named from a fixed vocabulary rather than built out of data.
-/// [`crate::schema_operations`] spells a whole set from one noun.
+///
+/// **[`crate::schema_operations`] is the only spelling.** The fields are
+/// private and the macro builds all five from one noun, so a set cannot name
+/// five different things or leave one act labelled for another schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Operations {
     /// Reading one of the pinned scalars the mechanics verdict is taken over.
-    pub reading: &'static str,
+    pub(crate) reading: &'static str,
     /// Opening the transaction the whole statement list runs inside.
-    pub opening_the_transaction: &'static str,
+    pub(crate) opening_the_transaction: &'static str,
     /// Running one statement of the list.
-    pub creating: &'static str,
+    pub(crate) creating: &'static str,
+    /// Digesting the schema the statements left behind.
+    pub(crate) digesting: &'static str,
     /// Committing the schema the list created.
-    pub committing: &'static str,
+    pub(crate) committing: &'static str,
+}
+
+impl Operations {
+    /// The constructor [`crate::schema_operations`] expands to.
+    ///
+    /// It is public because the macro expands in the client's crate, and it is
+    /// hidden because the macro is the spelling a client uses: five labels
+    /// passed by hand can name five different nouns.
+    #[doc(hidden)]
+    pub const fn spelled(
+        reading: &'static str,
+        opening_the_transaction: &'static str,
+        creating: &'static str,
+        digesting: &'static str,
+        committing: &'static str,
+    ) -> Self {
+        Operations {
+            reading,
+            opening_the_transaction,
+            creating,
+            digesting,
+            committing,
+        }
+    }
 }
 
 /// The operation labels of one schema, spelled from the noun that names it.
 ///
 /// `norn_db::schema_operations!("store schema")` reads as "creating the store
 /// schema" at the statement that failed, "committing the store schema" at the
-/// commit, and so on. One noun spells all four, so no two of them can drift.
+/// commit, and so on. One noun spells all five, and it is the only way to make
+/// an [`Operations`], so no two of them can drift.
 #[macro_export]
 macro_rules! schema_operations {
     ($noun:literal) => {
-        $crate::Operations {
-            reading: concat!("reading the ", $noun),
-            opening_the_transaction: concat!("opening the ", $noun, " transaction"),
-            creating: concat!("creating the ", $noun),
-            committing: concat!("committing the ", $noun),
-        }
+        $crate::Operations::spelled(
+            concat!("reading the ", $noun),
+            concat!("opening the ", $noun, " transaction"),
+            concat!("creating the ", $noun),
+            concat!("digesting the ", $noun),
+            concat!("committing the ", $noun),
+        )
     };
 }
 
@@ -121,14 +152,15 @@ fn fingerprint(schema: &Schema) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RebuildReason {
     /// The DDL fingerprint differs from this build's, which pre-release means
-    /// the DDL was edited. It consumes no version number: the store schema
-    /// version is pinned, and a development-time shape change is resolved by
-    /// rebuilding rather than by minting a version.
+    /// the DDL was edited. It consumes no version number: the schema version
+    /// is pinned, and a development-time shape change is resolved by rebuilding
+    /// rather than by minting a version.
     DdlFingerprint {
         expected: String,
         found: Option<String>,
     },
-    /// The store schema version is not the one this build pins.
+    /// The schema version recorded under [`meta::STORE_SCHEMA_VERSION`] is not
+    /// the one this build pins.
     StoreSchemaVersion { expected: i64, found: Option<i64> },
     /// The file is not a database this build wrote: not a database at all,
     /// corrupt pages, a schema that carries no `meta` table to ask, or a
@@ -151,9 +183,9 @@ impl fmt::Display for RebuildReason {
             RebuildReason::StoreSchemaVersion { expected, found } => match found {
                 Some(found) => write!(
                     f,
-                    "the store schema version is {found} and this build pins {expected}"
+                    "the schema version is {found} and this build pins {expected}"
                 ),
-                None => write!(f, "the store schema version is absent"),
+                None => write!(f, "the schema version is absent"),
             },
             RebuildReason::Damaged { detail } => write!(f, "{detail}"),
             RebuildReason::Client { detail } => write!(f, "{detail}"),
@@ -315,8 +347,8 @@ fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError>
     };
     if has_meta == 0 {
         return Ok(Verdict::Rebuild(RebuildReason::Damaged {
-            detail: "the database holds tables and no `meta` table, so it is not a store this \
-                     build wrote"
+            detail: "the database holds tables and no `meta` table, so it is not a database \
+                     this build wrote"
                 .to_string(),
         }));
     }
@@ -371,7 +403,8 @@ fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError>
     };
     if epoch.is_none() {
         return Ok(Verdict::Rebuild(RebuildReason::Damaged {
-            detail: "the database records no store epoch, so it is not a store this build wrote"
+            detail: "the database records no store epoch, so it is not a database this build \
+                     wrote"
                 .to_string(),
         }));
     }
@@ -405,8 +438,8 @@ fn create<C: Client>(connection: &Connection, schema: &Schema, client: &C) -> Re
         };
         ran.map_err(|error| error::sql_at_statement(schema.operations.creating, statement, error))?;
     }
-    let digest =
-        schema_digest(&transaction).map_err(|error| error::sql("digesting the schema", error))?;
+    let digest = schema_digest(&transaction)
+        .map_err(|error| error::sql(schema.operations.digesting, error))?;
     meta::put_meta(&transaction, meta::STORE_SCHEMA_VERSION, schema.version)?;
     meta::put_meta(
         &transaction,
@@ -479,7 +512,7 @@ mod tests {
                 found: Some(7),
             }
             .to_string(),
-            "the store schema version is 7 and this build pins 1"
+            "the schema version is 7 and this build pins 1"
         );
         assert_eq!(
             RebuildReason::Client {
