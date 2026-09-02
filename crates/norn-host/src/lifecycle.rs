@@ -1898,8 +1898,9 @@ impl<O: EntryOps> Host<O> {
     /// Request one explicit reload and wait until the vault has its outcome.
     ///
     /// This is the seam the vault reload verb Layer 3's verb charter places lands
-    /// on, and after the control files stopped activating from watcher events it
-    /// is the only path that re-pins a vault schema; nothing in this crate
+    /// on. Watcher events activate neither control file, so an edited schema
+    /// reaches the store's pin only through this reload or through the fresh
+    /// read an attach or a recovery leg makes for itself; nothing in this crate
     /// outside its own cases reaches it yet.
     pub fn reload(&self, name: &VaultName) -> Result<(), ReloadRefusal> {
         let Some(entry) = self.shared.entries.get(name) else {
