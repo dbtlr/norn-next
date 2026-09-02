@@ -26,14 +26,13 @@
 //! the ≥5k profile; the local readings beside them are the same case at the
 //! short default duration, which is what a developer runs.
 //!
-//! **One band here is unauthored.** [`SOAK_PEAK_RSS_CEILING_BYTES`] is `None`:
-//! the host's peak resident set at the ≥5k profile is recorded each run and
-//! barred against nothing, because no run before the one that records it
-//! measured it. A ceiling authored from the slope's quartile means would be a
-//! number with no reading behind it, and under [ADR
-//! 0007](../../../../docs/decisions/0007-authored-measurement-thresholds.md) a
-//! threshold is an authored constraint with stated grounds — so the bar waits
-//! for calibration runs of the scheduled lane on the scheduled platform.
+//! **One band here spells its calibration state.** [`SOAK_PEAK_RSS_CEILING_BYTES`]
+//! is an `Option`: `Some` bars the run, and a build that sets it back to `None`
+//! for recalibration records the reading, bars nothing, and stamps its own
+//! runs non-qualifying through the ledger's exit-bar registry
+//! (`norn_testkit::certification::ledger::NAMED_EXIT_BARS`, held to the
+//! constant by a test in `host_soak.rs`) — so a calibration window never
+//! counts toward lockdown's five.
 //!
 //! Two integration binaries compile this module — `memory.rs` for the per-PR
 //! lane and `host_soak.rs` for the scheduled one — and each asserts against the
@@ -166,7 +165,9 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// the maximum of the same samples is what says a load that stayed flat stayed
 /// flat somewhere reasonable. The reading is recorded every run either way, and
 /// the comparison happens only where a ceiling is authored: `Some` bars the
-/// run, `None` records the reading and bars nothing.
+/// run, `None` records the reading and bars nothing — a calibration state the
+/// qualification ledger types every such run non-qualifying under, so the
+/// readings accumulate without the runs counting.
 ///
 /// **What it is the peak of is the load, and the attach is not in it.** The
 /// series starts once the attachment reads ready, so the heal walk over the
@@ -176,17 +177,34 @@ pub const SOAK_RSS_SLOPE_PER_MILLE: u64 = 1_150;
 /// third reading, needing an instrument that survives the phase rather than
 /// samples it, and it is not taken yet.
 ///
-/// **It is `None` because no reading exists yet.** No run before the one that
-/// records it took a peak at this profile — `host_soak` sampled the current
-/// resident set for the slope and kept no maximum — so there is nothing to
-/// author a ceiling from. The quartile means beside it are means of a sampled
-/// series and not its height, so deriving a ceiling from them would state a
-/// number no measurement stands behind, which is what [ADR
-/// 0007](../../../../docs/decisions/0007-authored-measurement-thresholds.md)
-/// refuses. The value it takes comes from calibration runs of the scheduled
-/// lane on the scheduled platform at the scheduled duration, and it lands as a
-/// reviewed edit carrying those readings.
-pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = None;
+/// Observed on `ubuntu-latest` x86_64-glibc at the scheduled hour, which is the
+/// lane that gates: the peak has been recorded on **every nightly since the
+/// instrument landed — sixteen of them, 2026-08-18 through 2026-09-02**. The
+/// first seven read 18.02–18.32 MiB; the series then stepped 0.72 MiB between
+/// the 2026-08-24 and 2026-08-25 nightlies (18.32 → 19.04, runs 32690822466
+/// and 32809428376), and every reading since sits at 19.04–19.32. The seven
+/// runs of the suite this ceiling is authored under — 2026-08-27 through
+/// 2026-09-02, after the engine crates merged — read **19.17–19.32 MiB** (runs
+/// 33085019370, 33187194082, 33248400528, 33304650396, 33382242484,
+/// 33490462147 and 33608123948), each with a displayed slope of 1.00 against
+/// first-quartile means of 18.86–19.09. Observed on macos-arm64 at the
+/// 90-second default duration a developer runs: **22.31–23.20 MiB over three
+/// runs** — three to four MiB above the hosted band, as 16 KiB pages against
+/// 4 KiB predict, with a spread six times the hosted one, which is what a
+/// short run's cache-filling first minute does.
+///
+/// The ceiling is 40 MiB: 2.07x the highest hosted reading and 1.72x the
+/// highest local one, the stance [`ATTACH_PEAK_RSS_CEILING_BYTES`] takes and
+/// for the same reason. The readings are whole-process peaks, so each carries
+/// the binary and its runtime as a fixed addend that a runner image, a page
+/// size or an allocator moves without the load costing more — the sixteen-run
+/// series has already stepped 0.72 MiB overnight once, with the slope flat
+/// through it — and a bar that flakes on the next such step
+/// teaches people to rerun rather than to look. What a vault-shaped cost would
+/// read here is multiples of the band: a load that held the ≥5k profile's
+/// documents resident would clear this many times over, not by the 4 MiB
+/// between platforms.
+pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 
 /// Every band above is a reading of the unoptimized build. An optimized one
 /// allocates differently enough that the bars would be measuring a subject they

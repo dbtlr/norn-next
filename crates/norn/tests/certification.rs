@@ -193,6 +193,8 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-fs/tests/lockdown.rs",
         "crates/norn-store/tests/environment.rs",
         "crates/norn-store/tests/store/pillars.rs",
+        // The soak workload whose comparisons apply the authored soak bars.
+        "crates/norn-host/tests/host_soak.rs",
         // The recorded baselines a measurement step is judged against.
         "crates/norn-fixtures/tests/baselines/mod.rs",
         "crates/norn-host/tests/baselines/mod.rs",
@@ -268,6 +270,7 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
             })
             .collect(),
         result: RunResult::Passed,
+        unauthored_exit_bars: Vec::new(),
         classification: Classification::Qualifying,
     };
     assert_eq!(sound.problems(&root), Vec::<String>::new());

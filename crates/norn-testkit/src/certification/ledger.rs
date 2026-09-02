@@ -12,7 +12,7 @@
 //!
 //! # What makes a run qualifying
 //!
-//! Four things, and each of them is a field here rather than a judgment a
+//! Five things, and each of them is a field here rather than a judgment a
 //! reader makes:
 //!
 //! 1. **It ran the required suite.** The case outcomes reconcile exactly against
@@ -24,7 +24,13 @@
 //!    admitted the host. That slot is structure here and nothing else: what a
 //!    preflight checks and what it refuses is its own task's, and this records
 //!    the verdict rather than reaching one.
-//! 4. **It came off the schedule.** A run somebody started is outside the
+//! 4. **Every named exit bar was armed.** The exit checklist names bars, and a
+//!    bar authored `None` is one the suite records a reading for and holds
+//!    nothing against — so a run under it passed less than the exit asks. The
+//!    build's claim about which bars are armed is [`NAMED_EXIT_BARS`], and the
+//!    record carries the unarmed ones so it classifies the same however old it
+//!    is when read.
+//! 5. **It came off the schedule.** A run somebody started is outside the
 //!    sequence the five are counted over, so it is typed
 //!    [`NonQualifying::ManualDispatch`] rather than left to a reader to notice.
 //!
@@ -188,6 +194,13 @@ pub enum NonQualifying {
     ManualDispatch,
     /// The run was cancelled. It never happened.
     Cancellation,
+    /// A bar the layer's exit contract names was unauthored in the build this
+    /// run came from: somewhere in that build's suite a reading is recorded
+    /// with nothing held against it, so a green run evaluated less than the
+    /// exit asks. It is stamped from the build rather than from what this
+    /// lane's own steps ran — a calibration window makes every lane's runs
+    /// calibration runs, and five of them certify nothing.
+    UnauthoredExitBar,
     /// The host refused the run, the environment broke underneath it, or the
     /// run cannot say which machine it was: no preflight verdict, or no answer
     /// for one of the two platform facts the inventory's platform-deciding lanes
@@ -199,8 +212,8 @@ pub enum NonQualifying {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "verdict")]
 pub enum Classification {
-    /// The run ran the required suite, passed it, and its preflight admitted the
-    /// host.
+    /// The run ran the required suite, passed it, its preflight admitted the
+    /// host, every named exit bar was armed, and it came off the schedule.
     Qualifying,
     /// The run does not count, for exactly one typed reason.
     NonQualifying { reason: NonQualifying },
@@ -257,6 +270,50 @@ impl Preflight {
     }
 }
 
+/// A bar the layer's exit checklist names, and whether this build has it armed.
+///
+/// The value itself stays in the measuring crate's own baselines file — that
+/// file is the trend's whole memory, and it is a manifest entry, so authoring
+/// or un-authoring the bar moves the suite digest. What lives here is the
+/// *claim* that the bar is armed, which is what the classification below turns
+/// on; a test beside the constant holds the claim to the constant, so the two
+/// cannot drift apart quietly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExitBar {
+    /// The name the record carries where the bar is unarmed.
+    pub name: &'static str,
+    /// Where the authored value lives, for a reader chasing the bar down.
+    pub authored_at: &'static str,
+    /// Whether the bar is authored in this build. `false` is the calibration
+    /// state: the suite records the reading and holds nothing against it.
+    pub armed: bool,
+}
+
+/// Every bar the layer's exit contract names.
+///
+/// The refusal below only reaches the bars this list names, so a bar nobody
+/// registered would fail open — green runs under it would qualify. What holds
+/// the list exhaustive is a test that scans every crate's baselines file for
+/// public `Option`-typed constants: an `Option` band *is* the
+/// authored-or-calibrating spelling, so each one must have an entry here whose
+/// pointer names it, and each entry's pointer must resolve to one.
+pub const NAMED_EXIT_BARS: &[ExitBar] = &[ExitBar {
+    name: "soak-host-peak-rss-ceiling",
+    authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
+    armed: true,
+}];
+
+/// The names of the bars this build has unarmed — what the writer stamps into
+/// [`Record::unauthored_exit_bars`], and empty in a build whose suite evaluates
+/// the whole exit.
+pub fn unauthored_exit_bars() -> Vec<String> {
+    NAMED_EXIT_BARS
+        .iter()
+        .filter(|bar| !bar.armed)
+        .map(|bar| bar.name.to_string())
+        .collect()
+}
+
 /// **One certification run.**
 ///
 /// # The five-consecutive rule, documented and not implemented
@@ -300,6 +357,14 @@ pub struct Record {
     /// One line per required case.
     pub cases: Vec<CaseOutcome>,
     pub result: RunResult,
+    /// The named exit bars that were unauthored in the build this run executed
+    /// — [`unauthored_exit_bars`] as the writer's build computed it. Carried in
+    /// the record rather than recomputed at read time, so a record classifies
+    /// the same from its own contents however far the baselines have moved
+    /// since; empty is the only value a qualifying run carries. Required at
+    /// parse: a record without it was written by an earlier schema and is
+    /// refused whole, the same reading an unknown field gets.
+    pub unauthored_exit_bars: Vec<String>,
     pub classification: Classification,
 }
 
@@ -354,6 +419,15 @@ impl Record {
         {
             return Classification::NonQualifying {
                 reason: NonQualifying::ProductFailure,
+            };
+        }
+        // Read after the outcomes, because a failed case is a fact about the
+        // candidate whichever bars were armed around it — but before the
+        // platform answers, because a green run under an unarmed bar concluded
+        // less than the exit asks whatever machine it was on.
+        if !self.unauthored_exit_bars.is_empty() {
+            return Classification::NonQualifying {
+                reason: NonQualifying::UnauthoredExitBar,
             };
         }
         // A run that cannot say which of the two platform answers the
@@ -473,7 +547,29 @@ impl Record {
     /// which of the two platform answers the inventory's platform-deciding lanes
     /// require this run supplied.
     fn qualifying_claims(&self, workspace_root: &Path) -> Vec<String> {
+        self.qualifying_claims_against(workspace_root, NAMED_EXIT_BARS)
+    }
+
+    /// The claims check over an explicit bar registry, which is what lets a
+    /// test hold a record against a build whose bars are unarmed without
+    /// un-authoring a real one.
+    ///
+    /// The bar check is the counting side's own guard, independent of the
+    /// record's carried list: a record claiming every bar was armed is still
+    /// refused by a build that knows one is not. In real states the manifest
+    /// recomputation below refuses the same records — un-authoring a bar edits
+    /// a manifest entry — so this is the belt over that braces, reachable on
+    /// its own only through a record whose carried list was tampered with.
+    fn qualifying_claims_against(&self, workspace_root: &Path, bars: &[ExitBar]) -> Vec<String> {
         let mut problems = Vec::new();
+        for bar in bars.iter().filter(|bar| !bar.armed) {
+            problems.push(format!(
+                "the record is qualifying and this build names the exit bar `{}` unauthored (its \
+                 value lives at {}). Five qualifying runs cannot accumulate while a named exit \
+                 bar is unarmed, so a count under this build refuses every one of them.",
+                bar.name, bar.authored_at
+            ));
+        }
         match manifest::digest(workspace_root) {
             Ok(built) if built != self.suite_manifest_digest => problems.push(format!(
                 "the record is qualifying and carries the suite-manifest digest `{}`, and this \
@@ -664,6 +760,7 @@ pub fn from_environment(workspace_root: &Path) -> Result<Record, String> {
             Some("cancelled") => RunResult::Cancelled,
             _ => RunResult::Failed,
         },
+        unauthored_exit_bars: unauthored_exit_bars(),
         classification: Classification::Qualifying,
     };
     record.classification = record.implied_classification();
@@ -764,7 +861,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        CaseOutcome, Classification, NonQualifying, Outcome, Platform, Preflight, Record, RunResult,
+        CaseOutcome, Classification, ExitBar, NonQualifying, Outcome, Platform, Preflight, Record,
+        RunResult,
     };
     use crate::certification::inventory::{self, REQUIRED_CASES};
     use crate::certification::manifest;
@@ -810,6 +908,7 @@ mod tests {
             },
             cases: every_case(Outcome::Passed),
             result: RunResult::Passed,
+            unauthored_exit_bars: Vec::new(),
             classification: Classification::Qualifying,
         };
         record.classification = record.implied_classification();
@@ -1235,6 +1334,146 @@ mod tests {
     #[test]
     fn the_volume_probe_answers() {
         assert!(super::probe_volume_folding().is_some());
+    }
+
+    /// A run green under an unarmed exit bar is a calibration run, and the
+    /// record it leaves says so with a typed reason: the suite recorded the
+    /// reading and held nothing against it, so the run evaluated less than the
+    /// exit asks. The record is evidence rather than a defect — the writer
+    /// emits it, and nothing else about it is wrong.
+    #[test]
+    fn a_run_under_an_unauthored_exit_bar_is_typed_by_it() {
+        let root = workspace_root();
+        let mut record = qualifying_at(&root);
+        record.unauthored_exit_bars = vec!["soak-host-peak-rss-ceiling".to_string()];
+        record.classification = record.implied_classification();
+        assert_eq!(
+            record.classification,
+            Classification::NonQualifying {
+                reason: NonQualifying::UnauthoredExitBar
+            }
+        );
+        assert!(!record.qualifies(&root));
+        assert_eq!(record.problems(&root), Vec::<String>::new());
+        assert_eq!(record.writer_defects(&root), Vec::<String>::new());
+    }
+
+    /// A failed case still reads as the product failure it is: which bars were
+    /// armed around it changes nothing about what the run found.
+    #[test]
+    fn a_product_failure_outranks_an_unauthored_exit_bar() {
+        let root = workspace_root();
+        let mut record = qualifying_at(&root);
+        record.unauthored_exit_bars = vec!["soak-host-peak-rss-ceiling".to_string()];
+        record.cases[0].outcome = Outcome::Failed;
+        record.result = RunResult::Failed;
+        record.classification = record.implied_classification();
+        assert_eq!(
+            record.classification,
+            Classification::NonQualifying {
+                reason: NonQualifying::ProductFailure
+            }
+        );
+    }
+
+    /// **A stated-qualifying record is refused by a build whose registry holds
+    /// an unarmed bar.** This is the hand-edited half: a record whose own list
+    /// is empty claims every bar was armed, and the build counting it knows
+    /// otherwise — the same shape as the manifest recomputation beside it.
+    #[test]
+    fn a_qualifying_record_is_refused_where_this_build_has_an_unarmed_exit_bar() {
+        let root = workspace_root();
+        let record = qualifying_at(&root);
+        let unarmed = [ExitBar {
+            name: "soak-host-peak-rss-ceiling",
+            authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_PEAK_RSS_CEILING_BYTES",
+            armed: false,
+        }];
+        let problems = record.qualifying_claims_against(&root, &unarmed);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("`soak-host-peak-rss-ceiling` unauthored")),
+            "{problems:?}"
+        );
+    }
+
+    /// **An `Option`-typed baseline is an exit bar, and every one is
+    /// registered.** A band authored `None` that nobody added to
+    /// [`super::NAMED_EXIT_BARS`] would stamp nothing into any record and its
+    /// green runs would qualify — the fail-open direction — so the registry is
+    /// held exhaustive against the baselines files themselves, and each
+    /// entry's pointer is held to a constant that exists. The files are found
+    /// rather than listed — every crate's `tests/baselines/mod.rs` or
+    /// `tests/baselines.rs` — and the sweep reads public constants, which is
+    /// what a band asserted by more than one binary is.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the checkout's own baselines files.
+    fn every_option_typed_baseline_is_a_registered_exit_bar() {
+        let root = workspace_root();
+        let mut option_bars = Vec::new();
+        let crates = std::fs::read_dir(root.join("crates")).expect("listing the crates directory");
+        for crate_dir in crates {
+            let crate_dir = crate_dir.expect("reading a crates entry").path();
+            // A non-directory entry under crates/ (Finder litter, a stray
+            // file) is not a crate; skipping it keeps the read-failure panic
+            // below meaning what it says.
+            if !crate_dir.is_dir() {
+                continue;
+            }
+            for spelling in ["tests/baselines/mod.rs", "tests/baselines.rs"] {
+                let baselines = crate_dir.join(spelling);
+                // Only an absent file is a crate with no baselines; any other
+                // read failure is a file the sweep cannot rule out, which must
+                // not read as safe.
+                let text = match std::fs::read_to_string(&baselines) {
+                    Ok(text) => text,
+                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(problem) => panic!(
+                        "reading {}: {problem} — a baselines file the sweep cannot read may hold \
+                         an unregistered bar",
+                        baselines.display()
+                    ),
+                };
+                let file = baselines
+                    .strip_prefix(&root)
+                    .expect("a baselines path under the workspace root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                for line in text.lines() {
+                    let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                        continue;
+                    };
+                    let Some((name, ty)) = rest.split_once(':') else {
+                        continue;
+                    };
+                    if ty.trim_start().starts_with("Option<") {
+                        option_bars.push(format!("{file}::{}", name.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            !option_bars.is_empty(),
+            "the sweep found no Option-typed baseline at all, so it is reading the wrong tree"
+        );
+        for pointer in &option_bars {
+            assert!(
+                super::NAMED_EXIT_BARS
+                    .iter()
+                    .any(|bar| bar.authored_at == pointer.as_str()),
+                "`{pointer}` is an Option-typed baseline with no exit-bar entry; a bar nobody \
+                 registered fails open — its calibration runs would qualify"
+            );
+        }
+        for bar in super::NAMED_EXIT_BARS {
+            assert!(
+                option_bars.iter().any(|pointer| pointer == bar.authored_at),
+                "`{}` names no Option-typed constant in any baselines file, so the registry \
+                 points a reader at nothing",
+                bar.authored_at
+            );
+        }
     }
 
     #[test]

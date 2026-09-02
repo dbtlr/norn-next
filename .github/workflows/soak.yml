@@ -94,14 +94,16 @@ jobs:
   # weights to fetch.
   #
   # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
-  # mixed load, showing zero counter violations, a flat memory slope, and no
-  # file-descriptor growth.** All three terms now run: the child's warm
-  # requests assert every derivation counter at zero and carry a violation out
-  # as its exit status, the descriptor count is compared between the first
-  # sample and the last, and the resident-set series is judged as the ratio
-  # between its first and last quartile means. So the count starts at the first
-  # green run of this lane as it stands — a green run of a lane that does not
-  # measure a term is not one of the five, and this lane now measures all three.
+  # mixed load, showing zero counter violations, a flat memory slope, no
+  # file-descriptor growth, and a peak resident set under its authored
+  # ceiling.** All four terms now run: the child's warm requests assert every
+  # derivation counter at zero and carry a violation out as its exit status,
+  # the descriptor count is compared between the first sample and the last,
+  # the resident-set series is judged as the ratio between its first and last
+  # quartile means, and its maximum is held under the authored ceiling. So the
+  # count starts at the first green run of this lane as it stands — a green run
+  # of a lane that does not measure a term is not one of the five, and this
+  # lane now measures all four.
   #
   # The timeout is the outer runaway guard, and it is set so the inner one is
   # what fires. The host load's child carries its own deadline — the declared

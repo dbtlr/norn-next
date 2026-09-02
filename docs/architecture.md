@@ -46,17 +46,18 @@ The invariant is *measured*, not asserted:
   profile's tree costs, and its ceiling is authored. The other is the host's
   own: the highest resident set the load's process reaches while working that
   tree, sampled from the moment the attachment is ready, so it is the peak the
-  hour sustains and not the attach's. **That one has no ceiling yet** — no run
-  before the one that records the reading measured it, and under [ADR
-  0007](decisions/0007-authored-measurement-thresholds.md) a threshold is an
-  authored constraint with stated grounds, so the reading is recorded and
-  barred against nothing until calibration runs on the scheduled platform
-  produce grounds for a ceiling. **A third reading is missing rather than
-  deferred**: the attach and heal at ≥5k are ahead of the first sample, and the
-  per-PR attach ceiling covers that phase only at 2k. A baseline moves only by
-  a reviewed edit, and the downward direction of that movement is review-held
-  rather than mechanized — nothing here fails a raised baseline, so this is a
-  place this section's own rule applies: a review-held invariant rots quietly.
+  hour sustains and not the attach's. Its ceiling is authored off calibration
+  runs of the scheduled lane per [ADR
+  0007](decisions/0007-authored-measurement-thresholds.md), and the
+  qualification ledger refuses a qualifying verdict while any named exit bar
+  sits unauthored — so a recalibration window records readings without its
+  green runs counting toward lockdown's five. **A third reading is missing
+  rather than deferred**: the attach and heal at ≥5k are ahead of the first
+  sample, and the per-PR attach ceiling covers that phase only at 2k. A
+  baseline moves only by a reviewed edit, and the downward direction of that
+  movement is review-held rather than mechanized — nothing here fails a raised
+  baseline, so this is a place this section's own rule applies: a review-held
+  invariant rots quietly.
 - The mechanized form is a flat-slope requirement, and it runs in the same
   lane: a host attaches the ≥5k profile's vault and works it under a nightly
   mixed load while sampling its own resident set, and the run compares the
@@ -182,15 +183,17 @@ SHA answers for. It is a reading of the working tree, so a qualifying run is one
 clean checkout; neither it nor the record answers for the image a runner label resolved to
 on the day. The **qualification ledger** is what one run leaves behind: the candidate, both
 digests, the platform, the environmental preflight's verdict, an outcome per required case,
-and a classification whose non-qualifying reasons are a closed vocabulary — suite change,
-product failure, harness failure, timeout, manual dispatch, cancellation, environment. **A
-run is qualifying when it ran the required suite, passed it, a preflight admitted the host,
-and it came off the schedule**; anything else is non-qualifying with one typed reason, and
-the check that a record's stated verdict is the one its contents imply is what a campaign
-counts through. The scheduled lane writes a record every run and uploads it — except after a
-`timeout-minutes` kill, which stops the step that writes one, so a scheduled run with no
-record is how the campaign reads a timeout. Counting five consecutive qualifying scheduled
-runs over one frozen candidate is read off those records, and manual runs never advance it.
+the named exit bars the build had unauthored, and a classification whose non-qualifying
+reasons are a closed vocabulary — suite change, product failure, harness failure, timeout,
+manual dispatch, cancellation, unauthored exit bar, environment. **A run is qualifying when
+it ran the required suite, passed it, a preflight admitted the host, every named exit bar
+was armed, and it came off the schedule**; anything else is non-qualifying with one typed
+reason, and the check that a record's stated verdict is the one its contents imply is what
+a campaign counts through. The scheduled lane writes a record every run and uploads it —
+except after a `timeout-minutes` kill, which stops the step that writes one, so a scheduled
+run with no record is how the campaign reads a timeout. Counting five consecutive
+qualifying scheduled runs over one frozen candidate is read off those records, and manual
+runs never advance it.
 
 **Two scheduled lanes run the certification cases**, and each leaves a record of what its
 own machine did. The Linux lane carries the measurements and the hour-long load; the macOS
