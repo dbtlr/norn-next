@@ -600,9 +600,9 @@ impl norn_db::Client for StoreClient {
     /// The database is sound and the caller asked for the wrong thing about
     /// it, so nothing is discarded.
     ///
-    /// The arms are written out explicitly, mode by recorded mode, rather than
-    /// folded behind a wildcard — a wildcard is how the throwaway-and-absent
-    /// case went unnoticed the first time.
+    /// The arms are written out mode by recorded mode rather than folded
+    /// behind a wildcard, so every combination of asked-for and recorded mode
+    /// is a decision this code states.
     fn adopt(&self, connection: &Connection, path: &Path) -> Result<Adoption, StoreError> {
         let recorded = norn_db::meta::get_meta::<String>(connection, ddl::meta::STORE_MODE)?
             .as_deref()

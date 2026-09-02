@@ -38,10 +38,20 @@
 //!
 //! # Damage is resolved; a broken environment is refused
 //!
-//! Every reading an open performs goes through [`crate::damage_or_fail`], so a
-//! busy database, a revoked permission or an I/O error is reported as the
-//! refused operation it was rather than resolved by discarding a sound
-//! database. Only a file whose own contents are wrong is a rebuild.
+//! Every reading the mechanics verdict is taken over goes through
+//! [`crate::damage_or_fail`], so a busy database, a revoked permission or an
+//! I/O error is reported as the refused operation it was rather than resolved
+//! by discarding a sound database. Only a file whose own contents are wrong is
+//! a rebuild.
+//!
+//! A client's own readings inside [`Client::adopt`] follow the client's policy,
+//! and the two clients that run this ceremony answer differently. The sidecar
+//! reads its model keys under the same policy: a value no reader of its build
+//! wrote is [`Adoption::Rebuild`], because every row it holds is a projection
+//! it can compute again. The store reads its mode key and refuses a value it
+//! cannot make sense of, because the value decides whether the file outlives
+//! the handle and the wrong answer deletes a registered vault's whole derived
+//! state.
 //!
 //! # A rebuild is the whole file
 //!
@@ -166,9 +176,11 @@ pub enum RebuildReason {
     /// corrupt pages, a schema that carries no `meta` table to ask, or a
     /// schema that no longer holds what the statement list created.
     Damaged { detail: String },
-    /// The client judged the database it was offered, and asked for a fresh
-    /// one. The detail is the client's own: the mechanics agreed about every
-    /// part of the shape.
+    /// A rebuild the client judged, and the detail is the client's own. It is
+    /// reached two ways: at [`Client::adopt`], over a database the mechanics
+    /// already called usable, and by the client's own act on a database it
+    /// holds — the deliberate route through [`rebuild`], where no mechanics
+    /// verdict was taken at all.
     Client { detail: String },
 }
 
@@ -216,9 +228,11 @@ pub enum Adoption {
 
 /// The crate that owns what a statement list means.
 ///
-/// The ceremony calls back into it twice: once inside the create transaction,
-/// to record the keys the client pins, and once after the mechanics verdict,
-/// to take the verdict over those keys.
+/// The ceremony calls back into it at three hooks: [`Client::record`], once
+/// inside the create transaction, to record the keys the client pins;
+/// [`Client::adopt`], once after the mechanics verdict, to take the verdict
+/// over those keys; and [`Client::armed_failure`], once ahead of every
+/// statement of the list, to ask whether a suite arranged one to fail.
 pub trait Client {
     /// The refusal this client reports. Every substrate refusal crosses into
     /// it, so a client maps the driver seam onto its own vocabulary once.
@@ -227,6 +241,12 @@ pub trait Client {
     /// Write the client's own pinned scalars, inside the create transaction:
     /// the mechanics keys are already written, and the commit that says the
     /// list finished has not run.
+    ///
+    /// **Pinned scalars in `meta`, and nothing else.** The schema digest is
+    /// taken before this runs, so an object created here is an object the
+    /// recorded digest does not describe: the next open re-takes the digest,
+    /// finds it moved, and rebuilds — and the rebuild creates the same object
+    /// again, so every open after it rebuilds too.
     fn record(&self, transaction: &Connection) -> Result<(), Self::Error>;
 
     /// Judge the client's own keys in a database the mechanics call usable —
@@ -370,7 +390,10 @@ fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError>
     };
     let expected = fingerprint(schema);
     if found.as_deref() != Some(expected.as_str()) {
-        return Ok(Verdict::Rebuild(RebuildReason::DdlFingerprint { expected, found }));
+        return Ok(Verdict::Rebuild(RebuildReason::DdlFingerprint {
+            expected,
+            found,
+        }));
     }
 
     let recorded: Option<String> = match meta::read_meta(connection, meta::SCHEMA_DIGEST) {

@@ -337,9 +337,12 @@ fn the_recorded_fingerprint_is_the_digest_of_the_statements_that_ran() {
     let scratch = Scratch::new("derived-fingerprint");
     let schema = schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY, body TEXT)");
 
-    let (connection, outcome) =
-        norn_db::open(&scratch.database(), &schema, &TrialClient::new(Answer::Keep))
-            .expect("a first open");
+    let (connection, outcome) = norn_db::open(
+        &scratch.database(),
+        &schema,
+        &TrialClient::new(Answer::Keep),
+    )
+    .expect("a first open");
     assert_eq!(outcome, OpenOutcome::Created);
     assert_eq!(
         meta::get_meta::<String>(&connection, meta::DDL_FINGERPRINT).expect("the fingerprint"),

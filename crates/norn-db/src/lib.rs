@@ -31,7 +31,7 @@
 //!   handle that binds an open connection to its file and its epoch.
 //! - [`open`] — the ceremony every database runs: connect, judge, and create,
 //!   adopt or rebuild; with [`Schema`], what a client hands it, and [`Client`],
-//!   the two callbacks it hands back.
+//!   the three hooks it calls back into.
 //! - [`meta`] — the pinned scalars an open reads before it trusts anything
 //!   else, the mechanics keys among them, and the read and write of one.
 //! - [`digest`] and [`schema_digest`] — which statement list produced this

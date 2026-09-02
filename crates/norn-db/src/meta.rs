@@ -2,8 +2,8 @@
 //! else.
 //!
 //! A key/value table, because it is the one table whose shape may never
-//! change: the store schema fingerprint is read out of it in order to decide
-//! whether the rest of the database is the shape this build writes, so a
+//! change: the DDL fingerprint is read out of it in order to decide whether
+//! the rest of the database is the shape this build writes, so a
 //! reader of `meta` cannot rely on any other table's columns being what it
 //! expects. Adding a pinned scalar is a new key rather than a new column.
 //!
@@ -14,20 +14,27 @@
 //!
 //! # Two kinds of key, and this crate owns one of them
 //!
-//! **The mechanics keys are here**, and they are here for two different
-//! reasons. Two of them the substrate reads and writes itself: it reads
-//! [`STORE_EPOCH`] at [`crate::Database::adopt`], and it writes
-//! [`WRITE_GENERATION`] at [`next_generation`]. The other three —
-//! [`STORE_SCHEMA_VERSION`], [`DDL_FINGERPRINT`] and [`SCHEMA_DIGEST`] — are
-//! defined here and written by the client, because every database derived over
-//! this crate records all three and one spelling is what lets a second client's
-//! database be read by the same reasoning as the first's.
+//! **The mechanics keys are here, and the open ceremony owns four of them.**
+//! [`crate::open`] writes [`STORE_SCHEMA_VERSION`], [`DDL_FINGERPRINT`],
+//! [`SCHEMA_DIGEST`] and [`STORE_EPOCH`] inside the create transaction, and
+//! reads all four back at every later open to decide whether the file is a
+//! database this build wrote. Every database derived over this crate carries
+//! the same four, which is what lets a second client's database be read by the
+//! same reasoning as the first's.
+//!
+//! Two readings sit outside that ceremony and are the substrate's own:
+//! [`crate::Database::adopt`] reads [`STORE_EPOCH`] to bind a connection to the
+//! lifetime it belongs to, and [`next_generation`] writes [`WRITE_GENERATION`],
+//! the counter a client seeds among its own keys where its rows carry
+//! generations.
 //!
 //! **Every other key belongs to the client that writes it.** A key naming what
 //! a database was derived under, what it holds a projection of, or whether its
 //! file outlives the handle, is the client's own vocabulary: it spells the key,
-//! it decides what the value means, and it reads and writes it through
-//! [`put_meta`] and [`get_meta`] like any other pinned scalar.
+//! it decides what the value means, and it writes it inside the create
+//! transaction through [`crate::Client::record`] and reads it at
+//! [`crate::Client::adopt`], through [`put_meta`] and [`get_meta`] like any
+//! other pinned scalar.
 
 use rusqlite::{Connection, OptionalExtension, ToSql};
 
