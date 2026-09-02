@@ -30,8 +30,9 @@
 //! the blob's own bytes do not say how many values they hold.
 
 /// The engine schema version, pinned at 1 through the pre-release build. A
-/// DDL change is detected as a [`fingerprint`] mismatch and resolved by
-/// rebuilding from zero, which consumes no version numbers.
+/// DDL change is detected as a DDL fingerprint mismatch — the open takes that
+/// fingerprint over [`statements`] — and resolved by rebuilding from zero,
+/// which consumes no version numbers.
 pub(crate) const ENGINE_SCHEMA_VERSION: i64 = 1;
 
 /// Every statement the sidecar schema is made of, in execution order. `meta`
@@ -40,13 +41,6 @@ pub(crate) fn statements() -> Vec<String> {
     let mut statements = norn_db::meta::statements();
     statements.extend(STATEMENTS.iter().map(|statement| (*statement).to_string()));
     statements
-}
-
-/// The digest of the whole statement list — the sidecar's own DDL
-/// fingerprint, compared at open exactly as the store compares its own.
-pub(crate) fn fingerprint() -> String {
-    let statements = statements();
-    norn_db::digest(statements.iter().map(String::as_str))
 }
 
 const STATEMENTS: &[&str] = &["CREATE TABLE document_vectors (

@@ -46,7 +46,6 @@ fn sidecar_schema() -> norn_db::Schema {
         operations: norn_db::schema_operations!("sidecar schema"),
         version: ddl::ENGINE_SCHEMA_VERSION,
         statements: ddl::statements(),
-        fingerprint: ddl::fingerprint(),
     }
 }
 

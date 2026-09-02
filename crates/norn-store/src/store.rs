@@ -547,14 +547,14 @@ impl Drop for Store {
 
 /// The statement list this build writes, and what the ceremony calls it.
 ///
-/// The version is pinned and the fingerprint is taken over the list, so a DDL
-/// edit moves the fingerprint and an open resolves it by rebuilding.
+/// The version is pinned and the ceremony takes the DDL fingerprint over the
+/// list, so a DDL edit moves the fingerprint and an open resolves it by
+/// rebuilding.
 fn store_schema() -> norn_db::Schema {
     norn_db::Schema {
         operations: norn_db::schema_operations!("store schema"),
         version: ddl::STORE_SCHEMA_VERSION,
         statements: ddl::statements(),
-        fingerprint: ddl::fingerprint(),
     }
 }
 

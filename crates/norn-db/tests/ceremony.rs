@@ -110,18 +110,25 @@ impl Client for TrialClient {
 /// The trial schema: the `meta` table every database carries, and one table of
 /// the client's own.
 fn schema() -> Schema {
-    schema_at(1, norn_db::digest(["the trial schema"]))
+    schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY)")
 }
 
-fn schema_at(version: i64, fingerprint: String) -> Schema {
+/// The trial schema at another version, or over another statement list. The
+/// ceremony takes the DDL fingerprint over the list, so an edited statement is
+/// the only way to move it.
+fn schema_at(version: i64, notes: &str) -> Schema {
     let mut statements = meta::statements();
-    statements.push("CREATE TABLE notes (path TEXT PRIMARY KEY)".to_string());
+    statements.push(notes.to_string());
     Schema {
         operations: norn_db::schema_operations!("trial schema"),
         version,
         statements,
-        fingerprint,
     }
+}
+
+/// The fingerprint a `schema` records, taken the way the ceremony takes it.
+fn fingerprint_of(schema: &Schema) -> String {
+    norn_db::digest(schema.statements.iter().map(String::as_str))
 }
 
 /// Open the trial schema at `path`, answering `answer` where the mechanics ask
@@ -157,7 +164,8 @@ fn a_fresh_path_is_created_with_the_client_s_own_keys() {
     );
     assert_eq!(
         meta::get_meta::<String>(&connection, meta::DDL_FINGERPRINT).expect("the fingerprint"),
-        Some(schema().fingerprint)
+        Some(fingerprint_of(&schema())),
+        "a create recorded a fingerprint the statements it ran do not produce"
     );
 }
 
@@ -306,19 +314,39 @@ fn a_database_with_no_meta_table_is_rebuilt_from_zero() {
 fn a_moved_fingerprint_is_rebuilt_from_zero() {
     let scratch = Scratch::new("fingerprint");
     let database = scratch.database();
-    let first = schema().fingerprint;
+    let first = fingerprint_of(&schema());
     drop(open(&database, Answer::Keep).expect("a first open"));
 
-    let moved = schema_at(1, norn_db::digest(["the trial schema, edited"]));
+    let moved = schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY, body TEXT)");
     let (_, outcome) = norn_db::open(&database, &moved, &TrialClient::new(Answer::Keep))
         .expect("an open under an edited statement list");
     match &outcome {
         OpenOutcome::RebuiltFromZero(RebuildReason::DdlFingerprint { expected, found }) => {
-            assert_eq!(*expected, moved.fingerprint);
+            assert_eq!(*expected, fingerprint_of(&moved));
             assert_eq!(found.as_deref(), Some(first.as_str()));
         }
         other => panic!("the open ended as {other:?} rather than rebuilding"),
     }
+}
+
+/// The fingerprint a database records is the digest of the statement list that
+/// created it. The ceremony takes it, so a client has no way to record one the
+/// statements it ran do not produce.
+#[test]
+fn the_recorded_fingerprint_is_the_digest_of_the_statements_that_ran() {
+    let scratch = Scratch::new("derived-fingerprint");
+    let schema = schema_at(1, "CREATE TABLE notes (path TEXT PRIMARY KEY, body TEXT)");
+
+    let (connection, outcome) =
+        norn_db::open(&scratch.database(), &schema, &TrialClient::new(Answer::Keep))
+            .expect("a first open");
+    assert_eq!(outcome, OpenOutcome::Created);
+    assert_eq!(
+        meta::get_meta::<String>(&connection, meta::DDL_FINGERPRINT).expect("the fingerprint"),
+        Some(norn_db::digest(
+            schema.statements.iter().map(String::as_str)
+        ))
+    );
 }
 
 /// A pinned version that is not this build's is the typed reason it is, and
@@ -329,7 +357,7 @@ fn a_moved_version_is_rebuilt_from_zero() {
     let database = scratch.database();
     drop(open(&database, Answer::Keep).expect("a first open"));
 
-    let moved = schema_at(7, schema().fingerprint);
+    let moved = schema_at(7, "CREATE TABLE notes (path TEXT PRIMARY KEY)");
     let client = TrialClient::new(Answer::Keep);
     let (_, outcome) =
         norn_db::open(&database, &moved, &client).expect("an open under a moved version");

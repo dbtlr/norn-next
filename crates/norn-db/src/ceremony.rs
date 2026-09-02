@@ -2,10 +2,10 @@
 //! rebuild it.
 //!
 //! Every database derived over this crate is opened the same way, and the way
-//! is here. A client hands over the statement list it owns, the version it
-//! pins and the fingerprint of that list; what comes back is a connection and
-//! [`OpenOutcome`] — created, reused, or rebuilt from zero with a typed
-//! [`RebuildReason`].
+//! is here. A client hands over the statement list it owns and the version it
+//! pins; what comes back is a connection and [`OpenOutcome`] — created,
+//! reused, or rebuilt from zero with a typed [`RebuildReason`]. The DDL
+//! fingerprint is taken from the list here rather than handed in beside it.
 //!
 //! # Two verdicts, each taken where it can be taken
 //!
@@ -105,9 +105,16 @@ pub struct Schema {
     pub version: i64,
     /// The statement list, run in order inside one transaction.
     pub statements: Vec<String>,
-    /// The digest of that statement list, recorded under
-    /// [`meta::DDL_FINGERPRINT`] and compared at every open.
-    pub fingerprint: String,
+}
+
+/// The DDL fingerprint of a statement list: what a create records under
+/// [`meta::DDL_FINGERPRINT`] and what every later open compares against.
+///
+/// It is taken from the list rather than handed in beside it, so the recorded
+/// value and the statements that produced the database cannot say different
+/// things.
+fn fingerprint(schema: &Schema) -> String {
+    crate::schema::digest(schema.statements.iter().map(String::as_str))
 }
 
 /// Why a database was discarded and rebuilt.
@@ -329,11 +336,9 @@ fn inspect(connection: &Connection, schema: &Schema) -> Result<Verdict, DbError>
         Ok(found) => found,
         Err(error) => return rebuild_or_fail(reading, error).map(Verdict::Rebuild),
     };
-    if found.as_deref() != Some(schema.fingerprint.as_str()) {
-        return Ok(Verdict::Rebuild(RebuildReason::DdlFingerprint {
-            expected: schema.fingerprint.clone(),
-            found,
-        }));
+    let expected = fingerprint(schema);
+    if found.as_deref() != Some(expected.as_str()) {
+        return Ok(Verdict::Rebuild(RebuildReason::DdlFingerprint { expected, found }));
     }
 
     let recorded: Option<String> = match meta::read_meta(connection, meta::SCHEMA_DIGEST) {
@@ -406,7 +411,7 @@ fn create<C: Client>(connection: &Connection, schema: &Schema, client: &C) -> Re
     meta::put_meta(
         &transaction,
         meta::DDL_FINGERPRINT,
-        schema.fingerprint.as_str(),
+        fingerprint(schema).as_str(),
     )?;
     meta::put_meta(&transaction, meta::SCHEMA_DIGEST, digest)?;
     client.record(&transaction)?;
