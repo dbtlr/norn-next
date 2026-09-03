@@ -209,7 +209,17 @@ impl Batch {
     /// tells that apart from the same rename the other way round: both are two
     /// roots disagreeing about a shared ancestor's spelling, with no report
     /// saying which name a directory entry holds. What resolves it is a reading
-    /// of the tree, and this is a reading of reports.
+    /// of the tree, and this is a reading of reports. That is the contract, and
+    /// its bound is stated rather than closed. Neither backend this crate ships
+    /// produces the shape: a native stream reports the halves in the order they
+    /// happened, so the name the tree renders lands last, and the poll backend
+    /// reports the old spelling as a death, which never displaces a live name.
+    /// Reaching it takes a backend that reports the dead half last as a path
+    /// that stands, or a consumer folding [`Batch::vault_change`] at the dead
+    /// spelling after the live one. Rows derived under such a root stand at
+    /// the dead spelling until the consumer's next whole-vault heal reads the
+    /// tree. Which occasions run one is the consumer's contract; none runs
+    /// because time passed, so nothing sooner converges it.
     ///
     /// **A root nothing has spelled live covers only what also died.** Every
     /// covering root answers for its whole range — one reading enumerates the
@@ -1476,7 +1486,10 @@ fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
 /// both name a path that is gone. Every other kind names one that stands —
 /// including `RenameMode::Any`, which is what a backend reports when it cannot
 /// say which half of a rename a path was, and which therefore has to be read as
-/// the live side or a case flip would settle at the name that died.
+/// the live side or a case flip would settle at the name that died. Where a
+/// backend reports the dead half that way and reports it last, the batch
+/// carries the dead name; [`Batch::vault_roots`] states that bound and what
+/// converges it.
 fn reported_spelling(kind: EventKind) -> Spelling {
     match kind {
         EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
@@ -3361,6 +3374,10 @@ mod tests {
     /// shared ancestor is spelled, and no report saying which of the two names
     /// a directory entry holds. What resolves it is a reading of the tree, and
     /// a batch is a reading of reports.
+    ///
+    /// Neither shipped backend reports the shape, and the consumer's next
+    /// whole-vault heal converges what a batch that carries it derived; the
+    /// `Batch::vault_roots` contract states the bound.
     #[test]
     fn a_covering_root_carries_the_name_its_last_live_report_spelled() {
         let state = state_with_in_vault_schema(CaseSensitivity::Insensitive, "schema.yml");
