@@ -43,3 +43,11 @@ toml = { workspace = true }
 # that a dev binary cannot reach live state by any route, mistake included.
 [features]
 channel-live = []
+
+# Every scratch tree this crate's suites work in is named and removed through
+# `norn_testkit::scratch`, so one helper owns what a temporary directory is
+# called and when it goes away. The edge is a development one, and the
+# allowlist does not describe it: dev edges cycle by construction and the
+# architecture gate reads and discards them.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }

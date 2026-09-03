@@ -643,6 +643,7 @@ fn lock_path(path: &Path) -> Result<PathBuf, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use norn_testkit::scratch::Scratch;
 
     /// The lock guards the file without ever being the file: a writer renames
     /// over the target, and a lock on the target would move out from under the
@@ -682,10 +683,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: arranging a dead writer's residue.
     fn a_write_never_removes_a_temporary_it_did_not_create() {
-        let directory =
-            std::env::temp_dir().join(format!("norn-config-residue-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let scratch = Scratch::new("norn-config-residue");
+        let directory = scratch.root();
         let path = directory.join("registry.toml");
 
         // The name this process's next write will take: the same shape a
@@ -732,8 +731,6 @@ mod tests {
             b"version = 1\n",
             "the mutation did not land"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The recheck that guards the lock asks one question — does this name
@@ -744,10 +741,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a name that cannot be stat'd.
     fn a_stat_that_cannot_answer_is_reported_rather_than_read_as_a_mismatch() {
-        let directory =
-            std::env::temp_dir().join(format!("norn-config-identity-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let scratch = Scratch::new("norn-config-identity");
+        let directory = scratch.root();
 
         let absent = directory.join("nothing-here");
         assert_eq!(
@@ -776,19 +771,11 @@ mod tests {
             ),
             "{error}"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// A scratch directory of this name, emptied first and named after the
-    /// case so two cases never share one.
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case is arranged in.
-    fn scratch(name: &str) -> PathBuf {
-        let directory =
-            std::env::temp_dir().join(format!("norn-config-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).expect("a scratch directory");
-        directory
+    /// The tree a case is arranged in, removed when the handle drops.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("norn-config-{name}"))
     }
 
     /// The identity the lock is actually held on, read off the handle it holds.
@@ -809,7 +796,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
     fn a_lock_file_replaced_under_the_acquirer_is_not_settled_for() {
-        let directory = scratch("lock-aba");
+        let scratch = scratch("lock-aba");
+        let directory = scratch.root();
         let path = directory.join("registry.toml");
         let lock_name = lock_path(&path).expect("a lock path");
 
@@ -835,8 +823,6 @@ mod tests {
             current,
             "the lock settled for an inode the name no longer resolves to"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Foreign interference that never stops is a refusal that names the bound,
@@ -849,7 +835,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
     fn a_lock_file_replaced_on_every_attempt_refuses_at_the_bound() {
-        let directory = scratch("lock-aba-forever");
+        let scratch = scratch("lock-aba-forever");
+        let directory = scratch.root();
         let path = directory.join("registry.toml");
         let lock_name = lock_path(&path).expect("a lock path");
 
@@ -872,8 +859,6 @@ mod tests {
             ),
             "{error}"
         );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The recheck's stat failing is the machine failing, and the lock says so
@@ -886,7 +871,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: playing the foreign actor.
     fn a_recheck_whose_stat_cannot_answer_reports_the_machine() {
-        let directory = scratch("lock-unanswerable");
+        let scratch = scratch("lock-unanswerable");
+        let directory = scratch.root();
         let path = directory.join("registry.toml");
         let lock_name = lock_path(&path).expect("a lock path");
 
@@ -897,8 +883,8 @@ mod tests {
             // resolves to nothing — and the filesystem says so with something
             // other than "not found".
             std::fs::remove_file(&lock_name).expect("removing the lock file");
-            std::fs::remove_dir(&directory).expect("removing the directory");
-            std::fs::write(&directory, b"not a directory").expect("a file where a directory was");
+            std::fs::remove_dir(directory).expect("removing the directory");
+            std::fs::write(directory, b"not a directory").expect("a file where a directory was");
         })
         .expect_err("a stat that cannot answer");
 
@@ -914,7 +900,9 @@ mod tests {
             "{error}"
         );
 
-        let _ = std::fs::remove_file(&directory);
+        // The case left a regular file where the tree was, which the handle's
+        // own removal cannot take away.
+        let _ = std::fs::remove_file(directory);
     }
 
     /// The mode is a property of what the file holds, and the reader's demand
