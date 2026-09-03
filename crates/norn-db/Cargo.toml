@@ -42,3 +42,12 @@ rusqlite = { workspace = true }
 # the arrangement is armed in the client's suite and met inside this crate.
 [features]
 induced-failure = []
+
+# Every scratch tree this crate's suites work in is named and removed through
+# `norn_testkit::scratch`, so one helper owns what a temporary directory is
+# called and when it goes away. The edge is a development one and cycles back
+# — the testkit reaches this crate through `norn-store` — which is why the
+# allowlist does not describe it: dev edges cycle by construction and the
+# architecture gate reads and discards them.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }

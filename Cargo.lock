@@ -417,6 +417,7 @@ dependencies = [
 name = "norn-db"
 version = "0.0.0"
 dependencies = [
+ "norn-testkit",
  "rusqlite",
 ]
 
