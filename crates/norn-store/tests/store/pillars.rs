@@ -653,6 +653,17 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
             "a_feed_page_walks_its_covering_index_and_reads_no_row"
         }
+        ExplainedStatement::StoredDocument(_)
+        | ExplainedStatement::StoredFactsDocument(_)
+        | ExplainedStatement::DocumentLinks
+        | ExplainedStatement::DocumentHeadings
+        | ExplainedStatement::DocumentBlocks
+        | ExplainedStatement::DocumentTags
+        | ExplainedStatement::StoredTombstone(_)
+        | ExplainedStatement::StoredFindings(_)
+        | ExplainedStatement::VaultSchemaPin => {
+            "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
+        }
     }
 }
 
@@ -889,6 +900,11 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .into_iter()
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
+    .chain(
+        point_reads(&subject)
+            .into_iter()
+            .map(|(statement, _, _)| statement),
+    )
     .map(barred_by)
     .collect();
     assert_eq!(
@@ -896,6 +912,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         [
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_heal_page_seeks_the_index_that_holds_its_order",
+            "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
         ]
@@ -979,6 +996,119 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     );
     suffix_keys.assert_searches("documents");
     suffix_keys.assert_uses_index("documents_path");
+}
+
+/// Each keyed point read, beside the table it reaches and the index its key is
+/// a bound for. Named once so the bar and the statement census judge the same
+/// set.
+///
+/// The pinned-schema read names no index. `meta` is `WITHOUT ROWID`, so its
+/// rows live in the primary-key b-tree itself and SQLite reports that seek as
+/// `USING PRIMARY KEY` rather than through an index name — there is nothing for
+/// [`QueryPlan::assert_uses_index`] to match, and the search assertion is the
+/// whole of the bar there.
+fn point_reads(
+    subject: &norn_store::DocumentPath,
+) -> Vec<(ExplainedStatement<'_>, &'static str, Option<&'static str>)> {
+    vec![
+        (
+            ExplainedStatement::StoredDocument(subject),
+            "documents",
+            Some("documents_path"),
+        ),
+        (
+            ExplainedStatement::StoredFactsDocument(subject),
+            "documents",
+            Some("documents_path"),
+        ),
+        (
+            ExplainedStatement::DocumentLinks,
+            "links",
+            Some("links_document_ordinal"),
+        ),
+        (
+            ExplainedStatement::DocumentHeadings,
+            "headings",
+            Some("headings_document_ordinal"),
+        ),
+        (
+            ExplainedStatement::DocumentBlocks,
+            "blocks",
+            Some("blocks_document_ordinal"),
+        ),
+        (
+            ExplainedStatement::DocumentTags,
+            "document_tags",
+            Some("document_tags_document_ordinal"),
+        ),
+        (
+            ExplainedStatement::StoredTombstone(subject),
+            "tombstones",
+            Some("tombstones_path"),
+        ),
+        (
+            ExplainedStatement::StoredFindings(subject),
+            "findings",
+            Some("findings_path"),
+        ),
+        (ExplainedStatement::VaultSchemaPin, "meta", None),
+    ]
+}
+
+/// **A keyed point read reaches its rows through the key it was given.** Each
+/// of these answers about one subject a caller already holds — a path, the
+/// document row that path resolved to, or one pinned key — so a read that found
+/// its rows by stepping over the rows ahead of them would cost the whole table
+/// for every question about one place.
+///
+/// What each statement seeks:
+///
+/// - The document row and the row [`norn_store::Request::stored_facts`] opens
+///   its snapshot with both seek `documents_path`, which is unique, so one seek
+///   reaches the one row a path can have.
+/// - The four fact reads seek their own table's `(document, ordinal)` index, so
+///   a document's links, headings, block ids and tags each cost that document's
+///   rows and come off the index in the ordinal order the reader states.
+/// - The tombstone read seeks `tombstones_path`, unique for the same reason.
+/// - The findings read seeks `findings_path`, so it costs the subject's own
+///   findings rather than the table. It sorts after that seek, and that is the
+///   stated baseline: the reader orders by generation then row key, and no
+///   index over this table holds that order.
+/// - The pinned-schema read seeks `meta`'s primary key, which is why that one
+///   asserts the search alone — see [`point_reads`].
+#[test]
+fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
+    let scratch = Scratch::new("point-read-plans");
+    let mut store = scratch.open();
+    let mut request = store.begin_request();
+    let subject = path("one/glossary.md");
+    write_documents(
+        &mut request,
+        &[document_with_every_fact(subject.as_str(), "hash-1")],
+    );
+    request
+        .record_finding(&ambiguity(
+            subject.as_str(),
+            "glossary",
+            "glossary/",
+            &[],
+            2,
+        ))
+        .expect("recording a finding");
+    record_death(&mut request, &path("three/gone.md"), Provenance::HealPrune);
+
+    for (statement, table, index) in point_reads(&subject) {
+        let read = plan(
+            request
+                .emitted_plan(statement)
+                .expect("a query plan for a point read"),
+        );
+        read.assert_no_full_scan_of(table);
+        read.assert_searches(table);
+        if let Some(index) = index {
+            read.assert_uses_index(index);
+        }
+    }
 }
 
 /// **Every enumeration is complete and drains one page at a time.** A pillar

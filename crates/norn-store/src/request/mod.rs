@@ -564,7 +564,7 @@ impl<'a> Request<'a> {
     ) -> Result<Option<StoredDocument>, StoreError> {
         Self::read_one(
             self.store.connection(),
-            &format!("SELECT {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
+            &stored_document_sql(),
             params![path.as_str()],
             |row| stored_document(row, 0),
             "reading a document row",
@@ -694,7 +694,7 @@ impl<'a> Request<'a> {
             .deferred_transaction("opening the stored-facts snapshot")?;
         let found = Self::read_one(
             &transaction,
-            &format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1"),
+            &stored_facts_document_sql(),
             params![path.as_str()],
             |row| {
                 let id: i64 = row.get(0)?;
@@ -712,9 +712,7 @@ impl<'a> Request<'a> {
             links: Self::read_all_on(
                 &transaction,
                 &self.read_steps,
-                "SELECT family, embed, protocol, target, title, anchor, block_ref,
-                        span_line, span_column, span_offset
-                 FROM links WHERE document = ?1 ORDER BY ordinal",
+                DOCUMENT_LINKS_SQL,
                 params![id],
                 stored_link,
                 "reading a document's links",
@@ -722,9 +720,7 @@ impl<'a> Request<'a> {
             headings: Self::read_all_on(
                 &transaction,
                 &self.read_steps,
-                "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
-                        inside_container
-                 FROM headings WHERE document = ?1 ORDER BY ordinal",
+                DOCUMENT_HEADINGS_SQL,
                 params![id],
                 stored_heading,
                 "reading a document's headings",
@@ -732,8 +728,7 @@ impl<'a> Request<'a> {
             blocks: Self::read_all_on(
                 &transaction,
                 &self.read_steps,
-                "SELECT block_id, span_line, span_column, span_offset
-                 FROM blocks WHERE document = ?1 ORDER BY ordinal",
+                DOCUMENT_BLOCKS_SQL,
                 params![id],
                 stored_block,
                 "reading a document's block ids",
@@ -741,8 +736,7 @@ impl<'a> Request<'a> {
             tags: Self::read_all_on(
                 &transaction,
                 &self.read_steps,
-                "SELECT name, source, span_line, span_column, span_offset
-                 FROM document_tags WHERE document = ?1 ORDER BY ordinal",
+                DOCUMENT_TAGS_SQL,
                 params![id],
                 stored_tag,
                 "reading a document's tags",
@@ -760,8 +754,7 @@ impl<'a> Request<'a> {
     ) -> Result<Option<StoredTombstone>, StoreError> {
         Self::read_one(
             self.store.connection(),
-            "SELECT path, last_content_hash, provenance, generation, recorded_at
-             FROM tombstones WHERE path = ?1",
+            STORED_TOMBSTONE_SQL,
             params![path.as_str()],
             stored_tombstone,
             "reading a tombstone",
@@ -817,10 +810,7 @@ impl<'a> Request<'a> {
 
     /// The findings recorded at one path, oldest generation first.
     pub fn stored_findings(&self, path: &DocumentPath) -> Result<Vec<StoredFinding>, StoreError> {
-        let sql = format!(
-            "SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id"
-        );
-        self.findings(&sql, params![path.as_str()])
+        self.findings(&stored_findings_sql(), params![path.as_str()])
     }
 
     /// The next bounded page of **every** finding the store holds, paths with a
@@ -1109,7 +1099,14 @@ impl<'a> Request<'a> {
         }))
     }
 
-    /// How much each pillar is holding.
+    /// How much each pillar is holding: one `COUNT(*)` per table in the report,
+    /// each answering how many rows that table holds.
+    ///
+    /// **The cost of a count is the size of the table it counts.** SQLite
+    /// reaches the answer by reading the narrowest index over the table end to
+    /// end, so this reader grows with the vault by definition — which is what a
+    /// row count is. It therefore carries no size-independence bar and no plan
+    /// bar; there is no cheaper shape for either to hold it to.
     pub fn pillars(&self) -> Result<PillarReport, StoreError> {
         let count = |sql: &str| -> Result<u64, StoreError> {
             self.store
@@ -1472,6 +1469,66 @@ impl FeedCursor {
     pub fn path(&self) -> &DocumentPath {
         &self.path
     }
+}
+
+/// The statement [`Request::stored_document`] emits.
+///
+/// `documents_path` is unique, so the path is the whole of the seek and the one
+/// row it reaches is the whole answer.
+fn stored_document_sql() -> String {
+    format!("SELECT {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1")
+}
+
+/// The statement [`Request::stored_facts`] opens its snapshot with.
+///
+/// The row, the body and the document's id come back through one seek of
+/// `documents_path`, which is what lets the four fact reads below key off an id
+/// this statement already found rather than look the path up once per table.
+fn stored_facts_document_sql() -> String {
+    format!("SELECT id, body, {STORED_DOCUMENT_COLUMNS} FROM documents WHERE path = ?1")
+}
+
+/// The statement [`Request::stored_facts`] reads a document's links with.
+///
+/// Keyed by the document row id, and ordered by the ordinal that key's index
+/// already orders by — so the rows come off `links_document_ordinal` in the
+/// order the reader states and nothing sorts. The three fact statements below
+/// carry the same shape over their own tables.
+const DOCUMENT_LINKS_SQL: &str = "SELECT family, embed, protocol, target, title, anchor, block_ref,
+                        span_line, span_column, span_offset
+                 FROM links WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_facts`] reads a document's headings with.
+const DOCUMENT_HEADINGS_SQL: &str =
+    "SELECT text, slug, level, span_line, span_column, span_offset, body_offset,
+                        inside_container
+                 FROM headings WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_facts`] reads a document's block ids with.
+const DOCUMENT_BLOCKS_SQL: &str = "SELECT block_id, span_line, span_column, span_offset
+                 FROM blocks WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_facts`] reads a document's tags with.
+const DOCUMENT_TAGS_SQL: &str = "SELECT name, source, span_line, span_column, span_offset
+                 FROM document_tags WHERE document = ?1 ORDER BY ordinal";
+
+/// The statement [`Request::stored_tombstone`] emits.
+///
+/// `tombstones_path` is unique, so one seek reaches the one death a path can
+/// have recorded.
+const STORED_TOMBSTONE_SQL: &str = "SELECT path, last_content_hash, provenance, generation,
+                    recorded_at
+             FROM tombstones WHERE path = ?1";
+
+/// The statement [`Request::stored_findings`] emits.
+///
+/// `findings_path` bounds the read to the subject's own findings rather than
+/// the table. The order is the reader's — oldest generation first, then the row
+/// key — and no index over this table holds it, so those rows are sorted after
+/// the seek reaches them. That sorter costs one subject's findings, which is
+/// the set the seek already bounded.
+fn stored_findings_sql() -> String {
+    format!("SELECT {FINDING_COLUMNS} FROM findings WHERE path = ?1 ORDER BY generation, id")
 }
 
 /// The statement [`Request::suffix_candidates`] emits for a probe of

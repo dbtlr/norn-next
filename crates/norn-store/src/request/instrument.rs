@@ -18,15 +18,19 @@
 //! different reasons.
 
 use norn_db::EmittedPlan;
-use norn_db::rusqlite::params_from_iter;
+use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
 
+use crate::ddl;
+
 use super::{
+    DOCUMENT_BLOCKS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL,
     DiscardScope, DocumentPath, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE,
-    Request, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixProbe,
-    TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql, document_page_parameters,
-    document_page_sql, feed_page_parameters, finding_page_parameters, finding_page_sql,
-    finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
+    Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
+    SuffixProbe, TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql,
+    document_page_parameters, document_page_sql, feed_page_parameters, finding_page_parameters,
+    finding_page_sql, finding_subject_parameters, finding_subjects_sql, findings_in_class_sql,
+    probe_parameters, stored_document_sql, stored_facts_document_sql, stored_findings_sql,
     subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
     tombstone_feed_sql,
 };
@@ -46,6 +50,14 @@ const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
 /// the sequence's own range does; what matters is that the cursor is bound
 /// rather than null.
 const EXPLAINED_FEED_GENERATION: i64 = 1;
+
+/// The document row a fact read is explained from.
+///
+/// A fact statement is keyed by the row id the snapshot's first statement
+/// found, which is an id no caller above this crate holds. Any id inside the
+/// table's own range does; what matters is that the key is bound rather than
+/// null, for the reason [`explained_page_cursor`] states.
+const EXPLAINED_DOCUMENT_ROW: i64 = 1;
 
 impl<'a> Request<'a> {
     /// One named statement as this crate emits it, with the query plan SQLite
@@ -85,6 +97,15 @@ impl<'a> Request<'a> {
             ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
             ExplainedStatement::DocumentFeedPage => document_feed_sql(),
             ExplainedStatement::TombstoneFeedPage => tombstone_feed_sql(),
+            ExplainedStatement::StoredDocument(_) => stored_document_sql(),
+            ExplainedStatement::StoredFactsDocument(_) => stored_facts_document_sql(),
+            ExplainedStatement::DocumentLinks => DOCUMENT_LINKS_SQL.to_string(),
+            ExplainedStatement::DocumentHeadings => DOCUMENT_HEADINGS_SQL.to_string(),
+            ExplainedStatement::DocumentBlocks => DOCUMENT_BLOCKS_SQL.to_string(),
+            ExplainedStatement::DocumentTags => DOCUMENT_TAGS_SQL.to_string(),
+            ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
+            ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
+            ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
         };
         let connection = self.store.connection();
         Ok(match statement {
@@ -161,6 +182,29 @@ impl<'a> Request<'a> {
                         MAX_PAGE,
                     )),
                 )
+            }
+            // The path-keyed point reads are explained under the path the
+            // caller asked about, which is exactly what their execution sites
+            // bind.
+            ExplainedStatement::StoredDocument(path)
+            | ExplainedStatement::StoredFactsDocument(path)
+            | ExplainedStatement::StoredTombstone(path)
+            | ExplainedStatement::StoredFindings(path) => {
+                norn_db::emitted_plan(connection, &sql, params![path.as_str()])
+            }
+            // The four fact statements are keyed by a row id rather than a
+            // path, and the id is bound for the reason a page's cursor is —
+            // see [`EXPLAINED_DOCUMENT_ROW`].
+            ExplainedStatement::DocumentLinks
+            | ExplainedStatement::DocumentHeadings
+            | ExplainedStatement::DocumentBlocks
+            | ExplainedStatement::DocumentTags => {
+                norn_db::emitted_plan(connection, &sql, params![EXPLAINED_DOCUMENT_ROW])
+            }
+            // The pin reads three keys through one statement, so the plan is
+            // taken under the first of the three.
+            ExplainedStatement::VaultSchemaPin => {
+                norn_db::emitted_plan(connection, &sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
             }
         }?)
     }
@@ -253,6 +297,30 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::changed_tombstones_after`], the generation-ordered walk a
     /// lane-2 consumer reads recorded deaths through.
     TombstoneFeedPage,
+    /// [`Request::stored_document`], the one row a path stands at.
+    StoredDocument(&'a DocumentPath),
+    /// The statement [`Request::stored_facts`] opens its snapshot with: the
+    /// document's row, its body and its row id, keyed by the caller's path.
+    StoredFactsDocument(&'a DocumentPath),
+    /// The link rows [`Request::stored_facts`] reads for the document its first
+    /// statement found. The three below are the same read over the other fact
+    /// tables, and each is keyed by that document's row id rather than by a
+    /// path.
+    DocumentLinks,
+    /// The heading rows [`Request::stored_facts`] reads.
+    DocumentHeadings,
+    /// The block-id rows [`Request::stored_facts`] reads.
+    DocumentBlocks,
+    /// The tag rows [`Request::stored_facts`] reads.
+    DocumentTags,
+    /// [`Request::stored_tombstone`], the death recorded for one path.
+    StoredTombstone(&'a DocumentPath),
+    /// [`Request::stored_findings`], every finding recorded about one path.
+    StoredFindings(&'a DocumentPath),
+    /// The pinned-scalar read [`Request::vault_schema_pin`] runs once per key
+    /// it reports. One statement covers all three: the key rides the parameter
+    /// rather than the text.
+    VaultSchemaPin,
 }
 
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.

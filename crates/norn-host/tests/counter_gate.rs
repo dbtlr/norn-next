@@ -18,9 +18,11 @@
 //!   **The counters answer for derivation, not for reading.** The vocabulary
 //!   counts rows written and facts discarded, and no member counts rows read, so
 //!   a reader whose row count grew with the tree still reads zero here: what this
-//!   bar holds is that a warm read derives nothing, and the read's own cost shape
-//!   is held by the descriptor budget beside it and by the plan taken off the
-//!   executing statement in the store's suite.
+//!   bar holds is that a warm read derives nothing. The store's pillars suite
+//!   holds the read's own cost shape, in two carriers. A work bar brackets each
+//!   paged reader's drain with `Request::read_steps` and states the cost as a
+//!   line in the rows drained. Plan bars over the keyed point readers take the
+//!   plan off the executing statement and name the index each one seeks.
 //! - **Size independence.** One bounded write costs the same at 300 documents
 //!   and at 2000. A ceiling passes anything under it; a pair fails the moment
 //!   the two scales stop moving together.

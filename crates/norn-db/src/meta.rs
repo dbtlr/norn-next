@@ -106,6 +106,15 @@ pub fn get_meta<T: rusqlite::types::FromSql>(
     read_meta(connection, key).map_err(|error| error::sql("reading a pinned value", error))
 }
 
+/// The statement [`read_meta`] emits.
+///
+/// It is public for the reason [`crate::emitted_plan`] exists: a client that
+/// hands out a plan of its own pinned-scalar read explains this statement, and
+/// a plan taken of a copy of the SQL judges a string nobody executes. `meta` is
+/// `WITHOUT ROWID` with `key` as its primary key, so the key b-tree *is* the
+/// table and one seek of it reaches the row.
+pub const META_READ_SQL: &str = "SELECT value FROM meta WHERE key = ?1";
+
 /// [`get_meta`] with the driver's own error.
 ///
 /// An open path needs the error rather than a message: whether a failed `meta`
@@ -124,11 +133,7 @@ pub fn read_meta<T: rusqlite::types::FromSql>(
         ));
     }
     connection
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            rusqlite::params![key],
-            |row| row.get(0),
-        )
+        .query_row(META_READ_SQL, rusqlite::params![key], |row| row.get(0))
         .optional()
 }
 
