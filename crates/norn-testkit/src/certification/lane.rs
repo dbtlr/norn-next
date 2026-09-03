@@ -198,8 +198,12 @@ pub fn required_invocations() -> BTreeSet<Invocation> {
 /// holds every unit test the crate has, and the inventory names the handful of
 /// them that carry cases — so its log is read for those and its other tests are
 /// not the lane's business.
-pub fn outcomes_from_logs(dir: &Path) -> Result<String, String> {
+pub fn outcomes_from_logs(workspace_root: &Path, dir: &Path) -> Result<String, String> {
     let mut reported: BTreeMap<String, Outcome> = BTreeMap::new();
+    // The inline modules each carrier's file declares, read once per file: a
+    // harness line carries the whole module path of a test, and those are the
+    // only segments between the carrier's own prefix and its function.
+    let mut inline: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     for (package, name, text) in read_logs(dir)? {
         let target = named_target(&name);
         let mut results = parse_harness_output(&text);
@@ -213,6 +217,9 @@ pub fn outcomes_from_logs(dir: &Path) -> Result<String, String> {
             if carried_by.package != package || carried_by.target != target {
                 continue;
             }
+            let modules = inline
+                .entry(reference.file.clone())
+                .or_insert_with(|| regression::inline_modules_at(workspace_root, &reference.file));
             let listed = results
                 .keys()
                 .find(|listed| {
@@ -220,6 +227,7 @@ pub fn outcomes_from_logs(dir: &Path) -> Result<String, String> {
                         listed,
                         &carried_by.module_prefix,
                         &reference.function,
+                        modules,
                     )
                 })
                 .cloned();
@@ -278,7 +286,7 @@ fn is_claimed(package: &str, target: &Target) -> bool {
 /// empty value there has to read as "this step names no logs" rather than as a
 /// directory whose name is the empty string.
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: reads the variables the workflow's lane sets.
-pub fn collect() -> Result<Option<PathBuf>, String> {
+pub fn collect(workspace_root: &Path) -> Result<Option<PathBuf>, String> {
     let Some(logs) = std::env::var_os(LOGS).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
@@ -291,7 +299,7 @@ pub fn collect() -> Result<Option<PathBuf>, String> {
         ));
     }
     let logs = PathBuf::from(&logs);
-    let rendered = outcomes_from_logs(&logs)?;
+    let rendered = outcomes_from_logs(workspace_root, &logs)?;
     let path = logs.join(OUTCOMES_FILE);
     std::fs::write(&path, rendered.as_bytes())
         .map_err(|problem| format!("writing {}: {problem}", path.display()))?;
@@ -471,6 +479,17 @@ mod tests {
         assert_eq!(named_target("lib"), Target::Lib);
     }
 
+    /// The checkout these tests run inside, which is where a carrier's own file
+    /// is read from.
+    fn workspace_root() -> PathBuf {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .ancestors()
+            .nth(2)
+            .unwrap_or_else(|| panic!("no workspace root above {}", manifest.display()))
+            .to_path_buf()
+    }
+
     #[test]
     fn a_unit_tests_module_path_resolves_to_the_case_it_carries() {
         let carried = REQUIRED_CASES
@@ -480,11 +499,33 @@ mod tests {
         let reference = TestRef::parse(carried.carrier).expect("the carrier reference");
         let target = reference.target().expect("the carrier's target");
         assert_eq!(target.target, Target::Lib);
+        let inline = regression::inline_modules_at(&workspace_root(), &reference.file);
+        assert!(
+            inline.contains("tests"),
+            "a unit test sits in the file's own `mod tests` block"
+        );
         let listed = format!("{}tests::{}", target.module_prefix, reference.function);
         assert!(
-            regression::matches_function(&listed, &target.module_prefix, &reference.function),
+            regression::matches_function(
+                &listed,
+                &target.module_prefix,
+                &reference.function,
+                &inline
+            ),
             "`{listed}` is how the harness names `{}`",
             carried.carrier
+        );
+        // A namesake one file module further down is a different file's test,
+        // and the same carrier does not answer for it.
+        let below = format!("{}below::{}", target.module_prefix, reference.function);
+        assert!(
+            !regression::matches_function(
+                &below,
+                &target.module_prefix,
+                &reference.function,
+                &inline
+            ),
+            "`{below}` is a test in a file this carrier does not name"
         );
     }
 
