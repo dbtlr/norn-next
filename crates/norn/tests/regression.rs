@@ -72,7 +72,7 @@ use norn_testkit::regression::{
 
 /// Every case the registry carries. A silent drop fails here; a deliberate
 /// removal moves this number in the same diff as the entry.
-const CASE_TOTAL: usize = 105;
+const CASE_TOTAL: usize = 106;
 
 /// The whole registry's contract, as one value.
 ///
@@ -81,7 +81,7 @@ const CASE_TOTAL: usize = 105;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "9ebfa311a428bfd77a6e08deb5d0b9f31881ceb560af37a8f8e2f144d7134045";
+const CONTRACT_DIGEST: &str = "c39a142455969338273478e488e2a4c657bb8a308a3978ffdd7aeced8ec5692d";
 
 /// The cases carried by tests today, by name.
 ///
@@ -94,6 +94,7 @@ const CONTRACT_DIGEST: &str = "9ebfa311a428bfd77a6e08deb5d0b9f31881ceb560af37a8f
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
+    "cache-identity-is-total",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
@@ -123,7 +124,7 @@ const BOUND_CASES: &[&str] = &[
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
-    "cache-identity-is-total",
+    "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "comment-claims-are-test-bound",
     "derived-findings-are-materialized-and-maintained",
     "each-file-is-read-once-per-build",

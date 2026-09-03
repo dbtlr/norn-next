@@ -38,6 +38,24 @@
       }
     },
     {
+      "name": "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
+      "kind": "defect-class",
+      "venue": 1,
+      "property": "An engine's sidecar carries its own identity beside the lane-1 store: its rows are keyed by the model id and model version that computed them, a sidecar whose recorded model keys this build will not read is rebuilt from zero rather than adopted, and its feed cursors are scoped to the lane-1 store epoch they were recorded under, so a store that starts a new epoch is answered by a rescan from the start of the feed and never by a seek.",
+      "sources": ["NORN-a124"],
+      "binding": {
+        "status": "dormant",
+        "reason": "the sidecar and both halves of its identity exist — crates/norn-semantic/src/ddl.rs records the model id, the model version and the observed store epoch — and every bar over them sits in crates/norn-semantic/tests/engine/model.rs, crates/norn-semantic/tests/engine/nearest.rs, crates/norn-semantic/tests/engine/lifecycle.rs and crates/norn-semantic/tests/engine/drain.rs, which are modules of one integration target the carrier grammar cannot name. The case binds when that grammar can cite a module of an integration target; NORN-159 owns the grammar.",
+        "grounds": [
+          { "present": "crates/norn-semantic/src/ddl.rs" },
+          { "present": "crates/norn-semantic/tests/engine/model.rs" },
+          { "present": "crates/norn-semantic/tests/engine/nearest.rs" },
+          { "present": "crates/norn-semantic/tests/engine/lifecycle.rs" },
+          { "present": "crates/norn-semantic/tests/engine/drain.rs" }
+        ]
+      }
+    },
+    {
       "name": "budget-is-a-read-budget-not-a-recompute-budget",
       "kind": "enforcement-class",
       "venue": 0,
@@ -360,16 +378,18 @@
       "name": "cache-identity-is-total",
       "kind": "defect-class",
       "venue": 1,
-      "property": "Derived-state identity is a total function of root, schema, build channel and config identity, computed one way at every site. No path opens or upgrades a store outside its identity, no read-only-intent open has a write or wipe effect, and destructive recovery never requires a successful open.",
-      "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log"],
+      "property": "Lane-1 derived-state identity is a total function of the data base, the build channel and the registered vault name, computed at one site and consumed by everything placed beside the store — the maintainer lock and the keyed shadow home take the same three coordinates. The vault root is not a coordinate: derived state follows the registered name, so a moved root keeps what was derived from it and a name re-pointed at another root inherits that lineage until the next whole-vault heal converges it. Vault configuration is not a coordinate either: the schema fingerprint alone decides whether lane 1 re-derives, and an engine's configuration keys that engine's sidecar and nothing else. Inside the store, adoption is decided by what the file records — the store-schema version, the DDL fingerprint, the schema digest and the epoch — so a file another build wrote or a statement list that moved is rebuilt from zero rather than opened or upgraded, the client is asked to adopt only a database the mechanics call usable, and a deliberate rebuild starts the file over without a successful open first.",
+      "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log", "NORN-a15", "NORN-a124"],
       "binding": {
-        "status": "dormant",
-        "reason": "the derived store and part of its identity exist: crates/norn-config/src/lib.rs keys a vault's derived-state directory by the state base, the build channel and the registered vault name, and crates/norn-store/src/store.rs rebuilds from zero rather than opening a file whose store-schema version or DDL fingerprint is not this build's, with destructive recovery never requiring a successful open. That keying contradicts this property rather than lagging it: identity excludes the vault root by design, so that moving a root does not orphan what was derived from it, while the property names root as a coordinate. One of the two has to move and neither has been ruled on, so re-deriving this clause is a design judgment rather than a restatement. A config identity now exists and is not folded in, by design: crates/norn-host/src/reload.rs fingerprints both vault control files and the host retains the pair as the active fingerprints, while the vault schema is projected into the store as derived state and the config file cannot invalidate lane-1 state at all, so neither reaches the identity that chooses the directory. A second identity site stands beside the first: crates/norn-semantic/src/ddl.rs keys an engine's sidecar rows by model id and model version and scopes its feed cursors to the store epoch it observed, so 'computed one way at every site' now has two sites to hold across. No open declares a read-only intent, so the clause about a read-only-intent open having a write or wipe effect has no site to hold.",
-        "grounds": [
-          { "present": "crates/norn-config/src/lib.rs" },
-          { "present": "crates/norn-store/src/store.rs" },
-          { "present": "crates/norn-host/src/reload.rs" },
-          { "present": "crates/norn-semantic/src/ddl.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-config/src/lib.rs::the_derived_key_names_the_derived_directory_at_its_own_positions",
+          "crates/norn-config/src/lib.rs::two_data_bases_key_two_derived_stores",
+          "crates/norn-config/src/lib.rs::the_two_channels_name_two_directories",
+          "crates/norn-db/src/ceremony.rs::only_a_corrupt_file_is_a_reason_to_rebuild",
+          "crates/norn-db/tests/ceremony.rs::a_moved_fingerprint_is_rebuilt_from_zero",
+          "crates/norn-db/tests/ceremony.rs::the_client_is_asked_to_adopt_only_what_the_mechanics_call_usable",
+          "crates/norn-db/tests/ceremony.rs::a_deliberate_rebuild_starts_the_database_over"
         ]
       }
     },
