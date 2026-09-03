@@ -471,6 +471,7 @@ dependencies = [
  "norn-db",
  "norn-embed",
  "norn-store",
+ "norn-testkit",
  "toml",
 ]
 
