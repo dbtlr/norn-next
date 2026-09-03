@@ -1224,7 +1224,7 @@ fn finish_release<O: EntryOps>(
     tail: ReleaseTail,
 ) {
     if let Some(attachment) = attachment {
-        shared.ops.detach(name, attachment);
+        give_back(shared.ops.as_ref(), name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     debug_assert!(
@@ -1272,6 +1272,34 @@ fn finish_release<O: EntryOps>(
     }
 }
 
+/// Hand an attachment to [`EntryOps::detach`], and continue whatever the call
+/// does — return, or unwind.
+///
+/// The attachment is consumed either way: it moves in here, and nothing past
+/// this call has it to give back a second time regardless of what the call
+/// itself does with it. A panic inside [`EntryOps::detach`] can leave the ops
+/// implementation's own residue behind — a per-vault engine slot, in
+/// `ProductionEntryOps`, that `detach` empties before it releases the
+/// attachment's own resources — with nothing past the panic left to reach it.
+/// This calls [`EntryOps::discard`] on that path, the same call a leg whose
+/// attachment never reached a detach at all answers to, so a fresh attach
+/// acquires past the residue rather than finding a slot a call that already
+/// ran left occupied. `ProductionEntryOps::detach` and
+/// `ProductionEntryOps::discard` both give that slot back through
+/// `SemanticEngines::detach`, a map removal that is a no-op on a name already
+/// gone, so calling both over one leg's residue is sound rather than a double
+/// free.
+///
+/// Every release this crate performs calls through here rather than the trait
+/// method directly, so the bookkeeping that follows a give-back always runs,
+/// and the entry it released always reaches the state that says its
+/// resources — and, past a panic, its ops-side residue — are back.
+fn give_back<O: EntryOps>(ops: &O, name: &VaultName, attachment: O::Attachment) {
+    if std::panic::catch_unwind(AssertUnwindSafe(|| ops.detach(name, attachment))).is_err() {
+        ops.discard(name);
+    }
+}
+
 /// What a panic said, for the reason the entry publishes about it.
 ///
 /// A panic payload is whatever was thrown, and the two shapes a `panic!` makes
@@ -1307,6 +1335,16 @@ fn unwind_detail(payload: &(dyn Any + Send)) -> String {
 /// polling with it, and strands the entry the sweep was reconciling. The one
 /// poison a hold of this lock can carry is therefore the one poison that must
 /// not stop the cleanup, and no site is left able to raise it again.
+///
+/// The gate still poisons in production. [`park_on_current_classification`]
+/// holds it across `entries.recheck` and whatever refusal that read raises,
+/// and [`run_job_inner`]'s first `Job::Attach` arm holds it across the same
+/// recheck before the attach it guards ever runs — a panic under either
+/// leaves the poison this recovers rather than one nothing can raise. Once
+/// poisoned this way the underlying [`Mutex`] answers every direct `lock`
+/// with the same `PoisonError` forever — nothing here calls `clear_poison` —
+/// so recovery is this accessor's job on every call, not a one-time repair.
+/// Pinned by `a_poisoned_attach_gate_still_answers_through_the_accessor`.
 fn attach_gate<O: EntryOps>(shared: &Shared<O>) -> MutexGuard<'_, BTreeMap<Identity, VaultName>> {
     shared
         .attach_gate
@@ -1707,7 +1745,7 @@ fn refuse_identity_error<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName,
         }
     };
     if let Some(attachment) = attachment {
-        shared.ops.detach(name, attachment);
+        give_back(shared.ops.as_ref(), name, attachment);
     }
 }
 
@@ -2019,7 +2057,7 @@ impl<O: EntryOps> Drop for Host<O> {
                     .give_up()
             });
             if let Some(attachment) = attachment {
-                self.shared.ops.detach(entry.name(), attachment);
+                give_back(self.shared.ops.as_ref(), entry.name(), attachment);
             }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             // Coverage still out with a leg is that leg's to give back, and the
@@ -2727,7 +2765,7 @@ fn poll_claimed_entry<O: EntryOps>(
         // nothing but the attachment it took: it gives that back and
         // publishes nothing, because whatever moved the entry on has
         // already said where the entry stands.
-        shared.ops.detach(name, attachment);
+        give_back(shared.ops.as_ref(), name, attachment);
         let mut state = entry.gate.lock().expect("entry gate poisoned");
         // The coverage reached the ops through neither a release window nor
         // the route around one, so the close it was owed came from whatever
@@ -2844,7 +2882,7 @@ fn end_job_leg<O: EntryOps>(
     }
     let handed_back = held.is_some();
     if let Some(attachment) = held {
-        shared.ops.detach(name, attachment);
+        give_back(shared.ops.as_ref(), name, attachment);
     }
     let mut state = entry.gate.lock().expect("entry gate poisoned");
     // Coverage that reached the ops here reached them through neither a release
@@ -2953,7 +2991,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     match drain_observed(&shared.ops, &name, &mut attachment) {
                         Ok((pending, saturated)) => Ok((attachment, pending, saturated)),
                         Err(error) => {
-                            shared.ops.detach(&name, attachment);
+                            give_back(shared.ops.as_ref(), &name, attachment);
                             Err(error)
                         }
                     }
@@ -2969,7 +3007,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(refusal) => {
                     drop(attach_claims);
                     if let Ok((attachment, _, _)) = result {
-                        shared.ops.detach(&name, attachment);
+                        give_back(shared.ops.as_ref(), &name, attachment);
                     }
                     let mut state = entry.gate.lock().expect("entry gate poisoned");
                     if state.claim.stands_at(epoch) {
@@ -2989,7 +3027,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             if let Some(conflict) = post_conflict {
                 drop(attach_claims);
                 if let Ok((attachment, _, _)) = result {
-                    shared.ops.detach(&name, attachment);
+                    give_back(shared.ops.as_ref(), &name, attachment);
                 }
                 refuse_conflict(shared, &conflict);
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
@@ -6337,30 +6375,27 @@ mod tests {
     }
 
     /// Two production sites hand an entry's coverage to `EntryOps::detach`
-    /// while holding the attach gate, so a panic in that detach poisons it. The
-    /// cleanup the unwind routes to sweeps that gate: it recovers the lock
-    /// rather than dying inside the unwind handler, the worker goes back to the
-    /// channel, and the dispatcher's own tick still polls.
+    /// while holding the attach gate — [`refuse_conflict`] under
+    /// [`Job::Attach`]'s own hold is the one this exercises. [`give_back`]
+    /// catches the unwind before it crosses the guard, so the release the
+    /// panic landed inside completes in the same call rather than leaving
+    /// anything for a poisoned gate's cleanup: the gate is never poisoned, and
+    /// the incumbent the conflict displaced reaches `Unattached` on this call
+    /// rather than on a later one's.
     #[cfg(unix)]
     #[test]
-    fn a_detach_panic_under_the_attach_gate_leaves_the_cleanup_running() {
+    fn a_detach_panic_under_the_attach_gate_completes_the_release_and_leaves_the_gate_live() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("unwound-poisoned-attach-gate");
+        let base = temp_base("contained-detach-under-attach-gate");
         let root_a = base.join("a");
         let root_b = base.join("b");
-        let root_c = base.join("c");
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
-        let c = VaultName::new("c").unwrap();
         let ops = Arc::new(FakeOps::default());
         let host = rooted_host(
             Arc::clone(&ops),
-            &[
-                (&a, root_a.as_path()),
-                (&b, root_b.as_path()),
-                (&c, root_c.as_path()),
-            ],
+            &[(&a, root_a.as_path()), (&b, root_b.as_path())],
             1,
             Duration::from_secs(60),
         );
@@ -6370,27 +6405,15 @@ mod tests {
         // b's registered root becomes a's root, so the conflict is the one b's
         // own attach finds under the attach gate rather than one the serving
         // set found at insertion. The incumbent's release runs there, and its
-        // detach is what unwinds.
+        // detach is what panics.
         std::fs::remove_dir(&root_b).unwrap();
         symlink(&root_a, &root_b).unwrap();
         *ops.panic_in_detach_at.lock().unwrap() = Some(a.clone());
         drop(host.demand(&b, AttachMode::Durable).unwrap());
-        wait_until(
-            "the attach gate to be poisoned",
-            lifecycle_wait_budget(),
-            || {
-                if host.shared.attach_gate.lock().is_err() {
-                    Observed::Met(())
-                } else {
-                    Observed::pending("the gate still locks".to_string())
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}"));
 
-        // The leg that unwound was b's attach, and the conflict that attach
-        // raised is a park: a park is a wider fact than the unwind reason, so
-        // the cleanup publishes Unattached beneath the park it leaves standing.
+        // b is refused over the conflict exactly as it would be over a detach
+        // that returned cleanly: the panic underneath changes nothing b's own
+        // attach reads.
         wait_for_published_label(&host, &b, TrustState::Unattached);
         wait_for_park(
             &host,
@@ -6398,48 +6421,72 @@ mod tests {
             Demand::DuplicateRoot(AliasConflict::new([a.clone(), b.clone()])),
         );
 
-        // The pool's one slot outlived the leg: the cleanup swept the poisoned
-        // gate and returned rather than taking the worker with it.
-        *ops.panic_in_detach_at.lock().unwrap() = None;
-        drop(host.demand(&c, AttachMode::Durable).unwrap());
-        wait_for_state(&host, &c, TrustState::Ready);
+        // The gate b's attach ran the panicking detach under still locks: the
+        // panic never crossed the guard, so nothing poisoned it.
+        assert!(
+            host.shared.attach_gate.lock().is_ok(),
+            "a detach panic under the attach gate poisoned it"
+        );
 
-        // The entry whose leg unwound is answerable: a fresh demand withdraws
-        // the park and attaches it over the root the conflict is gone from.
+        // a's release is not left open for another leg to close: the call that
+        // panicked is the call that finished it. The conflict parks a beside
+        // b, so the label underneath is read directly.
+        wait_for_published_label(&host, &a, TrustState::Unattached);
+
+        // a is demand-answerable: nothing about the panic its release absorbed
+        // is left for a fresh attach to work around, once the root the
+        // conflict was over resolves to one name again.
+        *ops.panic_in_detach_at.lock().unwrap() = None;
         std::fs::remove_file(&root_b).unwrap();
         std::fs::create_dir_all(&root_b).unwrap();
-        drop(host.demand(&b, AttachMode::Durable).unwrap());
-        wait_for_state(&host, &b, TrustState::Ready);
+        drop(host.demand(&a, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &a, TrustState::Ready);
 
-        // A poll's unwind is caught on the dispatcher thread, and its cleanup
-        // reaches the same poisoned gate.
-        *ops.panic_in_poll_at.lock().unwrap() = Some(c.clone());
-        let polling = Arc::clone(&host.shared);
-        let tick = std::panic::catch_unwind(AssertUnwindSafe(|| poll_watchers(&polling)));
-        assert!(
-            tick.is_ok(),
-            "a tick over a poisoned attach gate unwound the dispatcher"
-        );
-        wait_for_state(&host, &c, unwound(POLL_PANIC));
-
-        // The vault a's release was interrupted mid-detach: nothing named it to
-        // the cleanup, which answers for the leg that unwound and for the entry
-        // that leg was running against. Its release window is still open, which
-        // is what a panic inside `EntryOps::detach` leaves and is unrelated to
-        // the leg the guard reclaims.
-        assert_eq!(published_label(&host, &a), Some(releasing()));
-
-        *ops.panic_in_poll_at.lock().unwrap() = None;
         std::mem::forget(host);
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// The pin the cleanup gives back is the one the entry recorded for the leg
-    /// that unwound. An idle detach leg takes the entry's coverage and pins
-    /// nothing, so a read in flight beside it holds the only pin over the
-    /// entry — and it is still holding it after that leg unwinds.
+    /// A poisoned attach gate stays poisoned — nothing in this crate calls
+    /// `clear_poison`, so every direct lock keeps failing once one holder has
+    /// panicked — but [`attach_gate`] recovers it on every call rather than
+    /// propagating the poison forward, so the machinery reads the gate's data
+    /// through the accessor exactly as if nothing had panicked under it.
     #[test]
-    fn a_detach_leg_that_unwinds_leaves_a_reads_pin_standing() {
+    fn a_poisoned_attach_gate_still_answers_through_the_accessor() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+
+        let shared = Arc::clone(&host.shared);
+        let poisoned = thread::spawn(move || {
+            let _guard = shared.attach_gate.lock().unwrap();
+            panic!("a test-only panic taken while the attach gate stood held");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the spawned holder did not panic");
+        assert!(
+            host.shared.attach_gate.lock().is_err(),
+            "the gate this case poisoned reads as unpoisoned"
+        );
+
+        // The accessor is what every production site reads the gate through,
+        // and a fresh attach reaches it twice: once to file the identity
+        // claim, once to release it. Both go through poison that stays
+        // standing, and the attach still completes.
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// An idle detach leg whose call into `EntryOps::detach` panics is a
+    /// normal teardown all the same: [`give_back`] absorbs the panic, so the
+    /// release it is part of completes in the same call rather than
+    /// unwinding — the entry reaches `Unattached` instead of an unwind
+    /// reason, and a fresh demand re-attaches it. An idle detach leg takes the
+    /// entry's coverage and pins nothing of its own, so a read in flight
+    /// beside it holds the only pin over the entry throughout: neither the
+    /// panic nor the release it completes touches a pin that was never the
+    /// leg's.
+    #[test]
+    fn a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing() {
         let ops = Arc::new(FakeOps::default());
         let subject = VaultName::new("z").unwrap();
         let holding = VaultName::new("a").unwrap();
@@ -6472,12 +6519,12 @@ mod tests {
         *ops.panic_in_detach_at.lock().unwrap() = Some(subject.clone());
         ops.block_reconcile.store(false, Ordering::SeqCst);
         ops.reconcile_release.store(true, Ordering::SeqCst);
-        wait_for_state(&host, &subject, unwound(DETACH_PANIC));
+        wait_for_state(&host, &subject, TrustState::Unattached);
 
         assert_eq!(
             entry.gate.lock().unwrap().safety_pins,
             1,
-            "the unwind gave back a pin the leg that unwound never took"
+            "the read's pin did not survive the panic the release absorbed"
         );
         assert_eq!(
             host.shared.entries.remove(&subject),
@@ -6486,7 +6533,87 @@ mod tests {
         );
         drop(read);
 
+        // The entry is demand-answerable: nothing about the panic its release
+        // absorbed is left for a fresh attach to work around.
         *ops.panic_in_detach_at.lock().unwrap() = None;
+        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &subject, TrustState::Ready);
+
+        drop(holding_lease);
+        std::mem::forget(host);
+    }
+
+    /// An attach leg takes the entry's coverage never — it pins nothing of its
+    /// own — so where it unwinds, [`EntryState::unpin_leg`]'s epoch check is
+    /// what keeps the reclaim from touching a pin standing for other reasons.
+    /// This binds that with a read: the read's pin survives an idle release
+    /// first, stands untouched while a fresh demand's attach leg panics, and
+    /// the entry still recovers once the arming is lifted.
+    #[test]
+    fn an_attach_that_unwinds_gives_back_no_pin_it_never_took() {
+        let ops = Arc::new(FakeOps::default());
+        let subject = VaultName::new("z").unwrap();
+        let holding = VaultName::new("a").unwrap();
+        let host = host_without_ambient_polling(Arc::clone(&ops), &[&subject, &holding], 1);
+        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &subject, TrustState::Ready);
+        let holding_lease = host.demand(&holding, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &holding, TrustState::Ready);
+        let entry = host.shared.entries.get(&subject).unwrap();
+
+        // The one worker is held inside the other vault's job, so the detach
+        // the reap below schedules waits in the channel while the read is
+        // taken.
+        ops.block_reconcile.store(true, Ordering::SeqCst);
+        report_through_a_driven_poll(&ops, &host, &holding, &ops.off_thread_rescan_poll_batches);
+        wait_for_flag("reconcile_started", &ops.reconcile_started);
+
+        host.reap_idle(Instant::now() + Duration::from_secs(3600))
+            .unwrap();
+        assert!(
+            entry.gate.lock().unwrap().detach_scheduled,
+            "no idle detach was scheduled"
+        );
+
+        // The reap-then-read order: the detach is already on its way when the
+        // read takes its hold, which is the one pin standing over the entry.
+        let read = host.begin_read(&subject).expect("the entry answers a read");
+        assert!(entry.gate.lock().unwrap().pinned(), "the read took no pin");
+
+        ops.block_reconcile.store(false, Ordering::SeqCst);
+        ops.reconcile_release.store(true, Ordering::SeqCst);
+        wait_for_state(&host, &subject, TrustState::Unattached);
+
+        assert_eq!(
+            entry.gate.lock().unwrap().safety_pins,
+            1,
+            "the read's pin did not survive the idle release"
+        );
+
+        // The read is held past the re-demand: the fresh attach this asks for
+        // unwinds with the read's pin standing beside it.
+        *ops.panic_in_attach_at.lock().unwrap() = Some(subject.clone());
+        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &subject, unwound(ATTACH_PANIC));
+
+        assert_eq!(
+            entry.gate.lock().unwrap().safety_pins,
+            1,
+            "the attach leg's unwind gave back a pin it never took"
+        );
+        assert_eq!(
+            host.shared.entries.remove(&subject),
+            Err(ServingRefusal::Held),
+            "the entry a read is running against did not refuse removal"
+        );
+        drop(read);
+
+        // The entry recovers: nothing about the attach panic it absorbed is
+        // left for a fresh demand to work around, once the arming lifts.
+        *ops.panic_in_attach_at.lock().unwrap() = None;
+        drop(host.demand(&subject, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &subject, TrustState::Ready);
+
         drop(holding_lease);
         std::mem::forget(host);
     }
@@ -6577,11 +6704,49 @@ mod tests {
         );
     }
 
-    /// Both catch sites are `catch_unwind`, which catches nothing under a
-    /// `panic = "abort"` profile: the process ends at the panic instead, and
-    /// every guarantee the cleanup carries goes with it. The strategy is a
-    /// build-time choice made outside this crate, so this is where the crate
-    /// says which one it is built under.
+    /// A detach that panics has given nothing back through
+    /// `EntryOps::detach` when the panic lands: [`give_back`] answers for
+    /// that leg's residue the same way it answers for a leg that never
+    /// reached the detach at all, so a vault whose detach panics still gives
+    /// its per-vault engine slot back rather than leaving it occupied under
+    /// an entry that publishes `Unattached`.
+    #[test]
+    fn a_detach_that_panics_gives_the_ops_their_residue_back_through_discard() {
+        let ops = Arc::new(FakeOps::default());
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        assert_eq!(
+            discards_of(&ops, &name),
+            0,
+            "an entry that is serving gave its residue back"
+        );
+
+        *ops.panic_in_detach_at.lock().unwrap() = Some(name.clone());
+        host.reap_idle(Instant::now() + Duration::from_secs(3600))
+            .unwrap();
+        wait_for_state(&host, &name, TrustState::Unattached);
+
+        assert_eq!(
+            discards_of(&ops, &name),
+            1,
+            "the panic inside the detach left the ops-side residue for give_back to answer for"
+        );
+
+        // The entry recovers, and a fresh attach acquires past the residue
+        // the panicked detach left for the discard to close out.
+        *ops.panic_in_detach_at.lock().unwrap() = None;
+        drop(host.demand(&name, AttachMode::Durable).unwrap());
+        wait_for_state(&host, &name, TrustState::Ready);
+    }
+
+    /// All three catch sites — the worker seam, the dispatcher's per-entry
+    /// poll and [`give_back`] — are `catch_unwind`, which catches nothing
+    /// under a `panic = "abort"` profile: the process ends at the panic
+    /// instead, and every guarantee the cleanup carries goes with it. The
+    /// strategy is a build-time choice made outside this crate, so this is
+    /// where the crate says which one it is built under.
     #[test]
     // The constant is the subject: this reads the build's own panic strategy,
     // and a profile that changed it is what makes the assertion false.

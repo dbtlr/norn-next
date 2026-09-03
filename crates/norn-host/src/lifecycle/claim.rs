@@ -323,10 +323,23 @@
 //! exactly where the leg is the one the entry is pinned for — never on a
 //! reading of what the leg was holding, which stands over legs that pin nothing
 //! and over legs already past their own end. Pinned by
-//! `a_detach_leg_that_unwinds_leaves_a_reads_pin_standing`, which is the case
-//! that fails where the give-back widens past the record, and by
 //! `a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other`, which is
 //! the case that fails where it stops reaching the leg that took one.
+//!
+//! The counterpart case — a non-pinning leg's unwind reaching this while a
+//! read's pin stands beside it — is reached, and the epoch check above is what
+//! carries it rather than a call graph that keeps the two apart. `Job::Detach`
+//! calls `EntryOps::detach` through `give_back`, which catches its panic before
+//! this is ever reached, so a detach panic completes the release it was part of
+//! instead of unwinding here — `a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing`
+//! pins that a read's pin survives such a panic through the give-back. `Job::Attach`
+//! makes calls of its own outside the entry's lock — `EntryOps::attach`,
+//! `drain_observed`, `entries.recheck` — that panic reaches this the ordinary
+//! way, with `pinned_leg` never set for it: a read's pin standing beside such an
+//! unwind is what `unpin_leg`'s `pinned_leg == Some(epoch)` check is for, and
+//! reading `self.pinned_leg` rather than widening past it is what keeps the
+//! reclaim from taking a pin the attach leg never took. Pinned by
+//! `an_attach_that_unwinds_gives_back_no_pin_it_never_took`.
 //!
 //! A read running against the entry takes one too, which is what makes it work
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
