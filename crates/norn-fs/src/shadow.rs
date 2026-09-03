@@ -508,10 +508,11 @@ fn shadow_name() -> String {
 
 /// Whether `name` is a shadow this crate staged.
 ///
-/// **This is how a shadow is recognized — not a leading dot.** The walk, the
-/// event-suppression path and the sweep all ask this one question, so a shadow
-/// is invisible as a document without any surface having to hide every hidden
-/// file: a user's genuinely dot-prefixed document stays a document.
+/// **This is how a shadow is recognized — not a leading dot.** The shadow home
+/// sweeps ask this byte-exact question, and the vault walk asks the same shape
+/// through `is_shadow_name_under`, so a shadow is invisible as a document
+/// without any surface having to hide every hidden file: a user's genuinely
+/// dot-prefixed document stays a document.
 ///
 /// The shape is exact: the prefix, a process identifier, a hyphen, and a
 /// counter, with nothing on either end. A name that merely starts the same way

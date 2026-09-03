@@ -647,7 +647,7 @@ pub enum SkipReason {
     HostExclusion,
     /// Norn's exact `.norn/tmp` fallback subtree.
     Mechanism,
-    /// An exact Norn shadow basename.
+    /// A Norn shadow basename, read under the root's own case behavior.
     Shadow,
     /// A symbolic link, which is never traversed.
     SymbolicLink(LinkKind),
