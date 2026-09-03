@@ -1144,17 +1144,11 @@ pub fn external_tools(seed: u64) -> Phased {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
 
-    /// A tree of this module's own, which is a directory the caller removes.
-    fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "norn-churn-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("a scratch tree");
-        root
+    /// A tree of this module's own, removed when the handle drops.
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("norn-churn-{name}"))
     }
 
     #[test]
@@ -1180,22 +1174,22 @@ mod tests {
     /// the account of the second phase names the documents it changed.
     #[test]
     fn applying_a_script_writes_and_removes_what_it_says() {
-        let root = scratch("ordinary");
+        let scratch = scratch("ordinary");
+        let root = scratch.root();
         let workload = ordinary_editing(5);
         workload
             .opening()
-            .apply(&root)
+            .apply(root)
             .expect("the opening phase applies");
         let applied = workload
             .changing()
-            .apply(&root)
+            .apply(root)
             .expect("the changing phase applies");
         assert_eq!(applied.steps(), workload.changing().steps().len());
         assert!(root.join("churn/root-note.md").is_file());
         assert!(root.join("churn/inner/deeper/nested-note.md").is_file());
         assert!(!root.join("churn/inner/deeper/sibling-note.md").exists());
         assert!(!root.join("churn/leaving").exists());
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     /// **A directory act is accounted for by the documents under it.** The
@@ -1205,15 +1199,16 @@ mod tests {
     /// directories.
     #[test]
     fn a_directory_act_names_the_documents_under_it_and_not_the_directory() {
-        let root = scratch("directory-places");
+        let scratch = scratch("directory-places");
+        let root = scratch.root();
         let workload = ordinary_editing(5);
         workload
             .opening()
-            .apply(&root)
+            .apply(root)
             .expect("the opening phase applies");
         let applied = workload
             .changing()
-            .apply(&root)
+            .apply(root)
             .expect("the changing phase applies");
         assert_eq!(
             applied.places().iter().cloned().collect::<Vec<String>>(),
@@ -1225,7 +1220,6 @@ mod tests {
             ],
             "{applied}"
         );
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     /// **A directory rename is accounted for at both ends of every document it
@@ -1233,7 +1227,8 @@ mod tests {
     /// and the directory's own two names are neither.
     #[test]
     fn a_directory_rename_names_both_ends_of_every_document_it_moves() {
-        let root = scratch("directory-rename");
+        let scratch = scratch("directory-rename");
+        let root = scratch.root();
         let script = Script::new(
             "a directory of two documents, renamed",
             vec![
@@ -1260,7 +1255,7 @@ mod tests {
                 ),
             ],
         );
-        let applied = script.apply(&root).expect("the script applies");
+        let applied = script.apply(root).expect("the script applies");
         assert_eq!(
             applied.places().iter().cloned().collect::<Vec<String>>(),
             vec![
@@ -1271,22 +1266,22 @@ mod tests {
             ],
             "{applied}"
         );
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     /// An atomic replacement leaves nothing beside the name it landed at: a
     /// staging file left behind would be a file in the tree a walk reads.
     #[test]
     fn an_atomic_replacement_leaves_no_staging_file() {
-        let root = scratch("atomic");
+        let scratch = scratch("atomic");
+        let root = scratch.root();
         let workload = atomic_replacement(5);
         workload
             .opening()
-            .apply(&root)
+            .apply(root)
             .expect("the opening phase applies");
         workload
             .changing()
-            .apply(&root)
+            .apply(root)
             .expect("the changing phase applies");
         let left: Vec<String> = fs::read_dir(root.join("churn/replaced"))
             .expect("the directory the replacement landed in")
@@ -1300,12 +1295,12 @@ mod tests {
             .filter(|name: &String| !name.ends_with(".md"))
             .collect();
         assert!(left.is_empty(), "{left:?}");
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     #[test]
     fn a_step_that_cannot_run_names_itself() {
-        let root = scratch("failing");
+        let scratch = scratch("failing");
+        let root = scratch.root();
         let script = Script::new(
             "a removal of nothing",
             vec![Step::new(
@@ -1315,28 +1310,28 @@ mod tests {
                 },
             )],
         );
-        let failure = script.apply(&root).expect_err("removing nothing fails");
+        let failure = script.apply(root).expect_err("removing nothing fails");
         assert!(
             failure
                 .to_string()
                 .contains("remove a document that is not there"),
             "{failure}"
         );
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     #[test]
     fn a_script_applied_in_parts_accounts_for_every_part() {
-        let root = scratch("parts");
+        let scratch = scratch("parts");
+        let root = scratch.root();
         let workload = burst(9);
         let script = workload.changing();
         let mut applied = Applied::default();
         script
-            .apply_range(&root, 0..3, &mut applied)
+            .apply_range(root, 0..3, &mut applied)
             .expect("the first part applies");
         assert_eq!(applied.steps(), 3);
         script
-            .apply_range(&root, 3..script.steps().len(), &mut applied)
+            .apply_range(root, 3..script.steps().len(), &mut applied)
             .expect("the rest applies");
         assert_eq!(applied.steps(), script.steps().len());
         assert!(
@@ -1345,20 +1340,19 @@ mod tests {
                 .contains("rewrite the standing row's hammered path"),
             "{applied}"
         );
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     #[test]
     fn a_probe_says_what_the_volume_does_with_case_and_leaves_nothing_behind() {
-        let root = scratch("folding");
-        let answer = folding(&root).expect("the probe runs");
+        let scratch = scratch("folding");
+        let root = scratch.root();
+        let answer = folding(root).expect("the probe runs");
         assert!(matches!(answer, Folding::Folded | Folding::Distinct));
         assert_eq!(
-            fs::read_dir(&root).expect("the probe's tree").count(),
+            fs::read_dir(root).expect("the probe's tree").count(),
             0,
             "the probe left a file behind"
         );
-        fs::remove_dir_all(&root).expect("removing the scratch tree");
     }
 
     /// Each phase declares the place that derives no row while that phase's

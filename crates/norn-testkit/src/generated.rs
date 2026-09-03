@@ -70,11 +70,9 @@ fn generate_and_read(
 
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the scratch tree is this module's to place.
 fn scratch_root(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "norn-generated-{label}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ))
+    std::env::temp_dir().join(crate::scratch::unique_name(&format!(
+        "norn-generated-{label}"
+    )))
 }
 
 #[allow(clippy::disallowed_methods)] // Harness scaffolding: the scratch tree is this module's to remove.

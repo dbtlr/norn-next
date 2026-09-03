@@ -1939,8 +1939,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Builds the temporary directory this case loads from.
     fn two_files_claiming_one_command_are_refused() {
-        let dir = std::env::temp_dir().join(format!("norn-testkit-dup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::scratch::Scratch::new("norn-testkit-dup");
+        let dir = scratch.root();
         let body = |command: &str| {
             format!(
                 r#"{{"source":{{"line":"l","branch":"b","commit":"c"}},"note":"n",
@@ -1949,8 +1949,7 @@ mod tests {
         };
         std::fs::write(dir.join("a.json"), body("find")).unwrap();
         std::fs::write(dir.join("b.json"), body("find")).unwrap();
-        let result = read_command_dir(&dir);
-        std::fs::remove_dir_all(&dir).ok();
+        let result = read_command_dir(dir);
         let message = match result {
             Err(e) => e.to_string(),
             Ok(loaded) => panic!("a duplicate command must be refused, but {loaded:?} loaded"),

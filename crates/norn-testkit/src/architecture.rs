@@ -897,6 +897,7 @@ fn array<'a>(value: &'a Value, key: &str) -> Result<&'a Vec<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Scratch;
 
     fn graph(members: &[&str], normal: &[(&str, &str)]) -> WorkspaceGraph {
         WorkspaceGraph {
@@ -1091,11 +1092,8 @@ mod tests {
     /// would report the exemption's absence as a workspace violation, on a
     /// machine whose only peculiarity is where it keeps its checkout.
     #[allow(clippy::disallowed_methods)] // Building the tree the reader is tested against.
-    fn workspace_root_with_patch_table(label: &str, patch: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("norn arch gate-{label}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch workspace root");
+    fn workspace_root_with_patch_table(label: &str, patch: &str) -> Scratch {
+        let root = Scratch::new(&format!("norn arch gate-{label}"));
         std::fs::write(root.join("Cargo.toml"), patch).expect("a root manifest");
         root
     }
@@ -1132,14 +1130,13 @@ mod tests {
     /// reads one directory *and* the patch table, and a local crate that
     /// misses either is still a violation.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Cleaning up the tree the reader is tested against.
     fn a_member_depending_on_a_vendored_release_is_not_reaching_a_workspace_crate() {
-        let root = workspace_root_with_patch_table(
+        let scratch = workspace_root_with_patch_table(
             "patched",
             "[patch.crates-io]\nnotify = { path = \"vendor/notify\" }\n",
         );
-        let graph = WorkspaceGraph::parse(&vendored_metadata(&root)).expect("parsing metadata");
-        let _ = std::fs::remove_dir_all(&root);
+        let graph =
+            WorkspaceGraph::parse(&vendored_metadata(scratch.root())).expect("parsing metadata");
 
         assert!(graph.unearned.is_empty());
         assert!(graph.normal.is_empty());
@@ -1161,14 +1158,13 @@ mod tests {
     /// nothing. What earns the exemption is the patch table: it is what makes
     /// the directory a replacement for a published release.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Cleaning up the tree the reader is tested against.
     fn a_vendored_package_the_patch_table_does_not_name_still_fails() {
-        let root = workspace_root_with_patch_table(
+        let scratch = workspace_root_with_patch_table(
             "unpatched",
             "[patch.crates-io]\nserde = { path = \"vendor/serde\" }\n",
         );
-        let graph = WorkspaceGraph::parse(&vendored_metadata(&root)).expect("parsing metadata");
-        let _ = std::fs::remove_dir_all(&root);
+        let graph =
+            WorkspaceGraph::parse(&vendored_metadata(scratch.root())).expect("parsing metadata");
 
         assert_eq!(
             graph.unearned,
@@ -1472,8 +1468,8 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods)] // Building the tree the reader is tested against.
     fn the_crate_directory_reader_takes_directories_holding_a_manifest() {
-        let root = std::env::temp_dir().join(format!("norn-crates-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = Scratch::new("norn-crates");
+        let root = scratch.root();
         for directory in [
             "crates/one",
             "crates/one/nested",
@@ -1492,7 +1488,7 @@ mod tests {
             std::fs::write(root.join(directory).join("Cargo.toml"), b"[package]\n")
                 .expect("a manifest");
         }
-        let found = crate_directories(&root).expect("reading the scratch tree");
+        let found = crate_directories(root).expect("reading the scratch tree");
         assert_eq!(
             found,
             [
@@ -1503,7 +1499,6 @@ mod tests {
             .into_iter()
             .collect()
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

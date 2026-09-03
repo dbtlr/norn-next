@@ -16,6 +16,12 @@
 //! nanosecond often enough to collide, and the loser meets a directory that
 //! already exists.
 //!
+//! **The counter is the only thing that separates two roots inside one
+//! process.** A thread id adds nothing to it. The counter is process-wide, so
+//! it already separates two roots taken on any two threads. A thread id is
+//! also reused once its thread ends, so two roots taken on two threads that
+//! never ran together can carry the same one.
+//!
 //! The name is cleared before it is created, because a process id is reused
 //! across runs. A case that started from a previous run's residue is judging a
 //! tree it did not arrange.
