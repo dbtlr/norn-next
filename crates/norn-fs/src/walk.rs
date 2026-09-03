@@ -689,6 +689,10 @@ pub enum SkipReason {
     /// holds, and a consumer that concludes from enumeration owes this root the
     /// same hold it owes every other one here: nothing this walk did earns
     /// authority over the places beneath a name it never read.
+    ///
+    /// A name that is not there is this, whatever it is spelled: shadow-ness is
+    /// a fact about an entry, so no spelling earns a refusal where no entry
+    /// stands.
     Vanished,
 }
 
@@ -2074,6 +2078,33 @@ mod tests {
             paths(walk_subtree(&scratch.at(""), Path::new("file.md/under"), &[]).expect("walk")),
             vec![(PathBuf::from("file.md"), Some(SkipReason::Vanished))],
             "a component that is not a directory read as a machine failure"
+        );
+    }
+
+    /// **A root that is not there vanishes however it is spelled.** A shadow
+    /// basename is a refusal about an entry, so the descent stats the root
+    /// before it reads the spelling: a root nothing stands at is the vault
+    /// evolving, and a root an entry stands at is the refusal.
+    ///
+    /// The two answers differ, so a caller telling "Norn will not read this
+    /// name" from "this name left" gets the same reading from a subtree walk
+    /// that it gets from [`Vault::skip_reaching`].
+    #[test]
+    fn a_shadow_spelled_subtree_root_vanishes_where_no_entry_stands_at_it() {
+        let scratch = Scratch::new("walk-subtree-shadow-absent");
+        scratch.directory("vault/norn-shadow-4-1");
+        scratch.place("norn-shadow-4-1/note.md", b"body");
+        scratch.place("keep.md", b"keep");
+
+        assert_eq!(
+            paths(walk_subtree(&scratch.at(""), Path::new("norn-shadow-3-3"), &[]).expect("walk")),
+            vec![(PathBuf::from("norn-shadow-3-3"), Some(SkipReason::Vanished))],
+            "no entry stands at this spelling, so the walk read nothing there"
+        );
+        assert_eq!(
+            paths(walk_subtree(&scratch.at(""), Path::new("norn-shadow-4-1"), &[]).expect("walk")),
+            vec![(PathBuf::from("norn-shadow-4-1"), Some(SkipReason::Shadow))],
+            "an entry stands at this one, and Norn never reads it"
         );
     }
 
