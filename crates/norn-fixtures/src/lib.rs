@@ -620,13 +620,16 @@ mod tests {
 
     /// A directory this process names, does not create, and removes if
     /// something else did.
+    ///
+    /// The name alone is what the cases below want, so this takes the scratch
+    /// helper's name rather than one of its trees: a case here asserts the
+    /// target was never created, which a handle that creates one would
+    /// falsify.
     #[allow(clippy::disallowed_methods)] // Names a target the cases below expect never to exist.
     fn unwritten_target(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "norn-fixtures-{label}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = std::env::temp_dir().join(norn_testkit::scratch::unique_name(&format!(
+            "norn-fixtures-{label}"
+        )));
         let _ = fs::remove_dir_all(&dir);
         dir
     }

@@ -573,30 +573,23 @@ mod tests {
     /// The probe answers for the filesystem it is pointed at, and the
     /// directory it answered about is exactly as it found it.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Makes and removes the directory it probes.
+    #[allow(clippy::disallowed_methods)] // Reads back the directory it probes.
     fn the_probe_answers_and_leaves_the_directory_as_it_found_it() {
-        let dir = std::env::temp_dir().join(format!(
-            "norn-fixtures-probe-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("creating a scratch directory");
+        let scratch = norn_testkit::scratch::Scratch::new("norn-fixtures-probe");
+        let dir = scratch.root();
 
         assert_eq!(
-            creatable_in(&dir).expect("probing a scratch directory"),
+            creatable_in(dir).expect("probing a scratch directory"),
             SUPPORTED,
             "the probe disagreed with the build about this platform"
         );
         assert_eq!(
-            std::fs::read_dir(&dir)
+            std::fs::read_dir(dir)
                 .expect("listing a scratch directory")
                 .count(),
             0,
             "the probe left an entry behind"
         );
-
-        std::fs::remove_dir_all(&dir).expect("removing a scratch directory");
     }
 
     /// A directory that is not there carries no link. The probe answers `no`
