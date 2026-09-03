@@ -4051,6 +4051,7 @@ pub(crate) fn answered(state: TrustState) -> Result<TrustState, ErrorEnvelope> {
 mod tests {
     use super::*;
     use norn_config::registry::{Entry as RegistryEntry, VaultRoot};
+    use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use norn_wire::ErrorDetail;
     use std::cell::Cell;
@@ -4702,22 +4703,14 @@ mod tests {
         .unwrap()
     }
 
-    /// A directory under the system temp directory, named uniquely to this
-    /// process and instant so cases running beside each other never share one.
+    /// A directory of one case's own, removed when the handle drops.
     ///
     /// The roots the fixtures above name resolve to nothing, which the registry
     /// reads as a root that is registrable and not yet present. A case whose
     /// subject is what the registry reads off a root needs a root the
     /// filesystem answers for, and this is where those live.
-    fn temp_base(label: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "norn-host-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    fn temp_base(label: &str) -> Scratch {
+        Scratch::new(&format!("norn-host-{label}"))
     }
 
     /// A host over roots the filesystem answers for. Every root is created
@@ -5323,7 +5316,8 @@ mod tests {
         ops.block_reload.store(true, Ordering::SeqCst);
         let reloaded = VaultName::new("reloaded").unwrap();
         let sibling = VaultName::new("sibling").unwrap();
-        let base = temp_base("reload-handoff");
+        let scratch = temp_base("reload-handoff");
+        let base = scratch.root();
         let reloaded_root = base.join("reloaded");
         let sibling_root = base.join("sibling");
         let host = Arc::new(host_over_roots(
@@ -5368,7 +5362,6 @@ mod tests {
         );
 
         drop(host);
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -6163,7 +6156,8 @@ mod tests {
     /// reaching that root as a duplicate of a vault nothing is attaching.
     #[test]
     fn an_attach_that_unwinds_leaves_the_root_claimed_by_nothing() {
-        let base = temp_base("unwound-attach-claim");
+        let scratch = temp_base("unwound-attach-claim");
+        let base = scratch.root();
         let root = base.join("shared");
         let a = VaultName::new("a").unwrap();
         let b = VaultName::new("b").unwrap();
@@ -6197,7 +6191,6 @@ mod tests {
         wait_for_state(&host, &b, TrustState::Ready);
 
         drop(host);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A poll runs on the dispatcher thread, which is also what reaps idle
@@ -6387,7 +6380,8 @@ mod tests {
     fn a_detach_panic_under_the_attach_gate_completes_the_release_and_leaves_the_gate_live() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("contained-detach-under-attach-gate");
+        let scratch = temp_base("contained-detach-under-attach-gate");
+        let base = scratch.root();
         let root_a = base.join("a");
         let root_b = base.join("b");
         let a = VaultName::new("a").unwrap();
@@ -6443,7 +6437,6 @@ mod tests {
         wait_for_state(&host, &a, TrustState::Ready);
 
         std::mem::forget(host);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A poisoned attach gate stays poisoned — nothing in this crate calls
@@ -7131,7 +7124,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_release_re_arming_over_an_unreadable_root_reports_the_refusal() {
-        let base = temp_base("released-identity-park");
+        let scratch = temp_base("released-identity-park");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -7172,7 +7166,6 @@ mod tests {
         );
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// One park is answered in one order however many stand at once: a
@@ -7307,7 +7300,8 @@ mod tests {
     fn a_park_raised_by_an_alias_is_retired_by_the_demand_after_the_root_is_resolved() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("retired-conflict-lease");
+        let scratch = temp_base("retired-conflict-lease");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         let ops = Arc::new(FakeOps::default());
@@ -7352,7 +7346,6 @@ mod tests {
         );
 
         drop((lease, recovered, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A demand against a warm entry classifies nothing.
@@ -7369,7 +7362,8 @@ mod tests {
     #[test]
     fn a_warm_demand_classifies_no_root() {
         let ops = Arc::new(FakeOps::default());
-        let base = temp_base("warm-demand-classifications");
+        let scratch = temp_base("warm-demand-classifications");
+        let base = scratch.root();
         let names = ["alpha", "beta", "gamma", "delta"]
             .map(|name| VaultName::new(name).expect("a legal vault name"));
         let roots = names.each_ref().map(|name| base.join(name.as_str()));
@@ -7400,7 +7394,6 @@ mod tests {
         );
 
         drop(host);
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// The status surface and the refusal surface cannot describe one instant
@@ -7541,7 +7534,8 @@ mod tests {
     fn coverage_lost_at_the_root_reclassifies_every_alias_of_it() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("coverage-lost-reclassify");
+        let scratch = temp_base("coverage-lost-reclassify");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         let ops = Arc::new(FakeOps::default());
@@ -7581,7 +7575,6 @@ mod tests {
         );
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A watcher report is spent by whichever caller drains the subscription
@@ -7593,7 +7586,8 @@ mod tests {
     fn a_job_leg_that_drains_coverage_lost_reclassifies_the_root() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("job-leg-coverage-lost");
+        let scratch = temp_base("job-leg-coverage-lost");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         let ops = Arc::new(FakeOps::default());
@@ -7630,7 +7624,6 @@ mod tests {
         wait_for_detaches(&ops, 1, "the refused entry to give its coverage back");
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A recovery installs coverage over the registered root again, so it
@@ -7645,7 +7638,8 @@ mod tests {
     fn a_recovery_classifies_the_root_it_installs_coverage_over() {
         use std::os::unix::fs::symlink;
 
-        let base = temp_base("recovery-classifies-root");
+        let scratch = temp_base("recovery-classifies-root");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         let ops = Arc::new(FakeOps::default());
@@ -7695,7 +7689,6 @@ mod tests {
         );
 
         drop((lease, recovery, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A demand a contention answers withdraws no park.
@@ -9165,7 +9158,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_identity_refusal_invalidates_an_in_flight_reconcile() {
-        let base = temp_base("reconcile-identity-refusal");
+        let scratch = temp_base("reconcile-identity-refusal");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -9198,7 +9192,6 @@ mod tests {
         );
         assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         drop(host);
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -9971,14 +9964,8 @@ mod tests {
     #[test]
     fn async_attach_rechecks_aliases_after_a_registry_root_is_retargeted() {
         use std::os::unix::fs::symlink;
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-alias-race-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = temp_base("alias-race");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         std::fs::create_dir_all(&a_root).unwrap();
@@ -10022,7 +10009,6 @@ mod tests {
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         drop((a_lease, b_lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -10030,14 +10016,8 @@ mod tests {
     fn live_retarget_refuses_and_detaches_every_attached_alias_during_poll() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-live-retarget-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = temp_base("live-retarget");
+        let base = scratch.root();
         let a_root = base.join("a");
         let b_root = base.join("b");
         std::fs::create_dir_all(&a_root).unwrap();
@@ -10079,7 +10059,6 @@ mod tests {
         assert!(matches!(a_lease.completion(), Demand::DuplicateRoot(_)));
         assert!(matches!(b_lease.completion(), Demand::DuplicateRoot(_)));
         drop((a_lease, b_lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -10087,14 +10066,8 @@ mod tests {
     fn identity_refusal_invalidates_and_detaches_a_live_entry() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-identity-refusal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = temp_base("identity-refusal");
+        let base = scratch.root();
         let root = base.join("root");
         std::fs::create_dir_all(&root).unwrap();
         let ops = Arc::new(FakeOps::default());
@@ -10130,7 +10103,6 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 1);
         assert_the_identity_park_stands_on_both_surfaces(&host, &name);
         drop(host);
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A poll the entry has moved past gives back everything it took: the
@@ -10146,7 +10118,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_superseded_poll_gives_the_entry_back_and_schedules_the_lease_on_it() {
-        let base = temp_base("superseded-poll-give-back");
+        let scratch = temp_base("superseded-poll-give-back");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -10182,7 +10155,6 @@ mod tests {
         assert_eq!(ops.attaches.load(Ordering::SeqCst), 2);
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// A job leg the entry has moved past ends the same way a superseded poll
@@ -10355,7 +10327,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_attach_time_registry_refusal_acquires_nothing_and_says_why() {
-        let base = temp_base("attach-recheck-refusal");
+        let scratch = temp_base("attach-recheck-refusal");
+        let base = scratch.root();
         let subject_root = base.join("subject");
         let holding_root = base.join("holding");
         let ops = Arc::new(FakeOps::default());
@@ -10383,7 +10356,6 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 0);
 
         drop((lease, holding_lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// The recheck an attach runs after its heal catches a root that stopped
@@ -10393,7 +10365,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_post_heal_registry_refusal_gives_the_attachment_back_and_says_why() {
-        let base = temp_base("post-heal-recheck-refusal");
+        let scratch = temp_base("post-heal-recheck-refusal");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -10421,7 +10394,6 @@ mod tests {
         assert_the_identity_park_stands_on_both_surfaces(&host, &name);
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// The demand seam carries the attach mode, and the mode it holds no
@@ -10554,7 +10526,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_attach_time_registry_refusal_parks_the_entry() {
-        let base = temp_base("attach-recheck-park");
+        let scratch = temp_base("attach-recheck-park");
+        let base = scratch.root();
         let subject_root = base.join("subject");
         let holding_root = base.join("holding");
         let ops = Arc::new(FakeOps::default());
@@ -10586,7 +10559,6 @@ mod tests {
         );
 
         drop((lease, holding_lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// The registry refusal an attach finds after its heal parks the entry it
@@ -10600,7 +10572,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_post_heal_registry_refusal_parks_the_entry_and_arms_nothing() {
-        let base = temp_base("post-heal-recheck-park");
+        let scratch = temp_base("post-heal-recheck-park");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -10646,7 +10619,6 @@ mod tests {
         }
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -10654,14 +10626,8 @@ mod tests {
     fn identity_refusal_does_not_poison_demand_for_an_unrelated_live_entry() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-identity-refusal-isolation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = temp_base("identity-refusal-isolation");
+        let base = scratch.root();
         let healthy_root = base.join("healthy");
         let refused_root = base.join("refused");
         std::fs::create_dir_all(&healthy_root).unwrap();
@@ -10703,7 +10669,6 @@ mod tests {
         assert_eq!(ops.detaches.load(Ordering::SeqCst), 1);
 
         drop((renewed_healthy, refused_lease, healthy_lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -10848,7 +10813,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_attach_that_installs_no_coverage_mints_no_reader() {
-        let base = temp_base("reader-slot-uninstalled-coverage");
+        let scratch = temp_base("reader-slot-uninstalled-coverage");
+        let base = scratch.root();
         let root = base.join("root");
         let ops = Arc::new(FakeOps::default());
         let name = VaultName::new("notes").unwrap();
@@ -10875,7 +10841,6 @@ mod tests {
         assert!(host.begin_read(&name).is_none());
 
         drop((lease, host));
-        let _ = std::fs::remove_dir_all(base);
     }
 
     /// An attach the entry moved on from installs nothing, so it mints
@@ -12876,7 +12841,8 @@ mod tests {
                 "a name the set does not serve was demandable before it joined"
             );
 
-            let base = temp_base("serving-set-insert");
+            let scratch = temp_base("serving-set-insert");
+            let base = scratch.root();
             let root = base.join("joined");
             std::fs::create_dir_all(&root).unwrap();
             host.shared
@@ -12904,7 +12870,6 @@ mod tests {
             drop(attached);
 
             drop(host);
-            let _ = std::fs::remove_dir_all(base);
         }
 
         /// An inserted root another served name already reaches is classified
@@ -12917,7 +12882,8 @@ mod tests {
         #[test]
         fn an_inserted_alias_of_a_served_root_is_refused_as_a_duplicate() {
             let ops = Arc::new(FakeOps::default());
-            let base = temp_base("serving-set-alias");
+            let scratch = temp_base("serving-set-alias");
+            let base = scratch.root();
             let root = base.join("root");
             std::fs::create_dir_all(&root).unwrap();
             let served = VaultName::new("served").unwrap();
@@ -12943,7 +12909,6 @@ mod tests {
             wait_for_detaches(&ops, 1, "the incumbent to give its coverage back");
 
             drop((incumbent, host));
-            let _ = std::fs::remove_dir_all(base);
         }
 
         /// A name the set already serves keeps the entry standing under it: the

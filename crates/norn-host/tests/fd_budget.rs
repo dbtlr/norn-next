@@ -9,7 +9,7 @@ mod attach;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use norn_config::ConfigDirs;
 use norn_config::registry::{Entry, VaultRoot};
@@ -18,6 +18,7 @@ use norn_host::{
     RegistryRead,
 };
 use norn_testkit::isolation::{self, Lease};
+use norn_testkit::scratch::Scratch;
 use norn_testkit::wait::{Observed, wait_until};
 use norn_wire::{ErrorEnvelope, ReasonCode, TrustState, VaultName};
 
@@ -267,7 +268,9 @@ fn open_fd_count() -> usize {
 }
 
 struct Fixture {
-    root: PathBuf,
+    // The naming and the removal are the scratch helper's; what this fixture
+    // adds is the vault tree inside and the lease beside it.
+    root: Scratch,
     vault: PathBuf,
     name: VaultName,
     // The probe attaches through production entry operations, and an
@@ -286,14 +289,7 @@ impl Fixture {
             isolation::REAL_WATCHER,
             isolation::acquisition_budget(attach::state_budget(WAIT_LIMIT)),
         );
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "norn-host-fd-budget-{}-{nonce}",
-            std::process::id()
-        ));
+        let root = Scratch::new("norn-host-fd-budget");
         let vault = root.join("vault");
         fs::create_dir_all(vault.join(".norn")).expect("create vault");
         fs::write(vault.join(".norn/schema.yaml"), "version: 1\n").expect("write schema");
@@ -331,11 +327,5 @@ impl Fixture {
             let path = self.vault.join(format!("note-{index:04}.md"));
             fs::write(path, format!("# Note {index}\n")).expect("write document");
         }
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }

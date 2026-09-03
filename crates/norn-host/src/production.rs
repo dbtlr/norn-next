@@ -2590,10 +2590,10 @@ mod tests {
     use crate::lifecycle::answered;
     use norn_config::registry::{SchemaSource, VaultRoot};
     use norn_store::{BlockFact, HeadingFact, LinkFact, OpenOutcome, TagFact};
+    use norn_testkit::scratch::Scratch;
     use norn_testkit::wait::{Budget, Observed, wait_until};
     use std::fs;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// **The maintainer lock is the last thing an attachment gives back**, and
     /// this file states that twice: [`release`] hands the resources back in
@@ -2810,7 +2810,9 @@ mod tests {
     }
 
     struct Fixture {
-        root: PathBuf,
+        // The naming and the removal are the scratch helper's; what this
+        // fixture adds is the vault tree inside and the lease beside it.
+        root: Scratch,
         // A case that attaches a real vault installs a real platform watcher.
         // The lease makes this process's watcher the only live one on the
         // machine, and it is held for the fixture's whole life because the
@@ -2841,12 +2843,7 @@ mod tests {
         }
 
         fn rooted(label: &str, watcher_lease: Option<norn_testkit::isolation::Lease>) -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let root = std::env::temp_dir()
-                .join(format!("norn-host-{label}-{}-{nonce}", std::process::id()));
+            let root = Scratch::new(&format!("norn-host-{label}"));
             fs::create_dir_all(root.join("vault/.norn")).unwrap();
             fs::write(root.join("vault/.norn/schema.yaml"), "version: 1\n").unwrap();
             Self {
@@ -2870,11 +2867,6 @@ mod tests {
                 ProductionEntryOps::new(dirs, ProductionPolicy::new(page, 2).unwrap()),
                 self.registration().name,
             )
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
@@ -7505,7 +7497,7 @@ mod tests {
         assert!(made.success(), "mkfifo failed");
 
         let (sender, receiver) = std::sync::mpsc::channel();
-        let root = f.root.clone();
+        let root = f.root.root().to_path_buf();
         let vault = f.vault();
         thread::spawn(move || {
             let dirs = ConfigDirs::new(root.join("config"), root.join("data")).unwrap();

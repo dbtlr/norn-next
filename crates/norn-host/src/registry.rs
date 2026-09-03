@@ -152,6 +152,7 @@ fn conflicts_from_identities(
 mod tests {
     use super::*;
     use norn_config::registry::VaultRoot;
+    use norn_testkit::scratch::Scratch;
 
     fn entry(name: &str, root: &str) -> Entry {
         Entry::new(VaultName::new(name).unwrap(), VaultRoot::new(root).unwrap())
@@ -200,14 +201,8 @@ mod tests {
     /// acquisition claim under a root the caller never asked about.
     #[test]
     fn a_recheck_resolves_the_requested_root_among_several() {
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-registry-requested-identity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = Scratch::new("norn-host-registry-requested-identity");
+        let base = scratch.root();
         let alpha_root = base.join("alpha");
         let beta_root = base.join("beta");
         std::fs::create_dir_all(&alpha_root).unwrap();
@@ -233,8 +228,6 @@ mod tests {
                 "the recheck over {requested:?} resolved another registered root"
             );
         }
-
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -242,14 +235,8 @@ mod tests {
     fn recheck_of_a_healthy_entry_ignores_an_unrelated_identity_refusal() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-registry-refusal-isolation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = Scratch::new("norn-host-registry-refusal-isolation");
+        let base = scratch.root();
         let healthy = base.join("healthy");
         let refused = base.join("refused");
         std::fs::create_dir_all(&healthy).unwrap();
@@ -275,8 +262,6 @@ mod tests {
             "a recheck that passed resolved the root it classified"
         );
         assert!(recheck_over(&entries, &VaultName::new("refused").unwrap()).is_err());
-
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -284,19 +269,13 @@ mod tests {
     fn a_recheck_keeps_healthy_entries_serviceable_when_another_identity_refuses() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-registry-startup-refusal-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = Scratch::new("norn-host-registry-startup-refusal");
+        let base = scratch.root();
         let healthy = base.join("healthy");
         let healthy_alias = healthy.join(".");
         let refused = base.join("refused");
         std::fs::create_dir_all(&healthy).unwrap();
-        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(base).unwrap();
         symlink("refused", &refused).unwrap();
         let healthy_name = VaultName::new("healthy").unwrap();
         let alias_name = VaultName::new("healthy-alias").unwrap();
@@ -316,8 +295,6 @@ mod tests {
             vec![healthy_name, alias_name]
         );
         assert!(recheck_over(&entries, &refused_name).is_err());
-
-        let _ = std::fs::remove_dir_all(base);
     }
 
     #[cfg(unix)]
@@ -325,14 +302,8 @@ mod tests {
     fn recheck_keeps_global_duplicate_classification_while_isolating_a_refusal() {
         use std::os::unix::fs::symlink;
 
-        let base = std::env::temp_dir().join(format!(
-            "norn-host-registry-global-aliases-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let scratch = Scratch::new("norn-host-registry-global-aliases");
+        let base = scratch.root();
         let shared = base.join("shared");
         let alias = base.join("alias");
         let refused = base.join("refused");
@@ -362,7 +333,5 @@ mod tests {
                 .aliases(),
             vec![alpha, beta]
         );
-
-        let _ = std::fs::remove_dir_all(base);
     }
 }
