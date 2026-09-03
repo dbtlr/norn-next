@@ -326,12 +326,14 @@ impl TestRef {
         if file.is_empty() || function.is_empty() {
             return Err(format!("`{reference}` names an empty file or function"));
         }
-        let path = Path::new(file);
-        if path.is_absolute() || path.components().any(|c| c.as_os_str() == "..") {
-            return Err(format!(
-                "`{file}` is not a workspace-relative path without parent traversal"
-            ));
+        // Read off the spelling rather than off the parsed path, which folds a
+        // bare dot and a doubled separator away: the reference is resolved
+        // against the tree's own entries, and a component naming nothing is a
+        // spelling no directory holds.
+        if let Some(fault) = ill_spelled(file) {
+            return Err(format!("`{file}` is {}", fault.clause()));
         }
+        let path = Path::new(file);
         Ok(TestRef {
             file: path.to_path_buf(),
             function: function.to_string(),
@@ -341,12 +343,41 @@ impl TestRef {
     /// Which cargo target this reference's file compiles into, and the module
     /// path a test in it is listed under.
     ///
-    /// Only the two shapes the registry can cite resolve: a file under a
-    /// crate's `src/`, whose tests compile into that crate's library target,
-    /// and a top-level file under a crate's `tests/`, which is an integration
-    /// target of its own. A bench, an example, a binary and a nested file
-    /// under `tests/` are all real cargo shapes and none of them is one this
-    /// grammar names, so each is refused rather than guessed at.
+    /// Three shapes resolve. A file under a crate's `src/`, whose tests compile
+    /// into that crate's library target. A top-level file under a crate's
+    /// `tests/`, which is an integration target of its own. And a file inside a
+    /// directory under `tests/`, which belongs to the integration target that
+    /// directory's `main.rs` roots: `tests/suite/main.rs` is the target's crate
+    /// root and its tests are listed at no prefix at all, while the files
+    /// beside it are modules, listed under the path their own place in the
+    /// directory gives them — `tests/suite/inner.rs` under `inner::` and
+    /// `tests/suite/deep/inner.rs` under `deep::inner::`, the way `src/` derives
+    /// one.
+    ///
+    /// `tests/<dir>/mod.rs` is refused. A crate root's modules live in the
+    /// directory that holds the crate root, so a target's own `mod x;` reaches
+    /// `tests/x.rs` or `tests/x/mod.rs` and never `tests/<target>/x.rs`: a
+    /// `mod.rs` directly under `tests/` roots a directory any target can reach
+    /// with `mod <dir>;`, and a test in it compiles into each target that does.
+    /// A bench, an example and a binary are real cargo shapes this grammar does
+    /// not name either, so each of these is refused rather than guessed at.
+    ///
+    /// # What the path alone cannot say
+    ///
+    /// The target and the module path are derived from where the file sits, and
+    /// a manifest or an attribute can move what cargo does with it. A
+    /// `[[test]]` entry naming its own `name` or `path` renames the target or
+    /// moves its root, and a `#[path = "…"]` attribute puts a module somewhere
+    /// else; this reads neither, so such a carrier is cited under the name
+    /// cargo lists or is not citable at all. Both failures are loud: cargo
+    /// lists no such target, or the audit finds no declaration reaching the
+    /// file.
+    ///
+    /// A file under `tests/` that any number of targets can pull in — the
+    /// shared module tree a `mod.rs` roots — belongs to no one target, and the
+    /// audit refuses a reference to any file in it rather than binding it to
+    /// one. That is a check against the workspace rather than against the path,
+    /// so it lives with the carrier audit; this answers the path alone.
     pub fn target(&self) -> Result<TargetRef, String> {
         let parts: Vec<&str> = self
             .file
@@ -374,12 +405,6 @@ impl TestRef {
         };
         match *kind {
             "src" => {
-                // A test in `src/a/b.rs` is listed as `a::b::…`; one in
-                // `src/a/mod.rs` as `a::…`; one in `src/lib.rs` at the root.
-                let mut modules: Vec<&str> = rest[..rest.len() - 1].to_vec();
-                if stem != "mod" && stem != "lib" {
-                    modules.push(stem);
-                }
                 if stem == "main" {
                     return Err(format!(
                         "`{}` is a binary target, which this grammar does not name: cite a \
@@ -387,10 +412,14 @@ impl TestRef {
                         self.file.display()
                     ));
                 }
-                let mut prefix = modules.join("::");
-                if !prefix.is_empty() {
-                    prefix.push_str("::");
-                }
+                let directories = &rest[..rest.len() - 1];
+                // `src/lib.rs` is the library's crate root, and a crate root
+                // names no module of its own.
+                let prefix = if directories.is_empty() && stem == "lib" {
+                    String::new()
+                } else {
+                    module_prefix(directories, stem)
+                };
                 Ok(TargetRef {
                     package: (*package).to_string(),
                     target: Target::Lib,
@@ -402,17 +431,53 @@ impl TestRef {
                 target: Target::Integration(stem.to_string()),
                 module_prefix: String::new(),
             }),
-            "tests" => Err(format!(
-                "`{}` is a module of an integration target rather than a target: cite the \
-                 `tests/<name>.rs` the test compiles into",
-                self.file.display()
-            )),
+            "tests" => {
+                let target = rest[0];
+                if rest.len() == 2 && stem == "mod" {
+                    return Err(format!(
+                        "`{}` roots a directory a target reaches with `mod {target};` rather than \
+                         a target of its own, so a test in it compiles into every target that \
+                         reaches it: cite a module of a single integration target",
+                        self.file.display()
+                    ));
+                }
+                // `tests/<target>/main.rs` is that target's crate root, and a
+                // crate root names no module of its own.
+                let prefix = if rest.len() == 2 && stem == "main" {
+                    String::new()
+                } else {
+                    module_prefix(&rest[1..rest.len() - 1], stem)
+                };
+                Ok(TargetRef {
+                    package: (*package).to_string(),
+                    target: Target::Integration((*target).to_string()),
+                    module_prefix: prefix,
+                })
+            }
             other => Err(format!(
                 "`{}` sits under `{other}/`, which is neither `src/` nor `tests/`",
                 self.file.display()
             )),
         }
     }
+}
+
+/// The module path a test in a file is listed under, from the directories
+/// between the crate root and the file and the file's own stem.
+///
+/// A `mod.rs` is its directory's own module and names nothing further; every
+/// other stem names a module. The result is empty or ends in `::`, so a caller
+/// puts a function name straight onto it.
+fn module_prefix(directories: &[&str], stem: &str) -> String {
+    let mut modules: Vec<&str> = directories.to_vec();
+    if stem != "mod" {
+        modules.push(stem);
+    }
+    let mut prefix = modules.join("::");
+    if !prefix.is_empty() {
+        prefix.push_str("::");
+    }
+    prefix
 }
 
 impl fmt::Display for TestRef {
@@ -564,7 +629,16 @@ impl TestIndex {
 
     /// Whether `function` is a live test in `target`'s listing, and whether it
     /// is ignored — or what is wrong with the reference.
-    pub fn resolve(&self, target: &TargetRef, function: &str) -> Result<bool, String> {
+    ///
+    /// `inline_modules` are the inline modules the cited file declares, which
+    /// is what makes the answer a claim about that file: see
+    /// [`matches_function`].
+    pub fn resolve(
+        &self,
+        target: &TargetRef,
+        function: &str,
+        inline_modules: &BTreeSet<String>,
+    ) -> Result<bool, String> {
         let listing = match self.listings.get(&target.key()) {
             Some(Ok(listing)) => listing,
             Some(Err(problem)) => return Err(problem.clone()),
@@ -578,7 +652,9 @@ impl TestIndex {
         let matched: Vec<&String> = listing
             .all
             .iter()
-            .filter(|listed| matches_function(listed, &target.module_prefix, function))
+            .filter(|listed| {
+                matches_function(listed, &target.module_prefix, function, inline_modules)
+            })
             .collect();
         if matched.is_empty() {
             return Err(format!(
@@ -594,18 +670,82 @@ impl TestIndex {
     }
 }
 
-/// Whether a listed test name is `prefix` followed by a module path ending in
-/// `function`.
+/// Whether a listed test name is the one the cited file's `function` is
+/// compiled under.
+///
+/// A listing carries the whole module path of a test, and a reference carries a
+/// file and a name. The file fixes everything up to `prefix`; what may still
+/// stand between it and the function is an inline module, because a `mod x { }`
+/// block in the cited file wraps the tests it holds in one more segment —
+/// `#[cfg(test)] mod tests { }` is that shape, and it is how most unit tests are
+/// written. A segment naming anything else is a **different file**: a module
+/// below the cited one, whose tests that file neither declares nor carries.
+///
+/// So a listing matches when it is `prefix` and `function` with nothing between
+/// them, or when everything between them is an inline module the cited file
+/// declares. Matching on the last segment alone would bind a reference to a
+/// namesake in a file below it: a declaration behind a `cfg` nothing turns on
+/// would read as carried by the descendant that really compiled, and a live
+/// carrier would be reported ignored because a namesake under it is.
 ///
 /// Public because two readers resolve the same names: the reconciliation above,
 /// against what cargo listed, and the certification lane's log reader, against
 /// what the harness reported. One rule, so a name that resolves for one of them
 /// resolves for the other.
-pub fn matches_function(listed: &str, prefix: &str, function: &str) -> bool {
+pub fn matches_function(
+    listed: &str,
+    prefix: &str,
+    function: &str,
+    inline_modules: &BTreeSet<String>,
+) -> bool {
     let Some(rest) = listed.strip_prefix(prefix) else {
         return false;
     };
-    rest.rsplit("::").next() == Some(function)
+    let mut segments: Vec<&str> = rest.split("::").collect();
+    let Some(last) = segments.pop() else {
+        return false;
+    };
+    last == function
+        && segments
+            .iter()
+            .all(|segment| inline_modules.contains(*segment))
+}
+
+/// The names of the inline modules a file declares: every `mod <name> {`.
+///
+/// A file module is declared `mod <name>;` and lives in another file, so it is
+/// not one of these — which is the whole distinction [`matches_function`] rests
+/// on.
+pub fn inline_modules(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let rest = past_word(past_qualifiers(line.trim()), "mod")?.trim_start();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                return None;
+            }
+            rest[name.len()..]
+                .trim_start()
+                .starts_with('{')
+                .then_some(name)
+        })
+        .collect()
+}
+
+/// The inline modules the file at `relative` declares, or none where the
+/// workspace does not hold it or cannot read it.
+///
+/// The empty answer is the strict one: a reference resolves only to the name
+/// its prefix and function spell exactly, which is what a reader that cannot
+/// see the source is entitled to claim.
+pub fn inline_modules_at(workspace_root: &Path, relative: &Path) -> BTreeSet<String> {
+    read(&workspace_root.join(relative))
+        .map(|source| inline_modules(&source))
+        .unwrap_or_default()
 }
 
 /// One `cargo test … -- --list` run, as the set of test names it printed.
@@ -1077,16 +1217,18 @@ impl Registry {
 
     /// What is wrong with one carrier reference, or nothing.
     ///
-    /// Four things have to hold for a binding to be a claim about the built
+    /// Five things have to hold for a binding to be a claim about the built
     /// suite. The reference has to resolve to a cargo target this grammar
     /// names. Its path has to exist spelled exactly as written, checked
     /// against the directory's own entries rather than by asking whether a
     /// file is there — a case-insensitive filesystem answers yes to a spelling
-    /// that fails on a case-sensitive one. The file has to declare the
-    /// function with `#[test]`, which is what pins the reference to the file
-    /// it names rather than to the target as a whole. And cargo has to have
-    /// compiled it: a name that appears only in a string literal, or behind a
-    /// `cfg` nothing turns on, is in the source and not in the list.
+    /// that fails on a case-sensitive one. The module tree has to reach the
+    /// file, because a file no `mod` declaration names is compiled by nothing,
+    /// however plausibly a listing elsewhere spells its name. The file has to
+    /// declare the function with `#[test]`, which is what pins the reference to
+    /// the file it names rather than to the target as a whole. And cargo has to
+    /// have compiled it: a name that appears only in a string literal, or
+    /// behind a `cfg` nothing turns on, is in the source and not in the list.
     ///
     /// An ignored carrier passes only when a lane adopts it, because a lane
     /// running a suite's ignored cases wholesale is the only thing that makes
@@ -1113,6 +1255,9 @@ impl Registry {
                 "names `{test}`, whose file is not in the workspace under that exact spelling"
             )];
         }
+        if let Some(problem) = unreachable_module(workspace_root, &test.file, sources) {
+            return vec![format!("names `{test}`, and {problem}")];
+        }
         let source = sources
             .entry(workspace_root.join(&test.file))
             .or_insert_with_key(|path| read(path).ok());
@@ -1125,8 +1270,9 @@ impl Registry {
                 test.function
             ));
         }
+        let inline = inline_modules(text);
 
-        match tests.resolve(&target, &test.function) {
+        match tests.resolve(&target, &test.function, &inline) {
             Err(problem) => problems.push(format!("names `{test}`, and {problem}")),
             Ok(false) => {}
             Ok(true) => {
@@ -1148,6 +1294,160 @@ impl Registry {
     }
 }
 
+/// What is wrong with the module path a carrier reference implies, or nothing.
+///
+/// A file is compiled into a target only where that target's module tree
+/// reaches it: a crate root, then a `mod <name>;` in the file above each one
+/// below it. Walking that chain is what separates a carrier from a file that
+/// merely sits in the right directory — a listing is only names, and an inline
+/// module elsewhere in the target can spell the same one.
+///
+/// The walk ends at a crate root: `src/lib.rs` for a library, `tests/<name>.rs`
+/// for a flat integration target, `tests/<name>/main.rs` for a directory one.
+///
+/// A directory under `tests/` that holds a `mod.rs` beside its `main.rs` ends
+/// the walk instead: it roots a target and a shared module tree at once, so
+/// each file below it compiles into the directory's own target and into every
+/// other target that writes `mod <dir>;`. One file under two module paths is
+/// not a carrier of one target, so the walk refuses it rather than binding it
+/// to the nearer root.
+fn unreachable_module(
+    workspace_root: &Path,
+    file: &Path,
+    sources: &mut BTreeMap<PathBuf, Option<String>>,
+) -> Option<String> {
+    let parts: Vec<String> = file
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let [_, package, kind, rest @ ..] = parts.as_slice() else {
+        return None;
+    };
+    let mut current: Vec<String> = rest.to_vec();
+    loop {
+        let stem = current.last()?.strip_suffix(".rs")?.to_string();
+        let directories = &current[..current.len() - 1];
+        let at_crate_root = if kind == "src" {
+            directories.is_empty() && stem == "lib"
+        } else {
+            directories.is_empty() || (directories.len() == 1 && stem == "main")
+        };
+        if at_crate_root {
+            return None;
+        }
+        // A `mod.rs` is its directory's module, so the name to look for above
+        // it is the directory's and the search starts one level higher.
+        let names_a_directory = stem == "mod";
+        let module = if names_a_directory {
+            directories.last()?.clone()
+        } else {
+            stem
+        };
+        let above = if names_a_directory {
+            &directories[..directories.len() - 1]
+        } else {
+            directories
+        };
+        let base = Path::new("crates").join(package).join(kind);
+        let candidates: Vec<Vec<String>> = if kind == "tests" && above.len() == 1 {
+            // A `mod.rs` beside the target root roots a second tree over the
+            // same files, and any other target under `tests/` pulls that tree
+            // in with `mod <dir>;`. Cargo then compiles every file below the
+            // directory into each of those targets, under a different module
+            // path in each, so the file answers to no one target.
+            let directory = &above[0];
+            let shared = base.join(directory).join("mod.rs");
+            if resolves_case_exactly(workspace_root, &shared, LastComponent::File) {
+                let root = base.join(directory).join("main.rs");
+                if resolves_case_exactly(workspace_root, &root, LastComponent::File) {
+                    return Some(format!(
+                        "`{}` is in a directory that roots a target and a shared module tree at \
+                         once: `{}` roots the integration target `{directory}` and `{}` roots a \
+                         tree any other target reaches with `mod {directory};`, so more than one \
+                         target compiles the file and it belongs to none of them",
+                        file.display(),
+                        root.display(),
+                        shared.display()
+                    ));
+                }
+            }
+            vec![vec![directory.clone(), "main.rs".to_string()]]
+        } else if above.is_empty() {
+            // Under `tests/` nothing is left above a file with no directories
+            // over it: the flat file and the directory root are both crate
+            // roots, and the grammar refuses the one remaining shape.
+            if kind != "src" {
+                return None;
+            }
+            vec![vec!["lib.rs".to_string()]]
+        } else {
+            let mut inside = above.to_vec();
+            inside.push("mod.rs".to_string());
+            let mut beside = above[..above.len() - 1].to_vec();
+            beside.push(format!("{}.rs", above[above.len() - 1]));
+            vec![inside, beside]
+        };
+        let found = candidates.iter().find(|candidate| {
+            let path = candidate
+                .iter()
+                .fold(base.clone(), |path, part| path.join(part));
+            resolves_case_exactly(workspace_root, &path, LastComponent::File)
+        });
+        let Some(parent) = found else {
+            let named: Vec<String> = candidates
+                .iter()
+                .map(|candidate| format!("crates/{package}/{kind}/{}", candidate.join("/")))
+                .collect();
+            if kind == "tests" && above.len() == 1 {
+                return Some(format!(
+                    "`{}` sits under a directory that roots no integration target: {} is not in \
+                     the workspace, so `{}` is a module tree a target reaches with `mod {};` \
+                     rather than a target of its own",
+                    file.display(),
+                    named.join(" and "),
+                    above[0],
+                    above[0]
+                ));
+            }
+            return Some(format!(
+                "`{}` has no module file above it: none of {} is in the workspace, so no crate \
+                 root reaches it",
+                file.display(),
+                named.join(" or ")
+            ));
+        };
+        let path = parent.iter().fold(base, |path, part| path.join(part));
+        let text = sources
+            .entry(workspace_root.join(&path))
+            .or_insert_with_key(|path| read(path).ok());
+        let Some(text) = text else {
+            return Some(format!(
+                "`{}` sits under `{}`, which could not be read",
+                file.display(),
+                path.display()
+            ));
+        };
+        if !declares_module(text, &module) {
+            return Some(format!(
+                "no module declares it: nothing in `{}` declares `mod {module};`, so no target \
+                 compiles `{}`",
+                path.display(),
+                file.display()
+            ));
+        }
+        current = parent.clone();
+    }
+}
+
+/// Whether `source` declares the file module `name` with `mod <name>;`.
+fn declares_module(source: &str, name: &str) -> bool {
+    source.lines().any(|line| {
+        past_word(past_qualifiers(line.trim()), "mod")
+            .and_then(|rest| rest.trim_start().strip_prefix(name))
+            .is_some_and(|rest| rest.trim_start().starts_with(';'))
+    })
+}
+
 /// What is wrong with one ground claiming a whole path, or nothing. `absent` is
 /// the claim: the path is one the tree is required not to hold, or one it is
 /// required to hold.
@@ -1159,8 +1459,11 @@ fn audit_path_ground(
     reason: &str,
     problems: &mut Vec<String>,
 ) {
-    if let Some(fault) = ill_spelled_ground(subject) {
-        problems.push(format!("`{name}` stands on `{subject}`, which is {fault}"));
+    if let Some(fault) = ill_spelled(subject) {
+        problems.push(format!(
+            "`{name}` stands on `{subject}`, which is {}",
+            fault.for_a_ground()
+        ));
         return;
     }
     if !reason.contains(subject) {
@@ -1244,9 +1547,10 @@ fn audit_symbol_ground(
         ));
         return;
     }
-    if let Some(fault) = ill_spelled_ground(file) {
+    if let Some(fault) = ill_spelled(file) {
         problems.push(format!(
-            "`{name}` stands on `{subject}`, whose file `{file}` is {fault}"
+            "`{name}` stands on `{subject}`, whose file `{file}` is {}",
+            fault.for_a_ground()
         ));
         return;
     }
@@ -1417,34 +1721,63 @@ fn shown(name: &OsStr) -> String {
     name.to_string_lossy().into_owned()
 }
 
-/// Why `subject` is not a spelling a [`Ground`] may stand on, or nothing.
-///
-/// A ground is resolved against directory entries, and for an `absent` ground
-/// resolving to nothing is the answer that passes. A spelling no tree can ever
-/// hold therefore passes forever, so the shape is held before the tree is asked:
-/// a component padded with whitespace, an empty one, a bare dot and a parent
-/// traversal are all refused whichever arm states them.
-fn ill_spelled_ground(subject: &str) -> Option<&'static str> {
-    if Path::new(subject).is_absolute() {
-        return Some("not a workspace-relative path without parent traversal");
+/// Why a path's spelling names nothing any tree holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IllSpelled {
+    Traversal,
+    NamesNothing,
+    Padded,
+}
+
+impl IllSpelled {
+    /// The fault, stated for any path.
+    fn clause(self) -> &'static str {
+        match self {
+            IllSpelled::Traversal => "not a workspace-relative path without parent traversal",
+            IllSpelled::NamesNothing => {
+                "not a workspace-relative path whose every component names something: an empty \
+                 component and a bare dot resolve to nothing"
+            }
+            IllSpelled::Padded => {
+                "a path with a component padded by whitespace, which no directory entry is \
+                 spelled with: the padded spelling resolves to nothing"
+            }
+        }
     }
-    for component in subject.split('/') {
+
+    /// The same fault, stated for a ground.
+    fn for_a_ground(self) -> String {
+        match self {
+            IllSpelled::Traversal => self.clause().to_string(),
+            _ => format!(
+                "{}, so an absence claimed under it never ends",
+                self.clause()
+            ),
+        }
+    }
+}
+
+/// The fault in a path's spelling, or none.
+///
+/// A path is resolved against directory entries, and a spelling no tree can
+/// hold resolves to nothing wherever it stands. For an `absent` ground that is
+/// the answer that passes, so the claim would never end; for a carrier
+/// reference it is a file the audit can never find. Either way the shape is
+/// held before the tree is asked: a component padded with whitespace, an empty
+/// one, a bare dot and a parent traversal are all refused.
+fn ill_spelled(path: &str) -> Option<IllSpelled> {
+    if Path::new(path).is_absolute() {
+        return Some(IllSpelled::Traversal);
+    }
+    for component in path.split('/') {
         if component == ".." {
-            return Some("not a workspace-relative path without parent traversal");
+            return Some(IllSpelled::Traversal);
         }
         if component.is_empty() || component == "." {
-            return Some(
-                "not a workspace-relative path whose every component names something: an empty \
-                 component and a bare dot resolve to nothing, so an absence claimed under one \
-                 never ends",
-            );
+            return Some(IllSpelled::NamesNothing);
         }
         if component != component.trim() {
-            return Some(
-                "a path with a component padded by whitespace, which no directory entry is \
-                 spelled with: the padded spelling resolves to nothing, so an absence claimed \
-                 under it never ends",
-            );
+            return Some(IllSpelled::Padded);
         }
     }
     None
@@ -1769,7 +2102,8 @@ mod tests {
     use super::{
         Binding, BindingStatus, Case, Ground, Kind, LANE_IGNORE_PREFIXES, LAYER_LANDING, Listing,
         MANDATORY_CASES, Registry, Target, TestIndex, TestRef, VENUE_NAMES, Venue, declares_symbol,
-        declares_test, ignore_reason, is_identifier, is_kebab_case, opens_fn,
+        declares_test, ignore_reason, inline_modules, is_identifier, is_kebab_case,
+        matches_function, opens_fn,
     };
     use crate::scratch::Scratch;
     use std::collections::BTreeSet;
@@ -1801,6 +2135,19 @@ fn a_name_in_prose() {
 }
 ";
 
+    /// A second module of the same target declaring the same test name, ignored
+    /// for a reason no lane adopts.
+    ///
+    /// Two modules of one binary may name a test the same thing, and the module
+    /// path is the whole of what tells them apart in cargo's listing. A
+    /// reference resolved without one reaches this carrier too, which is what
+    /// makes the module prefix load-bearing rather than decorative.
+    const NAMESAKE_CARRIER_SOURCE: &str = "\
+#[test]
+#[ignore = \"flaky on this machine\"]
+fn a_carrier() {}
+";
+
     /// The file a symbol ground is read out of: an enum whose members sit one
     /// per line, and a function behind a visibility qualifier.
     const VOCABULARY_SOURCE: &str = "\
@@ -1828,6 +2175,130 @@ pub(crate) fn foo(count: u64) -> u64 {
         // reaching a target nothing was listed for has somewhere to point.
         std::fs::write(tests.join("other.rs"), CARRIER_SOURCE).expect("a second carrier source");
         root
+    }
+
+    /// The module beside the carriers, and the file module under it: a
+    /// namesake ignored for a reason no lane adopts, and an inline module the
+    /// listing names.
+    const INNER_EXTRA_SOURCE: &str = "\
+mod sub;
+
+mod tests {
+    #[test]
+    fn an_inline_carrier() {}
+}
+";
+
+    /// A directory module that declares a file module and a test nothing
+    /// compiles. What cargo lists under `deep::` is the file module's test, and
+    /// the declaration here is the spoof: the file names the function and the
+    /// binary holds no such test.
+    const DEEP_SOURCE: &str = "\
+mod leaf;
+
+#[test]
+#[cfg(any())]
+fn a_carrier() {}
+";
+
+    /// A real cargo workspace whose one integration target is a directory
+    /// rooted at `crates/demo/tests/suite/main.rs`.
+    ///
+    /// The tree holds every shape the grammar has to tell apart: a test in the
+    /// target root, a module beside it, a file module under that module, an
+    /// inline module, a directory module whose own declaration is behind a
+    /// `cfg` nothing turns on, a file no `mod` declaration reaches beside an
+    /// inline module wearing its name, a directory that roots no target at
+    /// all, and a directory that is a target and a shared module tree at once.
+    ///
+    /// It is built rather than described because what it proves is the shape of
+    /// cargo's own `--list` output. It depends on nothing, so the lock file
+    /// written beside it is complete and the `--locked` listing holds.
+    #[allow(clippy::disallowed_methods)] // Builds the workspace cargo is asked to list.
+    fn cargo_workspace() -> Scratch {
+        let root = Scratch::new("norn-regression-cargo");
+        let suite = root.join("crates/demo/tests/suite");
+        std::fs::create_dir_all(suite.join("inner")).expect("a scratch workspace");
+        std::fs::create_dir_all(suite.join("deep")).expect("a directory module");
+        std::fs::create_dir_all(root.join("crates/demo/tests/scaffolding"))
+            .expect("a directory that roots no target");
+        let shared = root.join("crates/demo/tests/shared");
+        std::fs::create_dir_all(&shared).expect("a directory that is a target and a shared tree");
+        std::fs::create_dir_all(root.join("crates/demo/src")).expect("a source directory");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\"]\nresolver = \"2\"\n",
+        )
+        .expect("a workspace manifest");
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"demo\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("a lock file");
+        std::fs::write(
+            root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .expect("a package manifest");
+        std::fs::write(root.join("crates/demo/src/lib.rs"), "").expect("a library root");
+        std::fs::write(
+            suite.join("main.rs"),
+            "mod deep;\nmod inner;\nmod other;\n\n#[test]\nfn a_root_test() {}\n\nmod ghost {\n    #[test]\n    fn a_carrier() {}\n}\n",
+        )
+        .expect("a target root");
+        std::fs::write(
+            suite.join("inner.rs"),
+            format!("{CARRIER_SOURCE}\n{INNER_EXTRA_SOURCE}"),
+        )
+        .expect("a carrier source");
+        std::fs::write(suite.join("inner/sub.rs"), NAMESAKE_CARRIER_SOURCE)
+            .expect("a namesake under the carrier");
+        std::fs::write(suite.join("other.rs"), NAMESAKE_CARRIER_SOURCE).expect("a namesake source");
+        std::fs::write(suite.join("deep/mod.rs"), DEEP_SOURCE).expect("a directory module");
+        std::fs::write(suite.join("deep/leaf.rs"), "#[test]\nfn a_carrier() {}\n")
+            .expect("a file module");
+        std::fs::write(suite.join("ghost.rs"), "#[test]\nfn a_carrier() {}\n")
+            .expect("a file no module declares");
+        std::fs::write(
+            root.join("crates/demo/tests/scaffolding/mod.rs"),
+            "mod helper;\n",
+        )
+        .expect("a shared module root");
+        std::fs::write(
+            root.join("crates/demo/tests/scaffolding/helper.rs"),
+            "#[test]\nfn a_carrier() {}\n",
+        )
+        .expect("a shared module");
+        std::fs::write(shared.join("main.rs"), "mod inner;\n").expect("a second target root");
+        std::fs::write(shared.join("mod.rs"), "mod inner;\n").expect("a shared module root");
+        std::fs::write(shared.join("inner.rs"), "#[test]\nfn a_carrier() {}\n")
+            .expect("a file two targets compile");
+        std::fs::write(
+            root.join("crates/demo/tests/flat.rs"),
+            "mod shared;\n\n#[test]\nfn a_flat_test() {}\n",
+        )
+        .expect("a flat target pulling in the shared tree");
+        root
+    }
+
+    /// What the audit says about one carrier reference over the real cargo
+    /// workspace, with the sound registry's own claims moved onto paths that
+    /// tree holds.
+    fn cargo_audit(root: &Scratch, reference: &str) -> Vec<String> {
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests = vec![reference.to_string()];
+        let case = find(&mut registry, "a-dormant-layer-zero-case");
+        case.binding.reason = Some(
+            "crates/demo/tests/suite/inner.rs holds the recognition half, and the half this case \
+             waits on has no subject: crates/demo/src/absent.rs is not in the workspace"
+                .to_string(),
+        );
+        case.binding.grounds = vec![
+            Ground::Present("crates/demo/tests/suite/inner.rs".to_string()),
+            Ground::Absent("crates/demo/src/absent.rs".to_string()),
+        ];
+        let listed = TestIndex::from_cargo(root.root(), registry.cited_targets());
+        registry.audit(root.root(), &listed)
     }
 
     /// What cargo would say the scratch workspace's one target compiled: the
@@ -2671,8 +3142,8 @@ pub(crate) fn foo(count: u64) -> u64 {
             ),
             ("crates/demo/src/main.rs::a_carrier", "is a binary target"),
             (
-                "crates/demo/tests/suite/inner.rs::a_carrier",
-                "is a module of an integration target",
+                "crates/demo/tests/scaffolding/mod.rs::a_carrier",
+                "roots a directory a target reaches with `mod scaffolding;`",
             ),
             (
                 "demo/tests/suite.rs::a_carrier",
@@ -2845,6 +3316,26 @@ pub(crate) fn foo(count: u64) -> u64 {
                 Target::Integration("lanes".to_string()),
                 "",
             ),
+            (
+                "crates/a/tests/suite/main.rs::f",
+                Target::Integration("suite".to_string()),
+                "",
+            ),
+            (
+                "crates/a/tests/suite/inner.rs::f",
+                Target::Integration("suite".to_string()),
+                "inner::",
+            ),
+            (
+                "crates/a/tests/suite/deep/inner.rs::f",
+                Target::Integration("suite".to_string()),
+                "deep::inner::",
+            ),
+            (
+                "crates/a/tests/suite/deep/mod.rs::f",
+                Target::Integration("suite".to_string()),
+                "deep::",
+            ),
         ];
         for (reference, target, prefix) in cases {
             let found = TestRef::parse(reference)
@@ -2854,6 +3345,249 @@ pub(crate) fn foo(count: u64) -> u64 {
             assert_eq!(found.package, "a", "{reference}");
             assert_eq!(found.target, target, "{reference}");
             assert_eq!(found.module_prefix, prefix, "{reference}");
+        }
+    }
+
+    /// A carrier in a module of an integration target audits clean against the
+    /// listing cargo really prints for it.
+    ///
+    /// Everything else here describes what cargo says; this asks it. The listing
+    /// is the shape the module prefix is derived for — `inner::a_carrier` rather
+    /// than `a_carrier` — and it is also every other shape the grammar has to
+    /// tell apart: a test in the target root at no prefix at all, a file module
+    /// under a module, an inline module, and an inline module wearing the name
+    /// of a file nothing declares.
+    #[test]
+    fn a_module_of_an_integration_target_audits_against_the_listing_cargo_prints() {
+        let root = cargo_workspace();
+        let reference = "crates/demo/tests/suite/inner.rs::a_carrier";
+        let target = TestRef::parse(reference)
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        assert_eq!(target.target, Target::Integration("suite".to_string()));
+        assert_eq!(target.module_prefix, "inner::");
+
+        let listed = TestIndex::from_cargo(root.root(), [target.clone()]);
+        let compiled = listed.compiled(&target).expect("a listing");
+        let names: BTreeSet<&str> = compiled.all.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "a_root_test",
+                "deep::leaf::a_carrier",
+                "ghost::a_carrier",
+                "inner::a_carrier",
+                "inner::an_adopted_carrier",
+                "inner::an_orphan_carrier",
+                "inner::sub::a_carrier",
+                "inner::tests::an_inline_carrier",
+                "other::a_carrier",
+            ]),
+            "cargo lists a test under the module path it is declared in"
+        );
+        assert_eq!(cargo_audit(&root, reference), Vec::<String>::new());
+    }
+
+    /// A test the target root declares is listed at no prefix at all, and the
+    /// root is a carrier like any other file.
+    #[test]
+    fn a_test_the_target_root_declares_resolves_at_the_root() {
+        let root = cargo_workspace();
+        let reference = "crates/demo/tests/suite/main.rs::a_root_test";
+        let target = TestRef::parse(reference)
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        assert_eq!(target.target, Target::Integration("suite".to_string()));
+        assert_eq!(target.module_prefix, "");
+        assert_eq!(cargo_audit(&root, reference), Vec::<String>::new());
+    }
+
+    /// An inline module around the declaration is part of the name cargo lists,
+    /// and a reference naming the function reaches it.
+    #[test]
+    fn an_inline_module_around_a_declaration_is_part_of_the_listed_name() {
+        let root = cargo_workspace();
+        assert_eq!(
+            cargo_audit(&root, "crates/demo/tests/suite/inner.rs::an_inline_carrier"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A reference whose function only exists in a file module below it is
+    /// caught.
+    ///
+    /// `deep/mod.rs` declares the function behind a `cfg` nothing turns on, so
+    /// the file reads as if it carried the case, and `deep/leaf.rs` compiles a
+    /// test of the same name one module further down. A reference that reached
+    /// the descendant would be bound to a test in a file it does not name.
+    #[test]
+    fn a_reference_reaching_only_a_file_module_below_it_is_caught() {
+        let root = cargo_workspace();
+        let found = cargo_audit(&root, "crates/demo/tests/suite/deep/mod.rs::a_carrier");
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("cargo compiled no test `deep::a_carrier`")),
+            "{found:#?}"
+        );
+    }
+
+    /// A file no `mod` declaration reaches is caught, even where the target
+    /// lists that exact name from an inline module wearing it.
+    #[test]
+    fn a_file_no_module_declaration_reaches_is_caught() {
+        let root = cargo_workspace();
+        let found = cargo_audit(&root, "crates/demo/tests/suite/ghost.rs::a_carrier");
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.contains("declares `mod ghost;`")),
+            "{found:#?}"
+        );
+    }
+
+    /// A file under a directory that roots a target and also roots a shared
+    /// module tree is refused, because more than one target compiles it.
+    ///
+    /// `tests/shared/main.rs` roots the target `shared`, and
+    /// `tests/shared/mod.rs` roots a tree `tests/flat.rs` pulls in with
+    /// `mod shared;`. Cargo lists the one test in `tests/shared/inner.rs`
+    /// twice, under a different module path in each target, so no single
+    /// binding names it.
+    #[test]
+    fn a_file_a_target_and_a_shared_tree_both_compile_is_caught() {
+        let root = cargo_workspace();
+        let shared = TestRef::parse("crates/demo/tests/shared/inner.rs::a_carrier")
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        let flat = TestRef::parse("crates/demo/tests/flat.rs::a_flat_test")
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        let listed = TestIndex::from_cargo(root.root(), [shared.clone(), flat.clone()]);
+        assert!(
+            listed
+                .compiled(&shared)
+                .expect("a listing")
+                .all
+                .contains("inner::a_carrier"),
+            "the target rooted at `main.rs` compiles the file"
+        );
+        assert!(
+            listed
+                .compiled(&flat)
+                .expect("a listing")
+                .all
+                .contains("shared::inner::a_carrier"),
+            "the flat target pulling in the tree compiles it too"
+        );
+
+        let found = cargo_audit(&root, "crates/demo/tests/shared/inner.rs::a_carrier");
+        assert!(
+            found.iter().any(|problem| problem.contains(
+                "`crates/demo/tests/shared/mod.rs` roots a tree any other target reaches"
+            )),
+            "{found:#?}"
+        );
+    }
+
+    /// A directory under `tests/` that roots no target is caught before cargo
+    /// is asked, because there is no target to ask about.
+    #[test]
+    fn a_module_in_a_directory_that_roots_no_target_is_caught() {
+        let root = cargo_workspace();
+        let found = cargo_audit(&root, "crates/demo/tests/scaffolding/helper.rs::a_carrier");
+        assert!(
+            found.iter().any(|problem| problem
+                .contains("crates/demo/tests/scaffolding/main.rs is not in the workspace")),
+            "{found:#?}"
+        );
+    }
+
+    /// An ignored namesake one module further down leaves a live carrier live.
+    ///
+    /// `inner/sub.rs` declares `a_carrier` too and is ignored for a reason no
+    /// lane adopts. A reference that reached it as well would report the live
+    /// carrier in `inner.rs` as an ignored one nothing runs.
+    #[test]
+    fn an_ignored_namesake_in_a_file_module_leaves_a_live_carrier_live() {
+        let root = cargo_workspace();
+        let reference = "crates/demo/tests/suite/inner.rs::a_carrier";
+        let target = TestRef::parse(reference)
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        let listed = TestIndex::from_cargo(root.root(), [target.clone()]);
+        assert!(
+            listed
+                .compiled(&target)
+                .expect("a listing")
+                .ignored
+                .contains("inner::sub::a_carrier"),
+            "the namesake below the carrier is the ignored one"
+        );
+        assert_eq!(cargo_audit(&root, reference), Vec::<String>::new());
+    }
+
+    /// A component that names nothing is refused where it is written, because
+    /// the tree holds no entry spelled that way.
+    #[test]
+    fn a_reference_whose_component_names_nothing_is_caught() {
+        for reference in [
+            "crates/demo/tests/suite/./inner.rs::a_carrier",
+            "crates/demo/tests/suite//inner.rs::a_carrier",
+            "crates/demo/tests/suite/ inner.rs::a_carrier",
+        ] {
+            refused(
+                |registry| {
+                    find(registry, "a-bound-case").binding.tests = vec![reference.to_string()];
+                },
+                "to nothing",
+            );
+        }
+    }
+
+    /// An inline module is a `mod <name> {` block; a file module is a
+    /// declaration and lives somewhere else.
+    #[test]
+    fn an_inline_module_is_told_apart_from_a_file_module() {
+        let source = "\
+mod a_file_module;
+pub mod another_file_module;
+
+mod an_inline_module {
+    #[test]
+    fn a_carrier() {}
+}
+
+#[cfg(test)]
+pub(crate) mod tests {}
+";
+        assert_eq!(
+            inline_modules(source),
+            BTreeSet::from(["an_inline_module".to_string(), "tests".to_string()])
+        );
+    }
+
+    /// A listing matches a reference when the file's own inline modules are the
+    /// only thing standing between its prefix and the function.
+    #[test]
+    fn a_listing_below_the_cited_file_does_not_match_it() {
+        let inline = BTreeSet::from(["tests".to_string()]);
+        for listed in ["process::f", "process::tests::f"] {
+            assert!(
+                matches_function(listed, "process::", "f", &inline),
+                "{listed}"
+            );
+        }
+        for listed in ["process::below::f", "process::tests::below::f", "other::f"] {
+            assert!(
+                !matches_function(listed, "process::", "f", &inline),
+                "{listed}"
+            );
         }
     }
 

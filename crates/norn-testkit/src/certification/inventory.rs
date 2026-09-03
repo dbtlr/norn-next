@@ -73,7 +73,7 @@ use std::path::Path;
 
 use norn_fixtures::digest::{Sha256, hex};
 
-use crate::regression::{TargetRef, TestIndex, TestRef};
+use crate::regression::{self, TargetRef, TestIndex, TestRef};
 
 /// Which of the layer's suites a case belongs to.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -824,7 +824,7 @@ pub fn reconciliation_problems(workspace_root: &Path) -> Vec<String> {
     audit_shape(&mut problems);
 
     let indices = index_by_feature(workspace_root);
-    audit_carriers(&indices, &mut problems);
+    audit_carriers(workspace_root, &indices, &mut problems);
     audit_claimed_targets(&indices, &mut problems);
     problems
 }
@@ -894,7 +894,16 @@ fn index_by_feature(workspace_root: &Path) -> BTreeMap<Option<&'static str>, Tes
 }
 
 /// Forward: every id resolves to exactly one test cargo compiled.
-fn audit_carriers(indices: &BTreeMap<Option<&'static str>, TestIndex>, problems: &mut Vec<String>) {
+///
+/// The carrier's own file is read for the inline modules its declarations sit
+/// in, because that is what a listed name is resolved against: a test one
+/// module further down is a different file's, and an entry bound to it would
+/// count a case no run of the named carrier executes.
+fn audit_carriers(
+    workspace_root: &Path,
+    indices: &BTreeMap<Option<&'static str>, TestIndex>,
+    problems: &mut Vec<String>,
+) {
     for case in REQUIRED_CASES {
         let Ok(test) = TestRef::parse(case.carrier) else {
             continue; // Already reported by the shape audit.
@@ -913,7 +922,8 @@ fn audit_carriers(indices: &BTreeMap<Option<&'static str>, TestIndex>, problems:
             ));
             continue;
         };
-        match index.resolve(&target, &test.function) {
+        let inline = regression::inline_modules_at(workspace_root, &test.file);
+        match index.resolve(&target, &test.function, &inline) {
             Err(problem) => problems.push(format!(
                 "`{}` names `{test}`, and {problem}. A case cargo compiled nothing for is a case \
                  no run executes, whatever the suite's own result line says.",
@@ -934,7 +944,14 @@ fn audit_carriers(indices: &BTreeMap<Option<&'static str>, TestIndex>, problems:
                     let matched = listing
                         .all
                         .iter()
-                        .filter(|listed| listed.rsplit("::").next() == Some(test.function.as_str()))
+                        .filter(|listed| {
+                            regression::matches_function(
+                                listed,
+                                &target.module_prefix,
+                                &test.function,
+                                &inline,
+                            )
+                        })
                         .count();
                     if matched > 1 {
                         problems.push(format!(

@@ -365,7 +365,8 @@ fn a_lanes_suite_logs_become_an_outcome_for_every_required_case() {
         std::fs::write(invocation.log(&logs), rendered).expect("writing a suite log");
     }
 
-    let outcomes = lane::outcomes_from_logs(&logs).expect("reading the lane's logs");
+    let outcomes =
+        lane::outcomes_from_logs(&workspace_root(), &logs).expect("reading the lane's logs");
     let lines: Vec<&str> = outcomes.lines().collect();
     for case in REQUIRED_CASES {
         assert!(
@@ -392,7 +393,7 @@ fn a_lanes_suite_logs_become_an_outcome_for_every_required_case() {
 /// collects nothing is that nothing named logs.
 #[test]
 fn the_lanes_case_outcomes_are_collected_where_a_lane_names_logs() {
-    match lane::collect().expect("collecting the lane's outcomes") {
+    match lane::collect(&workspace_root()).expect("collecting the lane's outcomes") {
         Some(path) => eprintln!("wrote the lane's case outcomes to {}", path.display()),
         None => eprintln!("no {} was named, so this run collected none", lane::LOGS),
     }

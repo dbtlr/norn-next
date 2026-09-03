@@ -46,8 +46,8 @@
 //! absence, and the name is pre-committed rather than guessed at: a dormant case
 //! is the contract the carrier is authored against.
 //!
-//! What is left waits on nothing any subject names — a shell step, a module of
-//! an integration target, a reader behind a feature, a vocabulary nobody has
+//! What is left waits on nothing any subject names — a shell step, a
+//! `compile_fail` doctest, a reader behind a feature, a vocabulary nobody has
 //! written, a guard with no home decided. Those reasons expire only when a
 //! person re-derives them, so the class is pinned by name in
 //! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is that
@@ -89,7 +89,7 @@ const CASE_TOTAL: usize = 106;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "916c0eec5a7a5e82b57faf720fd3471549c3fa7c7f2db820f41a87c55de7d849";
+const CONTRACT_DIGEST: &str = "f03702341d40daac2a2a07c1b898145e87c29355f29ffdf271c86886c384acb3";
 
 /// The cases carried by tests today, by name.
 ///
@@ -102,11 +102,13 @@ const CONTRACT_DIGEST: &str = "916c0eec5a7a5e82b57faf720fd3471549c3fa7c7f2db820f
 const BOUND_CASES: &[&str] = &[
     "a-measurement-lane-proves-it-measured",
     "a-mutation-confirms-the-file-it-holds-before-it-publishes",
+    "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "cache-identity-is-total",
     "cost-is-independent-of-vault-size",
     "encoding-prefix-transparency",
     "fixtures-carry-real-content-volume",
     "frontmatter-roundtrip-or-refuse",
+    "guard-binds-executed-sql",
     "harness-condition-waits-have-deadlines",
     "harness-processes-are-bounded-and-exec-safe",
     "harness-runs-under-isolated-state-roots",
@@ -123,9 +125,11 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
-/// - **A module of an integration target.** The carrier compiles, and the
-///   reference grammar names top-level `tests/` files only; NORN-159 owns
-///   widening it. A `compile_fail` doctest sits in the same class.
+/// - **A `compile_fail` doctest.** One clause is held by a type and pinned by a
+///   doctest that must not compile, and a doctest is not a `#[test]` function a
+///   reference names. The clauses beside it are carried by a module of an
+///   integration target, which the grammar cites, so binding the case on those
+///   alone would name carriers for a clause none of them asserts.
 /// - **A reader behind a feature.** The declaration is there; what is absent is
 ///   the `induced-failure` selection cargo would compile it under, which is a
 ///   fact about a build rather than about a file's text.
@@ -148,11 +152,9 @@ const BOUND_CASES: &[&str] = &[
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
-    "a-sidecar-is-keyed-by-its-own-model-and-scoped-by-the-store-epoch",
     "comment-claims-are-test-bound",
     "derived-findings-are-materialized-and-maintained",
     "each-file-is-read-once-per-build",
-    "guard-binds-executed-sql",
     "harness-assertions-observe-stable-facts",
     "instrumentation-exists-and-is-consumed",
     "maintenance-touches-the-affected-set-only",
@@ -188,7 +190,7 @@ fn registry() -> Registry {
 ///
 /// Asking cargo what compiled is what makes this a claim about the suite that
 /// runs rather than about the text of a file: one `--list` pair per cited
-/// target, which is thirteen targets across five packages today.
+/// target, which is eighteen targets across nine packages today.
 #[test]
 fn the_registry_is_structurally_sound() {
     let registry = registry();
