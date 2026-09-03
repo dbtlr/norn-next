@@ -44,14 +44,15 @@
       "property": "An engine's sidecar carries its own identity beside the lane-1 store, and the engine's configuration reaches derived state only there: its rows are keyed by the model id and model version that computed them, a sidecar whose recorded model keys this build will not read is rebuilt from zero rather than adopted, and its feed cursors are scoped to the lane-1 store epoch they were recorded under, so a store that starts a new epoch is answered by a rescan from the start of the feed and never by a seek.",
       "sources": ["NORN-a124"],
       "binding": {
-        "status": "dormant",
-        "reason": "the sidecar and both halves of its identity exist — crates/norn-semantic/src/ddl.rs records the model id, the model version and the observed store epoch — and every bar over them sits in crates/norn-semantic/tests/engine/model.rs, crates/norn-semantic/tests/engine/nearest.rs, crates/norn-semantic/tests/engine/lifecycle.rs and crates/norn-semantic/tests/engine/drain.rs, which are modules of one integration target the carrier grammar cannot name. The case binds when that grammar can cite a module of an integration target; NORN-159 owns the grammar.",
-        "grounds": [
-          { "present": "crates/norn-semantic/src/ddl.rs" },
-          { "present": "crates/norn-semantic/tests/engine/model.rs" },
-          { "present": "crates/norn-semantic/tests/engine/nearest.rs" },
-          { "present": "crates/norn-semantic/tests/engine/lifecycle.rs" },
-          { "present": "crates/norn-semantic/tests/engine/drain.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-semantic/tests/engine/lifecycle.rs::the_sidecar_and_the_store_are_separate_files",
+          "crates/norn-semantic/tests/engine/lifecycle.rs::a_reopened_sidecar_is_adopted_under_its_epoch",
+          "crates/norn-semantic/tests/engine/model.rs::a_model_key_that_will_not_read_is_rebuilt_from_zero",
+          "crates/norn-semantic/tests/engine/nearest.rs::a_foreign_models_row_is_not_answered_with",
+          "crates/norn-semantic/tests/engine/nearest.rs::a_moved_model_rebuilds_the_sidecar_from_zero",
+          "crates/norn-semantic/tests/engine/drain.rs::the_cursor_survives_an_engine_reopen",
+          "crates/norn-semantic/tests/engine/drain.rs::a_store_rebuild_rescans_but_recomputes_nothing"
         ]
       }
     },
@@ -108,13 +109,14 @@
       "property": "Every plan-shape assertion is taken from SQL captured out of the executing request, never from a literal authored in the test. A test naming a query no request path issues fails as unbound rather than passing against a string nobody executes.",
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
-        "status": "dormant",
-        "reason": "the seam exists and the pairing is structural: crates/norn-db/src/plan.rs builds the pair, holding a statement together with the plan SQLite reported for it, crates/norn-store/src/request/instrument.rs names and binds the SQL a reader emits and hands that pair out, and crates/norn-testkit/src/explain.rs carries it to an assertion so no claim can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it. The residue is the integration-target module: the carrier's file is claimed present above, and a case inside it is not a subject a reference or a declaration claim reaches until NORN-159 widens the grammar.",
-        "grounds": [
-          { "present": "crates/norn-db/src/plan.rs" },
-          { "present": "crates/norn-store/src/request/instrument.rs" },
-          { "present": "crates/norn-testkit/src/explain.rs" },
-          { "present": "crates/norn-store/tests/store/pillars.rs" }
+        "status": "bound",
+        "tests": [
+          "crates/norn-store/tests/store/pillars.rs::every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
+          "crates/norn-store/tests/store/pillars.rs::an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
+          "crates/norn-store/tests/store/pillars.rs::a_feed_page_walks_its_covering_index_and_reads_no_row",
+          "crates/norn-store/tests/store/pillars.rs::a_heal_page_seeks_the_index_that_holds_its_order",
+          "crates/norn-store/tests/store/pillars.rs::a_paged_statement_binds_its_cursor_as_the_floor_it_seeks_from",
+          "crates/norn-testkit/src/explain.rs::a_failure_names_the_emitted_statement"
         ]
       }
     },
@@ -315,7 +317,7 @@
       "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15"],
       "binding": {
         "status": "dormant",
-        "reason": "the guarantee is shipped and neither bar that carries it is nameable here: crates/norn-fs/src/write.rs claims the name with `create_new` and no precheck, and the bar on it — a create onto a document a racer published, refused with the racer's bytes intact — sits in crates/norn-fs/tests/kernel/preconditions.rs, a module of an integration target rather than a target, which a reference in this file cannot name. The missing overwrite arm is held by the type and pinned by a `compile_fail` doctest in that same source file, and a doctest is not a `#[test]` function a reference can name either. Task NORN-159 owns the grammar; until it widens, what carries this property cannot be cited as carrying it. The residue is the integration-target module and the `compile_fail` doctest beside it: both files are claimed present above, and neither carrier is a subject a reference or a declaration claim reaches until NORN-159 widens the grammar.",
+        "reason": "the guarantee is shipped and one of the two bars that carry it is a `#[test]` a reference names: crates/norn-fs/src/write.rs claims the name with `create_new` and no precheck, and the bar on it — a create onto a document a racer published, refused with the racer's bytes intact — sits in crates/norn-fs/tests/kernel/preconditions.rs, which the carrier grammar cites as a module of the kernel integration target. The other bar is the overwrite arm that does not exist: it is held by the type and pinned by a `compile_fail` doctest in crates/norn-fs/src/write.rs, and a doctest is not a `#[test]` function a reference names. Binding the case to the runtime bar alone would name carriers for a clause no cited test asserts, so the residue is that doctest: both files are claimed present above, and a doctest is not a subject a reference or a declaration claim reaches.",
         "grounds": [
           { "present": "crates/norn-fs/src/write.rs" },
           { "present": "crates/norn-fs/tests/kernel/preconditions.rs" }
