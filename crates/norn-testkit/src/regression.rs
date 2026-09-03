@@ -341,12 +341,21 @@ impl TestRef {
     /// Which cargo target this reference's file compiles into, and the module
     /// path a test in it is listed under.
     ///
-    /// Only the two shapes the registry can cite resolve: a file under a
-    /// crate's `src/`, whose tests compile into that crate's library target,
-    /// and a top-level file under a crate's `tests/`, which is an integration
-    /// target of its own. A bench, an example, a binary and a nested file
-    /// under `tests/` are all real cargo shapes and none of them is one this
-    /// grammar names, so each is refused rather than guessed at.
+    /// Three shapes resolve. A file under a crate's `src/`, whose tests compile
+    /// into that crate's library target. A top-level file under a crate's
+    /// `tests/`, which is an integration target of its own. And a file inside a
+    /// directory under `tests/`, which is a module of the integration target
+    /// that directory's `main.rs` roots — cargo lists a test in it under its
+    /// module path, so the path is derived the way `src/` derives one:
+    /// `tests/suite/inner.rs` is listed under `inner::` and
+    /// `tests/suite/deep/inner.rs` under `deep::inner::`.
+    ///
+    /// Two files in that last shape carry nothing citable. `tests/<dir>/main.rs`
+    /// is the target's root rather than a module in it. `tests/<dir>/mod.rs` is
+    /// the root of a directory sibling targets pull in with `mod <dir>;`, so a
+    /// test in it compiles into each of them and no one target names it. A
+    /// bench, an example and a binary are real cargo shapes this grammar does
+    /// not name either, so each of these is refused rather than guessed at.
     pub fn target(&self) -> Result<TargetRef, String> {
         let parts: Vec<&str> = self
             .file
@@ -402,11 +411,39 @@ impl TestRef {
                 target: Target::Integration(stem.to_string()),
                 module_prefix: String::new(),
             }),
-            "tests" => Err(format!(
-                "`{}` is a module of an integration target rather than a target: cite the \
-                 `tests/<name>.rs` the test compiles into",
-                self.file.display()
-            )),
+            "tests" => {
+                // A test in `tests/suite/a/b.rs` is listed as `a::b::…` within
+                // the `suite` target; one in `tests/suite/a/mod.rs` as `a::…`.
+                let target = rest[0];
+                if rest.len() == 2 && stem == "main" {
+                    return Err(format!(
+                        "`{}` is the root of the `{target}` integration target rather than a \
+                         module in it: cite the module file that declares the test",
+                        self.file.display()
+                    ));
+                }
+                if rest.len() == 2 && stem == "mod" {
+                    return Err(format!(
+                        "`{}` roots a directory sibling targets declare with `mod {target};`, so \
+                         a test in it compiles into each of them rather than into one target: \
+                         cite a module of a single integration target",
+                        self.file.display()
+                    ));
+                }
+                let mut modules: Vec<&str> = rest[1..rest.len() - 1].to_vec();
+                if stem != "mod" {
+                    modules.push(stem);
+                }
+                let mut prefix = modules.join("::");
+                if !prefix.is_empty() {
+                    prefix.push_str("::");
+                }
+                Ok(TargetRef {
+                    package: (*package).to_string(),
+                    target: Target::Integration((*target).to_string()),
+                    module_prefix: prefix,
+                })
+            }
             other => Err(format!(
                 "`{}` sits under `{other}/`, which is neither `src/` nor `tests/`",
                 self.file.display()
@@ -1801,6 +1838,19 @@ fn a_name_in_prose() {
 }
 ";
 
+    /// A second module of the same target declaring the same test name, ignored
+    /// for a reason no lane adopts.
+    ///
+    /// Two modules of one binary may name a test the same thing, and the module
+    /// path is the whole of what tells them apart in cargo's listing. A
+    /// reference resolved without one reaches this carrier too, which is what
+    /// makes the module prefix load-bearing rather than decorative.
+    const NAMESAKE_CARRIER_SOURCE: &str = "\
+#[test]
+#[ignore = \"flaky on this machine\"]
+fn a_carrier() {}
+";
+
     /// The file a symbol ground is read out of: an enum whose members sit one
     /// per line, and a function behind a visibility qualifier.
     const VOCABULARY_SOURCE: &str = "\
@@ -1827,6 +1877,42 @@ pub(crate) fn foo(count: u64) -> u64 {
         // A second target, deliberately absent from `index`, so a binding
         // reaching a target nothing was listed for has somewhere to point.
         std::fs::write(tests.join("other.rs"), CARRIER_SOURCE).expect("a second carrier source");
+        root
+    }
+
+    /// A real cargo workspace whose one integration target is a directory:
+    /// `crates/demo/tests/suite/main.rs` roots it and the carriers sit in
+    /// `inner.rs` and `other.rs` beside it.
+    ///
+    /// This one is built rather than described because what it proves is the
+    /// shape of cargo's own `--list` output for a target with modules in it. It
+    /// depends on nothing, so the lock file written beside it is complete and
+    /// the `--locked` listing holds.
+    #[allow(clippy::disallowed_methods)] // Builds the workspace cargo is asked to list.
+    fn cargo_workspace() -> Scratch {
+        let root = Scratch::new("norn-regression-cargo");
+        let suite = root.join("crates/demo/tests/suite");
+        std::fs::create_dir_all(&suite).expect("a scratch workspace");
+        std::fs::create_dir_all(root.join("crates/demo/src")).expect("a source directory");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/demo\"]\nresolver = \"2\"\n",
+        )
+        .expect("a workspace manifest");
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"demo\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("a lock file");
+        std::fs::write(
+            root.join("crates/demo/Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .expect("a package manifest");
+        std::fs::write(root.join("crates/demo/src/lib.rs"), "").expect("a library root");
+        std::fs::write(suite.join("main.rs"), "mod inner;\nmod other;\n").expect("a target root");
+        std::fs::write(suite.join("inner.rs"), CARRIER_SOURCE).expect("a carrier source");
+        std::fs::write(suite.join("other.rs"), NAMESAKE_CARRIER_SOURCE).expect("a namesake source");
         root
     }
 
@@ -2671,8 +2757,12 @@ pub(crate) fn foo(count: u64) -> u64 {
             ),
             ("crates/demo/src/main.rs::a_carrier", "is a binary target"),
             (
-                "crates/demo/tests/suite/inner.rs::a_carrier",
-                "is a module of an integration target",
+                "crates/demo/tests/suite/main.rs::a_carrier",
+                "is the root of the `suite` integration target",
+            ),
+            (
+                "crates/demo/tests/scaffolding/mod.rs::a_carrier",
+                "sibling targets declare with `mod scaffolding;`",
             ),
             (
                 "demo/tests/suite.rs::a_carrier",
@@ -2845,6 +2935,21 @@ pub(crate) fn foo(count: u64) -> u64 {
                 Target::Integration("lanes".to_string()),
                 "",
             ),
+            (
+                "crates/a/tests/suite/inner.rs::f",
+                Target::Integration("suite".to_string()),
+                "inner::",
+            ),
+            (
+                "crates/a/tests/suite/deep/inner.rs::f",
+                Target::Integration("suite".to_string()),
+                "deep::inner::",
+            ),
+            (
+                "crates/a/tests/suite/deep/mod.rs::f",
+                Target::Integration("suite".to_string()),
+                "deep::",
+            ),
         ];
         for (reference, target, prefix) in cases {
             let found = TestRef::parse(reference)
@@ -2855,6 +2960,59 @@ pub(crate) fn foo(count: u64) -> u64 {
             assert_eq!(found.target, target, "{reference}");
             assert_eq!(found.module_prefix, prefix, "{reference}");
         }
+    }
+
+    /// A carrier in a module of an integration target audits clean against the
+    /// listing cargo really prints for it.
+    ///
+    /// Everything else here describes what cargo says; this asks it. The
+    /// listing is the shape the module prefix is derived for — `inner::a_carrier`
+    /// rather than `a_carrier` — and the namesake in the second module is what
+    /// makes the prefix decide the answer: without it the same reference reaches
+    /// an ignored carrier no lane adopts, and the audit refuses.
+    #[test]
+    fn a_module_of_an_integration_target_audits_against_the_listing_cargo_prints() {
+        let root = cargo_workspace();
+        let reference = "crates/demo/tests/suite/inner.rs::a_carrier";
+        let target = TestRef::parse(reference)
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        assert_eq!(target.target, Target::Integration("suite".to_string()));
+        assert_eq!(target.module_prefix, "inner::");
+
+        let listed = TestIndex::from_cargo(root.root(), [target.clone()]);
+        let compiled = listed.compiled(&target).expect("a listing");
+        let names: BTreeSet<&str> = compiled.all.iter().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "inner::a_carrier",
+                "inner::an_adopted_carrier",
+                "inner::an_orphan_carrier",
+                "other::a_carrier",
+            ]),
+            "cargo lists a test in a module under that module's path"
+        );
+        assert!(
+            listed
+                .resolve(&target, "a_carrier")
+                .is_ok_and(|ignored| !ignored)
+        );
+
+        let mut registry = sound();
+        find(&mut registry, "a-bound-case").binding.tests = vec![reference.to_string()];
+        let case = find(&mut registry, "a-dormant-layer-zero-case");
+        case.binding.reason = Some(
+            "crates/demo/tests/suite/inner.rs holds the recognition half, and the half this case \
+             waits on has no subject: crates/demo/src/absent.rs is not in the workspace"
+                .to_string(),
+        );
+        case.binding.grounds = vec![
+            Ground::Present("crates/demo/tests/suite/inner.rs".to_string()),
+            Ground::Absent("crates/demo/src/absent.rs".to_string()),
+        ];
+        assert_eq!(registry.audit(root.root(), &listed), Vec::<String>::new());
     }
 
     #[test]
