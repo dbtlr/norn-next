@@ -64,8 +64,9 @@ use crate::shadow::is_shadow_name;
 /// position the listing order moves is a refusing stat on a filesystem whose
 /// listing carries no entry type, and the page states it.
 pub fn walk(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
-    let mut walk = open_vault(root, exclusions)?;
-    let first = DirectoryFrontier::new(walk.root_fd.clone(), Path::new(""));
+    let vault = Vault::open(root, exclusions)?;
+    let first = DirectoryFrontier::new(vault.root_fd.clone(), Path::new(""));
+    let mut walk = vault.into_walk();
     walk.stack.push(first);
     Ok(walk)
 }
@@ -82,28 +83,146 @@ pub fn walk_subtree(
     relative: &Path,
     exclusions: &[PathBuf],
 ) -> Result<Walk, WalkError> {
-    let mut walk = open_vault(root, exclusions)?;
-    let subtree = walk
-        .normalizer
-        .normalize(relative)
-        .map_err(|source| WalkError::Path {
-            path: relative.to_owned(),
-            source,
-        })?;
-    if let Some(reason) = walk.exclusions.reason(&subtree) {
+    let vault = Vault::open(root, exclusions)?;
+    let subtree = vault.normalize(relative)?;
+    if let Some(reason) = vault.exclusions.reason(&subtree) {
+        let mut walk = vault.into_walk();
         walk.skipped = Some(SkipFact {
             path: subtree,
             reason: reason.into(),
         });
         return Ok(walk);
     }
-    match open_subtree(&walk, &subtree)? {
+    let frontier = open_subtree(&vault, &subtree)?;
+    let mut walk = vault.into_walk();
+    match frontier {
         Frontier::Open(fd) => walk
             .stack
             .push(DirectoryFrontier::new(fd, subtree.as_path())),
         Frontier::Skipped(skipped) => walk.skipped = Some(skipped),
     }
     Ok(walk)
+}
+
+/// One vault, opened: its root, a descriptor on that root, the case behavior
+/// the root proved, and the roots inside it Norn does not read.
+///
+/// A [`Walk`] is one of these with a frontier on it, and
+/// [`skip_reaching`](Self::skip_reaching) is the same descent carrying no
+/// frontier at all. Opening proves the root's case behavior once, so a caller
+/// deciding many names against one vault pays for that proof once rather than
+/// per name.
+pub struct Vault {
+    root: Arc<PathBuf>,
+    root_fd: Arc<OwnedFd>,
+    normalizer: PathNormalizer,
+    exclusions: Exclusions,
+}
+
+impl Vault {
+    /// Proves the root's case behavior, validates every exclusion, and opens
+    /// the root. Nothing below the root is read.
+    pub fn open(root: &Path, exclusions: &[PathBuf]) -> Result<Self, WalkError> {
+        let normalizer = PathNormalizer::detect(root).map_err(WalkError::Normalizer)?;
+        let exclusions = Exclusions::new(&normalizer, exclusions)?;
+        let root_fd = Arc::new(
+            open(root, directory_flags(), Mode::empty())
+                .map_err(|source| environment_errno("opening directory", root, source))?,
+        );
+        Ok(Self {
+            root: Arc::new(root.to_owned()),
+            root_fd,
+            normalizer,
+            exclusions,
+        })
+    }
+
+    /// The path ordering proven for this root.
+    pub fn case_sensitivity(&self) -> crate::CaseSensitivity {
+        self.normalizer.case_sensitivity()
+    }
+
+    /// The notation the vault walk states in place of reaching `relative`, or
+    /// nothing where the walk reaches that name.
+    ///
+    /// This is [`walk_subtree`]'s descent with no frontier on the end of it.
+    /// The exclusion roots decide the whole path, and every name above the last
+    /// one is decided the way the walk decides the entries it descends
+    /// through — a shadow basename and a symbolic link each end the answer at
+    /// that name. The last name is decided by what its spelling carries, which
+    /// is the shadow basename.
+    ///
+    /// **What the last name holds is not read here.** A caller that must tell a
+    /// file from a directory from an absence asks [`crate::path_kind`] for it,
+    /// and this leaves that one reading whole rather than taking half of it.
+    ///
+    /// **A name that is not there is not a refusal.** A path the descent finds
+    /// no name for holds nothing, which is what `path_kind` answers at it, so
+    /// this states no notation and lets that reading stand alone.
+    pub fn skip_reaching(&self, relative: &Path) -> Result<Option<SkipFact>, WalkError> {
+        let subtree = self.normalize(relative)?;
+        if let Some(reason) = self.exclusions.reason(&subtree) {
+            return Ok(Some(SkipFact {
+                path: subtree,
+                reason: reason.into(),
+            }));
+        }
+        let Some(leaf) = subtree.as_path().file_name() else {
+            return Ok(None);
+        };
+        if is_shadow_name(leaf) {
+            return Ok(Some(SkipFact {
+                path: subtree,
+                reason: SkipReason::Shadow,
+            }));
+        }
+        let above = subtree.as_path().parent().unwrap_or(Path::new(""));
+        let mut directory = self.root_fd.clone();
+        let mut traversed = PathBuf::new();
+        for component in above.components() {
+            let name = component.as_os_str();
+            traversed.push(name);
+            let access = self.root.join(&traversed);
+            let path = self.traversed(&traversed);
+            match component_skip(self, &directory, name, &path, &access)? {
+                Some(SkipReason::Vanished) | None => {}
+                Some(reason) => return Ok(Some(SkipFact { path, reason })),
+            }
+            directory = match open_component(&directory, name, &access)? {
+                Some(fd) => fd,
+                None => return Ok(None),
+            };
+        }
+        Ok(None)
+    }
+
+    /// This vault's identity for `relative`, or why that spelling names nothing
+    /// inside it.
+    fn normalize(&self, relative: &Path) -> Result<NormalizedPath, WalkError> {
+        self.normalizer
+            .normalize(relative)
+            .map_err(|source| WalkError::Path {
+                path: relative.to_owned(),
+                source,
+            })
+    }
+
+    /// The identity of a leading run of an already normalized path.
+    fn traversed(&self, traversed: &Path) -> NormalizedPath {
+        self.normalizer
+            .normalize(traversed)
+            .expect("a leading run of a normalized path's components is normalized")
+    }
+
+    /// This vault carrying a walk's frontier state, with no frontier on it yet.
+    fn into_walk(self) -> Walk {
+        Walk {
+            vault: self,
+            stack: Vec::new(),
+            skipped: None,
+            faults: WalkFaults::entry(),
+        }
+    }
 }
 
 /// The subtree frontier, or the skip that stands in place of it.
@@ -126,81 +245,87 @@ enum Frontier {
 /// writer editing the vault between that observation and this descent is the
 /// vault evolving: the walk reads nothing under the name and says so, so what is
 /// stored beneath it converges while the findings there stay withheld.
-#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
-fn open_subtree(walk: &Walk, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
-    let mut directory = walk.root_fd.clone();
+fn open_subtree(vault: &Vault, subtree: &NormalizedPath) -> Result<Frontier, WalkError> {
+    let mut directory = vault.root_fd.clone();
     let mut traversed = PathBuf::new();
     for component in subtree.as_path().components() {
         let name = component.as_os_str();
         traversed.push(name);
-        let access = walk.root.join(&traversed);
-        let path = walk
-            .normalizer
-            .normalize(&traversed)
-            .expect("a leading run of a normalized path's components is normalized");
-        let vanished = |path| {
-            Ok(Frontier::Skipped(SkipFact {
-                path,
-                reason: SkipReason::Vanished,
-            }))
-        };
-        if is_shadow_name(name) {
-            return Ok(Frontier::Skipped(SkipFact {
-                path,
-                reason: SkipReason::Shadow,
-            }));
+        let access = vault.root.join(&traversed);
+        let path = vault.traversed(&traversed);
+        if let Some(reason) = component_skip(vault, &directory, name, &path, &access)? {
+            return Ok(Frontier::Skipped(SkipFact { path, reason }));
         }
-        crate::reads::count_stat();
-        let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(metadata) => metadata,
-            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return vanished(path),
-            Err(source) => return Err(environment_errno("stating", &access, source)),
-        };
-        if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) == EntryKind::Symlink
-        {
-            return match classify_link(
-                &walk.root_fd,
-                path.as_path(),
-                &directory,
-                name,
-                &walk.normalizer,
-            )? {
-                Some(kind) => Ok(Frontier::Skipped(SkipFact {
+        directory = match open_component(&directory, name, &access)? {
+            Some(fd) => fd,
+            None => {
+                return Ok(Frontier::Skipped(SkipFact {
                     path,
-                    reason: SkipReason::SymbolicLink(kind),
-                })),
-                None => vanished(path),
-            };
-        }
-        directory = match openat(&directory, name, directory_flags(), Mode::empty()) {
-            Ok(fd) => Arc::new(fd),
-            Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
-                return vanished(path);
+                    reason: SkipReason::Vanished,
+                }));
             }
-            Err(source) => return Err(environment_errno("opening directory", &access, source)),
         };
     }
     Ok(Frontier::Open(directory))
 }
 
-/// The vault-identified walk state both entry points start from, with no
-/// frontier open yet.
-fn open_vault(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
-    let normalizer = PathNormalizer::detect(root).map_err(WalkError::Normalizer)?;
-    let exclusions = Exclusions::new(&normalizer, exclusions)?;
-    let root_fd = Arc::new(
-        open(root, directory_flags(), Mode::empty())
-            .map_err(|source| environment_errno("opening directory", root, source))?,
-    );
-    Ok(Walk {
-        root: Arc::new(root.to_owned()),
-        root_fd,
-        normalizer,
-        exclusions,
-        stack: Vec::new(),
-        skipped: None,
-        faults: WalkFaults::entry(),
-    })
+/// The notation the walk states at one name a descent passes through, or
+/// nothing where the descent reads that name and continues.
+///
+/// The reading is the page's, taken one name at a time: a Norn shadow basename
+/// is never entered, and a symbolic link is a fact about a name rather than an
+/// edge to follow. A name that is gone is [`SkipReason::Vanished`], and what
+/// that means for the descent is the caller's to say.
+#[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
+fn component_skip(
+    vault: &Vault,
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    path: &NormalizedPath,
+    access: &Path,
+) -> Result<Option<SkipReason>, WalkError> {
+    if is_shadow_name(name) {
+        return Ok(Some(SkipReason::Shadow));
+    }
+    crate::reads::count_stat();
+    let metadata = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
+            return Ok(Some(SkipReason::Vanished));
+        }
+        Err(source) => return Err(environment_errno("stating", access, source)),
+    };
+    if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) != EntryKind::Symlink {
+        return Ok(None);
+    }
+    Ok(Some(
+        match classify_link(
+            &vault.root_fd,
+            path.as_path(),
+            directory,
+            name,
+            &vault.normalizer,
+        )? {
+            Some(kind) => SkipReason::SymbolicLink(kind),
+            None => SkipReason::Vanished,
+        },
+    ))
+}
+
+/// Opens one name of a descent as the next directory, or answers that there is
+/// no directory at it to open.
+fn open_component(
+    directory: &Arc<OwnedFd>,
+    name: &OsStr,
+    access: &Path,
+) -> Result<Option<Arc<OwnedFd>>, WalkError> {
+    match openat(directory, name, directory_flags(), Mode::empty()) {
+        Ok(fd) => Ok(Some(Arc::new(fd))),
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP) => {
+            Ok(None)
+        }
+        Err(source) => Err(environment_errno("opening directory", access, source)),
+    }
 }
 
 /// A streaming vault walk.
@@ -208,10 +333,7 @@ fn open_vault(root: &Path, exclusions: &[PathBuf]) -> Result<Walk, WalkError> {
 /// Any yielded error is terminal: later calls return `None`, so exhaustion can
 /// describe a complete inventory only when every preceding item was `Ok`.
 pub struct Walk {
-    root: Arc<PathBuf>,
-    root_fd: Arc<OwnedFd>,
-    normalizer: PathNormalizer,
-    exclusions: Exclusions,
+    vault: Vault,
     stack: Vec<DirectoryFrontier>,
     skipped: Option<SkipFact>,
     /// Which of this walk's paging observations a foreign writer's edit stands
@@ -230,9 +352,9 @@ impl Iterator for Walk {
         loop {
             let frontier = self.stack.last_mut()?;
             let pending = match frontier.next_pending(
-                &self.root_fd,
-                &self.normalizer,
-                &self.exclusions,
+                &self.vault.root_fd,
+                &self.vault.normalizer,
+                &self.vault.exclusions,
                 &self.faults,
             ) {
                 Ok(Some(pending)) => pending,
@@ -255,8 +377,8 @@ impl Iterator for Walk {
                 }
                 Observed::File(stat) => {
                     return Some(Ok(WalkFact::File(FileFact {
-                        root: self.root.clone(),
-                        root_fd: self.root_fd.clone(),
+                        root: self.vault.root.clone(),
+                        root_fd: self.vault.root_fd.clone(),
                         path: pending.path,
                         stat,
                     })));
@@ -270,7 +392,7 @@ impl Iterator for Walk {
                 // with something that is not one, leaves nothing here to enter,
                 // which is the answer a walk begun now gives at that name.
                 Observed::Directory => {
-                    let access = self.root.join(pending.path.as_path());
+                    let access = self.vault.root.join(pending.path.as_path());
                     match openat(
                         &pending.parent,
                         &pending.name,
@@ -308,7 +430,7 @@ impl Iterator for Walk {
 impl Walk {
     /// The path ordering proven for this walk's root.
     pub fn case_sensitivity(&self) -> crate::CaseSensitivity {
-        self.normalizer.case_sensitivity()
+        self.vault.case_sensitivity()
     }
 }
 
@@ -2322,6 +2444,81 @@ mod tests {
                 Some(SkipReason::SymbolicLink(LinkKind::InVaultFile))
             )]
         );
+    }
+
+    /// **The bar on deciding one name with no enumeration at all.** A caller
+    /// holding a name asks the vault what the walk states in place of reaching
+    /// it, and the answer is the subtree descent's: a shadow basename and a
+    /// symbolic link each end it at their own name, an excluded root ends it at
+    /// the path the root covers, and a name the walk reaches states nothing.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a linked ancestor.
+    fn a_vault_states_the_walk_s_skip_at_one_name() {
+        let scratch = Scratch::new("vault-skip-reaching");
+        scratch.directory("vault/dir/norn-shadow-7-2");
+        scratch.directory("vault/real");
+        scratch.directory("vault/excluded/deep");
+        scratch.place("dir/norn-shadow-7-2/note.md", b"body");
+        scratch.place("dir/plain.md", b"body");
+        scratch.place("real/note.md", b"body");
+        scratch.place("excluded/deep/note.md", b"body");
+        std::os::unix::fs::symlink("../real", scratch.at("dir/link")).expect("link");
+
+        let vault = Vault::open(&scratch.at(""), &[PathBuf::from("excluded")]).expect("a vault");
+        let skip = |relative: &str| {
+            vault
+                .skip_reaching(Path::new(relative))
+                .expect("a decided name")
+                .map(|fact| (fact.path().as_path().to_owned(), fact.reason()))
+        };
+        assert_eq!(
+            skip("dir/norn-shadow-7-2/note.md"),
+            Some((PathBuf::from("dir/norn-shadow-7-2"), SkipReason::Shadow)),
+            "a name under a shadow basename"
+        );
+        assert_eq!(
+            skip("dir/norn-shadow-7-2"),
+            Some((PathBuf::from("dir/norn-shadow-7-2"), SkipReason::Shadow)),
+            "the shadow basename itself"
+        );
+        assert_eq!(
+            skip("dir/link/note.md"),
+            Some((
+                PathBuf::from("dir/link"),
+                SkipReason::SymbolicLink(LinkKind::InVaultDirectory)
+            )),
+            "a name under a symbolic link"
+        );
+        assert_eq!(
+            skip("excluded/deep/note.md"),
+            Some((
+                PathBuf::from("excluded/deep/note.md"),
+                SkipReason::HostExclusion
+            )),
+            "a name inside an excluded root"
+        );
+        assert_eq!(skip("dir/plain.md"), None, "a file the walk reads");
+        assert_eq!(skip("dir"), None, "a directory the walk enters");
+    }
+
+    /// **A name that is not there is not one of the walk's refusals.** No path
+    /// the descent finds no name for holds anything, so the vault states no
+    /// notation and leaves that whole reading to [`crate::path_kind`].
+    #[test]
+    fn a_name_that_is_not_there_is_no_skip_at_all() {
+        let scratch = Scratch::new("vault-skip-absent");
+        scratch.place("plain.md", b"body");
+
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        for absent in ["gone", "gone/note.md", "plain.md/under.md"] {
+            assert!(
+                vault
+                    .skip_reaching(Path::new(absent))
+                    .expect("a decided name")
+                    .is_none(),
+                "{absent}"
+            );
+        }
     }
 
     #[test]
