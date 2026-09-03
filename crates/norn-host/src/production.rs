@@ -1113,16 +1113,12 @@ fn scoped_increment(
     progress: &Healing<'_, ProductionAttachment>,
     exclusions: &[PathBuf],
 ) -> Result<(), JobFailure> {
-    let normalizer = norn_fs::PathNormalizer::detect(root).map_err(effect)?;
-    let sensitivity = normalizer.case_sensitivity();
-    let excluded = norn_fs::Exclusions::new(&normalizer, exclusions).map_err(effect)?;
+    let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
+    let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
-        if excluded.excludes(relative) {
-            continue;
-        }
         // Both the identity and the range it addresses are read before anything
         // that would use them, because what a spelling names and what it holds
         // are different questions: `..md` names no document and is still where
@@ -1137,6 +1133,30 @@ fn scoped_increment(
             (Err(_), Some(prefix)) => Some(SubtreeScope::Prefix(prefix)),
             (Err(_), None) => None,
         };
+        // **What this leg may read is what the vault walk reaches**, and the
+        // vault is asked rather than re-read here: an excluded root, a shadow
+        // basename and a symbolic link on the way down are one refusal with one
+        // spelling, in norn-fs. A dirty root the walk refuses is a root under
+        // which no walk of this vault yields anything, so the rows it addresses
+        // die and nothing is derived at it — the answer a build from zero
+        // gives. The findings stay standing, because a place the walk read
+        // nothing at is a place this leg earned no authority over.
+        if vault.skip_reaching(path).map_err(effect)?.is_some() {
+            pending.flush()?;
+            if let Some(scope) = scope {
+                prune_subtree_ordered(
+                    pending.store,
+                    root,
+                    exclusions,
+                    scope,
+                    policy,
+                    progress,
+                    store_order(sensitivity),
+                    pending.account,
+                )?;
+            }
+            continue;
+        }
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
@@ -8276,12 +8296,13 @@ mod tests {
     /// a build from zero gives.
     ///
     /// **The place is reachable through its own root**, which is what says the
-    /// case is stated over a real boundary rather than an empty one: a dirty
-    /// path spelled through the refused name opens the file component by
-    /// component and derives a row there, and that row is one no walk of this
-    /// vault yields. The covering root is what withdraws it. The lone-root leg
-    /// asserted below is that divergence held still, not a contract: it is a
-    /// row the next attach heal prunes.
+    /// case is stated over a real boundary rather than an empty one: a file
+    /// sits under the refused name and a read spelled component by component
+    /// would reach its bytes. The lone-root leg asserted below is what says the
+    /// increment does not read them. It asks the vault what the walk states at
+    /// the name, meets the refusal there, and derives nothing — so the leg
+    /// reaches the from-zero answer on its own and the covering root beside it
+    /// has nothing left to withdraw.
     #[test]
     fn a_covering_root_answers_for_a_place_the_walk_reads_nothing_through() {
         let f = Fixture::new("covering-root-unwalked-place");
@@ -8314,8 +8335,8 @@ mod tests {
         );
         assert_eq!(
             stored_paths(&mut attachment.store),
-            ["dir/norn-shadow-7-2/note.md", "dir/plain.md"],
-            "a root spelled through the refused name reached nothing at all"
+            ["dir/plain.md"],
+            "a root spelled through the refused name derived a row of its own"
         );
 
         let batch = dirty_batch(f.vault().as_path(), &["dir", "dir/norn-shadow-7-2/note.md"]);
@@ -8335,20 +8356,17 @@ mod tests {
     /// of them beside a covering directory root, and what the store holds
     /// afterwards is what a build from zero holds.
     ///
-    /// **None of the three is a place a covered root reads anything at
-    /// either**, which is the first assertion in each row and the difference
-    /// from the shadow name: a path spelled through a link reads as a regular
-    /// file to a stat that follows it and is then refused by the open that does
-    /// not; a pipe is not a file at all; and an exclusion is read by
-    /// [`scoped_increment`] itself, one leg at a time, before any of them opens
-    /// anything. So each root's own leg derives nothing and the covering root
-    /// withdraws nothing that was there. The shadow name is the one refusal
-    /// where the two legs genuinely differ.
+    /// **No covering root here withdraws anything**, which is what the two
+    /// assertions in each row say together: the lone root's own leg already
+    /// stands at the from-zero answer. Two of the three reach it at the vault's
+    /// reading of the walk — an exclusion root covers the path, and a link
+    /// stops the descent at its own name — and the third is a last name the
+    /// vault leaves whole for [`norn_fs::path_kind`], which reads a pipe as
+    /// something other than a regular file.
     ///
-    /// The exclusion row is the one the two readings disagree about: the
-    /// watcher admits every path outside the mechanism root, so a host root
-    /// reaches a dirty set as an ordinary path, and it is the increment's own
-    /// reading of the walk's exclusion set that answers for it.
+    /// The watcher is why the exclusion row is a dirty root at all: it admits
+    /// every path outside the mechanism root, so a host root reaches a dirty
+    /// set spelled like any other path.
     ///
     /// The subtree behind the link is reached under its own name rather than
     /// through it, which is what keeps the row about the refusal: `elsewhere`
@@ -8415,6 +8433,46 @@ mod tests {
                 "the covering root did not answer for {refused}"
             );
         }
+        ops.detach(&name, attachment);
+    }
+
+    /// **A dirty root inside an excluded tree meets the refusal at the same
+    /// door.** The walk's exclusion roots are read where its shadow basenames
+    /// and its links are, so a lone root spelled through an excluded directory
+    /// derives nothing there and takes the rows it addresses with it. That is
+    /// the answer a build from zero under this exclusion set gives.
+    #[test]
+    fn a_dirty_root_inside_an_excluded_tree_derives_nothing_and_takes_its_rows() {
+        let f = Fixture::new("increment-excluded-tree");
+        fs::create_dir_all(f.vault().join("staging")).unwrap();
+        fs::write(f.vault().join("staging/note.md"), "body").unwrap();
+        fs::write(f.vault().join("plain.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["plain.md", "staging/note.md"],
+            "the vault heal read the tree this case then excludes"
+        );
+
+        let mut excluding = exclusions(&attachment.registration, &attachment._shadows);
+        excluding.push(PathBuf::from("staging"));
+        fs::write(f.vault().join("staging/note.md"), "edited").unwrap();
+        scoped_increment(
+            &mut attachment.store,
+            f.vault().as_path(),
+            &dirty_path(f.vault().as_path(), "staging/note.md"),
+            ProductionPolicy::new(2, 2).unwrap(),
+            &progress.healing(),
+            &excluding,
+        )
+        .unwrap();
+        assert_eq!(
+            stored_paths(&mut attachment.store),
+            ["plain.md"],
+            "the excluded root left a row standing where the walk yields none"
+        );
         ops.detach(&name, attachment);
     }
 
