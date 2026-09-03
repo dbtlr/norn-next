@@ -2265,8 +2265,7 @@ mod tests {
     /// come back paired with the candidate and class it — and only it — wrote.
     #[test]
     fn findings_reassemble_correctly_across_a_chunk_boundary() {
-        let root =
-            std::env::temp_dir().join(format!("norn-store-request-chunk-{}", std::process::id()));
+        let root = norn_testkit::scratch::Scratch::new("norn-store-request-chunk");
         let mut store = Store::open_throwaway(root.join("store.sqlite3")).expect("opening a store");
         let subject = DocumentPath::new("notes.md").expect("a document path");
 

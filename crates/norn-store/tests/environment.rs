@@ -21,13 +21,13 @@
 //! claim. Inside this binary they take one lock and disarm on the way out.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use norn_store::{
     Change, DocumentFacts, DocumentPath, IncrementProvenance, OpenOutcome, Store, StoreError, ddl,
     induced_failure,
 };
+use norn_testkit::scratch::Scratch as TestkitScratch;
 
 /// One case at a time: every arrangement here is process-wide.
 fn serially() -> MutexGuard<'static, ()> {
@@ -47,25 +47,20 @@ impl Drop for Disarmed {
     }
 }
 
-/// Distinguishes two scratch directories taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-/// A directory that exists for one case and is removed with it.
+/// A store's database under a directory that lasts one case.
+///
+/// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
+/// this adds is where a store's file sits inside the tree and how one is
+/// opened.
 struct Scratch {
-    root: PathBuf,
+    root: TestkitScratch,
 }
 
 impl Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the directory a case's store lives in.
     fn new(label: &str) -> Scratch {
-        let root = std::env::temp_dir().join(format!(
-            "norn-store-{label}-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
-        Scratch { root }
+        Scratch {
+            root: TestkitScratch::new(&format!("norn-store-{label}")),
+        }
     }
 
     fn database(&self) -> PathBuf {
@@ -74,13 +69,6 @@ impl Scratch {
 
     fn open(&self) -> Store {
         Store::open(self.database()).expect("opening a store")
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the directory this case made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

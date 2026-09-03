@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_store::{
     BlockFact, CandidateFact, Change, ClassKey, DerivationCounters, DocumentFacts, DocumentPath,
@@ -15,6 +14,7 @@ use norn_store::{
     LinkFamily, Provenance, Request, Span, Store, TagFact, TagSource, suffix_probe,
 };
 use norn_testkit::counters::CounterSnapshot;
+use norn_testkit::scratch::Scratch as TestkitScratch;
 use norn_wire::{FindingKind, Severity};
 
 /// A snapshot of a request's reading, in the shape the harness compares.
@@ -22,25 +22,20 @@ pub fn snapshot(counters: &DerivationCounters) -> CounterSnapshot {
     counters.readings().collect()
 }
 
-/// Distinguishes two scratch directories taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-/// A directory that exists for one test and is removed with it.
+/// A store's database under a directory that lasts one test.
+///
+/// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
+/// this adds is where a store's file sits inside the tree and how one is
+/// opened.
 pub struct Scratch {
-    root: PathBuf,
+    root: TestkitScratch,
 }
 
 impl Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: the directory a test's store lives in.
     pub fn new(label: &str) -> Self {
-        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "norn-store-{label}-{}-{serial}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("a scratch directory");
-        Scratch { root }
+        Scratch {
+            root: TestkitScratch::new(&format!("norn-store-{label}")),
+        }
     }
 
     /// The path a store's database file sits at. Its parent does not exist, so
@@ -51,13 +46,6 @@ impl Scratch {
 
     pub fn open(&self) -> Store {
         Store::open(self.database()).expect("opening a store")
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the directory this test made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
