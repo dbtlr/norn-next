@@ -83,10 +83,22 @@ impl Exclusions {
     /// answer holds for a path a traversal reaches without passing through the
     /// root itself.
     pub fn reason(&self, path: &NormalizedPath) -> Option<Excluded> {
-        if self.hosts.iter().any(|root| path.starts_with(root)) {
-            Some(Excluded::Host)
+        self.covering_root(path).map(|(_, reason)| reason)
+    }
+
+    /// The excluded root `path` lies in, with its reason.
+    ///
+    /// The root is what a consumer converging derived state acts over: every
+    /// place beneath it holds the same nothing, so one reading of the root
+    /// answers for every path inside it rather than one reading per path.
+    pub(crate) fn covering_root(
+        &self,
+        path: &NormalizedPath,
+    ) -> Option<(&NormalizedPath, Excluded)> {
+        if let Some(root) = self.hosts.iter().find(|root| path.starts_with(root)) {
+            Some((root, Excluded::Host))
         } else if path.starts_with(&self.mechanism) {
-            Some(Excluded::Mechanism)
+            Some((&self.mechanism, Excluded::Mechanism))
         } else {
             None
         }

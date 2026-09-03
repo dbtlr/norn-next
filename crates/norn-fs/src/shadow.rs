@@ -105,6 +105,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use crate::identity::identity_of;
+use crate::path::CaseSensitivity;
 use crate::refusal::{Refusal, environment};
 
 /// What every shadow name begins with, and therefore the first thing
@@ -507,10 +508,11 @@ fn shadow_name() -> String {
 
 /// Whether `name` is a shadow this crate staged.
 ///
-/// **This is how a shadow is recognized — not a leading dot.** The walk, the
-/// event-suppression path and the sweep all ask this one question, so a shadow
-/// is invisible as a document without any surface having to hide every hidden
-/// file: a user's genuinely dot-prefixed document stays a document.
+/// **This is how a shadow is recognized — not a leading dot.** The shadow home
+/// sweeps ask this byte-exact question, and the vault walk asks the same shape
+/// through `is_shadow_name_under`, so a shadow is invisible as a document
+/// without any surface having to hide every hidden file: a user's genuinely
+/// dot-prefixed document stays a document.
 ///
 /// The shape is exact: the prefix, a process identifier, a hyphen, and a
 /// counter, with nothing on either end. A name that merely starts the same way
@@ -527,16 +529,47 @@ fn shadow_name() -> String {
 /// assert!(!is_shadow_name(OsStr::new("norn-shadow-notes")));
 /// ```
 pub fn is_shadow_name(name: &OsStr) -> bool {
+    is_shadow_name_under(CaseSensitivity::Sensitive, name)
+}
+
+/// Whether `name` is one of ours, read under the case behavior of the root it
+/// was found on.
+///
+/// **The vault walk asks this one**, through the normalizer that proved that
+/// behavior, because a root resolving `NORN-SHADOW-7-2` and `norn-shadow-7-2`
+/// to one entry holds one name there and the walk owes it one answer. The
+/// exported [`is_shadow_name`] is the byte-exact reading, which is what the
+/// shadow home sweeps ask: a home is Norn's own directory, every name this
+/// crate puts in it is spelled the one way, and a near miss beside them belongs
+/// to somebody else.
+///
+/// Only the prefix carries case. What follows it is two runs of digits.
+pub(crate) fn is_shadow_name_under(sensitivity: CaseSensitivity, name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };
-    let Some(rest) = name.strip_prefix(SHADOW_PREFIX) else {
+    let Some(rest) = strip_shadow_prefix(sensitivity, name) else {
         return false;
     };
     let Some((pid, sequence)) = rest.split_once('-') else {
         return false;
     };
     is_number(pid) && is_number(sequence)
+}
+
+/// What follows the shadow prefix in `name`, or nothing where `name` does not
+/// open with it under `sensitivity`.
+fn strip_shadow_prefix(sensitivity: CaseSensitivity, name: &str) -> Option<&str> {
+    match sensitivity {
+        CaseSensitivity::Sensitive => name.strip_prefix(SHADOW_PREFIX),
+        // A head that matches an ASCII prefix ignoring case is itself ASCII, so
+        // the byte after it is a character boundary.
+        CaseSensitivity::Insensitive => name
+            .as_bytes()
+            .get(..SHADOW_PREFIX.len())?
+            .eq_ignore_ascii_case(SHADOW_PREFIX.as_bytes())
+            .then(|| &name[SHADOW_PREFIX.len()..]),
+    }
 }
 
 /// Whether `text` is one or more ASCII digits and nothing else.

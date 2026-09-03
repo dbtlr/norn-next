@@ -122,7 +122,7 @@ pub use shadow::{
     is_shadow_name, sweep_fallback_root, sweep_fallback_tree,
 };
 pub use walk::{
-    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Walk, WalkError,
+    FileFact, FileKind, FileStat, LinkKind, ReadFile, SkipFact, SkipReason, Vault, Walk, WalkError,
     WalkFact, walk, walk_subtree,
 };
 pub use watch::{
