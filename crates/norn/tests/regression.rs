@@ -119,7 +119,7 @@ const BOUND_CASES: &[&str] = &[
 ///
 /// A reason waiting on a name inside a file the tree already holds states that
 /// name as a `symbol-absent` ground and leaves this list. What is left is the
-/// residue no subject reaches, and it is five classes rather than a bag:
+/// residue no subject reaches, and it is six classes rather than a bag:
 ///
 /// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
 ///   `<file>::<fn>` reference and no Rust declaration names.
@@ -133,6 +133,9 @@ const BOUND_CASES: &[&str] = &[
 ///   set, so no name can be pre-committed as the carrier's.
 /// - **A guard with no settled home.** The scan or lint the case waits on has
 ///   no file decided on to hold it, and a symbol ground names a file.
+/// - **An unwired surface.** The binary is empty and the corpus activation list
+///   is data; what is absent is an invocation, which is a state of that data
+///   rather than a name any declaration carries.
 ///
 /// The grounds beside such a reason hold the subjects it cites as present, so
 /// the audit still catches those moving; the claim that something is missing is
