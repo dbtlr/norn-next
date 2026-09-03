@@ -63,14 +63,22 @@
 //! converges on the winner. A caller that needs to know whether it won compares
 //! the [`PostState`] it was handed against what is at the path.
 //!
-//! **Two arms carry a wider version of the same residual, because they re-ask
-//! the identity and not the hash.** A removal ([`vacate`]) and the suppressed
-//! no-op ([`Landed::Unchanged`]) publish on the strength of the precondition's
-//! own hash plus one identity comparison, so a foreign write into the file that
-//! was read is invisible to them: the removal takes a document whose content
-//! nobody looked at, and the no-op reports content the path no longer holds.
-//! Their window is a `stat` wide where the replacement's spans a shadow's fill
-//! and its fsync, and a second full read is what a re-hash there would cost.
+//! **Every arm that reads a document and then publishes or answers at that
+//! same name asks both questions first.** A removal ([`vacate`]) and the
+//! suppressed no-op ([`Landed::Unchanged`]) re-hash the bytes through the held
+//! handle and then confirm the name, exactly as the replacement does before
+//! its swap, so a foreign write into the file that was read refuses on each of
+//! the three. Their residual is the same one: the width of the single call
+//! that publishes after the verification passed, and the no-op arm has no
+//! such call. An exclusive create reads nothing first, so its open is its
+//! whole question. A move's source leg is the one read that publishes
+//! elsewhere: the bytes it read are placed at the destination before the
+//! source is removed under the removal's own verification, so a foreign write
+//! into the source inside that span refuses at the removal, after the
+//! destination was placed, and leaves both names holding a document. The
+//! second read is paid on every removal and every idempotent write; that is
+//! the price of one protocol rather than two, and of never removing or
+//! vouching for content nobody read again.
 //!
 //! # Two durability barriers, and no third
 //!
@@ -237,21 +245,16 @@ pub enum Landed {
     /// never coming, and would then absorb the next foreign change to that
     /// document. The identity carried is the existing file's.
     ///
-    /// The bytes are not re-read — there is nothing to compare them against a
-    /// second time — but the **name is confirmed to still resolve to the file
-    /// they were read from**. This outcome says the destination holds exactly
-    /// this content, and a foreign replacement that landed during the
-    /// precondition's read makes that false about a file a caller can go and
-    /// look at.
-    ///
-    /// **What the confirmation does not cover is a foreign write into that same
-    /// file**, which leaves the identity unchanged and the bytes different, so
-    /// this outcome is reported about content the path no longer holds. The
-    /// window is between the precondition's hash and the confirmation's `stat`
-    /// and is not widened by anything; the replacement arm pays for a re-hash
-    /// because its window spans a shadow's fill and fsync instead, and this one
-    /// buys a narrower window with a second full read of the file. Whatever is
-    /// finally at the path is what the watcher reports, which is what bounds it.
+    /// The bytes are **re-read through the handle the precondition opened**, and
+    /// the **name is confirmed to still resolve to the file they were read
+    /// from** — the two questions the replacement asks before its swap. This
+    /// outcome says the destination holds exactly this content. A foreign write
+    /// into the file during the precondition's read makes that false about the
+    /// bytes and refuses as drift; a foreign replacement makes it false about
+    /// the file and refuses as a republished name. Nothing publishes on this
+    /// arm, so what a foreign write after the verification costs is bounded
+    /// the way every arm's residual is: whatever is finally at the path is
+    /// what the watcher reports.
     Unchanged(PostState),
 }
 
@@ -439,30 +442,28 @@ fn write_disturbed(
 /// mean a different file, and the removal would take that one. The window is
 /// the width of one call and POSIX offers nothing to close it.
 ///
-/// **The bytes are not hashed a second time**, so the two questions here are not
-/// the replacement's two: that arm asks a re-hash through the held handle and an
-/// identity comparison, and this one asks the precondition's own hash and the
-/// identity comparison. A foreign write into the same file between the hash and
-/// the `unlink` therefore removes a document whose content nobody read, and the
-/// [`Vacated::removed`] state describes the bytes the precondition saw rather
-/// than the bytes that were there at the unlink. The window is a `stat` and an
-/// `unlink` wide, where the replacement's spans a shadow's fill and its fsync,
-/// which is why only that arm pays a second full read for a narrower one.
+/// **The bytes are hashed a second time**, through the handle the precondition
+/// opened, so the two questions here are the replacement's two: a re-hash
+/// through the held handle, then the identity comparison. A foreign write into
+/// the same file between the precondition's read and the verification refuses
+/// as drift, and [`Vacated::removed`] describes bytes that hashed to the
+/// caller's expectation at the last point before the `unlink`. The second full
+/// read is the price of never removing a document whose content nobody read.
 pub fn vacate(path: &Path, expected: ContentHash) -> Result<Vacated, Refusal> {
     vacate_disturbed(path, expected, &mut |_| {})
 }
 
 /// [`vacate`], with something allowed to happen inside the window between the
-/// precondition's reading and the identity confirmation.
+/// precondition's reading and the verification.
 fn vacate_disturbed(
     path: &Path,
     expected: ContentHash,
     disturb: &mut dyn FnMut(Window),
 ) -> Result<Vacated, Refusal> {
     refuse_symlink(path)?;
-    let (_held, observed, _) = observed_under(path, expected)?;
+    let (mut held, observed, _) = observed_under(path, expected)?;
     disturb(Window::Vacating);
-    confirm_name_still_resolves(path, observed.identity(), expected)?;
+    verify(&mut held, path, expected, observed.identity())?;
 
     remove(path)?;
     // The removal is a directory entry, so the directory is what has to reach
@@ -648,12 +649,12 @@ fn replace_observed(
     let composed = ContentHash::of(content);
     if composed == observed.content_hash {
         // Nothing to do, and doing it anyway would cost a new inode, a shadow,
-        // and a filesystem event for a document that did not change. The name is
-        // still confirmed to resolve to the handle that was read: `Unchanged`
-        // says the destination holds exactly this content, and a foreign
-        // replacement that landed while the precondition was being read makes
-        // that sentence false about a file the caller can see.
-        confirm_name_still_resolves(destination, observed.identity(), expected)?;
+        // and a filesystem event for a document that did not change. The
+        // verification still runs through the handle that was read: `Unchanged`
+        // says the destination holds exactly this content, and a foreign write
+        // or a foreign replacement that landed while the precondition was being
+        // read makes that sentence false about a file the caller can see.
+        verify(&mut held, destination, expected, observed.identity())?;
         return Ok(Landed::Unchanged(observed));
     }
 
@@ -855,6 +856,10 @@ fn carry_mode_forward(file: &std::fs::File, replaced: &std::fs::Metadata) {
 /// Re-observe the destination through the handle the precondition read, and
 /// confirm the name still resolves to it.
 ///
+/// Each arm that publishes or answers at the name it read asks this at the
+/// last point before it does: the replacement before its swap, the removal
+/// before its `unlink`, and the suppressed no-op before it answers.
+///
 /// Two questions, and each catches what the other cannot. The **re-hash**
 /// catches a foreign write into the same file. The **identity comparison**
 /// catches a foreign *replacement* of the file — a rename over the destination
@@ -994,9 +999,8 @@ fn observed_state(held: &mut std::fs::File, path: &Path) -> Result<PostState, Re
 /// The prologue every precondition-bearing verb runs, in one place: a
 /// replacement and a removal ask the identical question and an answer that
 /// differed between them would be two preconditions wearing one name. The handle
-/// comes back because the verb that asked is not finished with it — the
-/// replacement verifies through it, and the removal confirms the name against
-/// what it says.
+/// comes back because the verb that asked is not finished with it: both
+/// verify through it before they publish or answer.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn observed_under(
     path: &Path,
@@ -1695,6 +1699,54 @@ mod tests {
         assert_ne!(*current, original);
     }
 
+    /// **The bar on the unchanged outcome's re-hash.** Content identical to
+    /// what was read is only `Unchanged` while the file still holds it.
+    ///
+    /// The forbidden shape is answering on the precondition's hash and the
+    /// identity alone. A foreign writer editing the same file leaves the inode
+    /// where it was and moves only the bytes, so the identity agrees and the
+    /// caller is told the destination holds exactly this content — about bytes
+    /// the path no longer holds — and its own write is suppressed for a
+    /// document it never looked at again.
+    #[test]
+    fn an_unchanged_outcome_over_a_foreign_write_is_refused() {
+        let scratch = Scratch::new("write-unchanged-foreign-write");
+        let path = scratch.place("note.md", b"already right");
+
+        let refusal = write_disturbed(
+            &path,
+            b"already right",
+            Precondition::Replace(ContentHash::of(b"already right")),
+            scratch.shadows(),
+            Faults::NONE,
+            &mut |window| {
+                if window == Window::Composed {
+                    #[allow(clippy::disallowed_methods)]
+                    // Harness scaffolding: playing the foreign writer.
+                    std::fs::write(&path, b"theirs").expect("a foreign write");
+                }
+            },
+        )
+        .expect_err("an unchanged outcome over a foreign write");
+
+        let Refusal::Drifted {
+            expected, observed, ..
+        } = &refusal
+        else {
+            panic!("a foreign write was reported as unchanged: {refusal}");
+        };
+        assert_eq!(*expected, ContentHash::of(b"already right"));
+        assert_eq!(
+            observed.as_ref().expect("the observed state").content_hash,
+            ContentHash::of(b"theirs")
+        );
+        assert_eq!(scratch.read(&path), b"theirs", "the no-op arm published");
+        assert!(
+            scratch.shadow_names().is_empty(),
+            "a shadow was staged for a no-op"
+        );
+    }
+
     /// A document removed inside the window is drift onto nothing — the same
     /// answer a precondition met at an empty path gets, because it is the same
     /// event — and the swap does not resurrect it.
@@ -1959,6 +2011,45 @@ mod tests {
         assert_eq!(
             scratch.read(&path),
             b"to be removed",
+            "the removal took a document nobody read"
+        );
+    }
+
+    /// **The bar on the removal's re-hash.** A removal takes only bytes that
+    /// still hash to what the caller read.
+    ///
+    /// The forbidden shape is an unlink justified by the precondition's hash
+    /// and the identity alone. A foreign writer editing the same file leaves
+    /// the inode where it was, so the identity agrees and the unlink takes a
+    /// document whose newer content nobody read.
+    #[test]
+    fn a_removal_over_a_foreign_write_is_refused() {
+        let scratch = Scratch::new("write-vacate-foreign-write");
+        let path = scratch.place("note.md", b"to be removed");
+
+        let refusal = vacate_disturbed(&path, ContentHash::of(b"to be removed"), &mut |window| {
+            if window == Window::Vacating {
+                #[allow(clippy::disallowed_methods)]
+                // Harness scaffolding: playing the foreign writer.
+                std::fs::write(&path, b"somebody else's newer text").expect("a foreign write");
+            }
+        })
+        .expect_err("a removal over a foreign write");
+
+        let Refusal::Drifted {
+            expected, observed, ..
+        } = &refusal
+        else {
+            panic!("a foreign write was not reported as drift: {refusal}");
+        };
+        assert_eq!(*expected, ContentHash::of(b"to be removed"));
+        assert_eq!(
+            observed.as_ref().expect("the observed state").content_hash,
+            ContentHash::of(b"somebody else's newer text")
+        );
+        assert_eq!(
+            scratch.read(&path),
+            b"somebody else's newer text",
             "the removal took a document nobody read"
         );
     }

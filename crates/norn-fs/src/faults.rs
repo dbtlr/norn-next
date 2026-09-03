@@ -347,8 +347,8 @@ pub(crate) enum Window {
     Composed,
     /// A create has claimed its name and has not filled it.
     Claimed,
-    /// A removal's precondition is satisfied and the name has not been confirmed
-    /// to still resolve to the handle that was read.
+    /// A removal's precondition is satisfied and the bytes have not been
+    /// verified through the handle that was read.
     Vacating,
     /// A move's source has been read and the name has not been confirmed to
     /// still resolve to the handle it was read through.

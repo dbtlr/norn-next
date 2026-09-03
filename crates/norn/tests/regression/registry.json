@@ -307,7 +307,7 @@
       "name": "a-mutation-confirms-the-file-it-holds-before-it-publishes",
       "kind": "defect-class",
       "venue": 1,
-      "property": "A mutation evaluates its precondition against bytes the call reads itself, through a handle the call opens and holds — never against a caller-supplied snapshot and never against what an index remembers. At the last point before anything is published, the call resolves the name again and compares what it finds against that handle's device and inode; a replacement, a suppressed no-op, a removal and a move's source read all ask that one question, and both answers that are not the file the call read refuse it — a name republished onto a different file, and a name that resolves to nothing. Re-hashing the bytes through the same handle is the second question, and it is asked where the window between the read and the publication spans staging a shadow and syncing it: on a replacement, a foreign write into the file that was read refuses there. A move's second leg re-reads its source under its own precondition rather than trusting the first leg's read. On a create the exclusive open is itself the publication, so the identity comparison there governs cleanup instead: a create that fails takes back only a name that still resolves to the file it created.",
+      "property": "A mutation evaluates its precondition against bytes the call reads itself, through a handle the call opens and holds — never against a caller-supplied snapshot and never against what an index remembers. At the last point before anything is published, the call resolves the name again and compares what it finds against that handle's device and inode; a replacement, a suppressed no-op, a removal and a move's source read all ask that one question, and both answers that are not the file the call read refuse it — a name republished onto a different file, and a name that resolves to nothing. Re-hashing the bytes through the same handle is the second question, and every arm that publishes or answers at the name it read asks it at the same last point: on a replacement, on a suppressed no-op and on a removal, a foreign write into the file that was read refuses there. A move's source leg publishes elsewhere on the bytes it read once, and its second leg re-reads the source under the removal's own two questions rather than trusting that read, so a foreign write into the source inside the span refuses at the removal and leaves both names holding a document. On a create the exclusive open is itself the publication, so the identity comparison there governs cleanup instead: a create that fails takes back only a name that still resolves to the file it created.",
       "sources": ["NRN-106", "NRN-233", "NRN-55", "NRN-160", "NRN-157", "NRN-99", "NORN-a15"],
       "binding": {
         "status": "bound",
@@ -315,8 +315,10 @@
           "crates/norn-fs/src/write.rs::a_foreign_write_inside_the_window_is_caught_before_the_swap",
           "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused",
           "crates/norn-fs/src/write.rs::an_unchanged_outcome_whose_name_was_republished_is_refused",
+          "crates/norn-fs/src/write.rs::an_unchanged_outcome_over_a_foreign_write_is_refused",
           "crates/norn-fs/src/write.rs::a_document_removed_inside_the_window_is_not_resurrected",
           "crates/norn-fs/src/write.rs::a_removal_whose_name_was_republished_is_refused",
+          "crates/norn-fs/src/write.rs::a_removal_over_a_foreign_write_is_refused",
           "crates/norn-fs/src/write.rs::a_move_whose_source_is_republished_while_it_is_read_is_refused",
           "crates/norn-fs/src/write.rs::a_move_whose_source_is_rewritten_between_the_legs_keeps_it",
           "crates/norn-fs/src/write.rs::a_create_that_fails_never_removes_a_foreign_document"
