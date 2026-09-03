@@ -1,28 +1,31 @@
 //! Conditions the machine imposes on a store, and the line between them and
 //! damage.
 //!
-//! Two of this crate's claims are about failures that are not the database's
-//! fault and must never be answered as though they were. A **full disk** stops
-//! an increment from completing and says nothing about the pages already at
-//! rest, so it is refused and nothing is discarded. A **store schema that
-//! cannot be written** is the other end: a creation is what rung 3 resolves
-//! damage *with*, so a creation that itself meets a corrupt database is the one
-//! state no rung above it can resolve, and it is typed as damage at the
-//! statement that met it.
+//! Three of this crate's claims are about failures that are not the
+//! database's fault and must never be answered as though they were. A **full
+//! disk** stops an increment from completing and says nothing about the pages
+//! already at rest, so it is refused and nothing is discarded. A **database
+//! held by somebody else** is the same shape at the open: a busy pinned-scalar
+//! read is refused, and the database it could not read is intact afterwards.
+//! A **store schema that cannot be written** is the other end: a creation is
+//! what rung 3 resolves damage *with*, so a creation that itself meets a
+//! corrupt database is the one state no rung above it can resolve, and it is
+//! typed as damage at the statement that met it.
 //!
-//! The cases live in a binary of their own because the arrangements they use
+//! The cases live in a binary of their own because most arrangements they use
 //! are process-wide — a page cap is read by every connection opened after it,
 //! and a store creation armed to fail is armed for whichever creation runs
 //! next. Sharing a process with the rest of the suite would arm them for cases
-//! that never asked. Inside this binary they take one lock and disarm on the
-//! way out.
+//! that never asked. The busy arm is per-thread and one-shot rather than
+//! process-wide; it sits with these cases because it states the same kind of
+//! claim. Inside this binary they take one lock and disarm on the way out.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use norn_store::{
-    Change, DocumentFacts, DocumentPath, IncrementProvenance, Store, StoreError, ddl,
+    Change, DocumentFacts, DocumentPath, IncrementProvenance, OpenOutcome, Store, StoreError, ddl,
     induced_failure,
 };
 
@@ -163,6 +166,44 @@ fn a_full_disk_refuses_the_increment_and_is_never_typed_as_damage() {
             .stored_document(&DocumentPath::new("notes/grown-0.md").expect("a document path"))
             .expect("reading a row the second attempt landed")
             .is_some()
+    );
+}
+
+/// **A database somebody else holds meets the same rule as a full disk.**
+///
+/// A pinned-scalar read that reports the database busy says nothing about the
+/// stored state, so an open that meets one is refused rather than sent to rung
+/// 3: rebuilding from zero in response would discard a sound database to fix a
+/// condition that clears on its own. The database an open could not even read
+/// is still there afterwards, with everything that was in it.
+#[test]
+fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
+    let _serial = serially();
+    let _disarmed = Disarmed;
+    let scratch = Scratch::new("busy");
+    let database = scratch.database();
+    let subject = "docs/norn/glossary.md";
+
+    let mut store = scratch.open();
+    write_document(&mut store, document(subject, "hash-1", "a body\n"));
+    drop(store);
+
+    induced_failure::fail_next_meta_read_as_busy();
+    let error = Store::open(&database).expect_err("a busy database");
+    assert!(
+        matches!(error, StoreError::Sql { .. }),
+        "a busy database was reported as {error:?} rather than as a refused operation"
+    );
+
+    let mut reopened = Store::open(&database).expect("reopening a store");
+    assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
+    assert!(
+        reopened
+            .begin_request()
+            .stored_document(&DocumentPath::new(subject).expect("a document path"))
+            .expect("reading a document")
+            .is_some(),
+        "the refusal discarded a database it could not even read"
     );
 }
 

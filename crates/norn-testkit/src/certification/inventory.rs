@@ -509,6 +509,16 @@ pub const REQUIRED_CASES: &[Case] = &[
         feature: None,
     },
     Case {
+        id: "induced-store-busy-database-is-refused-not-rebuilt",
+        suite: Suite::InducedFailure,
+        lane: Lane::Any,
+        states: "a database somebody else holds refuses the open and is never typed as damage, \
+                 because rung 3 is for damaged state and never for a hostile environment",
+        carrier: "crates/norn-store/tests/environment.rs::\
+                  a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt",
+        feature: None,
+    },
+    Case {
         id: "induced-store-schema-refusal-names-its-statement",
         suite: Suite::InducedFailure,
         lane: Lane::Any,

@@ -40,12 +40,11 @@
 //! ship inside product crates and are all listed below, because none of them is
 //! behavior a candidate is certified *for* — they are how a case reaches a
 //! condition and how a reading is taken. A file holding both is a file to split
-//! rather than a reason to widen this list. **One entry below is such a file.**
-//! `crates/norn-store/src/request.rs` holds the step-count and plan instrument
-//! the work bars are read through beside the request behavior a candidate is
-//! certified for; its entry stands because the instrument the bars read lives
-//! inside it, and an edit anywhere in that file moves this digest. And a product
-//! module that a seam is merely *read at* stays out: the substrate's own open and
+//! rather than a reason to widen this list, which is why the plan-and-step
+//! instrument the work bars are read through lives in its own file — carved out
+//! from beside the request behavior a candidate is certified for — rather than
+//! widening a product file's entry to cover it. And a product module that a
+//! seam is merely *read at* stays out: the substrate's own open and
 //! pinned-scalar reads carry the behavior the candidate SHA answers for, and
 //! listing them here would fold that behavior into the suite's identity.
 //!
@@ -197,6 +196,14 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               norn-db's arms. Which failures a rung-2 or rung-3 case may ask for is this file's \
               answer",
     },
+    // This seam's two product-module call sites are not digested as bytes:
+    // `crates/norn-db/src/database.rs`'s `connect` applies the page cap, and
+    // `crates/norn-db/src/meta.rs`'s `read_meta` meets the busy arm. Each is
+    // covered instead by a digested consuming suite — both cases live in
+    // `crates/norn-store/tests/environment.rs`, entered below — that reddens
+    // if the call site is neutered. Loosening the consuming suite is what
+    // moves this digest, through that suite's own entry rather than through
+    // the call site's.
     ManifestFile {
         path: "crates/norn-db/src/faults.rs",
         why: "the driver seam's arms: the process-wide page cap that makes the engine report a \
@@ -204,12 +211,16 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               database, and the helper an open applies the cap through. What a case may arrange \
               at this seam, and what the engine then does, is authored here",
     },
+    // The step accumulation itself — the counter the paged readers thread as
+    // a drain runs — stays in the undigested `request` module beside the
+    // readers. It is covered the way the norn-db call sites above are: a
+    // reader that stops counting reads as zero, and the work bars' negative
+    // control fails a zero reading, so the digested pillars suite reddens.
     ManifestFile {
-        path: "crates/norn-store/src/request.rs",
-        why: "the instrument a work reading is taken through: the virtual-machine steps the paged \
-              readers accumulate as a drain runs, and which named statement a plan bar is asked \
-              about and how it is bound. A reading taken through a different instrument is a \
-              different reading",
+        path: "crates/norn-store/src/request/instrument.rs",
+        why: "the instrument a work reading is taken through: how the accumulated step count is \
+              handed out, and which named statement a plan bar is asked about and how it is \
+              bound. A reading taken through a different instrument is a different reading",
     },
     ManifestFile {
         path: "crates/norn-db/src/plan.rs",

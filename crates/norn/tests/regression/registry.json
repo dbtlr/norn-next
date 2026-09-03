@@ -91,10 +91,10 @@
       "sources": ["NRN-a59", "NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the seam exists and the pairing is structural: crates/norn-db/src/plan.rs builds the pair, holding a statement together with the plan SQLite reported for it, crates/norn-store/src/request.rs names and binds the SQL a reader emits and hands that pair out, and crates/norn-testkit/src/explain.rs carries it to an assertion so no claim can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it.",
+        "reason": "the seam exists and the pairing is structural: crates/norn-db/src/plan.rs builds the pair, holding a statement together with the plan SQLite reported for it, crates/norn-store/src/request/instrument.rs names and binds the SQL a reader emits and hands that pair out, and crates/norn-testkit/src/explain.rs carries it to an assertion so no claim can be made about a plan without naming the SQL it came from, and a failure prints it. The assertions that take a plan off an executing request sit in crates/norn-store/tests/store/pillars.rs, which is a module of an integration target rather than a target — a shape a reference in this file cannot name — so what carries the property today cannot be cited as carrying it.",
         "grounds": [
           { "present": "crates/norn-db/src/plan.rs" },
-          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/src/request/instrument.rs" },
           { "present": "crates/norn-testkit/src/explain.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" }
         ]
@@ -427,11 +427,11 @@
       "sources": ["NRN-a59", "NRN-a60", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers arrives with crates/norn-serve, which is not in the workspace.",
+        "reason": "the schema declares its indexes and its plans are proven over emitted SQL: crates/norn-store/src/ddl/mod.rs designs the schema whole, and crates/norn-store/tests/store/pillars.rs asserts every findings-maintenance statement searches the index its parameters are bounds for. The reader half has nothing to reconcile against: the probe readers crates/norn-store/src/request/mod.rs offers are the range primitives the read builders of a higher layer compose, and the production plan roster that would name their callers arrives with crates/norn-serve, which is not in the workspace.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/mod.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" },
-          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/src/request/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }
@@ -597,9 +597,9 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a61", "NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. What has no subject is a request that could multiply two of its own quantities: nothing issues a statement per row of a result set and nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
+        "reason": "the readers exist and a cost term is assertable over them: crates/norn-store/src/request/mod.rs pages every enumeration behind a cursor, and crates/norn-testkit/src/work.rs holds a drain of n rows under a line in n, so a reader that re-reads the rows ahead of its own position fails. What has no subject is a request that could multiply two of its own quantities: nothing issues a statement per row of a result set and nothing computes link impact for a moved document, because crates/norn-serve is not in the workspace. The nested scan this class was mined from is inside one frontmatter block, where crates/norn-text/src/frontmatter/fields.rs now resolves the parsed mapping by key, and what bars it is a wall-clock ratio in a soak lane — not an evidence kind this stratum binds on.",
         "grounds": [
-          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-testkit/src/work.rs" },
           { "present": "crates/norn-text/src/frontmatter/fields.rs" },
           { "absent": "crates/norn-serve" }
@@ -840,10 +840,10 @@
       "sources": ["NRN-a60", "NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. The re-entry points the property binds have no subject: resolving one string, asking which documents link here, k membership probes and every advisory uniqueness or collision check are request paths, and crates/norn-serve is not in the workspace — so statements-per-request has no request to be O(1) in.",
+        "reason": "the index and the targeted readers exist: crates/norn-store/src/ddl/documents.rs indexes the path and suffix keys, crates/norn-store/src/request/mod.rs answers one identifier with one bounded statement, and crates/norn-store/tests/store/pillars.rs proves those plans over the SQL the readers emitted. The re-entry points the property binds have no subject: resolving one string, asking which documents link here, k membership probes and every advisory uniqueness or collision check are request paths, and crates/norn-serve is not in the workspace — so statements-per-request has no request to be O(1) in.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/documents.rs" },
-          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/src/request/mod.rs" },
           { "present": "crates/norn-store/tests/store/pillars.rs" },
           { "absent": "crates/norn-serve" }
         ]
@@ -857,10 +857,10 @@
       "sources": ["NRN-a60"],
       "binding": {
         "status": "dormant",
-        "reason": "the text index exists and is maintained across every write: crates/norn-store/src/ddl/fts.rs declares it and crates/norn-store/src/request.rs matches against it, so no path case-folds a substring over every body. The cost claim has no subject: a search surface is what turns a match count into a request's cost, and crates/norn-serve is not in the workspace — so nothing scales with match count rather than corpus bytes, and no bar reads either quantity.",
+        "reason": "the text index exists and is maintained across every write: crates/norn-store/src/ddl/fts.rs declares it and crates/norn-store/src/request/mod.rs matches against it, so no path case-folds a substring over every body. The cost claim has no subject: a search surface is what turns a match count into a request's cost, and crates/norn-serve is not in the workspace — so nothing scales with match count rather than corpus bytes, and no bar reads either quantity.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/fts.rs" },
-          { "present": "crates/norn-store/src/request.rs" },
+          { "present": "crates/norn-store/src/request/mod.rs" },
           { "absent": "crates/norn-serve" }
         ]
       }

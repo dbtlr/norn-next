@@ -65,6 +65,16 @@ pub fn fail_next_meta_read_as_busy() {
     NEXT_META_READ_FAILS.set(true);
 }
 
+/// Take the busy arm back off the calling thread, consumed or not.
+///
+/// The read the arm fails is what normally clears it. A case that armed one
+/// and never read would otherwise leave it standing for whatever opens next
+/// on this thread, so a disarm sweeps it rather than trusting every case to
+/// have consumed what it armed.
+pub fn clear_the_meta_read_arm() {
+    NEXT_META_READ_FAILS.set(false);
+}
+
 /// Hold this connection to the page count an arrangement capped it at.
 ///
 /// A build without the feature never reads the cap.
