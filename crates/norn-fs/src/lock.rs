@@ -265,9 +265,12 @@ impl fmt::Display for Incumbent {
 ///
 /// ```
 /// use norn_fs::{Acquisition, try_acquire};
+/// use norn_testkit::scratch::Scratch;
 ///
-/// let directory = std::env::temp_dir().join(format!("norn-fs-doc-{}", std::process::id()));
-/// let lock = directory.join("maintainer.lock");
+/// // The derived directory is one level down and is not there yet, so this
+/// // acquisition is the one that makes it.
+/// let scratch = Scratch::new("norn-fs-doc");
+/// let lock = scratch.join("derived").join("maintainer.lock");
 ///
 /// let held = match try_acquire(&lock).expect("an acquisition") {
 ///     Acquisition::Acquired(held) => held,

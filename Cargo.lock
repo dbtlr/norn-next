@@ -408,6 +408,7 @@ name = "norn-config"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "norn-testkit",
  "norn-wire",
  "toml",
 ]
@@ -416,6 +417,7 @@ dependencies = [
 name = "norn-db"
 version = "0.0.0"
 dependencies = [
+ "norn-testkit",
  "rusqlite",
 ]
 
@@ -470,6 +472,7 @@ dependencies = [
  "norn-db",
  "norn-embed",
  "norn-store",
+ "norn-testkit",
  "toml",
 ]
 

@@ -821,19 +821,10 @@ fn environment(name: &str) -> Option<String> {
 /// It lives on the emitter's side rather than in the product: nothing the store
 /// or the host does branches on this, and a probe compiled into a shipped build
 /// would be a filesystem write no caller asked for.
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)] // Harness scaffolding: this run's own case probe, under the directory the fixtures write trees into.
 fn probe_volume_folding() -> Option<bool> {
-    let at = std::env::temp_dir().join(format!(
-        "norn-qualification-case-probe-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&at).ok()?;
-    let folding = crate::churn::folding(&at).ok();
-    let _ = std::fs::remove_dir_all(&at);
+    let at = crate::scratch::Scratch::under(&std::env::temp_dir(), "norn-qualification-case-probe")
+        .ok()?;
+    let folding = crate::churn::folding(at.root()).ok();
     Some(folding? == crate::churn::Folding::Folded)
 }
 

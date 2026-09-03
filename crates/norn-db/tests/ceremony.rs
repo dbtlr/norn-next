@@ -7,40 +7,30 @@
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_db::rusqlite::Connection;
 use norn_db::{Adoption, Client, DbError, OpenOutcome, RebuildReason, Schema, meta};
+use norn_testkit::scratch::Scratch as TestkitScratch;
 
-/// Distinguishes two scratch directories taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
-
-/// A directory that exists for one test and is removed with it.
+/// A database under a directory that lasts one test.
+///
+/// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
+/// this adds is where the database sits inside the tree.
 struct Scratch {
-    root: PathBuf,
+    root: TestkitScratch,
 }
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "norn-db-ceremony-{label}-{}-{serial}",
-            std::process::id()
-        ));
-        Scratch { root }
+        Scratch {
+            root: TestkitScratch::new(&format!("norn-db-ceremony-{label}")),
+        }
     }
 
     /// The database a case opens. Its parent does not exist until an open
     /// prepares it, which is the state a first open meets.
     fn database(&self) -> PathBuf {
         self.root.join("derived").join("trial.sqlite3")
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the directory this test made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

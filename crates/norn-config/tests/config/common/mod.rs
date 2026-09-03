@@ -7,30 +7,26 @@
 //! nothing here runs beside a process-wide write.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use norn_config::machine::tokens::TokenLabel;
 use norn_config::registry::{Entry, VaultRoot};
 use norn_config::{ConfigDirs, VaultName};
-
-/// Distinguishes two scratch machines taken in the same process.
-static SERIAL: AtomicU64 = AtomicU64::new(0);
+use norn_testkit::scratch::Scratch as TestkitScratch;
 
 /// A machine's config and data bases, for the length of one test.
+///
+/// The naming and the removal are [`norn_testkit::scratch::Scratch`]'s; what
+/// this adds is the two bases inside the tree and the [`ConfigDirs`] over
+/// them.
 pub struct Scratch {
-    root: PathBuf,
+    root: TestkitScratch,
     dirs: ConfigDirs,
 }
 
 impl Scratch {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the bases a test's state lives under.
     pub fn new(label: &str) -> Self {
-        let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "norn-config-{label}-{}-{serial}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = TestkitScratch::new(&format!("norn-config-{label}"));
         std::fs::create_dir_all(root.join("config")).expect("a config base");
         std::fs::create_dir_all(root.join("data")).expect("a data base");
         let dirs = ConfigDirs::new(root.join("config"), root.join("data"))
@@ -131,13 +127,6 @@ impl Scratch {
             .collect();
         names.sort();
         names
-    }
-}
-
-impl Drop for Scratch {
-    #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree this test made.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

@@ -26,3 +26,11 @@ norn-store = { path = "../norn-store" }
 # table over and defines nothing past the handoff. `toml` is the syntax that
 # table arrives in.
 toml = { workspace = true }
+
+# Every scratch tree this crate's suites work in is named and removed through
+# `norn_testkit::scratch`, so one helper owns what a temporary directory is
+# called and when it goes away. The edge is a development one, and the
+# allowlist does not describe it: dev edges cycle by construction and the
+# architecture gate reads and discards them.
+[dev-dependencies]
+norn-testkit = { path = "../norn-testkit" }
