@@ -176,7 +176,7 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-testkit/src/equivalence.rs",
         "crates/norn-testkit/src/churn.rs",
         "crates/norn-testkit/src/work.rs",
-        "crates/norn-store/src/request.rs",
+        "crates/norn-store/src/request/instrument.rs",
         "crates/norn-db/src/plan.rs",
         // The seams every rung-2 and rung-3 case is reached through.
         "crates/norn-fs/src/faults.rs",

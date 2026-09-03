@@ -81,7 +81,7 @@ const CASE_TOTAL: usize = 105;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "cb19b5e7743ac8f6d679f2e0d6044fdb4ea5a0d1f98ae71805003e4d5a9bcc4b";
+const CONTRACT_DIGEST: &str = "ce67611891a5d62ea80c2a853fd996510686563f650f150566a8760dda155bfe";
 
 /// The cases carried by tests today, by name.
 ///
