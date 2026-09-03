@@ -18,15 +18,19 @@
 //! different reasons.
 
 use norn_db::EmittedPlan;
-use norn_db::rusqlite::params_from_iter;
+use norn_db::rusqlite::{params, params_from_iter};
 use norn_wire::FindingKind;
 
+use crate::ddl;
+
 use super::{
+    DOCUMENT_BLOCKS_SQL, DOCUMENT_HEADINGS_SQL, DOCUMENT_LINKS_SQL, DOCUMENT_TAGS_SQL,
     DiscardScope, DocumentPath, FeedCursor, FindingCursor, INDEXED_TERM_PAGE_SQL, MAX_PAGE,
-    Request, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope, SuffixProbe,
-    TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql, document_page_parameters,
-    document_page_sql, feed_page_parameters, finding_page_parameters, finding_page_sql,
-    finding_subject_parameters, finding_subjects_sql, findings_in_class_sql, probe_parameters,
+    Request, STORED_TOMBSTONE_SQL, SUFFIX_KEY_PAGE_SQL, StoreError, StoredPathOrder, SubjectScope,
+    SuffixProbe, TOMBSTONE_PAGE_SQL, class_discard_sql, document_feed_sql,
+    document_page_parameters, document_page_sql, feed_page_parameters, finding_page_parameters,
+    finding_page_sql, finding_subject_parameters, finding_subjects_sql, findings_in_class_sql,
+    probe_parameters, stored_document_sql, stored_facts_document_sql, stored_findings_sql,
     subject_discard_parameters, subject_discard_sql, suffix_candidates_sql, text_page_parameters,
     tombstone_feed_sql,
 };
@@ -46,6 +50,14 @@ const EXPLAINED_TERM_CURSOR: &str = "explained-page-cursor";
 /// the sequence's own range does; what matters is that the cursor is bound
 /// rather than null.
 const EXPLAINED_FEED_GENERATION: i64 = 1;
+
+/// The document row a fact read is explained from.
+///
+/// A fact statement is keyed by the row id the snapshot's first statement
+/// found, which is an id no caller above this crate holds. Any id inside the
+/// table's own range does; what matters is that the key is bound rather than
+/// null, for the reason [`explained_page_cursor`] states.
+const EXPLAINED_DOCUMENT_ROW: i64 = 1;
 
 impl<'a> Request<'a> {
     /// One named statement as this crate emits it, with the query plan SQLite
@@ -85,6 +97,15 @@ impl<'a> Request<'a> {
             ExplainedStatement::IndexedTermPage => INDEXED_TERM_PAGE_SQL.to_string(),
             ExplainedStatement::DocumentFeedPage => document_feed_sql(),
             ExplainedStatement::TombstoneFeedPage => tombstone_feed_sql(),
+            ExplainedStatement::StoredDocument(_) => stored_document_sql(),
+            ExplainedStatement::StoredFactsDocument(_) => stored_facts_document_sql(),
+            ExplainedStatement::DocumentLinks => DOCUMENT_LINKS_SQL.to_string(),
+            ExplainedStatement::DocumentHeadings => DOCUMENT_HEADINGS_SQL.to_string(),
+            ExplainedStatement::DocumentBlocks => DOCUMENT_BLOCKS_SQL.to_string(),
+            ExplainedStatement::DocumentTags => DOCUMENT_TAGS_SQL.to_string(),
+            ExplainedStatement::StoredTombstone(_) => STORED_TOMBSTONE_SQL.to_string(),
+            ExplainedStatement::StoredFindings(_) => stored_findings_sql(),
+            ExplainedStatement::VaultSchemaPin => norn_db::meta::META_READ_SQL.to_string(),
         };
         let connection = self.store.connection();
         Ok(match statement {
@@ -161,6 +182,29 @@ impl<'a> Request<'a> {
                         MAX_PAGE,
                     )),
                 )
+            }
+            // The path-keyed point reads are explained under the path the
+            // caller asked about, which is exactly what their execution sites
+            // bind.
+            ExplainedStatement::StoredDocument(path)
+            | ExplainedStatement::StoredFactsDocument(path)
+            | ExplainedStatement::StoredTombstone(path)
+            | ExplainedStatement::StoredFindings(path) => {
+                norn_db::emitted_plan(connection, &sql, params![path.as_str()])
+            }
+            // The four fact statements are keyed by a row id rather than a
+            // path, and the id is bound for the reason a page's cursor is —
+            // see [`EXPLAINED_DOCUMENT_ROW`].
+            ExplainedStatement::DocumentLinks
+            | ExplainedStatement::DocumentHeadings
+            | ExplainedStatement::DocumentBlocks
+            | ExplainedStatement::DocumentTags => {
+                norn_db::emitted_plan(connection, &sql, params![EXPLAINED_DOCUMENT_ROW])
+            }
+            // The pin reads three keys through one statement, so the plan is
+            // taken under the first of the three.
+            ExplainedStatement::VaultSchemaPin => {
+                norn_db::emitted_plan(connection, &sql, params![ddl::meta::VAULT_SCHEMA_BYTES])
             }
         }?)
     }
@@ -253,6 +297,185 @@ pub enum ExplainedStatement<'a> {
     /// [`Request::changed_tombstones_after`], the generation-ordered walk a
     /// lane-2 consumer reads recorded deaths through.
     TombstoneFeedPage,
+    /// [`Request::stored_document`], the one row a path stands at.
+    StoredDocument(&'a DocumentPath),
+    /// The statement [`Request::stored_facts`] opens its snapshot with: the
+    /// document's row, its body and its row id, keyed by the caller's path.
+    StoredFactsDocument(&'a DocumentPath),
+    /// The link rows [`Request::stored_facts`] reads for the document its first
+    /// statement found. The three below are the same read over the other fact
+    /// tables, and each is keyed by that document's row id rather than by a
+    /// path.
+    DocumentLinks,
+    /// The heading rows [`Request::stored_facts`] reads.
+    DocumentHeadings,
+    /// The block-id rows [`Request::stored_facts`] reads.
+    DocumentBlocks,
+    /// The tag rows [`Request::stored_facts`] reads.
+    DocumentTags,
+    /// [`Request::stored_tombstone`], the death recorded for one path.
+    StoredTombstone(&'a DocumentPath),
+    /// [`Request::stored_findings`], every finding recorded about one path.
+    StoredFindings(&'a DocumentPath),
+    /// The pinned-scalar read [`Request::vault_schema_pin`] runs once per key
+    /// it reports. One statement covers all three: the key rides the parameter
+    /// rather than the text.
+    VaultSchemaPin,
+}
+
+/// How many keyed point reads this seam names.
+///
+/// It is the length of [`ExplainedStatement::point_reads`], and that is the
+/// whole of the guarantee: a point read dropped from the census does not
+/// compile, rather than quietly narrowing the bar that iterates it.
+pub const POINT_READS: usize = 9;
+
+/// How many statements this seam names in total.
+///
+/// It is the length of [`ExplainedStatement::all`], which is the enumeration
+/// every other census is checked against.
+pub const STATEMENTS: usize = 21;
+
+impl<'a> ExplainedStatement<'a> {
+    /// Every statement this seam names, in slot order, each bound to a subject
+    /// a caller supplies.
+    ///
+    /// A list of statements is not self-checking: an entry dropped from a list
+    /// and a count shrunk beside it compiles, and a bar that iterates that list
+    /// then judges one statement fewer without saying so. This is the one
+    /// enumeration the narrower censuses are read out of, and
+    /// [`Self::slot`] — exhaustive over this enum — is what binds a variant to
+    /// its place in it.
+    ///
+    /// The parameters are the ones a statement cannot be spelled without. The
+    /// scope, the order and the discard scope are not parameters: a statement's
+    /// place in this enumeration does not depend on which of them it carries,
+    /// and the bars that care about those axes range over them themselves.
+    pub fn all(
+        subject: &'a DocumentPath,
+        probe: &'a SuffixProbe,
+        kinds: &'a [FindingKind],
+    ) -> [Self; STATEMENTS] {
+        [
+            Self::SuffixCandidates(probe),
+            Self::FindingsInClass(probe),
+            Self::ClassDiscard(probe),
+            Self::SubjectDiscard(subject, DiscardScope::EveryKind),
+            Self::FindingSubjectsWithoutRows(
+                SubjectScope::Vault,
+                kinds,
+                StoredPathOrder::Sensitive,
+            ),
+            Self::StoredDocumentPage(SubjectScope::Vault, StoredPathOrder::Sensitive),
+            Self::StoredFindingPage,
+            Self::StoredTombstonePage,
+            Self::StoredSuffixKeyPage,
+            Self::IndexedTermPage,
+            Self::DocumentFeedPage,
+            Self::TombstoneFeedPage,
+            Self::StoredDocument(subject),
+            Self::StoredFactsDocument(subject),
+            Self::DocumentLinks,
+            Self::DocumentHeadings,
+            Self::DocumentBlocks,
+            Self::DocumentTags,
+            Self::StoredTombstone(subject),
+            Self::StoredFindings(subject),
+            Self::VaultSchemaPin,
+        ]
+    }
+
+    /// Where this statement stands in [`Self::all`].
+    ///
+    /// The `match` is exhaustive, so a variant added to this enum has to take a
+    /// slot, and a slot outside the enumeration is refused here rather than
+    /// left to a bar to notice. The suite walks the two together: every member
+    /// of [`Self::all`] claims the slot it occupies, which is what says the
+    /// enumeration holds each variant once and in the order it declares.
+    pub fn slot(self) -> usize {
+        let slot = match self {
+            Self::SuffixCandidates(_) => 0,
+            Self::FindingsInClass(_) => 1,
+            Self::ClassDiscard(_) => 2,
+            Self::SubjectDiscard(..) => 3,
+            Self::FindingSubjectsWithoutRows(..) => 4,
+            Self::StoredDocumentPage(..) => 5,
+            Self::StoredFindingPage => 6,
+            Self::StoredTombstonePage => 7,
+            Self::StoredSuffixKeyPage => 8,
+            Self::IndexedTermPage => 9,
+            Self::DocumentFeedPage => 10,
+            Self::TombstoneFeedPage => 11,
+            Self::StoredDocument(_) => 12,
+            Self::StoredFactsDocument(_) => 13,
+            Self::DocumentLinks => 14,
+            Self::DocumentHeadings => 15,
+            Self::DocumentBlocks => 16,
+            Self::DocumentTags => 17,
+            Self::StoredTombstone(_) => 18,
+            Self::StoredFindings(_) => 19,
+            Self::VaultSchemaPin => 20,
+        };
+        assert!(
+            slot < STATEMENTS,
+            "slot {slot} is outside the enumeration: grow `all` and `STATEMENTS` with the \
+             statement that took it"
+        );
+        slot
+    }
+
+    /// Every keyed point read, each bound to one subject.
+    ///
+    /// **The set is named here rather than beside the bar that judges it**, so
+    /// there is one list rather than a list and a copy of it. A bar holding its
+    /// own copy greens whatever the copy forgot.
+    pub fn point_reads(subject: &'a DocumentPath) -> [Self; POINT_READS] {
+        [
+            Self::StoredDocument(subject),
+            Self::StoredFactsDocument(subject),
+            Self::DocumentLinks,
+            Self::DocumentHeadings,
+            Self::DocumentBlocks,
+            Self::DocumentTags,
+            Self::StoredTombstone(subject),
+            Self::StoredFindings(subject),
+            Self::VaultSchemaPin,
+        ]
+    }
+
+    /// Whether this statement answers about a key its caller already holds,
+    /// rather than draining a page or ranging over a probe.
+    ///
+    /// The `match` is exhaustive, so a variant added to this enum has to say
+    /// which of the two it is. A statement that says it is a point read belongs
+    /// in [`Self::point_reads`], and the bar over that census checks the answer
+    /// both ways: every statement it is handed reads `true` here, and the
+    /// census is the length this seam declares.
+    pub fn is_point_read(self) -> bool {
+        match self {
+            Self::StoredDocument(_)
+            | Self::StoredFactsDocument(_)
+            | Self::DocumentLinks
+            | Self::DocumentHeadings
+            | Self::DocumentBlocks
+            | Self::DocumentTags
+            | Self::StoredTombstone(_)
+            | Self::StoredFindings(_)
+            | Self::VaultSchemaPin => true,
+            Self::SuffixCandidates(_)
+            | Self::FindingsInClass(_)
+            | Self::ClassDiscard(_)
+            | Self::SubjectDiscard(..)
+            | Self::FindingSubjectsWithoutRows(..)
+            | Self::StoredDocumentPage(..)
+            | Self::StoredFindingPage
+            | Self::StoredTombstonePage
+            | Self::StoredSuffixKeyPage
+            | Self::IndexedTermPage
+            | Self::DocumentFeedPage
+            | Self::TombstoneFeedPage => false,
+        }
+    }
 }
 
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.

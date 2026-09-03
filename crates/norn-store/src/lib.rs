@@ -103,6 +103,7 @@ pub use path::{
     suffix_probe,
 };
 pub use request::{
-    DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, Request, SubjectScope,
+    DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, POINT_READS, Request,
+    STATEMENTS, SubjectScope,
 };
 pub use store::{RecordedStoreSchema, SnapshotReader, Store, StoreMode};

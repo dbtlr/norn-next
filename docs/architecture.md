@@ -534,7 +534,7 @@ specifically, because a gate against hand-written SQL tests a string nobody exec
 The contract is stated whole and filled shape by shape, as each builder lands. The seam an
 `EXPLAIN` bar is taken through exists — `norn-store` hands out the plan SQLite reported for
 a statement it emitted, because a plan cannot be taken by a crate that may not reach the
-database — and twelve named statements carry an index bar through it: suffix candidates,
+database — and twenty-one named statements carry an index bar through it: suffix candidates,
 findings in a class, the class- and subject-scoped findings discards — the subject
 discard in both the whole form and the form narrowed to the kinds a producer re-derives —
 the page a walk reads its scope's unaccounted finding subjects through, the ordered
@@ -543,7 +543,21 @@ whole pillar through — the findings table, the tombstones, every row's stored 
 beside the path that has to produce it, and the vocabulary the full-text index holds — and
 the two drains a lane-2 consumer ([ADR
 0021](decisions/0021-derived-indexes-split-into-two-lanes.md)) reads change through: the
-live document rows, and the recorded deaths.
+live document rows, and the recorded deaths — and the nine keyed point reads: the document
+row a path stands at, the row a facts snapshot opens on and the four fact reads keyed by
+the row id it found, the death recorded for a path, the findings recorded about one, and
+the pinned vault-schema projection.
+
+A point read is barred harder than a page, because a search is not a point read on its
+own: a range over the same index reports the same step, so each of the nine is judged on
+the **equality constraint** its seek carries as well as on the index it runs through. Every
+one is held by four assertions: it never reads its table end to end, it searches that
+table, the step that searches it carries the equality constraint, and it builds no
+temporary B-tree. Eight also name the index they run through. The pinned-schema read seeks
+the primary key of a `WITHOUT ROWID` table, which SQLite reports with no index name, so
+that one carries the other four and no index assertion. Only the findings read is exempt
+from the sorter bar, because it states an order — generation, then row key — that no index
+over that table holds; the other eight state an order their own index already gives them.
 
 The document page and the finding-subject page are barred in the same terms, because a page
 is judged by what it reads before it returns its first row: the cursor is a bound on an

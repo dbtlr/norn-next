@@ -653,6 +653,17 @@ fn barred_by(statement: ExplainedStatement<'_>) -> &'static str {
         ExplainedStatement::DocumentFeedPage | ExplainedStatement::TombstoneFeedPage => {
             "a_feed_page_walks_its_covering_index_and_reads_no_row"
         }
+        ExplainedStatement::StoredDocument(_)
+        | ExplainedStatement::StoredFactsDocument(_)
+        | ExplainedStatement::DocumentLinks
+        | ExplainedStatement::DocumentHeadings
+        | ExplainedStatement::DocumentBlocks
+        | ExplainedStatement::DocumentTags
+        | ExplainedStatement::StoredTombstone(_)
+        | ExplainedStatement::StoredFindings(_)
+        | ExplainedStatement::VaultSchemaPin => {
+            "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for"
+        }
     }
 }
 
@@ -889,6 +900,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
     .into_iter()
     .chain(ENUMERATIONS.iter().copied())
     .chain(FEEDS.iter().copied())
+    .chain(ExplainedStatement::point_reads(&subject))
     .map(barred_by)
     .collect();
     assert_eq!(
@@ -896,6 +908,7 @@ fn every_findings_maintenance_statement_searches_the_index_its_parameters_are_bo
         [
             "a_feed_page_walks_its_covering_index_and_reads_no_row",
             "a_heal_page_seeks_the_index_that_holds_its_order",
+            "a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for",
             "an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_it",
             "every_findings_maintenance_statement_searches_the_index_its_parameters_are_bounds_for",
         ]
@@ -979,6 +992,196 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     );
     suffix_keys.assert_searches("documents");
     suffix_keys.assert_uses_index("documents_path");
+}
+
+/// **The point-read census is exactly the statements that say they are point
+/// reads.** [`ExplainedStatement::point_reads`] is a list, and a list can be
+/// short: an edit that drops an entry and shrinks the count beside it compiles,
+/// and every bar that iterates the census then judges one statement fewer
+/// without a word.
+///
+/// So the two declarations are walked against each other. [`ExplainedStatement::all`]
+/// enumerates the seam, [`ExplainedStatement::slot`] is exhaustive over the enum
+/// and says where each statement stands in that enumeration, and this reads the
+/// point reads out of it and demands the census be that set — same count, same
+/// members, same order.
+#[test]
+fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
+    let subject = path("one/glossary.md");
+    let probe = class_probe("glossary").expect("a class stem");
+    let kinds = [FindingKind::PathNamesNoDocument];
+
+    let every = ExplainedStatement::all(&subject, &probe, &kinds);
+    assert_eq!(every.len(), norn_store::STATEMENTS);
+    for (position, statement) in every.iter().enumerate() {
+        assert_eq!(
+            statement.slot(),
+            position,
+            "the enumeration and the slot a statement claims disagree: {statement:?}"
+        );
+    }
+
+    let declared: Vec<ExplainedStatement<'_>> = every
+        .into_iter()
+        .filter(|statement| statement.is_point_read())
+        .collect();
+    assert_eq!(
+        declared,
+        ExplainedStatement::point_reads(&subject).to_vec(),
+        "a statement says it is a point read and the census does not hold it, or holds \
+         one that does not — so the point-read bar judges a set nothing else agrees with"
+    );
+}
+
+/// How the bar judges one keyed point read.
+struct PointReadBar {
+    /// The table the statement reaches its rows in.
+    table: &'static str,
+    /// The index the seek runs through, or [`None`] where the seek runs
+    /// through a primary key. `meta` is `WITHOUT ROWID`, so its rows live in
+    /// the key b-tree itself and SQLite reports `USING PRIMARY KEY` with no
+    /// name for [`QueryPlan::assert_uses_index`] to match. The scan, search
+    /// and constraint assertions carry that entry whole.
+    index: Option<&'static str>,
+    /// The constraint an equality seek of this statement's key prints. It is
+    /// what separates a point read from a range: `path>?` opens a cursor on
+    /// the same index as `path=?` and reports the same index name, so a bar
+    /// that read the name alone would green a reader that seeks to a key and
+    /// then walks the rest of the table.
+    constraint: &'static str,
+    /// Whether the statement's stated order is one no index over its table
+    /// holds, so the rows the seek reached are sorted after it. Only the
+    /// findings read does: it orders by generation then row key, and
+    /// `findings_path` orders by path. Every other entry states an order its
+    /// own index already holds, and the temporary-B-tree bar is what says so.
+    sorts: bool,
+}
+
+/// What the bar expects of one statement, or [`None`] where the statement is a
+/// page or a probe another bar holds.
+///
+/// The `match` is exhaustive over [`ExplainedStatement`], so a variant added to
+/// that seam has to say whether this bar judges it, and the census the bar
+/// iterates is [`ExplainedStatement::point_reads`] rather than a second list
+/// kept here.
+fn point_read_bar(statement: ExplainedStatement<'_>) -> Option<PointReadBar> {
+    let seek = |table, index, constraint| {
+        Some(PointReadBar {
+            table,
+            index: Some(index),
+            constraint,
+            sorts: false,
+        })
+    };
+    match statement {
+        // The document row and the row a facts snapshot opens on both seek the
+        // unique path index, so one seek reaches the one row a path can have.
+        ExplainedStatement::StoredDocument(_) | ExplainedStatement::StoredFactsDocument(_) => {
+            seek("documents", "documents_path", "(path=?)")
+        }
+        // Each fact read seeks its own table's `(document, ordinal)` index, so
+        // it costs one document's rows and comes off that index in the ordinal
+        // order the reader states.
+        ExplainedStatement::DocumentLinks => {
+            seek("links", "links_document_ordinal", "(document=?)")
+        }
+        ExplainedStatement::DocumentHeadings => {
+            seek("headings", "headings_document_ordinal", "(document=?)")
+        }
+        ExplainedStatement::DocumentBlocks => {
+            seek("blocks", "blocks_document_ordinal", "(document=?)")
+        }
+        ExplainedStatement::DocumentTags => seek(
+            "document_tags",
+            "document_tags_document_ordinal",
+            "(document=?)",
+        ),
+        ExplainedStatement::StoredTombstone(_) => seek("tombstones", "tombstones_path", "(path=?)"),
+        // The subject's own findings, and the one entry that sorts.
+        ExplainedStatement::StoredFindings(_) => Some(PointReadBar {
+            table: "findings",
+            index: Some("findings_path"),
+            constraint: "(path=?)",
+            sorts: true,
+        }),
+        ExplainedStatement::VaultSchemaPin => Some(PointReadBar {
+            table: "meta",
+            index: None,
+            constraint: "(key=?)",
+            sorts: false,
+        }),
+        ExplainedStatement::SuffixCandidates(_)
+        | ExplainedStatement::FindingsInClass(_)
+        | ExplainedStatement::ClassDiscard(_)
+        | ExplainedStatement::SubjectDiscard(..)
+        | ExplainedStatement::FindingSubjectsWithoutRows(..)
+        | ExplainedStatement::StoredDocumentPage(..)
+        | ExplainedStatement::StoredFindingPage
+        | ExplainedStatement::StoredTombstonePage
+        | ExplainedStatement::StoredSuffixKeyPage
+        | ExplainedStatement::IndexedTermPage
+        | ExplainedStatement::DocumentFeedPage
+        | ExplainedStatement::TombstoneFeedPage => None,
+    }
+}
+
+/// **A keyed point read reaches its rows by an equality seek on the key it was
+/// given.** Each of these answers about one subject a caller already holds — a
+/// path, the document row that path resolved to, or one pinned key — so a read
+/// that found its rows by stepping over the rows ahead of them would cost the
+/// whole table for every question about one place.
+///
+/// Four assertions per statement, and the last two are what make it a bar
+/// rather than a description:
+///
+/// - It does not read its table end to end, and it searches that table.
+/// - The step that searches the table carries an **equality** constraint. A
+///   search alone is not a point read: a range over the same index reports the
+///   same `SEARCH … USING INDEX` row, and for the pinned-schema read — whose
+///   `WITHOUT ROWID` primary key has no index name — the constraint is the only
+///   thing there is to judge.
+/// - It sorts only where [`PointReadBar::sorts`] says its stated order is one
+///   no index holds, so a reader that grew a sorter over an order an index
+///   already gave it reddens here.
+///
+/// The census is [`ExplainedStatement::point_reads`], which lives beside the
+/// statements rather than here: a bar with its own copy of the list is a bar
+/// that greens whatever the copy forgot.
+///
+/// **The store holds no rows.** A plan is read off the statement text, and
+/// nothing here runs `ANALYZE`, so the planner's choice is the same over an
+/// empty table as over a full one — rows would be scenery.
+#[test]
+fn a_keyed_point_read_seeks_the_index_its_key_is_a_bound_for() {
+    let scratch = Scratch::new("point-read-plans");
+    let mut store = scratch.open();
+    let request = store.begin_request();
+    let subject = path("one/glossary.md");
+
+    let census = ExplainedStatement::point_reads(&subject);
+    assert_eq!(census.len(), norn_store::POINT_READS);
+    for statement in census {
+        assert!(
+            statement.is_point_read(),
+            "the census hands the point-read bar a statement another bar holds: {statement:?}"
+        );
+        let expected = point_read_bar(statement)
+            .unwrap_or_else(|| panic!("the point-read bar states nothing for {statement:?}"));
+        let read = plan(
+            request
+                .emitted_plan(statement)
+                .expect("a query plan for a point read"),
+        );
+        read.assert_no_full_scan_of(expected.table);
+        read.assert_searches(expected.table);
+        read.assert_search_constraint(expected.table, expected.constraint);
+        if let Some(index) = expected.index {
+            read.assert_uses_index(index);
+        }
+        if !expected.sorts {
+            read.assert_no_temp_btree();
+        }
+    }
 }
 
 /// **Every enumeration is complete and drains one page at a time.** A pillar
