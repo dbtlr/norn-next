@@ -899,10 +899,6 @@ mod tests {
             ),
             "{error}"
         );
-
-        // The case left a regular file where the tree was, which the handle's
-        // own removal cannot take away.
-        let _ = std::fs::remove_file(directory);
     }
 
     /// The mode is a property of what the file holds, and the reader's demand

@@ -17,10 +17,9 @@
 //! already exists.
 //!
 //! **The counter is the only thing that separates two roots inside one
-//! process.** A thread id adds nothing to it. The counter is process-wide, so
-//! it already separates two roots taken on any two threads. A thread id is
-//! also reused once its thread ends, so two roots taken on two threads that
-//! never ran together can carry the same one.
+//! process.** A thread id adds nothing to it: the counter is process-wide, so
+//! it already separates two roots taken on any two threads, and two roots
+//! taken on one thread carry the same thread id.
 //!
 //! The name is cleared before it is created, because a process id is reused
 //! across runs. A case that started from a previous run's residue is judging a
@@ -28,13 +27,16 @@
 //!
 //! # What removal survives
 //!
-//! A tree goes away when its [`Scratch`] drops. A case that made a directory
-//! unsearchable — to reach a refusal that needs one — leaves a tree the plain
-//! removal cannot enter, so a removal that fails puts the modes back and tries
-//! once more. The retry is second because the mode walk costs a read of every
-//! directory in the tree and almost no case needs it. A tree that still will
-//! not go is left behind rather than panicking a case that has already
-//! reported its verdict.
+//! A tree goes away when its [`Scratch`] drops, and the root it stands on is
+//! whatever the case left there. A case that replaced the root with a regular
+//! file — to reach a refusal that needs a name which is not a directory —
+//! leaves a root the directory removal refuses, so the file removal follows
+//! it. A case that made a directory unsearchable — to reach a refusal that
+//! needs one — leaves a tree the plain removal cannot enter, so the modes go
+//! back and the directory removal runs once more. That retry is last because
+//! the mode walk costs a read of every directory in the tree and almost no
+//! case needs it. A root that still will not go is left behind rather than
+//! panicking a case that has already reported its verdict.
 
 use std::ffi::OsStr;
 use std::io;
@@ -120,6 +122,9 @@ impl Drop for Scratch {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: removing the tree a case made.
     fn drop(&mut self) {
         if std::fs::remove_dir_all(&self.root).is_ok() {
+            return;
+        }
+        if std::fs::remove_file(&self.root).is_ok() {
             return;
         }
         restore_modes(&self.root);
@@ -214,6 +219,26 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(&root).is_err(),
             "an unsearchable directory kept the tree alive"
+        );
+    }
+
+    /// **A root a case replaced with a regular file is still removed.** A
+    /// case reaching a refusal that needs a name which is not a directory
+    /// leaves one where its tree was, and a removal that only knows
+    /// directories would leave that name on the machine for good.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Arranging the shape this case is about.
+    fn a_root_that_became_a_regular_file_is_still_removed() {
+        let root = {
+            let scratch = Scratch::new("norn-testkit-scratch-became-a-file");
+            let root = scratch.root().to_path_buf();
+            std::fs::remove_dir(&root).expect("emptying the tree");
+            std::fs::write(&root, b"not a directory").expect("a file where the tree was");
+            root
+        };
+        assert!(
+            std::fs::symlink_metadata(&root).is_err(),
+            "a root that became a regular file outlived its handle"
         );
     }
 
