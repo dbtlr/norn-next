@@ -83,7 +83,7 @@ use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::Store;
 
 mod instrument;
-pub use instrument::{ExplainedStatement, POINT_READS};
+pub use instrument::{ExplainedStatement, POINT_READS, STATEMENTS};
 
 /// Maximum row count any paged reader accepts.
 ///

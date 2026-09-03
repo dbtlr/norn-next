@@ -330,7 +330,100 @@ pub enum ExplainedStatement<'a> {
 /// compile, rather than quietly narrowing the bar that iterates it.
 pub const POINT_READS: usize = 9;
 
+/// How many statements this seam names in total.
+///
+/// It is the length of [`ExplainedStatement::all`], which is the enumeration
+/// every other census is checked against.
+pub const STATEMENTS: usize = 21;
+
 impl<'a> ExplainedStatement<'a> {
+    /// Every statement this seam names, in slot order, each bound to a subject
+    /// a caller supplies.
+    ///
+    /// A list of statements is not self-checking: an entry dropped from a list
+    /// and a count shrunk beside it compiles, and a bar that iterates that list
+    /// then judges one statement fewer without saying so. This is the one
+    /// enumeration the narrower censuses are read out of, and
+    /// [`Self::slot`] — exhaustive over this enum — is what binds a variant to
+    /// its place in it.
+    ///
+    /// The parameters are the ones a statement cannot be spelled without. The
+    /// scope, the order and the discard scope are not parameters: a statement's
+    /// place in this enumeration does not depend on which of them it carries,
+    /// and the bars that care about those axes range over them themselves.
+    pub fn all(
+        subject: &'a DocumentPath,
+        probe: &'a SuffixProbe,
+        kinds: &'a [FindingKind],
+    ) -> [Self; STATEMENTS] {
+        [
+            Self::SuffixCandidates(probe),
+            Self::FindingsInClass(probe),
+            Self::ClassDiscard(probe),
+            Self::SubjectDiscard(subject, DiscardScope::EveryKind),
+            Self::FindingSubjectsWithoutRows(
+                SubjectScope::Vault,
+                kinds,
+                StoredPathOrder::Sensitive,
+            ),
+            Self::StoredDocumentPage(SubjectScope::Vault, StoredPathOrder::Sensitive),
+            Self::StoredFindingPage,
+            Self::StoredTombstonePage,
+            Self::StoredSuffixKeyPage,
+            Self::IndexedTermPage,
+            Self::DocumentFeedPage,
+            Self::TombstoneFeedPage,
+            Self::StoredDocument(subject),
+            Self::StoredFactsDocument(subject),
+            Self::DocumentLinks,
+            Self::DocumentHeadings,
+            Self::DocumentBlocks,
+            Self::DocumentTags,
+            Self::StoredTombstone(subject),
+            Self::StoredFindings(subject),
+            Self::VaultSchemaPin,
+        ]
+    }
+
+    /// Where this statement stands in [`Self::all`].
+    ///
+    /// The `match` is exhaustive, so a variant added to this enum has to take a
+    /// slot, and a slot outside the enumeration is refused here rather than
+    /// left to a bar to notice. The suite walks the two together: every member
+    /// of [`Self::all`] claims the slot it occupies, which is what says the
+    /// enumeration holds each variant once and in the order it declares.
+    pub fn slot(self) -> usize {
+        let slot = match self {
+            Self::SuffixCandidates(_) => 0,
+            Self::FindingsInClass(_) => 1,
+            Self::ClassDiscard(_) => 2,
+            Self::SubjectDiscard(..) => 3,
+            Self::FindingSubjectsWithoutRows(..) => 4,
+            Self::StoredDocumentPage(..) => 5,
+            Self::StoredFindingPage => 6,
+            Self::StoredTombstonePage => 7,
+            Self::StoredSuffixKeyPage => 8,
+            Self::IndexedTermPage => 9,
+            Self::DocumentFeedPage => 10,
+            Self::TombstoneFeedPage => 11,
+            Self::StoredDocument(_) => 12,
+            Self::StoredFactsDocument(_) => 13,
+            Self::DocumentLinks => 14,
+            Self::DocumentHeadings => 15,
+            Self::DocumentBlocks => 16,
+            Self::DocumentTags => 17,
+            Self::StoredTombstone(_) => 18,
+            Self::StoredFindings(_) => 19,
+            Self::VaultSchemaPin => 20,
+        };
+        assert!(
+            slot < STATEMENTS,
+            "slot {slot} is outside the enumeration: grow `all` and `STATEMENTS` with the \
+             statement that took it"
+        );
+        slot
+    }
+
     /// Every keyed point read, each bound to one subject.
     ///
     /// **The set is named here rather than beside the bar that judges it**, so

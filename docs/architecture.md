@@ -550,12 +550,14 @@ the pinned vault-schema projection.
 
 A point read is barred harder than a page, because a search is not a point read on its
 own: a range over the same index reports the same step, so each of the nine is judged on
-the **equality constraint** its seek carries as well as on the index it runs through. Eight
-name an index. The pinned-schema read seeks the primary key of a `WITHOUT ROWID` table,
-which SQLite reports with no index name, so a primary-key equality search is the whole of
-that one's bar. Only the findings read sorts, because it states an order — generation, then
-row key — that no index over that table holds; the other eight state an order their own
-index already gives them.
+the **equality constraint** its seek carries as well as on the index it runs through. Every
+one is held by four assertions: it never reads its table end to end, it searches that
+table, the step that searches it carries the equality constraint, and it builds no
+temporary B-tree. Eight also name the index they run through. The pinned-schema read seeks
+the primary key of a `WITHOUT ROWID` table, which SQLite reports with no index name, so
+that one carries the other four and no index assertion. Only the findings read is exempt
+from the sorter bar, because it states an order — generation, then row key — that no index
+over that table holds; the other eight state an order their own index already gives them.
 
 The document page and the finding-subject page are barred in the same terms, because a page
 is judged by what it reads before it returns its first row: the cursor is a bound on an

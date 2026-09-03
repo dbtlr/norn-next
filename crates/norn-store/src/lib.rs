@@ -104,6 +104,6 @@ pub use path::{
 };
 pub use request::{
     DiscardScope, ExplainedStatement, FeedCursor, FindingCursor, MAX_PAGE, POINT_READS, Request,
-    SubjectScope,
+    STATEMENTS, SubjectScope,
 };
 pub use store::{RecordedStoreSchema, SnapshotReader, Store, StoreMode};

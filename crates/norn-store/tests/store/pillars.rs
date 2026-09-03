@@ -994,6 +994,45 @@ fn an_enumeration_page_reaches_its_first_row_without_reading_the_rows_ahead_of_i
     suffix_keys.assert_uses_index("documents_path");
 }
 
+/// **The point-read census is exactly the statements that say they are point
+/// reads.** [`ExplainedStatement::point_reads`] is a list, and a list can be
+/// short: an edit that drops an entry and shrinks the count beside it compiles,
+/// and every bar that iterates the census then judges one statement fewer
+/// without a word.
+///
+/// So the two declarations are walked against each other. [`ExplainedStatement::all`]
+/// enumerates the seam, [`ExplainedStatement::slot`] is exhaustive over the enum
+/// and says where each statement stands in that enumeration, and this reads the
+/// point reads out of it and demands the census be that set — same count, same
+/// members, same order.
+#[test]
+fn the_point_read_census_holds_every_statement_that_says_it_is_one() {
+    let subject = path("one/glossary.md");
+    let probe = class_probe("glossary").expect("a class stem");
+    let kinds = [FindingKind::PathNamesNoDocument];
+
+    let every = ExplainedStatement::all(&subject, &probe, &kinds);
+    assert_eq!(every.len(), norn_store::STATEMENTS);
+    for (position, statement) in every.iter().enumerate() {
+        assert_eq!(
+            statement.slot(),
+            position,
+            "the enumeration and the slot a statement claims disagree: {statement:?}"
+        );
+    }
+
+    let declared: Vec<ExplainedStatement<'_>> = every
+        .into_iter()
+        .filter(|statement| statement.is_point_read())
+        .collect();
+    assert_eq!(
+        declared,
+        ExplainedStatement::point_reads(&subject).to_vec(),
+        "a statement says it is a point read and the census does not hold it, or holds \
+         one that does not — so the point-read bar judges a set nothing else agrees with"
+    );
+}
+
 /// How the bar judges one keyed point read.
 struct PointReadBar {
     /// The table the statement reaches its rows in.
