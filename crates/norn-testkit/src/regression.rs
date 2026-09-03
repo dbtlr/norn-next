@@ -29,9 +29,10 @@
 //! itself on a symbol — `symbol-present` and `symbol-absent` name a
 //! `<file>::<Symbol>` pair, and the audit reads the declaration lines of that
 //! file. Two rules keep the symbol arms off the shape a path absence is held
-//! off: the file has to resolve for **both** claims, because an absent symbol in
-//! an absent file is a path absence and is claimed as one; and the `Symbol` has
-//! to be one Rust identifier, spelled in the reason as well. A `symbol-absent`
+//! off: the file has to be a Rust source file that resolves, for **both**
+//! claims, because an absent symbol in an absent file is a path absence and is
+//! claimed as one; and the `Symbol` has to be one Rust identifier that is not a
+//! keyword, spelled in the reason as well. A `symbol-absent`
 //! ground therefore pre-commits the name the carrier takes when it lands, which
 //! is what a dormant case is — an authoring contract, not a guess about what
 //! somebody will call it.
@@ -216,10 +217,13 @@ pub enum Ground {
     /// The file has to be there. A name is claimed absent only where the tree
     /// can answer for it, so a subject whose home is not built yet is a path
     /// absence and is claimed as one, and a subject whose home nobody has picked
-    /// yet has no ground at all. What the claim costs is a decision: the
-    /// registry pre-commits the name the carrier takes, so the case fails the
-    /// day something declares it and fails while a carrier lands under a name
-    /// nobody wrote down.
+    /// yet has no ground at all. What the claim costs is a decision. The
+    /// registry pre-commits the name the carrier will take, and the audit fails
+    /// the day that name is declared — which is the whole point. A carrier that
+    /// lands under some other name leaves the claim standing, and that is why
+    /// the name is written down in advance: a dormant case is the contract the
+    /// carrier is authored against, not a guess about what somebody will call
+    /// it.
     SymbolAbsent(String),
     /// A `<file>::<Symbol>` pair the reason cites as a declaration the tree
     /// carries. The audit fails when the file declares no such name, which is a
@@ -1014,9 +1018,10 @@ impl Registry {
     /// where the tree can answer for it: an absent symbol in an absent file is
     /// a path absence, and reading it as a symbol absence would pass on the
     /// file's absence and go on passing after the file landed carrying the name.
-    /// The `Symbol` is held to being one Rust identifier for the same reason a
-    /// path is held to its spelling — a name no file can declare is an absence
-    /// nothing can end.
+    /// The file is held to being a Rust source file and the `Symbol` to being
+    /// one non-keyword Rust identifier, for the same reason a path is held to
+    /// its spelling — a name no file can declare, or a file whose lines this
+    /// grammar does not describe, is an absence nothing can end.
     ///
     /// Every ground's subject is also required to appear in the reason itself,
     /// the whole `<file>::<Symbol>` pair for a symbol ground. The grounds are
@@ -1221,6 +1226,21 @@ fn audit_symbol_ground(
             "`{name}` stands on `{subject}`, which is not a `<file>::<Symbol>` reference to one \
              declaration. A symbol ground names a single Rust identifier a file declares, because \
              a name no file can declare is a claim the scan can never refute"
+        ));
+        return;
+    }
+    if RUST_KEYWORDS.contains(&symbol) {
+        problems.push(format!(
+            "`{name}` stands on `{subject}`, whose `{symbol}` is a keyword: a Rust keyword names \
+             nothing a file can declare, so no landing ends an absence claimed under one"
+        ));
+        return;
+    }
+    if !file.ends_with(".rs") {
+        problems.push(format!(
+            "`{name}` stands on `{subject}`, whose file is not a Rust source file. A symbol claim \
+             is answered by a scan of Rust declaration lines, and running that scan over anything \
+             else reads a grammar the file does not use"
         ));
         return;
     }
@@ -1517,8 +1537,8 @@ fn declares_test(source: &str, name: &str) -> bool {
     false
 }
 
-/// Whether `name` is one Rust identifier: a letter or underscore, then letters,
-/// digits and underscores.
+/// Whether `name` is spelled like one Rust identifier: a letter or underscore,
+/// then letters, digits and underscores.
 ///
 /// A symbol ground is held to this before the tree is read, for the reason a
 /// path ground is held to its spelling. A name no Rust file could declare —
@@ -1532,15 +1552,24 @@ fn is_rust_identifier(name: &str) -> bool {
         && characters.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// The qualifiers a declaration may carry ahead of its keyword.
-const DECLARATION_QUALIFIERS: &[&str] = &[
-    "pub(crate) ",
-    "pub ",
-    "async ",
-    "unsafe ",
-    "const ",
-    "static ",
+/// The words spelled like an identifier that a declaration cannot be named.
+///
+/// Strict keywords and reserved ones together. A keyword passes
+/// [`is_rust_identifier`] and names nothing, so `counters.rs::fn` would be an
+/// absence no landing could ever end — and the raw spelling `r#fn` is a
+/// different string, which this grammar does not read either.
+const RUST_KEYWORDS: &[&str] = &[
+    "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
+    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl",
+    "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
+    "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
+    "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
 ];
+
+/// The bare words a declaration may carry ahead of its keyword, in any order
+/// and any number. `pub` and `extern` are read by [`past_qualifiers`] instead,
+/// because each may carry a group after it.
+const BARE_QUALIFIERS: &[&str] = &["async", "unsafe", "const", "static", "default"];
 
 /// The keywords that name a declaration whose name follows them.
 ///
@@ -1555,17 +1584,27 @@ const DECLARATION_KEYWORDS: &[&str] = &["struct ", "enum ", "union ", "trait ", 
 /// This is a scan of declaration lines, not a parse: the grammar reads the
 /// shapes a pre-committed name lands in — a function, a struct, an enum, a
 /// union, a trait, a type alias, a module, a constant, a static — and reads **a
-/// line that opens with the name itself** as a declaration too, which is how an
-/// enum member and a struct field are named.
+/// line segment that opens with the name itself** as a declaration too, which is
+/// how an enum member and a struct field are named. A line is cut at its commas
+/// and opening braces first, so members sharing one line are each read.
 ///
-/// That last arm over-reads. A match arm, a struct-literal field and a bare
-/// tail expression all open with an identifier, so a name used that way reads as
-/// declared. **The over-reading fails loud**: a `symbol-absent` ground refuted
-/// by a match arm fails the audit and forces somebody to re-derive the reason,
-/// which is the direction a falsifiability gate is allowed to err in.
-/// Under-reading is what the grammar must not do — a declaration this missed
-/// would leave an absence claim standing after its subject landed, which is the
-/// failure the grounds exist to prevent.
+/// **Under-reading is the failure this grammar must not have.** A declaration
+/// the scan misses leaves a `symbol-absent` claim standing after its subject
+/// landed, which is the exact staleness the grounds exist to catch, so every
+/// qualifier a declaration can carry is stripped ahead of the name
+/// ([`past_qualifiers`]) rather than matched in one fixed order.
+///
+/// **Over-reading is allowed, because it fails loud.** A match arm, a
+/// struct-literal field and a bare tail expression all open with an identifier,
+/// so a name used that way reads as declared; the case then fails the audit and
+/// somebody re-derives the reason, which is the direction a falsifiability gate
+/// may err in.
+///
+/// **The accepted bound is the macro.** A name produced by a macro invocation —
+/// `counter! { StatementsPrepared }` — is not read, because reading it means
+/// expanding macros rather than scanning lines. One `macro_rules!` exists in
+/// this workspace, so the bound costs nothing today; a vocabulary that moved
+/// behind a macro would need a ground of another kind.
 fn declares_symbol(source: &str, name: &str) -> bool {
     source
         .lines()
@@ -1577,21 +1616,115 @@ fn declares_symbol_here(line: &str, name: &str) -> bool {
     if opens_fn(line, name) {
         return true;
     }
-    let mut rest = line;
-    for qualifier in DECLARATION_QUALIFIERS {
-        if let Some(stripped) = rest.strip_prefix(qualifier) {
-            rest = stripped;
-        }
-    }
+    let rest = past_qualifiers(line);
     for keyword in DECLARATION_KEYWORDS {
-        if let Some(after) = rest.strip_prefix(keyword) {
-            return named_before(after, name, " <({;:=");
+        if let Some(after) = rest.strip_prefix(keyword)
+            && named_before(after, name, " <({;:=")
+        {
+            return true;
         }
     }
     // The line-opening arm: an enum member, a field, a constant's name once its
-    // `const` was stripped. Whitespace ahead of the follower is allowed, so
-    // `Foo ,` and `Foo = 1,` read the same as `Foo,`.
-    named_before(rest, name, ",({:=")
+    // `const` was stripped. The line is cut at its commas and opening braces so
+    // that members sharing one line are each read, and whitespace ahead of the
+    // follower is allowed, so `Foo ,` and `Foo = 1,` read the same as `Foo,`.
+    rest.split([',', '{'])
+        .any(|segment| named_before(segment.trim_start(), name, ",({:=}"))
+}
+
+/// `line` with every leading declaration qualifier removed, in whatever order
+/// and however many times they appear.
+///
+/// One reader, two callers: the carrier scan and the symbol scan see the same
+/// shapes, so a form one of them learns the other cannot miss. What is stripped
+/// is a same-line `#[…]` attribute group, `pub` with an optional restriction
+/// (`pub(crate)`, `pub(super)`, `pub(in path)`), `extern` with an optional
+/// string ABI, and the bare words in [`BARE_QUALIFIERS`]. An attribute whose
+/// brackets do not close on this line is left alone: it opens something the next
+/// lines finish, and this reader is a reader of one line.
+fn past_qualifiers(line: &str) -> &str {
+    let mut rest = line.trim_start();
+    loop {
+        let stripped = past_attribute(rest)
+            .or_else(|| past_visibility(rest))
+            .or_else(|| past_extern(rest))
+            .or_else(|| {
+                BARE_QUALIFIERS
+                    .iter()
+                    .find_map(|word| past_word(rest, word))
+            });
+        match stripped {
+            Some(shorter) => rest = shorter.trim_start(),
+            None => return rest,
+        }
+    }
+}
+
+/// What follows a leading `#[…]` group, when one opens and closes on this line.
+fn past_attribute(line: &str) -> Option<&str> {
+    let opened = line
+        .strip_prefix("#[")
+        .or_else(|| line.strip_prefix("#!["))?;
+    let mut depth = 1usize;
+    for (index, character) in opened.char_indices() {
+        match character {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&opened[index + character.len_utf8()..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What follows a leading `pub`, with its parenthesised restriction if it has
+/// one.
+fn past_visibility(line: &str) -> Option<&str> {
+    let rest = past_word(line, "pub")?;
+    let Some(opened) = rest.strip_prefix('(') else {
+        return Some(rest);
+    };
+    let mut depth = 1usize;
+    for (index, character) in opened.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&opened[index + character.len_utf8()..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What follows a leading `extern`, with its string ABI if it has one.
+fn past_extern(line: &str) -> Option<&str> {
+    let rest = past_word(line, "extern")?.trim_start();
+    let Some(opened) = rest.strip_prefix('"') else {
+        return Some(rest);
+    };
+    opened.split_once('"').map(|(_, after)| after)
+}
+
+/// What follows a leading `word`, when the line really opens with that whole
+/// word rather than with a longer name starting the same way.
+///
+/// `pub` is stripped from `pub(crate) fn`, where nothing separates the word
+/// from what follows it, and never from `public_holiday`.
+fn past_word<'a>(line: &'a str, word: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(word)?;
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(character) if character.is_whitespace() || character == '(' => Some(rest),
+        Some(_) => None,
+    }
 }
 
 /// Whether `rest` opens with `name` and then ends, or reaches one of
@@ -1607,19 +1740,13 @@ fn named_before(rest: &str, name: &str, followers: &str) -> bool {
     }
 }
 
-/// Whether a trimmed line declares `fn <name>`, with or without a visibility
-/// or `async` qualifier ahead of it.
+/// Whether a trimmed line declares `fn <name>`, whatever qualifiers it carries
+/// ahead of the keyword.
 fn opens_fn(line: &str, name: &str) -> bool {
-    let mut rest = line;
-    for qualifier in ["pub(crate) ", "pub ", "async ", "unsafe ", "const "] {
-        if let Some(stripped) = rest.strip_prefix(qualifier) {
-            rest = stripped;
-        }
-    }
-    let Some(rest) = rest.strip_prefix("fn ") else {
+    let Some(rest) = past_word(past_qualifiers(line), "fn") else {
         return false;
     };
-    let Some(rest) = rest.strip_prefix(name) else {
+    let Some(rest) = rest.trim_start().strip_prefix(name) else {
         return false;
     };
     rest.starts_with('(') || rest.starts_with('<')
@@ -2288,6 +2415,78 @@ pub(crate) fn foo(count: u64) -> u64 {
         );
     }
 
+    /// **A qualifier never hides a declaration.** Visibility restrictions, an
+    /// ABI, a same-line attribute and any order of the rest are all stripped, so
+    /// a `symbol-absent` claim cannot stay green because the carrier landed
+    /// behind `pub(super)`.
+    #[test]
+    fn a_declaration_is_read_through_qualifiers_in_any_order() {
+        for source in [
+            "pub(super) fn collect_statistics(connection: &Connection) {",
+            "pub(self) fn collect_statistics() {}",
+            "pub(in crate::db) fn collect_statistics() {",
+            "pub extern \"C\" fn collect_statistics() {",
+            "extern \"C\" fn collect_statistics() {",
+            "#[rustfmt::skip] pub fn collect_statistics() {",
+            "#[inline] #[cold] pub(crate) unsafe fn collect_statistics() {",
+            "default fn collect_statistics() {",
+            "const unsafe fn collect_statistics() {",
+            "unsafe const fn collect_statistics() {",
+        ] {
+            assert!(
+                declares_symbol(source, "collect_statistics"),
+                "`{source}` declares `collect_statistics`"
+            );
+        }
+        assert!(declares_symbol(
+            "#[derive(Clone)] pub struct Profile {",
+            "Profile"
+        ));
+        // One qualifier reader, two callers: the carrier scan sees the same
+        // shapes the symbol scan does.
+        assert!(opens_fn(
+            "#[rustfmt::skip] pub(super) fn wanted()",
+            "wanted"
+        ));
+        assert!(!opens_fn("pub(super) fn wanted_more()", "wanted"));
+    }
+
+    /// A Rust keyword is not a name a file can declare, so an absence claimed
+    /// under one could never be refuted — `r#fn` is a different spelling and
+    /// this grammar reads neither.
+    #[test]
+    fn a_symbol_ground_naming_a_keyword_is_caught() {
+        for keyword in ["fn", "crate", "self", "Self", "struct", "mod", "yield"] {
+            let subject = format!("crates/demo/tests/vocabulary.rs::{keyword}");
+            refused(
+                |registry| {
+                    let case = find(registry, "a-dormant-layer-zero-case");
+                    case.binding.reason = Some(format!("waits on {subject}"));
+                    case.binding.grounds = vec![Ground::SymbolAbsent(subject)];
+                },
+                "a Rust keyword names nothing a file can declare",
+            );
+        }
+    }
+
+    /// The scan is a Rust declaration scan, so its subject is a Rust file. A
+    /// shell script would pass every other check and then be read with a
+    /// grammar it has nothing to do with.
+    #[test]
+    fn a_symbol_ground_on_a_file_that_is_not_rust_is_caught() {
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.binding.reason =
+                    Some("waits on .github/scripts/lane-suite.sh::run_the_lane".to_string());
+                case.binding.grounds = vec![Ground::SymbolAbsent(
+                    ".github/scripts/lane-suite.sh::run_the_lane".to_string(),
+                )];
+            },
+            "whose file is not a Rust source file",
+        );
+    }
+
     /// A symbol ground names one declaration. A path with no symbol, a path and
     /// two, an empty name and a name no Rust file can declare are each a claim
     /// the scan could never refute, so each is refused before the tree is asked.
@@ -2390,6 +2589,13 @@ pub(crate) fn foo(count: u64) -> u64 {
             ("    StatementsPrepared,", "StatementsPrepared"),
             ("    documents: u64,", "documents"),
             ("    Held", "Held"),
+            // Members sharing one line are read: the line-opening arm reads
+            // every segment, not only the first.
+            ("    Foo, StatementsPrepared,", "StatementsPrepared"),
+            (
+                "pub enum Counter { Foo, StatementsPrepared }",
+                "StatementsPrepared",
+            ),
         ] {
             assert!(
                 declares_symbol(source, name),
