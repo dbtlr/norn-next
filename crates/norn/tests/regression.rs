@@ -37,13 +37,21 @@
 //! by itself, and re-deriving it — binding the case, or restating why a built
 //! subject still carries nothing — is the only way back to green.
 //!
-//! Not every missing subject is a path. A reason may wait on a guard nobody
-//! wrote, on a member absent from a counter vocabulary, or on a carrier the
-//! reference grammar cannot name, and no path claim refutes any of those. Those
-//! reasons expire only when a person re-derives them, so the class is pinned by
-//! name in [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees
-//! mechanically is that the class is a reviewed list rather than a silent
-//! majority.
+//! A subject is not always a whole path. A reason often waits on one name
+//! inside a file the tree already holds — a member absent from a counter
+//! vocabulary, a guard function nobody wrote, a type a module will grow — and
+//! states it as a `symbol-absent` ground: a `<file>::<Symbol>` pair the audit
+//! reads out of that file's declaration lines. The file has to be there for
+//! either symbol claim, because an absent name in an absent file is a path
+//! absence, and the name is pre-committed rather than guessed at: a dormant case
+//! is the contract the carrier is authored against.
+//!
+//! What is left waits on nothing any subject names — a shell step, a module of
+//! an integration target, a reader behind a feature, a vocabulary nobody has
+//! written, a guard with no home decided. Those reasons expire only when a
+//! person re-derives them, so the class is pinned by name in
+//! [`UNFALSIFIABLE_DORMANCY`]: what the registry guarantees mechanically is that
+//! the class is a reviewed list rather than a silent majority.
 //!
 //! # What this suite is not
 //!
@@ -81,7 +89,7 @@ const CASE_TOTAL: usize = 106;
 /// the constant, which is the moment the edit becomes a thing a reviewer
 /// looked at. This is the fixture generator's contract digest applied to a
 /// registry.
-const CONTRACT_DIGEST: &str = "71dcde9ab3dccc94b0458b2856527c96920bfb10e270f98cb929a6dee76841fd";
+const CONTRACT_DIGEST: &str = "527f75ab703590fbbbf196573b7ec7af8f2a6310af9b91b5090e8556c9102fd6";
 
 /// The cases carried by tests today, by name.
 ///
@@ -109,18 +117,31 @@ const BOUND_CASES: &[&str] = &[
 /// The dormant cases at or below [`LAYER_LANDING`] whose reason states no
 /// absence, by name — **the dormancy the falsifiability gate cannot refute.**
 ///
-/// Each of these waits on something that is not a path: a guard nobody wrote, a
-/// member absent from a counter vocabulary, a vault-rule vocabulary that does
-/// not exist, a carrier the reference grammar cannot name because it is a shell
-/// step, a module of an integration target, or a reader behind a feature. The
-/// grounds beside such a reason hold the paths it cites as present, so the audit
-/// still catches those moving; the claim that something is missing is refuted by
-/// nobody but the next person to read the code.
+/// A reason waiting on a name inside a file the tree already holds states that
+/// name as a `symbol-absent` ground and leaves this list. What is left is the
+/// residue no subject reaches, and it is five classes rather than a bag:
+///
+/// - **A shell step.** The carrier is a line of `lane-suite.sh`, which no
+///   `<file>::<fn>` reference and no Rust declaration names.
+/// - **A module of an integration target.** The carrier compiles, and the
+///   reference grammar names top-level `tests/` files only; NORN-159 owns
+///   widening it. A `compile_fail` doctest sits in the same class.
+/// - **A reader behind a feature.** The declaration is there; what is absent is
+///   the `induced-failure` selection cargo would compile it under, which is a
+///   fact about a build rather than about a file's text.
+/// - **An absent vault-rule vocabulary.** No file is settled to declare a rule
+///   set, so no name can be pre-committed as the carrier's.
+/// - **A guard with no settled home.** The scan or lint the case waits on has
+///   no file decided on to hold it, and a symbol ground names a file.
+///
+/// The grounds beside such a reason hold the subjects it cites as present, so
+/// the audit still catches those moving; the claim that something is missing is
+/// refuted by nobody but the next person to read the code.
 ///
 /// Pinned for the reason [`BOUND_CASES`] is: the size of this class is the
-/// honest scope of the gate. A case that gains an `absent` ground leaves the
-/// list, a reason that newly waits on a non-path subject joins it, and either
-/// way the edit is in the diff.
+/// honest scope of the gate. A case that gains an absence leaves the list, a
+/// reason that newly waits on a subject nothing names joins it, and either way
+/// the edit is in the diff.
 const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "a-create-never-takes-a-name-somebody-else-holds",
     "a-measurement-step-asserts-a-nonzero-pass-count",
@@ -130,18 +151,13 @@ const UNFALSIFIABLE_DORMANCY: &[&str] = &[
     "each-file-is-read-once-per-build",
     "guard-binds-executed-sql",
     "harness-assertions-observe-stable-facts",
-    "incremental-equals-rebuild",
     "instrumentation-exists-and-is-consumed",
     "maintenance-touches-the-affected-set-only",
     "output-parity-cannot-certify-structure",
     "present-but-unusable-config-refuses-loudly",
-    "scale-assertions-vary-documents-and-bytes-independently",
-    "statements-are-prepared-once",
     "steps-report-their-own-outcome",
-    "storage-configuration-is-explicit",
     "substrate-capabilities-are-probed-before-they-are-relied-on",
     "unsatisfiable-config-is-rejected-at-load",
-    "warm-state-survives-process-lifetime",
 ];
 
 fn workspace_root() -> PathBuf {
