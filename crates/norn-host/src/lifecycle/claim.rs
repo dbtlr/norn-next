@@ -234,6 +234,15 @@
 //! `a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg`
 //! and `destruction_gives_back_an_attachment_a_finished_job_left_behind`.
 //!
+//! **Coverage out with one named leg is what says that leg's pin still
+//! stands.** Carried by [`Coverage::out_with`], whose one reader is
+//! `reclaim_unwound_leg`: every pinning leg takes its pin immediately before it
+//! takes the coverage and gives the pin back at the lock that ends it, so a leg
+//! that never reached that lock is pinning the entry exactly where the custody
+//! record still names it. Pinned by
+//! `a_leg_that_unwinds_leaves_the_entry_untrusted_and_a_demand_attaches_it_again`,
+//! which reads the entry's pin count after the unwind.
+//!
 //! ## The closing path
 //!
 //! Every teardown enters at `begin_release`, which opens the gate
@@ -258,11 +267,13 @@
 //! Two moves revoke a claim blind to the kind and the epoch it stands at:
 //! [`Claim::end_running_leg`], which ends whatever is registered, and the
 //! [`Claim::open`] beside it in `refuse_conflict`, `refuse_identity_error`,
-//! `Host::drop` and the demand that takes back a scheduled teardown. Every one
-//! of those sites is preceded by [`Claim::invalidate`] under the same lock, and
-//! that supersede-first order is what makes the blindness safe: the entry has
-//! moved past every epoch a leg could be standing at before anything is
-//! revoked, so what these end can no longer write anything back.
+//! `Host::drop` and the demand that takes back a scheduled teardown.
+//! `reclaim_unwound_leg` reaches the second of them through `begin_release`,
+//! over a leg that will never take another lock. Every one of those sites is
+//! preceded by [`Claim::invalidate`] under the same lock, and that
+//! supersede-first order is what makes the blindness safe: the entry has moved
+//! past every epoch a leg could be standing at before anything is revoked, so
+//! what these end can no longer write anything back.
 //!
 //! The remaining calls to [`Claim::open`] revoke nothing another claim holds.
 //! `begin_release` and `finish_release` open the gate on the entry's own
@@ -296,6 +307,13 @@
 //! later tick where a pin says the coverage is coming back, and ends there where
 //! none does. Pinned by
 //! `a_job_that_loses_the_attachment_to_a_poll_runs_when_the_poll_gives_it_back`.
+//!
+//! One writer gives a pin back for a leg rather than as one. A leg that unwinds
+//! reaches no lock of its own, so `reclaim_unwound_leg` gives the pin back on
+//! its behalf, and [`Coverage::out_with`] is what says such a pin is standing:
+//! the pinning legs take the pin immediately before they take the coverage, so
+//! the custody record naming the leg and the pin that leg took stand or fall
+//! together.
 //!
 //! A read running against the entry takes one too, which is what makes it work
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
@@ -472,6 +490,13 @@ impl<A> Coverage<A> {
         matches!(self.0, Custody::OnLeg(_))
     }
 
+    /// Whether the coverage out with a leg is out with the leg at this epoch.
+    /// Coverage a leg parked back, and coverage another leg holds, are each
+    /// coverage this one is not holding.
+    pub(super) fn out_with(&self, leg: u64) -> bool {
+        matches!(self.0, Custody::OnLeg(held) if held == leg)
+    }
+
     /// Take the coverage the entry holds, for the leg at this epoch. An entry
     /// holding none gives none, and coverage already out with a leg is taken by
     /// no other.
@@ -582,7 +607,7 @@ pub(super) enum Leg {
 
 impl Leg {
     /// The epoch the leg was taken at.
-    fn epoch(self) -> u64 {
+    pub(super) fn epoch(self) -> u64 {
         match self {
             Self::Poll(epoch) | Self::Job(epoch) => epoch,
         }
