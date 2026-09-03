@@ -168,6 +168,13 @@ impl Vault {
     /// the other case and is stated here, as [`SkipReason::UnderAnEntry`]:
     /// `path_kind` cannot answer at all through an entry that is not a
     /// directory.
+    ///
+    /// **A notation is a fact about an entry**, so the descent proves each name
+    /// above the last one is there before it reads that name as a shadow
+    /// basename or as a link. A spelling nothing stands at vanishes on any
+    /// root, and the last name's spelling is reached only once every name above
+    /// it is there — so an absent ancestor answers, and a shadow basename below
+    /// one is never spelled at all.
     pub fn skip_reaching(&self, relative: &Path) -> Result<Option<SkipFact>, WalkError> {
         let subtree = self.normalize(relative)?;
         if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
@@ -312,6 +319,14 @@ enum Passed {
 /// Reads one name a descent passes through, the way the page reads the entries
 /// it descends through.
 ///
+/// **The stat comes first, so every verdict here is a verdict about an entry.**
+/// The page judges names a directory stream handed it, and each of those is a
+/// name something stands at. This descent is handed a caller's spelling
+/// instead, so it proves an entry is there before it reads the name as a Norn
+/// shadow basename or as a symbolic link. A spelling nothing stands at is an
+/// absence on any root, and a root that tells two spellings apart holds the
+/// shadow name and an ordinary neighbour as two separate names.
+///
 /// A Norn shadow basename is never entered, and a symbolic link is a fact about
 /// a name rather than an edge to follow. Absence and a non-directory entry are
 /// kept apart because they are two different answers about what stands below:
@@ -326,15 +341,15 @@ fn pass_component(
     path: &NormalizedPath,
     access: &Path,
 ) -> Result<Passed, WalkError> {
-    if vault.names_a_shadow(name) {
-        return Ok(Passed::Skipped(SkipReason::Shadow));
-    }
     crate::reads::count_stat();
     let metadata = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(metadata) => metadata,
         Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(Passed::Vanished),
         Err(source) => return Err(environment_errno("stating", access, source)),
     };
+    if vault.names_a_shadow(name) {
+        return Ok(Passed::Skipped(SkipReason::Shadow));
+    }
     Ok(
         match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
             EntryKind::Directory => Passed::Directory,
@@ -2585,14 +2600,21 @@ mod tests {
     ///
     /// The last name's own spelling is read after the descent, not before it,
     /// so an absent ancestor answers for a shadow basename below it rather than
-    /// the other way about.
+    /// the other way about. A shadow-spelled *ancestor* is read the same way:
+    /// the descent stats the name before it judges the spelling, so a name no
+    /// entry stands at holds nothing whatever it is spelled.
     #[test]
     fn a_name_that_is_not_there_is_no_skip_at_all() {
         let scratch = Scratch::new("vault-skip-absent");
         scratch.place("plain.md", b"body");
 
         let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
-        for absent in ["gone", "gone/note.md", "gone/norn-shadow-1-1"] {
+        for absent in [
+            "gone",
+            "gone/note.md",
+            "gone/norn-shadow-1-1",
+            "norn-shadow-3-3/x.md",
+        ] {
             assert!(
                 vault
                     .skip_reaching(Path::new(absent))
