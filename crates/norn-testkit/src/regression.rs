@@ -1545,6 +1545,10 @@ fn declares_test(source: &str, name: &str) -> bool {
 /// `foo-bar`, `Foo::bar`, nothing at all — is a name the declaration scan never
 /// finds, so an absence claimed under one would pass forever.
 fn is_rust_identifier(name: &str) -> bool {
+    // A lone underscore is a reserved token, not a name: nothing declares it.
+    if name == "_" {
+        return false;
+    }
     let mut characters = name.chars();
     characters
         .next()
@@ -2498,6 +2502,7 @@ pub(crate) fn foo(count: u64) -> u64 {
             "crates/demo/tests/vocabulary.rs::",
             "crates/demo/tests/vocabulary.rs::foo-bar",
             "crates/demo/tests/vocabulary.rs::9lives",
+            "crates/demo/tests/vocabulary.rs::_",
         ] {
             refused(
                 |registry| {
