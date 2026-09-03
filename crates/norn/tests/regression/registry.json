@@ -269,11 +269,11 @@
       "sources": ["NRN-a58", "NRN-a61", "NRN-a63"],
       "binding": {
         "status": "dormant",
-        "reason": "the per-PR pair moves both axes together: crates/norn-fixtures/src/profile.rs sizes `ambiguous` at 300 documents of compact body and `realistic` at 2000 of realistic body, so the pair crates/norn-host/tests/counter_gate.rs runs differs in document count and in body and clutter volume at once and no assertion over it isolates an axis. A pair that varied one axis needs a profile whose scale moves while its body shape holds, and the generator's knobs are declared per profile rather than per axis. It waits on a crates/norn-fixtures/src/profile.rs::AXIS_ISOLATED_PAIR declaration naming the two profiles that differ on one axis alone, which is the name the pair takes when it lands.",
+        "reason": "the per-PR pair moves both axes together: crates/norn-fixtures/src/profile.rs sizes `ambiguous` at 300 documents of compact body and `realistic` at 2000 of realistic body, so the pair crates/norn-host/tests/counter_gate.rs runs differs in document count and in body and clutter volume at once and no assertion over it isolates an axis. A pair that varied one axis needs a profile whose scale moves while its body shape holds, and the generator's knobs are declared per profile rather than per axis. It waits on a crates/norn-testkit/src/scale.rs::AxisIsolatedPair beside `SizeIndependencePair`, which is the name the pairing takes when it lands: a scale assertion is built from a pair type, and a profile is an anonymous entry in the generator's table rather than a name a claim can carry.",
         "grounds": [
           { "present": "crates/norn-fixtures/src/profile.rs" },
           { "present": "crates/norn-host/tests/counter_gate.rs" },
-          { "symbol-absent": "crates/norn-fixtures/src/profile.rs::AXIS_ISOLATED_PAIR" }
+          { "symbol-absent": "crates/norn-testkit/src/scale.rs::AxisIsolatedPair" }
         ]
       }
     },
@@ -824,7 +824,7 @@
       "sources": ["NRN-a58"],
       "binding": {
         "status": "dormant",
-        "reason": "the caching half exists: crates/norn-store/src/increment.rs prepares a changeset's statements through the connection's own cache, so a changeset of n documents compiles a bounded set rather than a set per document. The counter the property reads does not exist — crates/norn-store/src/counters.rs counts derivation, and statement compilation is not a member of that vocabulary — so there is no reading to hold to a bounded constant independent of row count. It waits on a crates/norn-store/src/counters.rs::StatementsPrepared member of `Counter`, which is the name the carrier takes when it lands.",
+        "reason": "the caching half exists: crates/norn-store/src/increment.rs prepares a changeset's statements through the connection's own cache, so a changeset of n documents compiles a bounded set rather than a set per document. The reading the property holds to a bounded constant does not exist: no member of the counting vocabulary names statement compilation. The member is pre-committed as crates/norn-store/src/counters.rs::StatementsPrepared, in the file that owns that vocabulary, and landing it amends the same file's rule that what is counted is derivation and only derivation — compilation is work a request paid for rather than a fact it derived, so the carrier widens the vocabulary's own statement of what a counter is for in the same edit.",
         "grounds": [
           { "present": "crates/norn-store/src/increment.rs" },
           { "present": "crates/norn-store/src/counters.rs" },
@@ -855,7 +855,7 @@
       "sources": ["norn-legacy engineering learnings"],
       "binding": {
         "status": "dormant",
-        "reason": "the capability is relied on now: crates/norn-store/src/ddl/fts.rs leans on the full-text index. The capability this class was mined from is not it — crates/norn-store/src/json.rs projects a value tree to canonical JSON of its own rather than through the engine's JSON aggregation — and no declaration records that as the alternative the property's second arm asks for. The probe has no home either: crates/norn-host/tests/counter_gate.rs reaches the index over a generated tree as a reader inside a counter bar, not as a probe of the capability at corpus scale. The residue is the guard with no settled home: the probe has no file to sit in, so there is no `file::Symbol` this case can pre-commit as the carrier's name.",
+        "reason": "the capability is relied on now: crates/norn-store/src/ddl/fts.rs leans on the full-text index. The capability this class was mined from is not it — crates/norn-store/src/json.rs projects a value tree to canonical JSON of its own rather than through the engine's JSON aggregation — and no declaration records that as the alternative the property's second arm asks for. The probe has no home either: crates/norn-host/tests/counter_gate.rs reaches the index over a generated tree as a reader inside a counter bar, not as a probe of the capability at corpus scale. Two residues with no settled home, then: the probe has no file to sit in, and the declaration the second arm asks for — the record naming a canonical projection of this workspace's own as the chosen alternative to the engine's JSON aggregation — has none either, so neither absence is a `file::Symbol` this case can pre-commit as a carrier's name.",
         "grounds": [
           { "present": "crates/norn-store/src/ddl/fts.rs" },
           { "present": "crates/norn-store/src/json.rs" },
