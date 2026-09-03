@@ -11,11 +11,12 @@
 //! carrying its reason; it never answers from state it knows is stale, and it
 //! never answers with a caveat attached.
 //!
-//! [`TrustState::Warming`], [`TrustState::Untrusted`],
-//! [`UntrustedReason::WatcherLost`] and [`UntrustedReason::EnvironmentalRefusal`]
-//! are the variants whose payloads grow — how far a heal has come, what made a
-//! state untrustworthy, what ended watcher coverage, what the environment
-//! refused. Each is `#[non_exhaustive]` at the variant level, so a field
+//! **Every variant here that carries a payload is one whose payload grows** —
+//! how far a heal has come, what made a state untrustworthy, and what each
+//! reason has to say about the run that raised it. The rule is the shape rather
+//! than a list, so a reason added below is covered by it without this paragraph
+//! being edited. Each such variant is `#[non_exhaustive]` at the variant level,
+//! so a field
 //! arriving in one of them is not a compile error for a caller that
 //! destructured it: a pattern over such a variant already has to accept the
 //! fields it does not name. Construction is what the arriving field does

@@ -123,6 +123,11 @@
 //! taken under the lock publishing the state it warms into. The hand-on is
 //! pinned by `a_job_leg_release_honors_a_demand_with_a_claimed_re_attach` and
 //! `a_demand_raised_during_a_teardown_is_honored_when_the_release_finishes`.
+//! The re-arm is the tail every teardown takes and the one the cleanup after an
+//! unwind does not — a decision `finish_release` is told rather than derives —
+//! so this pair is reached over work an entry chose to end, never over work
+//! that ended part way through. Pinned there by
+//! `a_lease_held_across_an_unwind_buys_one_attempt_and_the_next_demand_asks_again`.
 //! The slot the pair takes is what holds the entry to the attach the re-arm
 //! sends: the re-arm plants no marker of its own, so the reader that refuses a
 //! second send — [`Claim::take_slot_for_marked`] — has the slot alone to read a
@@ -234,14 +239,14 @@
 //! `a_refusal_over_a_leg_holding_none_of_the_coverage_closes_its_window_at_the_leg`
 //! and `destruction_gives_back_an_attachment_a_finished_job_left_behind`.
 //!
-//! **Coverage out with one named leg is what says that leg's pin still
-//! stands.** Carried by [`Coverage::out_with`], whose one reader is
-//! `reclaim_unwound_leg`: every pinning leg takes its pin immediately before it
-//! takes the coverage and gives the pin back at the lock that ends it, so a leg
-//! that never reached that lock is pinning the entry exactly where the custody
-//! record still names it. Pinned by
-//! `a_leg_that_unwinds_leaves_the_entry_untrusted_and_a_demand_attaches_it_again`,
-//! which reads the entry's pin count after the unwind.
+//! **Custody says who holds the coverage, and nothing about who holds a pin.**
+//! The two part at three places: an attach leg pins and takes no coverage,
+//! `Job::Detach` takes the coverage and pins nothing, and every leg past its
+//! epilogue is still recorded as holding what it is handing to
+//! [`EntryOps::detach`](super::EntryOps::detach). No move here is read as a pin
+//! for that reason — the entry names its pinning leg itself, at
+//! `EntryState::pinned_leg`, and the row for that field is under *What this
+//! module is not*.
 //!
 //! ## The closing path
 //!
@@ -310,10 +315,17 @@
 //!
 //! One writer gives a pin back for a leg rather than as one. A leg that unwinds
 //! reaches no lock of its own, so `reclaim_unwound_leg` gives the pin back on
-//! its behalf, and [`Coverage::out_with`] is what says such a pin is standing:
-//! the pinning legs take the pin immediately before they take the coverage, so
-//! the custody record naming the leg and the pin that leg took stand or fall
-//! together.
+//! its behalf, and `EntryState::pinned_leg` is what says such a pin is
+//! standing: every pinning leg takes the coverage and the pin under one hold of
+//! the entry's lock, records itself there as it takes them, and clears the
+//! record at the lock that ends it. A pin is therefore given back for a leg
+//! exactly where the leg is the one the entry is pinned for — never on a
+//! reading of what the leg was holding, which stands over legs that pin nothing
+//! and over legs already past their own end. Pinned by
+//! `a_detach_leg_that_unwinds_leaves_a_reads_pin_standing`, which is the case
+//! that fails where the give-back widens past the record, and by
+//! `a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other`, which is
+//! the case that fails where it stops reaching the leg that took one.
 //!
 //! A read running against the entry takes one too, which is what makes it work
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
@@ -488,13 +500,6 @@ impl<A> Coverage<A> {
     /// the leg ends.
     pub(super) fn out_with_leg(&self) -> bool {
         matches!(self.0, Custody::OnLeg(_))
-    }
-
-    /// Whether the coverage out with a leg is out with the leg at this epoch.
-    /// Coverage a leg parked back, and coverage another leg holds, are each
-    /// coverage this one is not holding.
-    pub(super) fn out_with(&self, leg: u64) -> bool {
-        matches!(self.0, Custody::OnLeg(held) if held == leg)
     }
 
     /// Take the coverage the entry holds, for the leg at this epoch. An entry
