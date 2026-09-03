@@ -323,6 +323,68 @@ pub enum ExplainedStatement<'a> {
     VaultSchemaPin,
 }
 
+/// How many keyed point reads this seam names.
+///
+/// It is the length of [`ExplainedStatement::point_reads`], and that is the
+/// whole of the guarantee: a point read dropped from the census does not
+/// compile, rather than quietly narrowing the bar that iterates it.
+pub const POINT_READS: usize = 9;
+
+impl<'a> ExplainedStatement<'a> {
+    /// Every keyed point read, each bound to one subject.
+    ///
+    /// **The set is named here rather than beside the bar that judges it**, so
+    /// there is one list rather than a list and a copy of it. A bar holding its
+    /// own copy greens whatever the copy forgot.
+    pub fn point_reads(subject: &'a DocumentPath) -> [Self; POINT_READS] {
+        [
+            Self::StoredDocument(subject),
+            Self::StoredFactsDocument(subject),
+            Self::DocumentLinks,
+            Self::DocumentHeadings,
+            Self::DocumentBlocks,
+            Self::DocumentTags,
+            Self::StoredTombstone(subject),
+            Self::StoredFindings(subject),
+            Self::VaultSchemaPin,
+        ]
+    }
+
+    /// Whether this statement answers about a key its caller already holds,
+    /// rather than draining a page or ranging over a probe.
+    ///
+    /// The `match` is exhaustive, so a variant added to this enum has to say
+    /// which of the two it is. A statement that says it is a point read belongs
+    /// in [`Self::point_reads`], and the bar over that census checks the answer
+    /// both ways: every statement it is handed reads `true` here, and the
+    /// census is the length this seam declares.
+    pub fn is_point_read(self) -> bool {
+        match self {
+            Self::StoredDocument(_)
+            | Self::StoredFactsDocument(_)
+            | Self::DocumentLinks
+            | Self::DocumentHeadings
+            | Self::DocumentBlocks
+            | Self::DocumentTags
+            | Self::StoredTombstone(_)
+            | Self::StoredFindings(_)
+            | Self::VaultSchemaPin => true,
+            Self::SuffixCandidates(_)
+            | Self::FindingsInClass(_)
+            | Self::ClassDiscard(_)
+            | Self::SubjectDiscard(..)
+            | Self::FindingSubjectsWithoutRows(..)
+            | Self::StoredDocumentPage(..)
+            | Self::StoredFindingPage
+            | Self::StoredTombstonePage
+            | Self::StoredSuffixKeyPage
+            | Self::IndexedTermPage
+            | Self::DocumentFeedPage
+            | Self::TombstoneFeedPage => false,
+        }
+    }
+}
+
 /// The cursor [`Request::emitted_plan`] explains a paged statement with.
 ///
 /// Both paged statements are explained with a cursor **bound and inside the

@@ -302,6 +302,47 @@ impl QueryPlan {
         );
     }
 
+    /// **The equality bar.** Every step that searches `table` was given this
+    /// constraint, in the spelling SQLite prints it.
+    ///
+    /// A search is not a point read on its own. `path>?` opens a cursor on the
+    /// same index as `path=?` and reports the same `SEARCH … USING INDEX` row,
+    /// so [`QueryPlan::assert_uses_index`] and [`QueryPlan::assert_searches`]
+    /// both green a reader that seeks to a key and then walks the rest of the
+    /// table. The constraint text is where the two come apart, and it is the
+    /// only place a `WITHOUT ROWID` primary-key seek can be judged at all —
+    /// that row names no index.
+    ///
+    /// The constraint is read off the steps that search `table` and nowhere
+    /// else, so an equality seek of some other relation in the same plan
+    /// cannot answer for this one. A plan that does not search the table at all
+    /// fails, for the same reason [`QueryPlan::assert_searches`] does.
+    pub fn assert_search_constraint(&self, table: &str, constraint: &str) {
+        let table = bare_name(table);
+        let searches: Vec<&PlanRow> = self
+            .rows
+            .iter()
+            .filter(|row| row.searches().map(|name| self.table_of(name)) == Some(table))
+            .collect();
+        assert!(
+            !searches.is_empty(),
+            "the plan does not search `{table}`: {}\nemitted SQL: {}",
+            rows_display(&self.rows.iter().collect::<Vec<_>>()),
+            self.sql
+        );
+        let wrong: Vec<&PlanRow> = searches
+            .into_iter()
+            .filter(|row| row.constraint() != Some(constraint))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "a step searching `{table}` does not carry the constraint `{constraint}`: {}\n\
+             emitted SQL: {}",
+            rows_display(&wrong),
+            self.sql
+        );
+    }
+
     /// The plan reads through the named index.
     pub fn assert_uses_index(&self, index: &str) {
         assert!(
@@ -907,6 +948,56 @@ mod tests {
     fn a_plan_reading_another_index_fails_the_index_bar() {
         plan(&["SEARCH documents USING INDEX documents_path (path=?)"])
             .assert_uses_index("documents_stem");
+    }
+
+    /// The index bar cannot tell a point read from a range: both report
+    /// `SEARCH … USING INDEX documents_stem`, and only the constraint says
+    /// which one ran.
+    #[test]
+    fn the_constraint_bar_separates_an_equality_seek_from_a_range_over_the_same_index() {
+        let equality = plan(&["SEARCH documents USING INDEX documents_stem (stem=?)"]);
+        equality.assert_uses_index("documents_stem");
+        equality.assert_search_constraint("documents", "(stem=?)");
+
+        let range = plan(&["SEARCH documents USING INDEX documents_stem (stem>?)"]);
+        range.assert_uses_index("documents_stem");
+        let failure = std::panic::catch_unwind(move || {
+            range.assert_search_constraint("documents", "(stem=?)")
+        })
+        .expect_err("a range is not an equality seek");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("a formatted assertion message");
+        assert!(
+            message.contains("does not carry the constraint"),
+            "{message}"
+        );
+    }
+
+    /// The primary key of a `WITHOUT ROWID` table has no index name, so the
+    /// constraint is the only thing that says the seek was a point read.
+    #[test]
+    fn a_primary_key_seek_is_judged_by_its_constraint() {
+        plan(&["SEARCH meta USING PRIMARY KEY (key=?)"])
+            .assert_search_constraint("meta", "(key=?)");
+    }
+
+    /// The constraint is read off the step that searches the named table, so
+    /// another table's equality seek in the same plan cannot answer for it.
+    #[test]
+    #[should_panic(expected = "does not carry the constraint `(path=?)`")]
+    fn another_tables_equality_seek_does_not_answer_the_constraint_bar() {
+        plan(&[
+            "SEARCH documents USING INDEX documents_path (path>?)",
+            "SEARCH links USING INDEX links_source (path=?)",
+        ])
+        .assert_search_constraint("documents", "(path=?)");
+    }
+
+    #[test]
+    #[should_panic(expected = "does not search `documents`")]
+    fn a_plan_that_scans_fails_the_constraint_bar_too() {
+        plan(&["SCAN documents"]).assert_search_constraint("documents", "(path=?)");
     }
 
     #[test]

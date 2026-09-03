@@ -83,7 +83,7 @@ use crate::path::{ClassKey, DirectoryPrefix, DocumentPath, SuffixProbe};
 use crate::store::Store;
 
 mod instrument;
-pub use instrument::ExplainedStatement;
+pub use instrument::{ExplainedStatement, POINT_READS};
 
 /// Maximum row count any paged reader accepts.
 ///
@@ -1103,10 +1103,12 @@ impl<'a> Request<'a> {
     /// each answering how many rows that table holds.
     ///
     /// **The cost of a count is the size of the table it counts.** SQLite
-    /// reaches the answer by reading the narrowest index over the table end to
-    /// end, so this reader grows with the vault by definition — which is what a
-    /// row count is. It therefore carries no size-independence bar and no plan
-    /// bar; there is no cheaper shape for either to hold it to.
+    /// reaches the answer by reading the table end to end — through the
+    /// narrowest index over it where one exists, and over the table's own rows
+    /// where none does, which is how the `WITHOUT ROWID` pillars plan. So this
+    /// reader grows with the vault by definition, which is what a row count is:
+    /// it carries no size-independence bar and no plan bar, because there is no
+    /// cheaper shape for either to hold it to.
     pub fn pillars(&self) -> Result<PillarReport, StoreError> {
         let count = |sql: &str| -> Result<u64, StoreError> {
             self.store
