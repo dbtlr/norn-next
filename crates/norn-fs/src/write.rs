@@ -63,16 +63,22 @@
 //! converges on the winner. A caller that needs to know whether it won compares
 //! the [`PostState`] it was handed against what is at the path.
 //!
-//! **Every arm that publishes or vouches asks both questions first.** A removal
-//! ([`vacate`]) and the suppressed no-op ([`Landed::Unchanged`]) re-hash the
-//! bytes through the held handle and then confirm the name, exactly as the
-//! replacement does before its swap, so a foreign write into the file that was
-//! read refuses on every arm. The residual is then the same one everywhere:
-//! the width of the single call that publishes after the verification passed.
-//! The no-op arm has no such call, so what lands after its verification is the
-//! next change the watcher reports. The second read is paid on every removal
-//! and every idempotent write; that is the price of one protocol rather than
-//! two, and of never removing or vouching for content nobody read again.
+//! **Every arm that reads a document and then publishes or answers at that
+//! same name asks both questions first.** A removal ([`vacate`]) and the
+//! suppressed no-op ([`Landed::Unchanged`]) re-hash the bytes through the held
+//! handle and then confirm the name, exactly as the replacement does before
+//! its swap, so a foreign write into the file that was read refuses on each of
+//! the three. Their residual is the same one: the width of the single call
+//! that publishes after the verification passed, and the no-op arm has no
+//! such call. An exclusive create reads nothing first, so its open is its
+//! whole question. A move's source leg is the one read that publishes
+//! elsewhere: the bytes it read are placed at the destination before the
+//! source is removed under the removal's own verification, so a foreign write
+//! into the source inside that span refuses at the removal, after the
+//! destination was placed, and leaves both names holding a document. The
+//! second read is paid on every removal and every idempotent write; that is
+//! the price of one protocol rather than two, and of never removing or
+//! vouching for content nobody read again.
 //!
 //! # Two durability barriers, and no third
 //!
@@ -246,8 +252,9 @@ pub enum Landed {
     /// into the file during the precondition's read makes that false about the
     /// bytes and refuses as drift; a foreign replacement makes it false about
     /// the file and refuses as a republished name. Nothing publishes on this
-    /// arm, so a foreign write that lands after the verification is the next
-    /// change the watcher reports, not a statement this outcome made untrue.
+    /// arm, so what a foreign write after the verification costs is bounded
+    /// the way every arm's residual is: whatever is finally at the path is
+    /// what the watcher reports.
     Unchanged(PostState),
 }
 
@@ -849,9 +856,9 @@ fn carry_mode_forward(file: &std::fs::File, replaced: &std::fs::Metadata) {
 /// Re-observe the destination through the handle the precondition read, and
 /// confirm the name still resolves to it.
 ///
-/// Every arm that publishes or vouches asks this at the last point before it
-/// does: the replacement before its swap, the removal before its `unlink`,
-/// and the suppressed no-op before it answers.
+/// Each arm that publishes or answers at the name it read asks this at the
+/// last point before it does: the replacement before its swap, the removal
+/// before its `unlink`, and the suppressed no-op before it answers.
 ///
 /// Two questions, and each catches what the other cannot. The **re-hash**
 /// catches a foreign write into the same file. The **identity comparison**
@@ -992,8 +999,8 @@ fn observed_state(held: &mut std::fs::File, path: &Path) -> Result<PostState, Re
 /// The prologue every precondition-bearing verb runs, in one place: a
 /// replacement and a removal ask the identical question and an answer that
 /// differed between them would be two preconditions wearing one name. The handle
-/// comes back because the verb that asked is not finished with it: every arm
-/// verifies through it before it publishes or answers.
+/// comes back because the verb that asked is not finished with it: both
+/// verify through it before they publish or answer.
 #[allow(clippy::disallowed_types)] // The vault filesystem seam: this crate owns vault handles.
 fn observed_under(
     path: &Path,
