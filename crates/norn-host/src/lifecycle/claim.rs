@@ -323,10 +323,16 @@
 //! exactly where the leg is the one the entry is pinned for — never on a
 //! reading of what the leg was holding, which stands over legs that pin nothing
 //! and over legs already past their own end. Pinned by
-//! `a_detach_leg_that_unwinds_leaves_a_reads_pin_standing`, which is the case
-//! that fails where the give-back widens past the record, and by
 //! `a_pinning_leg_that_unwinds_gives_its_own_pin_back_and_no_other`, which is
 //! the case that fails where it stops reaching the leg that took one.
+//!
+//! The counterpart case — a non-pinning leg's unwind reaching this while a
+//! read's pin stands beside it — has no leg left to carry it. `EntryOps::detach`
+//! was the one call a non-pinning leg made outside its own lock, and `give_back`
+//! catches its panic before this is ever reached, so a detach panic completes
+//! the release it was part of rather than unwinding into a reading `unpin_leg`
+//! could widen past the record. `a_detach_panic_on_an_idle_leg_completes_the_release_with_a_reads_pin_standing`
+//! pins that a read's pin survives such a panic through the give-back instead.
 //!
 //! A read running against the entry takes one too, which is what makes it work
 //! the discipline covers rather than work beside it: `Host::begin_read` takes
