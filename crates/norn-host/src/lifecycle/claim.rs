@@ -240,7 +240,8 @@
 //! and `destruction_gives_back_an_attachment_a_finished_job_left_behind`.
 //!
 //! **Custody says who holds the coverage, and nothing about who holds a pin.**
-//! The two part at three places: an attach leg pins and takes no coverage,
+//! The two part at three places: an attach leg holds an attachment it never
+//! took from the entry and pins nothing,
 //! `Job::Detach` takes the coverage and pins nothing, and every leg past its
 //! epilogue is still recorded as holding what it is handing to
 //! [`EntryOps::detach`](super::EntryOps::detach). No move here is read as a pin

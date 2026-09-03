@@ -170,8 +170,10 @@ pub trait EntryOps: Send + Sync + 'static {
     /// attachment — would outlive an entry that publishes as holding nothing.
     /// This names the vault alone, because the attachment is what is missing.
     ///
-    /// It is called only where nothing reached [`EntryOps::detach`] for that
-    /// leg, and the two are the same act on everything they share: an
+    /// It is called where the entry holds no coverage to route through
+    /// [`EntryOps::detach`] — which admits a leg whose coverage already went
+    /// to a detach before it unwound — and the two are the same act on
+    /// everything they share: an
     /// implementation whose detach gives residue back can give the same residue
     /// back here.
     ///
