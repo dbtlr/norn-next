@@ -102,7 +102,7 @@ impl Scratch {
     #[allow(clippy::disallowed_methods)] // Harness scaffolding: the tree a case works in.
     pub fn under(base: &Path, label: &str) -> io::Result<Scratch> {
         let root = base.join(unique_name(label));
-        std::fs::remove_dir_all(&root).or_else(ignore_missing)?;
+        clear_residue(&root)?;
         std::fs::create_dir_all(&root)?;
         Ok(Scratch { root })
     }
@@ -151,6 +151,22 @@ fn restore_modes(root: &Path) {
 /// Nothing to put back where a directory's removability is not a mode.
 #[cfg(not(unix))]
 fn restore_modes(_root: &Path) {}
+
+/// Take away whatever stands at `root`, directory or regular file, and answer
+/// for a name that holds nothing.
+///
+/// A root a previous run replaced with a regular file outlives that run when
+/// the process is killed before the handle drops, so the directory removal is
+/// not the only shape residue comes in. Clearing only directories would fail a
+/// case at its setup over a name it never chose.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: clearing a previous run's residue.
+fn clear_residue(root: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => std::fs::remove_file(root).or_else(ignore_missing),
+    }
+}
 
 fn ignore_missing(error: io::Error) -> io::Result<()> {
     if error.kind() == io::ErrorKind::NotFound {
@@ -239,6 +255,26 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(&root).is_err(),
             "a root that became a regular file outlived its handle"
+        );
+    }
+
+    /// **A regular file left at a root does not block a fresh tree.** A run
+    /// killed after its root became a regular file leaves one standing at a
+    /// name the next run can take, and a pre-clear that only knows directories
+    /// would fail the next case at its setup.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Arranging the residue this case is about.
+    fn a_regular_file_left_at_a_root_does_not_block_a_fresh_tree() {
+        let base = Scratch::new("norn-testkit-scratch-file-residue");
+        let root = base.join(unique_name("stale"));
+        std::fs::write(&root, b"not a directory").expect("a file where a root was");
+
+        clear_residue(&root).expect("clearing a regular file at a root");
+        std::fs::create_dir_all(&root).expect("a fresh tree over the residue");
+
+        assert!(
+            std::fs::metadata(&root).expect("the fresh tree").is_dir(),
+            "the residue kept the root from becoming a directory"
         );
     }
 
