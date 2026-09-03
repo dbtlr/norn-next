@@ -11,11 +11,12 @@
 //! carrying its reason; it never answers from state it knows is stale, and it
 //! never answers with a caveat attached.
 //!
-//! [`TrustState::Warming`], [`TrustState::Untrusted`],
-//! [`UntrustedReason::WatcherLost`] and [`UntrustedReason::EnvironmentalRefusal`]
-//! are the variants whose payloads grow — how far a heal has come, what made a
-//! state untrustworthy, what ended watcher coverage, what the environment
-//! refused. Each is `#[non_exhaustive]` at the variant level, so a field
+//! **Every variant here that carries a payload is one whose payload grows** —
+//! how far a heal has come, what made a state untrustworthy, and what each
+//! reason has to say about the run that raised it. The rule is the shape rather
+//! than a list, so a reason added below is covered by it without this paragraph
+//! being edited. Each such variant is `#[non_exhaustive]` at the variant level,
+//! so a field
 //! arriving in one of them is not a compile error for a caller that
 //! destructured it: a pattern over such a variant already has to accept the
 //! fields it does not name. Construction is what the arriving field does
@@ -62,6 +63,14 @@
 //! once documented as a read of what the entry is holding, which no client can
 //! perform: holdings cross no seam, and a fact a client branches on is a tag
 //! here or it is nothing.
+//!
+//! **A run that ended in a panic is a word of its own.**
+//! [`UntrustedReason::LegUnwound`] says the work over the vault stopped part
+//! way through and reached no verdict about anything. The two verdicts beside
+//! it each say something a run established — the environment refused, or the
+//! derived state is damaged — and an unwind establishes neither: what the run
+//! was doing is unfinished, and what it was holding is given back unread.
+//! Spelling it as either would publish a diagnosis nothing made.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -250,6 +259,17 @@ pub enum UntrustedReason {
         /// branches on.
         detail: String,
     },
+    /// The run of work over this vault ended in a panic. It reached no verdict
+    /// about the vault or about the derived state, so neither is said to be at
+    /// fault; what it was holding is given back unread. The entry holds nothing
+    /// from here and is served again when a client demands it.
+    #[non_exhaustive]
+    LegUnwound {
+        /// The panic in words, for a person reading a message or a log.
+        /// Clients never match on it: the reason's `kind` is what a client
+        /// branches on.
+        detail: String,
+    },
 }
 
 impl UntrustedReason {
@@ -280,6 +300,13 @@ impl UntrustedReason {
     /// is what establishes the database to discard, described by `detail`.
     pub fn store_damaged_awaiting_demand(detail: impl Into<String>) -> Self {
         UntrustedReason::StoreDamagedAwaitingDemand {
+            detail: detail.into(),
+        }
+    }
+
+    /// The run of work over the vault ended in a panic, described by `detail`.
+    pub fn leg_unwound(detail: impl Into<String>) -> Self {
+        UntrustedReason::LegUnwound {
             detail: detail.into(),
         }
     }

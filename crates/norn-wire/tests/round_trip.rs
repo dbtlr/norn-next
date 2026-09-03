@@ -47,6 +47,7 @@ fn untrusted_reasons() -> Vec<UntrustedReason> {
     reasons.push(UntrustedReason::store_damaged_awaiting_demand(
         "the database disk image is malformed",
     ));
+    reasons.push(UntrustedReason::leg_unwound("the heal panicked"));
     reasons
 }
 
@@ -444,6 +445,10 @@ fn an_untrusted_reason_is_an_object_tagged_kind() {
     assert_eq!(
         wire(&UntrustedReason::environmental_refusal("the disk is full")),
         r#"{"kind":"environmental_refusal","detail":"the disk is full"}"#
+    );
+    assert_eq!(
+        wire(&UntrustedReason::leg_unwound("the heal panicked")),
+        r#"{"kind":"leg_unwound","detail":"the heal panicked"}"#
     );
 }
 

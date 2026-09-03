@@ -134,6 +134,7 @@ fn an_untrusted_reason_advertises_its_kind_tag() {
             "environmental_refusal",
             "store_damaged_rebuilding",
             "store_damaged_awaiting_demand",
+            "leg_unwound",
         ])
     );
 }

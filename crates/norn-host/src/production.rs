@@ -841,6 +841,18 @@ impl EntryOps for ProductionEntryOps {
         }
         release(attachment);
     }
+
+    /// The engine goes back for a leg whose attachment went with an unwinding
+    /// stack. The attachment released itself as it was dropped — the watcher,
+    /// the store and the maintainer lock go back in field order — and the
+    /// engine is what it did not carry: the slot is this composition's, keyed
+    /// by vault name, so nothing but this call empties it. Its sidecar file is
+    /// retained state, as it is on the detach path.
+    fn discard(&self, name: &VaultName) {
+        if let Some(semantic) = &self.semantic {
+            semantic.detach(name);
+        }
+    }
 }
 
 /// One settled batch, or no facts.
@@ -3430,6 +3442,45 @@ mod tests {
             assert!(matches!(engines.status(&name), SemanticStatus::On { .. }));
 
             ops.detach(&name, attachment);
+            assert_eq!(engines.status(&name), SemanticStatus::Off);
+            assert_eq!(
+                engines.nearest(&name, "anything", 5),
+                Err(SemanticRefusal::NoEngine)
+            );
+            let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+            assert!(
+                fs::metadata(dirs.derived_dir(&name).join("semantic.sqlite3")).is_ok(),
+                "retained state outlives the entry"
+            );
+        }
+
+        /// A leg that unwinds drops its attachment on the unwinding stack, so
+        /// no detach runs for it. The engine slot is keyed by vault name rather
+        /// than owned by the attachment, so the discard the cleanup calls is
+        /// what empties it — and the sidecar file stays, as it does on the
+        /// detach path.
+        #[test]
+        fn a_discard_gives_the_engine_back_and_keeps_its_sidecar() {
+            let f = Fixture::new("semantic-discard");
+            fs::write(f.vault().join(".norn/config.toml"), "[engine.semantic]\n").unwrap();
+            let (engines, ops) = engines_and_ops(&f);
+            let name = f.registration().name;
+
+            let attachment = ops
+                .attach(&f.registration(), &ProgressReporter::disconnected())
+                .expect("an attach with an enabled engine");
+            assert!(matches!(engines.status(&name), SemanticStatus::On { .. }));
+
+            // What an unwind does to the attachment: it is dropped where it
+            // stands, which releases the watcher, the store and the maintainer
+            // lock in field order and gives the engine back to nobody.
+            drop(attachment);
+            assert!(
+                matches!(engines.status(&name), SemanticStatus::On { .. }),
+                "the engine went back with an attachment that never reached a detach"
+            );
+
+            ops.discard(&name);
             assert_eq!(engines.status(&name), SemanticStatus::Off);
             assert_eq!(
                 engines.nearest(&name, "anything", 5),

@@ -87,6 +87,7 @@
 //! [`UntrustedReason::environmental_refusal`],
 //! [`UntrustedReason::store_damaged_rebuilding`],
 //! [`UntrustedReason::store_damaged_awaiting_demand`],
+//! [`UntrustedReason::leg_unwound`],
 //! [`ErrorDetail::duplicate_root`],
 //! [`ErrorDetail::entry_untrusted`], [`ErrorDetail::maintainer_contended`],
 //! [`ErrorDetail::unknown_vault`], [`ErrorDetail::unsupported_attach_mode`],
