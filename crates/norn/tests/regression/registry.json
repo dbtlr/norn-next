@@ -379,7 +379,6 @@
       "kind": "defect-class",
       "venue": 1,
       "property": "Lane-1 derived-state identity is a total function of the data base, the build channel and the registered vault name: the key has exactly those three positions, so the vault root is not a coordinate, derived state follows the registered name, and a moved root keeps what was derived from it. The key is computed at one site and consumed by everything placed beside the store — the maintainership key carries the derived directory's own coordinates, two keys over one vault root fall back into two shadow homes, and a total sweep of one home leaves the other key's shadow standing. Vault configuration is not a coordinate either: a config-only reload dispatches without lane-1 derivation, so only the schema fingerprint decides a re-derivation. Inside the store, adoption is decided by what the file records: a store-schema version or a statement list that is not this build's is rebuilt from zero rather than opened or upgraded, only a code about the file's own contents authorizes discarding it, the client is asked to adopt only a database the mechanics call usable, and a deliberate rebuild starts the file over under a new epoch.",
-
       "sources": ["NRN-285", "NRN-269", "NRN-286", "NRN-270", "NRN-289", "NRN-288", "norn-legacy annoyances log", "NORN-a72", "NORN-a124"],
       "binding": {
         "status": "bound",
