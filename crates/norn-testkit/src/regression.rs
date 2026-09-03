@@ -1304,6 +1304,13 @@ impl Registry {
 ///
 /// The walk ends at a crate root: `src/lib.rs` for a library, `tests/<name>.rs`
 /// for a flat integration target, `tests/<name>/main.rs` for a directory one.
+///
+/// A directory under `tests/` that holds a `mod.rs` beside its `main.rs` ends
+/// the walk instead: it roots a target and a shared module tree at once, so
+/// each file below it compiles into the directory's own target and into every
+/// other target that writes `mod <dir>;`. One file under two module paths is
+/// not a carrier of one target, so the walk refuses it rather than binding it
+/// to the nearer root.
 fn unreachable_module(
     workspace_root: &Path,
     file: &Path,
@@ -1341,8 +1348,30 @@ fn unreachable_module(
         } else {
             directories
         };
+        let base = Path::new("crates").join(package).join(kind);
         let candidates: Vec<Vec<String>> = if kind == "tests" && above.len() == 1 {
-            vec![vec![above[0].clone(), "main.rs".to_string()]]
+            // A `mod.rs` beside the target root roots a second tree over the
+            // same files, and any other target under `tests/` pulls that tree
+            // in with `mod <dir>;`. Cargo then compiles every file below the
+            // directory into each of those targets, under a different module
+            // path in each, so the file answers to no one target.
+            let directory = &above[0];
+            let shared = base.join(directory).join("mod.rs");
+            if resolves_case_exactly(workspace_root, &shared, LastComponent::File) {
+                let root = base.join(directory).join("main.rs");
+                if resolves_case_exactly(workspace_root, &root, LastComponent::File) {
+                    return Some(format!(
+                        "`{}` is in a directory that roots a target and a shared module tree at \
+                         once: `{}` roots the integration target `{directory}` and `{}` roots a \
+                         tree any other target reaches with `mod {directory};`, so more than one \
+                         target compiles the file and it belongs to none of them",
+                        file.display(),
+                        root.display(),
+                        shared.display()
+                    ));
+                }
+            }
+            vec![vec![directory.clone(), "main.rs".to_string()]]
         } else if above.is_empty() {
             // Under `tests/` nothing is left above a file with no directories
             // over it: the flat file and the directory root are both crate
@@ -1358,7 +1387,6 @@ fn unreachable_module(
             beside.push(format!("{}.rs", above[above.len() - 1]));
             vec![inside, beside]
         };
-        let base = Path::new("crates").join(package).join(kind);
         let found = candidates.iter().find(|candidate| {
             let path = candidate
                 .iter()
@@ -2180,8 +2208,8 @@ fn a_carrier() {}
     /// target root, a module beside it, a file module under that module, an
     /// inline module, a directory module whose own declaration is behind a
     /// `cfg` nothing turns on, a file no `mod` declaration reaches beside an
-    /// inline module wearing its name, and a directory that roots no target at
-    /// all.
+    /// inline module wearing its name, a directory that roots no target at
+    /// all, and a directory that is a target and a shared module tree at once.
     ///
     /// It is built rather than described because what it proves is the shape of
     /// cargo's own `--list` output. It depends on nothing, so the lock file
@@ -2194,6 +2222,8 @@ fn a_carrier() {}
         std::fs::create_dir_all(suite.join("deep")).expect("a directory module");
         std::fs::create_dir_all(root.join("crates/demo/tests/scaffolding"))
             .expect("a directory that roots no target");
+        let shared = root.join("crates/demo/tests/shared");
+        std::fs::create_dir_all(&shared).expect("a directory that is a target and a shared tree");
         std::fs::create_dir_all(root.join("crates/demo/src")).expect("a source directory");
         std::fs::write(
             root.join("Cargo.toml"),
@@ -2239,6 +2269,15 @@ fn a_carrier() {}
             "#[test]\nfn a_carrier() {}\n",
         )
         .expect("a shared module");
+        std::fs::write(shared.join("main.rs"), "mod inner;\n").expect("a second target root");
+        std::fs::write(shared.join("mod.rs"), "mod inner;\n").expect("a shared module root");
+        std::fs::write(shared.join("inner.rs"), "#[test]\nfn a_carrier() {}\n")
+            .expect("a file two targets compile");
+        std::fs::write(
+            root.join("crates/demo/tests/flat.rs"),
+            "mod shared;\n\n#[test]\nfn a_flat_test() {}\n",
+        )
+        .expect("a flat target pulling in the shared tree");
         root
     }
 
@@ -3405,6 +3444,52 @@ fn a_carrier() {}
             found
                 .iter()
                 .any(|problem| problem.contains("declares `mod ghost;`")),
+            "{found:#?}"
+        );
+    }
+
+    /// A file under a directory that roots a target and also roots a shared
+    /// module tree is refused, because more than one target compiles it.
+    ///
+    /// `tests/shared/main.rs` roots the target `shared`, and
+    /// `tests/shared/mod.rs` roots a tree `tests/flat.rs` pulls in with
+    /// `mod shared;`. Cargo lists the one test in `tests/shared/inner.rs`
+    /// twice, under a different module path in each target, so no single
+    /// binding names it.
+    #[test]
+    fn a_file_a_target_and_a_shared_tree_both_compile_is_caught() {
+        let root = cargo_workspace();
+        let shared = TestRef::parse("crates/demo/tests/shared/inner.rs::a_carrier")
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        let flat = TestRef::parse("crates/demo/tests/flat.rs::a_flat_test")
+            .expect("a pair")
+            .target()
+            .expect("a target");
+        let listed = TestIndex::from_cargo(root.root(), [shared.clone(), flat.clone()]);
+        assert!(
+            listed
+                .compiled(&shared)
+                .expect("a listing")
+                .all
+                .contains("inner::a_carrier"),
+            "the target rooted at `main.rs` compiles the file"
+        );
+        assert!(
+            listed
+                .compiled(&flat)
+                .expect("a listing")
+                .all
+                .contains("shared::inner::a_carrier"),
+            "the flat target pulling in the tree compiles it too"
+        );
+
+        let found = cargo_audit(&root, "crates/demo/tests/shared/inner.rs::a_carrier");
+        assert!(
+            found.iter().any(|problem| problem.contains(
+                "`crates/demo/tests/shared/mod.rs` roots a tree any other target reaches"
+            )),
             "{found:#?}"
         );
     }
