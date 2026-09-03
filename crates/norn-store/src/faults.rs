@@ -298,11 +298,14 @@ pub mod induced_failure {
             Some((database.to_path_buf(), code));
     }
 
-    /// Disarm every process-wide arrangement above: the page cap, the store
-    /// schema's armed condition, and the two tears.
+    /// Disarm every process-wide arrangement above — the page cap, the store
+    /// schema's armed condition, and the two tears — plus the calling
+    /// thread's busy one-shot.
     ///
-    /// The per-thread ones are absent by design: nothing survives the abort
-    /// they arm. The committed-changeset count is absent for a different
+    /// The per-thread tears are absent by design: nothing survives the abort
+    /// they arm. The busy one-shot is per-thread too but arms an error rather
+    /// than an abort, so it is swept here for the calling thread — an arm a
+    /// case left unconsumed must not fail whatever opens next on this thread. The committed-changeset count is absent for a different
     /// reason — it is a counter rather than an arm, it is what a tear is armed
     /// *against*, and a run that reset it would move the boundary every arm
     /// still standing in this process names. These are here because a suite in
@@ -310,6 +313,7 @@ pub mod induced_failure {
     /// to watch the same request converge without it.
     pub fn disarm() {
         norn_db::faults::set_page_cap(0);
+        norn_db::faults::clear_the_meta_read_arm();
         *super::ARMED_STORE_SCHEMA
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;

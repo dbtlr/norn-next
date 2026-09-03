@@ -211,12 +211,16 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
               database, and the helper an open applies the cap through. What a case may arrange \
               at this seam, and what the engine then does, is authored here",
     },
+    // The step accumulation itself — the counter the paged readers thread as
+    // a drain runs — stays in the undigested `request` module beside the
+    // readers. It is covered the way the norn-db call sites above are: a
+    // reader that stops counting reads as zero, and the work bars' negative
+    // control fails a zero reading, so the digested pillars suite reddens.
     ManifestFile {
         path: "crates/norn-store/src/request/instrument.rs",
-        why: "the instrument a work reading is taken through: the virtual-machine steps the paged \
-              readers accumulate as a drain runs, and which named statement a plan bar is asked \
-              about and how it is bound. A reading taken through a different instrument is a \
-              different reading",
+        why: "the instrument a work reading is taken through: how the accumulated step count is \
+              handed out, and which named statement a plan bar is asked about and how it is \
+              bound. A reading taken through a different instrument is a different reading",
     },
     ManifestFile {
         path: "crates/norn-db/src/plan.rs",

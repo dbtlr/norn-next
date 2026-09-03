@@ -1,21 +1,24 @@
 //! Conditions the machine imposes on a store, and the line between them and
 //! damage.
 //!
-//! Two of this crate's claims are about failures that are not the database's
-//! fault and must never be answered as though they were. A **full disk** stops
-//! an increment from completing and says nothing about the pages already at
-//! rest, so it is refused and nothing is discarded. A **store schema that
-//! cannot be written** is the other end: a creation is what rung 3 resolves
-//! damage *with*, so a creation that itself meets a corrupt database is the one
-//! state no rung above it can resolve, and it is typed as damage at the
-//! statement that met it.
+//! Three of this crate's claims are about failures that are not the
+//! database's fault and must never be answered as though they were. A **full
+//! disk** stops an increment from completing and says nothing about the pages
+//! already at rest, so it is refused and nothing is discarded. A **database
+//! held by somebody else** is the same shape at the open: a busy pinned-scalar
+//! read is refused, and the database it could not read is intact afterwards.
+//! A **store schema that cannot be written** is the other end: a creation is
+//! what rung 3 resolves damage *with*, so a creation that itself meets a
+//! corrupt database is the one state no rung above it can resolve, and it is
+//! typed as damage at the statement that met it.
 //!
-//! The cases live in a binary of their own because the arrangements they use
+//! The cases live in a binary of their own because most arrangements they use
 //! are process-wide — a page cap is read by every connection opened after it,
 //! and a store creation armed to fail is armed for whichever creation runs
 //! next. Sharing a process with the rest of the suite would arm them for cases
-//! that never asked. Inside this binary they take one lock and disarm on the
-//! way out.
+//! that never asked. The busy arm is per-thread and one-shot rather than
+//! process-wide; it sits with these cases because it states the same kind of
+//! claim. Inside this binary they take one lock and disarm on the way out.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

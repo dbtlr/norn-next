@@ -412,42 +412,6 @@ fn an_environment_that_cannot_hold_a_database_is_refused_rather_than_rebuilt() {
     assert!(operation.contains("preparing"), "{operation}");
 }
 
-/// The same rule for a database somebody else holds. A pinned-scalar read that
-/// reports the database busy says nothing about the stored state, so it is
-/// reported — and the database it could not read is still there afterwards, with
-/// everything that was in it.
-#[test]
-fn a_database_that_reports_itself_busy_is_refused_rather_than_rebuilt() {
-    let scratch = Scratch::new("busy");
-    let database = scratch.database();
-    let subject = path("docs/norn/glossary.md");
-
-    let mut store = Store::open(&database).expect("creating a store");
-    write_document(
-        &mut store.begin_request(),
-        &document(subject.as_str(), "hash-1", "a body\n"),
-    );
-    drop(store);
-
-    induced_failure::fail_next_meta_read_as_busy();
-    let error = Store::open(&database).expect_err("a busy database");
-    assert!(
-        matches!(error, StoreError::Sql { .. }),
-        "a busy database was reported as {error:?} rather than as a refused operation"
-    );
-
-    let mut reopened = Store::open(&database).expect("reopening a store");
-    assert_eq!(*reopened.open_outcome(), OpenOutcome::Reused);
-    assert!(
-        reopened
-            .begin_request()
-            .stored_document(&subject)
-            .expect("reading a document")
-            .is_some(),
-        "the refusal discarded a database it could not even read"
-    );
-}
-
 /// **Damage an open cannot see is damage a later operation meets, and it is
 /// reported as damage there too.** An open reads the store schema and nothing
 /// else, so pages holding documents are judged by the reads and writes that
