@@ -1267,11 +1267,11 @@
       "name": "whole-vault-work-is-declared-and-triggered-deliberately",
       "kind": "defect-class",
       "venue": 4,
-      "property": "Vault-wide work happens only where it is declared, and the declared set is a fixed enumerable roster asserted by test; row-touch counters on undeclared paths are bounded by the declared affected set. Full derivation is reached only at cold start, integrity failure, or a scheduled health scan — never from the request path, and never under the mutation lock — and precondition evaluation is one indexed statement per selector.",
+      "property": "Vault-wide work happens only where it is declared, and the declared set is a fixed enumerable roster asserted by test; row-touch counters on undeclared paths are bounded by the declared affected set. Full derivation is reached only at cold start, integrity failure, or a scheduled health scan — never from the request path — and precondition evaluation is one indexed statement per selector.",
       "sources": ["NRN-a63", "NRN-a59"],
       "binding": {
         "status": "dormant",
-        "reason": "there is no roster to declare and no request path to keep clear."
+        "reason": "there is no roster to declare and no mutation request path to keep clear; the read path's derivation-free claim is carried at venue 2 by warm-requests-derive-nothing."
       }
     },
     {
