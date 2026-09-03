@@ -54,7 +54,6 @@ use crate::hash::{ContentHash, read_bytes_and_hash};
 use crate::identity::{Identity, identity_of};
 use crate::open::{Reached, directory_flags, open_regular_at};
 use crate::path::{ChildKeys, NormalizedPath, NormalizerError, PathError, PathNormalizer};
-use crate::shadow::is_shadow_name;
 
 /// Begins a deterministic streaming walk of `root`.
 ///
@@ -145,35 +144,36 @@ impl Vault {
     /// The notation the vault walk states in place of reaching `relative`, or
     /// nothing where the walk reaches that name.
     ///
-    /// This is [`walk_subtree`]'s descent with no frontier on the end of it.
-    /// The exclusion roots decide the whole path, and every name above the last
-    /// one is decided the way the walk decides the entries it descends
-    /// through — a shadow basename and a symbolic link each end the answer at
-    /// that name. The last name is decided by what its spelling carries, which
-    /// is the shadow basename.
+    /// This is [`walk_subtree`]'s descent with no frontier on the end of it,
+    /// read in the descent's own order: an exclusion root covering the path,
+    /// then each name above the last one decided the way the walk decides the
+    /// entries it descends through, then the last name's own spelling. So a
+    /// path under a link is the link's answer rather than its own leaf's, which
+    /// is the order the walk reaches the two names in.
+    ///
+    /// **The notation stands at the root the walk stops at**, not at the path
+    /// that reached it: the excluded root, the shadow basename, the link. Every
+    /// place under that root holds the same nothing, so a consumer converging
+    /// derived state reads the root once for all of them —
+    /// [`SkipFact::covers`] is how it asks which later paths that reading
+    /// already answered.
     ///
     /// **What the last name holds is not read here.** A caller that must tell a
     /// file from a directory from an absence asks [`crate::path_kind`] for it,
     /// and this leaves that one reading whole rather than taking half of it.
     ///
-    /// **A name that is not there is not a refusal.** A path the descent finds
-    /// no name for holds nothing, which is what `path_kind` answers at it, so
-    /// this states no notation and lets that reading stand alone.
+    /// **A name that is not there is not a refusal.** A path no name leads to
+    /// holds nothing, which is what `path_kind` answers at it, so this states
+    /// no notation and lets that reading stand alone. A path a *name* blocks is
+    /// the other case and is stated here, as [`SkipReason::UnderAnEntry`]:
+    /// `path_kind` cannot answer at all through an entry that is not a
+    /// directory.
     pub fn skip_reaching(&self, relative: &Path) -> Result<Option<SkipFact>, WalkError> {
         let subtree = self.normalize(relative)?;
-        if let Some(reason) = self.exclusions.reason(&subtree) {
+        if let Some((root, reason)) = self.exclusions.covering_root(&subtree) {
             return Ok(Some(SkipFact {
-                path: subtree,
+                path: root.clone(),
                 reason: reason.into(),
-            }));
-        }
-        let Some(leaf) = subtree.as_path().file_name() else {
-            return Ok(None);
-        };
-        if is_shadow_name(leaf) {
-            return Ok(Some(SkipFact {
-                path: subtree,
-                reason: SkipReason::Shadow,
             }));
         }
         let above = subtree.as_path().parent().unwrap_or(Path::new(""));
@@ -184,16 +184,37 @@ impl Vault {
             traversed.push(name);
             let access = self.root.join(&traversed);
             let path = self.traversed(&traversed);
-            match component_skip(self, &directory, name, &path, &access)? {
-                Some(SkipReason::Vanished) | None => {}
-                Some(reason) => return Ok(Some(SkipFact { path, reason })),
+            match pass_component(self, &directory, name, &path, &access)? {
+                Passed::Skipped(reason) => return Ok(Some(SkipFact { path, reason })),
+                Passed::Vanished => return Ok(None),
+                Passed::NotADirectory => {
+                    return Ok(Some(SkipFact {
+                        path: subtree,
+                        reason: SkipReason::UnderAnEntry,
+                    }));
+                }
+                Passed::Directory => {}
             }
             directory = match open_component(&directory, name, &access)? {
                 Some(fd) => fd,
                 None => return Ok(None),
             };
         }
+        let Some(leaf) = subtree.as_path().file_name() else {
+            return Ok(None);
+        };
+        if self.names_a_shadow(leaf) {
+            return Ok(Some(SkipFact {
+                path: subtree,
+                reason: SkipReason::Shadow,
+            }));
+        }
         Ok(None)
+    }
+
+    /// Whether `name` is one of Norn's shadow basenames on this root.
+    fn names_a_shadow(&self, name: &OsStr) -> bool {
+        self.normalizer.names_a_shadow(name)
     }
 
     /// This vault's identity for `relative`, or why that spelling names nothing
@@ -253,63 +274,83 @@ fn open_subtree(vault: &Vault, subtree: &NormalizedPath) -> Result<Frontier, Wal
         traversed.push(name);
         let access = vault.root.join(&traversed);
         let path = vault.traversed(&traversed);
-        if let Some(reason) = component_skip(vault, &directory, name, &path, &access)? {
-            return Ok(Frontier::Skipped(SkipFact { path, reason }));
+        let vanished = SkipFact {
+            path: path.clone(),
+            reason: SkipReason::Vanished,
+        };
+        match pass_component(vault, &directory, name, &path, &access)? {
+            Passed::Skipped(reason) => return Ok(Frontier::Skipped(SkipFact { path, reason })),
+            // A frontier is a directory or it is nothing, so an entry standing
+            // where one was named leaves this walk the same nothing an absence
+            // does.
+            Passed::Vanished | Passed::NotADirectory => {
+                return Ok(Frontier::Skipped(vanished));
+            }
+            Passed::Directory => {}
         }
         directory = match open_component(&directory, name, &access)? {
             Some(fd) => fd,
-            None => {
-                return Ok(Frontier::Skipped(SkipFact {
-                    path,
-                    reason: SkipReason::Vanished,
-                }));
-            }
+            None => return Ok(Frontier::Skipped(vanished)),
         };
     }
     Ok(Frontier::Open(directory))
 }
 
-/// The notation the walk states at one name a descent passes through, or
-/// nothing where the descent reads that name and continues.
+/// What a descent meets at one name it passes through.
+enum Passed {
+    /// A directory the descent continues through.
+    Directory,
+    /// The notation the walk states at this name in place of descending it.
+    Skipped(SkipReason),
+    /// No name is there.
+    Vanished,
+    /// An entry the walk reads rather than descends into. Nothing the descent
+    /// is reaching for stands below it.
+    NotADirectory,
+}
+
+/// Reads one name a descent passes through, the way the page reads the entries
+/// it descends through.
 ///
-/// The reading is the page's, taken one name at a time: a Norn shadow basename
-/// is never entered, and a symbolic link is a fact about a name rather than an
-/// edge to follow. A name that is gone is [`SkipReason::Vanished`], and what
-/// that means for the descent is the caller's to say.
+/// A Norn shadow basename is never entered, and a symbolic link is a fact about
+/// a name rather than an edge to follow. Absence and a non-directory entry are
+/// kept apart because they are two different answers about what stands below:
+/// nothing is under a name that is not there, and nothing is under an entry the
+/// walk reads either — but only the second is a name a caller can be told
+/// about.
 #[allow(clippy::disallowed_methods)] // norn-fs owns the vault walk and stat.
-fn component_skip(
+fn pass_component(
     vault: &Vault,
     directory: &Arc<OwnedFd>,
     name: &OsStr,
     path: &NormalizedPath,
     access: &Path,
-) -> Result<Option<SkipReason>, WalkError> {
-    if is_shadow_name(name) {
-        return Ok(Some(SkipReason::Shadow));
+) -> Result<Passed, WalkError> {
+    if vault.names_a_shadow(name) {
+        return Ok(Passed::Skipped(SkipReason::Shadow));
     }
     crate::reads::count_stat();
     let metadata = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(metadata) => metadata,
-        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => {
-            return Ok(Some(SkipReason::Vanished));
-        }
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR) => return Ok(Passed::Vanished),
         Err(source) => return Err(environment_errno("stating", access, source)),
     };
-    if classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) != EntryKind::Symlink {
-        return Ok(None);
-    }
-    Ok(Some(
-        match classify_link(
-            &vault.root_fd,
-            path.as_path(),
-            directory,
-            name,
-            &vault.normalizer,
-        )? {
-            Some(kind) => SkipReason::SymbolicLink(kind),
-            None => SkipReason::Vanished,
+    Ok(
+        match classify_file_type(FileType::from_raw_mode(metadata.st_mode as _)) {
+            EntryKind::Directory => Passed::Directory,
+            EntryKind::File | EntryKind::Special(_) => Passed::NotADirectory,
+            EntryKind::Symlink => match classify_link(
+                &vault.root_fd,
+                path.as_path(),
+                directory,
+                name,
+                &vault.normalizer,
+            )? {
+                Some(kind) => Passed::Skipped(SkipReason::SymbolicLink(kind)),
+                None => Passed::Vanished,
+            },
         },
-    ))
+    )
 }
 
 /// Opens one name of a descent as the next directory, or answers that there is
@@ -587,6 +628,16 @@ impl SkipFact {
     pub fn reason(&self) -> SkipReason {
         self.reason
     }
+
+    /// Whether `path` is this root or lies beneath it.
+    ///
+    /// Containment is answered on the vault's proven case behavior, the way
+    /// every identity question on that root is. A consumer holding many paths
+    /// asks it so that one reading of this root answers for every path the root
+    /// already covers.
+    pub fn covers(&self, path: &NormalizedPath) -> bool {
+        path.starts_with(&self.path)
+    }
 }
 
 /// Why a root has one notation and no descendant facts.
@@ -602,6 +653,19 @@ pub enum SkipReason {
     SymbolicLink(LinkKind),
     /// A device-like entry unsafe to open as document content.
     SpecialFile(FileKind),
+    /// A name below an entry the walk reads rather than descends into.
+    ///
+    /// The walk yields that entry — a document, or its own notation at a name
+    /// that is neither file nor directory — and nothing beneath it. So this
+    /// root is a spelling the vault holds nothing at, and holds nothing at for
+    /// as long as that entry stands.
+    ///
+    /// [`Vault::skip_reaching`] is what states it, for a caller deciding one
+    /// name it never enumerated. A walk carries it in no fact of its own: a
+    /// frontier is a directory or it is nothing, so a subtree walk named
+    /// through such an entry reads nothing at the name and says
+    /// [`SkipReason::Vanished`] there.
+    UnderAnEntry,
     /// A name another writer took away — or took away and gave to something
     /// else — between two of this walk's observations of it.
     ///
@@ -1101,7 +1165,7 @@ fn directory_page(
         let mut sort_key = path.comparison_key().as_bytes().to_vec();
         if listed == Some(EntryKind::Directory)
             && !exclusions.excludes(&path)
-            && !is_shadow_name(&name)
+            && !normalizer.names_a_shadow(&name)
         {
             sort_key.push(b'/');
         }
@@ -1197,7 +1261,7 @@ fn observe_listed(
     if let Some(reason) = exclusions.reason(path) {
         return Ok(Observed::Skipped(reason.into()));
     }
-    if is_shadow_name(name) {
+    if normalizer.names_a_shadow(name) {
         return Ok(Observed::Skipped(SkipReason::Shadow));
     }
     Ok(match kind {
@@ -2490,12 +2554,25 @@ mod tests {
             "a name under a symbolic link"
         );
         assert_eq!(
-            skip("excluded/deep/note.md"),
+            skip("dir/link/norn-shadow-1-1"),
             Some((
-                PathBuf::from("excluded/deep/note.md"),
-                SkipReason::HostExclusion
+                PathBuf::from("dir/link"),
+                SkipReason::SymbolicLink(LinkKind::InVaultDirectory)
             )),
-            "a name inside an excluded root"
+            "the link is reached before the last name is spelled"
+        );
+        assert_eq!(
+            skip("excluded/deep/note.md"),
+            Some((PathBuf::from("excluded"), SkipReason::HostExclusion)),
+            "the excluded root, not the path that reached it"
+        );
+        assert_eq!(
+            skip("dir/plain.md/under.md"),
+            Some((
+                PathBuf::from("dir/plain.md/under.md"),
+                SkipReason::UnderAnEntry
+            )),
+            "a name below a document"
         );
         assert_eq!(skip("dir/plain.md"), None, "a file the walk reads");
         assert_eq!(skip("dir"), None, "a directory the walk enters");
@@ -2503,14 +2580,19 @@ mod tests {
 
     /// **A name that is not there is not one of the walk's refusals.** No path
     /// the descent finds no name for holds anything, so the vault states no
-    /// notation and leaves that whole reading to [`crate::path_kind`].
+    /// notation and leaves that whole reading to [`crate::path_kind`], which
+    /// answers the same absence for the whole path.
+    ///
+    /// The last name's own spelling is read after the descent, not before it,
+    /// so an absent ancestor answers for a shadow basename below it rather than
+    /// the other way about.
     #[test]
     fn a_name_that_is_not_there_is_no_skip_at_all() {
         let scratch = Scratch::new("vault-skip-absent");
         scratch.place("plain.md", b"body");
 
         let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
-        for absent in ["gone", "gone/note.md", "plain.md/under.md"] {
+        for absent in ["gone", "gone/note.md", "gone/norn-shadow-1-1"] {
             assert!(
                 vault
                     .skip_reaching(Path::new(absent))
@@ -2519,6 +2601,81 @@ mod tests {
                 "{absent}"
             );
         }
+    }
+
+    /// **A name below an entry the walk reads is the vault's answer, not the
+    /// caller's to work out.** Nothing stands under a document or under a
+    /// device-like entry, and a stat of such a path refuses rather than
+    /// reporting an absence, so the notation is stated here.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Harness scaffolding: arranging a fifo component.
+    fn a_name_below_an_entry_the_walk_reads_is_its_own_notation() {
+        let scratch = Scratch::new("vault-skip-under-entry");
+        scratch.place("plain.md", b"body");
+        let made = std::process::Command::new("mkfifo")
+            .arg(scratch.at("pipe"))
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo failed");
+
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        for blocked in ["plain.md/under.md", "pipe/under.md", "plain.md/a/b.md"] {
+            assert_eq!(
+                vault
+                    .skip_reaching(Path::new(blocked))
+                    .expect("a decided name")
+                    .map(|fact| (fact.path().as_path().to_owned(), fact.reason())),
+                Some((PathBuf::from(blocked), SkipReason::UnderAnEntry)),
+                "{blocked}"
+            );
+        }
+    }
+
+    /// **Shadow-ness is an identity question, so the root's own case behavior
+    /// decides it.** A root that resolves two spellings to one entry holds one
+    /// name there, and the walk refuses that name however a caller spells it.
+    ///
+    /// A case-sensitive root holds two different names, and reads
+    /// `NORN-SHADOW-7-2` as an ordinary directory it walks. That is the same
+    /// rule giving the other answer, so the case states it rather than skipping
+    /// silently.
+    #[test]
+    fn a_shadow_basename_is_refused_under_the_root_s_own_case_behavior() {
+        let scratch = Scratch::new("walk-shadow-case");
+        scratch.directory("vault/NORN-SHADOW-7-2");
+        scratch.place("NORN-SHADOW-7-2/note.md", b"body");
+        scratch.place("plain.md", b"body");
+
+        let facts = paths(walk(&scratch.at(""), &[]).expect("walk"));
+        let vault = Vault::open(&scratch.at(""), &[]).expect("a vault");
+        let spelled_lower = vault
+            .skip_reaching(Path::new("norn-shadow-7-2/note.md"))
+            .expect("a decided name")
+            .map(|fact| fact.reason());
+        if vault.case_sensitivity() == CaseSensitivity::Sensitive {
+            assert!(
+                facts.contains(&(PathBuf::from("NORN-SHADOW-7-2/note.md"), None)),
+                "a case-sensitive root holds a name no shadow spelling collides with"
+            );
+            assert_eq!(
+                spelled_lower, None,
+                "the lower spelling is a second name, and nothing is at it"
+            );
+            return;
+        }
+        assert_eq!(
+            facts,
+            vec![
+                (PathBuf::from("NORN-SHADOW-7-2"), Some(SkipReason::Shadow)),
+                (PathBuf::from("plain.md"), None),
+            ],
+            "the walk read through a name that folds onto a shadow basename"
+        );
+        assert_eq!(
+            spelled_lower,
+            Some(SkipReason::Shadow),
+            "the other spelling of the one name this root holds"
+        );
     }
 
     #[test]

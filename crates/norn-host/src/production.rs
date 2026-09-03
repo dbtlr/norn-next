@@ -1116,9 +1116,40 @@ fn scoped_increment(
     let vault = norn_fs::Vault::open(root, exclusions).map_err(effect)?;
     let sensitivity = vault.case_sensitivity();
     let mut account = Account::default();
+    let mut refused: Vec<norn_fs::SkipFact> = Vec::new();
     let mut pending = Pending::new(store, policy.changeset_size, root, exclusions, &mut account);
     for (index, relative) in dirty.iter().enumerate() {
         let path = relative.as_path();
+        // **A refusal belongs to the root the walk stops at, and this leg takes
+        // that root once.** The prune below ranges over every row beneath the
+        // refused root, so a later dirty path the same root covers has nothing
+        // left to converge and is passed over before it costs a reading.
+        if refused.iter().any(|taken| taken.covers(relative)) {
+            continue;
+        }
+        // **What this leg may read is what the vault walk reaches**, and the
+        // vault is asked rather than re-read here: an excluded root, a shadow
+        // basename and a symbolic link on the way down are one refusal with one
+        // spelling, in norn-fs. Under a refused root no walk of this vault
+        // yields anything, so the rows there die and nothing is derived — the
+        // answer a build from zero gives. The findings stay standing, because a
+        // place the walk read nothing at is a place this leg earned no
+        // authority over.
+        if let Some(skip) = vault.skip_reaching(path).map_err(effect)? {
+            pending.flush()?;
+            prune_addressed(
+                pending.store,
+                root,
+                exclusions,
+                skip.path().as_path(),
+                policy,
+                progress,
+                store_order(sensitivity),
+                pending.account,
+            )?;
+            refused.push(skip);
+            continue;
+        }
         // Both the identity and the range it addresses are read before anything
         // that would use them, because what a spelling names and what it holds
         // are different questions: `..md` names no document and is still where
@@ -1128,35 +1159,7 @@ fn scoped_increment(
         let prefix = path
             .to_str()
             .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
-        let scope = match (&identity, &prefix) {
-            (Ok(root), _) => Some(SubtreeScope::Subtree(root)),
-            (Err(_), Some(prefix)) => Some(SubtreeScope::Prefix(prefix)),
-            (Err(_), None) => None,
-        };
-        // **What this leg may read is what the vault walk reaches**, and the
-        // vault is asked rather than re-read here: an excluded root, a shadow
-        // basename and a symbolic link on the way down are one refusal with one
-        // spelling, in norn-fs. A dirty root the walk refuses is a root under
-        // which no walk of this vault yields anything, so the rows it addresses
-        // die and nothing is derived at it — the answer a build from zero
-        // gives. The findings stay standing, because a place the walk read
-        // nothing at is a place this leg earned no authority over.
-        if vault.skip_reaching(path).map_err(effect)?.is_some() {
-            pending.flush()?;
-            if let Some(scope) = scope {
-                prune_subtree_ordered(
-                    pending.store,
-                    root,
-                    exclusions,
-                    scope,
-                    policy,
-                    progress,
-                    store_order(sensitivity),
-                    pending.account,
-                )?;
-            }
-            continue;
-        }
+        let scope = addressed_scope(&identity, &prefix);
         match norn_fs::path_kind(&root.join(path)).map_err(effect)? {
             norn_fs::PathKind::Directory => {
                 pending.flush()?;
@@ -1531,6 +1534,48 @@ impl HealScope<'_> {
         }
         .map_err(store_effect)
     }
+}
+
+/// The rows one vault-relative spelling addresses.
+///
+/// A spelling the grammar admits carries its own row and every row beneath it;
+/// one it refuses carries only what is beneath it, and a spelling no prefix
+/// admits addresses nothing at all — every path under it is one the store
+/// cannot name either.
+fn addressed_scope<'a>(
+    identity: &'a Result<DocumentPath, Quarantine>,
+    prefix: &'a Option<DirectoryPrefix>,
+) -> Option<SubtreeScope<'a>> {
+    match (identity, prefix) {
+        (Ok(root), _) => Some(SubtreeScope::Subtree(root)),
+        (Err(_), Some(prefix)) => Some(SubtreeScope::Prefix(prefix)),
+        (Err(_), None) => None,
+    }
+}
+
+/// Take every row one vault-relative spelling addresses, and nothing where it
+/// addresses none.
+#[allow(clippy::too_many_arguments)]
+fn prune_addressed(
+    store: &mut Store,
+    vault_root: &Path,
+    exclusions: &[PathBuf],
+    addressed: &Path,
+    policy: ProductionPolicy,
+    progress: &Healing<'_, ProductionAttachment>,
+    order: StoredPathOrder,
+    account: &mut Account,
+) -> Result<(), JobFailure> {
+    let identity = document_path(addressed);
+    let prefix = addressed
+        .to_str()
+        .and_then(|spelling| DirectoryPrefix::new(spelling).ok());
+    let Some(scope) = addressed_scope(&identity, &prefix) else {
+        return Ok(());
+    };
+    prune_subtree_ordered(
+        store, vault_root, exclusions, scope, policy, progress, order, account,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8439,20 +8484,27 @@ mod tests {
     /// **A dirty root inside an excluded tree meets the refusal at the same
     /// door.** The walk's exclusion roots are read where its shadow basenames
     /// and its links are, so a lone root spelled through an excluded directory
-    /// derives nothing there and takes the rows it addresses with it. That is
-    /// the answer a build from zero under this exclusion set gives.
+    /// derives nothing there. That is the answer a build from zero under this
+    /// exclusion set gives.
+    ///
+    /// **What the leg takes is the excluded root, not the dirty path**, which
+    /// the deep row below is what states: it is inside no dirty path's own
+    /// range and is gone all the same, because every place under that root
+    /// holds the same nothing and one reading of the root answers for all of
+    /// them.
     #[test]
-    fn a_dirty_root_inside_an_excluded_tree_derives_nothing_and_takes_its_rows() {
+    fn a_dirty_root_inside_an_excluded_tree_takes_the_whole_excluded_root() {
         let f = Fixture::new("increment-excluded-tree");
-        fs::create_dir_all(f.vault().join("staging")).unwrap();
+        fs::create_dir_all(f.vault().join("staging/deep")).unwrap();
         fs::write(f.vault().join("staging/note.md"), "body").unwrap();
+        fs::write(f.vault().join("staging/deep/other.md"), "body").unwrap();
         fs::write(f.vault().join("plain.md"), "body").unwrap();
         let (ops, name) = f.ops(2);
         let progress = ProgressReporter::disconnected();
         let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
         assert_eq!(
             stored_paths(&mut attachment.store),
-            ["plain.md", "staging/note.md"],
+            ["plain.md", "staging/deep/other.md", "staging/note.md"],
             "the vault heal read the tree this case then excludes"
         );
 
@@ -8473,6 +8525,148 @@ mod tests {
             ["plain.md"],
             "the excluded root left a row standing where the walk yields none"
         );
+        ops.detach(&name, attachment);
+    }
+
+    /// **One increment reads a refused root once.** The notation names the root
+    /// the walk stops at rather than the dirty path that reached it, and the
+    /// prune over that root converges every row beneath it, so the later dirty
+    /// paths the same root covers cost no reading of their own.
+    #[test]
+    fn many_dirty_paths_under_one_refused_root_cost_one_reading() {
+        let f = Fixture::new("increment-refused-root-once");
+        fs::create_dir_all(f.vault().join("dir/norn-shadow-7-2")).unwrap();
+        for leaf in ["a", "b", "c", "d", "e"] {
+            fs::write(
+                f.vault().join(format!("dir/norn-shadow-7-2/{leaf}.md")),
+                "body",
+            )
+            .unwrap();
+        }
+        fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+
+        let normalizer = norn_fs::PathNormalizer::detect(f.vault().as_path()).unwrap();
+        let dirty = |relatives: &[&str]| -> std::collections::BTreeSet<norn_fs::NormalizedPath> {
+            relatives
+                .iter()
+                .map(|relative| normalizer.normalize(Path::new(relative)).unwrap())
+                .collect()
+        };
+        let one = dirty(&["dir/norn-shadow-7-2/a.md"]);
+        let five = dirty(&[
+            "dir/norn-shadow-7-2/a.md",
+            "dir/norn-shadow-7-2/b.md",
+            "dir/norn-shadow-7-2/c.md",
+            "dir/norn-shadow-7-2/d.md",
+            "dir/norn-shadow-7-2/e.md",
+        ]);
+        let cost = |store: &mut Store, dirty: &_| {
+            let window = norn_fs::reads::ReadWindow::open();
+            scoped_increment(
+                store,
+                f.vault().as_path(),
+                dirty,
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+            window.finish()
+        };
+
+        let alone = cost(&mut attachment.store, &one);
+        assert!(
+            alone.stats > 0,
+            "the refused root was decided without reading anything"
+        );
+        assert_eq!(
+            cost(&mut attachment.store, &five),
+            alone,
+            "each dirty path under the refused root paid for a reading of its own"
+        );
+        assert_eq!(stored_paths(&mut attachment.store), ["dir/plain.md"]);
+        ops.detach(&name, attachment);
+    }
+
+    /// **A spelling is refused on the root's own case behavior, not on its
+    /// bytes.** However a dirty path spells a shadow-named directory, the leg
+    /// reaches the answer a build from zero holds: a root that folds case holds
+    /// one name there and the walk refuses it either way, and a root that does
+    /// not holds two names, only one of which is there at all.
+    #[test]
+    fn a_shadow_name_is_refused_however_the_dirty_path_spells_it() {
+        for (label, on_disk, spelled) in [
+            ("upper-on-disk", "NORN-SHADOW-7-2", "norn-shadow-7-2"),
+            ("lower-on-disk", "norn-shadow-7-2", "NORN-SHADOW-7-2"),
+        ] {
+            let f = Fixture::new(&format!("increment-shadow-case-{label}"));
+            fs::create_dir_all(f.vault().join(format!("dir/{on_disk}"))).unwrap();
+            fs::write(f.vault().join(format!("dir/{on_disk}/note.md")), "body").unwrap();
+            fs::write(f.vault().join("dir/plain.md"), "body").unwrap();
+            let (ops, name) = f.ops(2);
+            let progress = ProgressReporter::disconnected();
+            let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+            let from_zero = stored_paths(&mut attachment.store);
+
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty_path(f.vault().as_path(), &format!("dir/{spelled}/note.md")),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "a dirty root spelled dir/{spelled} left the from-zero answer"
+            );
+            ops.detach(&name, attachment);
+        }
+    }
+
+    /// **A dirty path spelled below an entry the walk reads is an answer, not a
+    /// failure.** Nothing stands under a document or under a device-like entry,
+    /// and a stat through one refuses rather than reporting an absence, so the
+    /// vault states the notation and the leg takes the rows that spelling
+    /// addresses. The entry's own row is above that range and stands.
+    #[cfg(unix)]
+    #[test]
+    fn a_dirty_root_below_an_entry_the_walk_reads_converges() {
+        let f = Fixture::new("increment-under-an-entry");
+        fs::write(f.vault().join("note.md"), "body").unwrap();
+        fs::write(f.vault().join("plain.md"), "body").unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(f.vault().join("pipe"))
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo failed");
+        let (ops, name) = f.ops(2);
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&f.registration(), &progress).unwrap();
+        let from_zero = stored_paths(&mut attachment.store);
+        assert_eq!(from_zero, ["note.md", "plain.md"]);
+
+        for blocked in ["note.md/under.md", "pipe/under.md"] {
+            scoped_increment(
+                &mut attachment.store,
+                f.vault().as_path(),
+                &dirty_path(f.vault().as_path(), blocked),
+                ProductionPolicy::new(2, 2).unwrap(),
+                &progress.healing(),
+                &exclusions(&attachment.registration, &attachment._shadows),
+            )
+            .unwrap();
+            assert_eq!(
+                stored_paths(&mut attachment.store),
+                from_zero,
+                "a dirty root spelled {blocked}"
+            );
+        }
         ops.detach(&name, attachment);
     }
 

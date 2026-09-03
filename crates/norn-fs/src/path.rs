@@ -173,6 +173,16 @@ impl PathNormalizer {
         self.sensitivity
     }
 
+    /// Whether `name` is one of Norn's shadow basenames on this root.
+    ///
+    /// Shadow-ness is a question about identity, so it is answered the way
+    /// every other identity question on this root is: under the case behavior
+    /// the root proved. A root that resolves two spellings to one entry holds
+    /// one name there, and the walk refuses it whichever spelling reaches it.
+    pub(crate) fn names_a_shadow(&self, name: &OsStr) -> bool {
+        crate::shadow::is_shadow_name_under(self.sensitivity, name)
+    }
+
     /// A normalizer for a root whose case behavior a case states outright,
     /// so identity rules are judged on both behaviors from any host.
     #[cfg(test)]
@@ -274,9 +284,12 @@ impl NormalizedPath {
     /// decides it exactly as it decides equality, and only whole components
     /// match: `notes-archive` lies beneath `notes` no more than a sibling does.
     ///
-    /// In-crate: [`Exclusions`](crate::Exclusions) is the exported way to ask
-    /// what a root contains, so a host cannot spell a second answer out of this
-    /// primitive.
+    /// In-crate: [`Exclusions`](crate::Exclusions) and
+    /// [`SkipFact::covers`](crate::SkipFact::covers) are the exported ways to
+    /// ask what a root contains — one for the roots Norn does not read, one for
+    /// the root a walk states a notation at — so a host reads containment off a
+    /// root this crate handed it rather than spelling its own answer out of
+    /// this primitive.
     ///
     /// A test asking whether a *reported* root reaches a path is asking a
     /// different question — both sides are values one harness run collected,

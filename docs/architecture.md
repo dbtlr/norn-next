@@ -1287,7 +1287,10 @@ walk is hash-authoritative: it reads every Markdown path that needs derivation. 
 **document-scoped** finding is reached without content drift because the row records its own
 defect and the walk restores a missing finding.
 **Exclusion is a membership boundary**: an excluded place holds no rows, and any row
-standing under an excluded root is pruned by the next heal that ranges over it. A finding
+standing under an excluded root is pruned by the next leg that ranges over that root —
+the heal that walks it, or an increment a dirty path inside it reaches. An increment
+takes the excluded root whole rather than the path that reached it, once per root, so
+one dirty path inside a churning excluded tree converges the same rows a thousand do. A finding
 whose path left the vault is outside what the walk files again, and is what the walk's own
 subject-axis prune takes: the place is inside the scope it enumerated, and nothing it read
 renders onto it.
