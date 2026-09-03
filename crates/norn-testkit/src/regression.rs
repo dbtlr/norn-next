@@ -801,9 +801,7 @@ impl Registry {
                     .binding
                     .grounds
                     .iter()
-                    .any(|ground| {
-                        matches!(ground, Ground::Absent(_) | Ground::SymbolAbsent(_))
-                    })
+                    .any(|ground| matches!(ground, Ground::Absent(_) | Ground::SymbolAbsent(_)))
         })
     }
 
@@ -1173,10 +1171,10 @@ fn audit_path_ground(
     );
     match (absent, resolution) {
         (true, Resolution::Held) => problems.push(format!(
-                    "`{name}` stands on `{subject}` being absent, and the workspace holds it. The \
+            "`{name}` stands on `{subject}` being absent, and the workspace holds it. The \
                      subject landed, so the reason is stale: bind the case, or restate why a built \
                      subject still carries nothing"
-                )),
+        )),
         (true, Resolution::Confusable { asked, found }) => {
             problems.push(format!(
                 "`{name}` stands on `{subject}` being absent, and the workspace holds `{found}` \
@@ -2363,8 +2361,9 @@ pub(crate) fn foo(count: u64) -> u64 {
     fn the_digest_moves_when_a_symbol_grounds_claim_flips() {
         let subject = "crates/demo/tests/vocabulary.rs::Foo";
         let mut absent = sound();
-        find(&mut absent, "a-dormant-layer-zero-case").binding.grounds =
-            vec![Ground::SymbolAbsent(subject.to_string())];
+        find(&mut absent, "a-dormant-layer-zero-case")
+            .binding
+            .grounds = vec![Ground::SymbolAbsent(subject.to_string())];
         let mut present = sound();
         find(&mut present, "a-dormant-layer-zero-case")
             .binding
