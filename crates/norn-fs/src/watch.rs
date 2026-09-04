@@ -1196,7 +1196,7 @@ fn registered_link_names(root: &Path) -> Result<Vec<PathBuf>, WatchError> {
             // registration-owned edges. Their canonical spelling is already
             // used by every edge below them, and watching `/` for each vault
             // would turn machine-wide churn into watcher input.
-            && parent.parent().is_some()
+            && registration_owns_link(&prefix)
         {
             let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
                 WatchError::Backend(format!(
@@ -1208,6 +1208,22 @@ fn registered_link_names(root: &Path) -> Result<Vec<PathBuf>, WatchError> {
         }
     }
     Ok(links)
+}
+
+fn registration_owns_link(link: &Path) -> bool {
+    !is_platform_root_alias(link)
+}
+
+#[cfg(target_os = "macos")]
+fn is_platform_root_alias(link: &Path) -> bool {
+    ["/etc", "/home", "/tmp", "/var"]
+        .into_iter()
+        .any(|alias| link == Path::new(alias))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_platform_root_alias(_: &Path) -> bool {
+    false
 }
 
 /// Install a whole coverage plan through the backend's bulk-registration seam.
@@ -1959,6 +1975,40 @@ mod tests {
                 (PathBuf::from("/registered"), RecursiveMode::NonRecursive),
             ]
         );
+    }
+
+    #[test]
+    fn a_root_level_custom_link_is_a_registration_owned_edge() {
+        assert!(registration_owns_link(Path::new("/vault")));
+    }
+
+    #[test]
+    fn a_root_level_registered_name_adds_the_filesystem_root_edge() {
+        let normalizer = normalizer();
+        let in_vault =
+            SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
+
+        assert_eq!(
+            coverage_plan(
+                Path::new("/targets/notes"),
+                &[PathBuf::from("/vault")],
+                &in_vault,
+            )
+            .unwrap(),
+            [
+                (PathBuf::from("/targets/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/targets"), RecursiveMode::NonRecursive),
+                (PathBuf::from("/"), RecursiveMode::NonRecursive),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_platform_aliases_are_not_registration_owned_edges() {
+        for alias in ["/etc", "/home", "/tmp", "/var"] {
+            assert!(!registration_owns_link(Path::new(alias)));
+        }
     }
 
     #[test]
