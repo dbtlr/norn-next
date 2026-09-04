@@ -139,22 +139,30 @@ pub(crate) struct ReloadCandidate {
 }
 
 impl ReloadCandidate {
-    pub(crate) fn authored_fingerprints(
+    pub(crate) fn authored_fingerprints_at(
         registration: &Registration,
+        covered_root: &Path,
     ) -> Result<ActiveFingerprints, ReloadError> {
-        let (schema_anchor, schema_name) = schema_anchor(registration)?;
+        let (schema_anchor, schema_name) = schema_anchor_at(registration, covered_root)?;
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
-        let config = norn_fs::read_if_present_and_hash(
-            registration.root.as_path(),
-            Path::new(IN_VAULT_CONFIG_PATH),
-        )
-        .map_err(ReloadError::ConfigRead)?;
+        let config =
+            norn_fs::read_if_present_and_hash(covered_root, Path::new(IN_VAULT_CONFIG_PATH))
+                .map_err(ReloadError::ConfigRead)?;
         Ok(fingerprints(&schema, config.as_ref()))
     }
 
+    #[cfg(test)]
     pub(crate) fn read(registration: &Registration) -> Result<Self, ReloadError> {
-        let (schema_anchor, schema_name) = schema_anchor(registration)?;
+        Self::read_at(registration, registration.root.as_path())
+    }
+
+    /// Read controls from the operational root one attachment covers.
+    pub(crate) fn read_at(
+        registration: &Registration,
+        covered_root: &Path,
+    ) -> Result<Self, ReloadError> {
+        let (schema_anchor, schema_name) = schema_anchor_at(registration, covered_root)?;
         let schema = norn_fs::read_and_hash(&schema_anchor, &schema_name)
             .map_err(ReloadError::SchemaRead)?;
         let schema_text = std::str::from_utf8(schema.bytes())
@@ -162,11 +170,9 @@ impl ReloadCandidate {
         serde_yaml::from_str::<serde_yaml::Value>(schema_text)
             .map_err(|error| ReloadError::SchemaParse(error.to_string()))?;
 
-        let config = norn_fs::read_if_present_and_hash(
-            registration.root.as_path(),
-            Path::new(IN_VAULT_CONFIG_PATH),
-        )
-        .map_err(ReloadError::ConfigRead)?;
+        let config =
+            norn_fs::read_if_present_and_hash(covered_root, Path::new(IN_VAULT_CONFIG_PATH))
+                .map_err(ReloadError::ConfigRead)?;
         let parsed = VaultConfig::parse(config.as_ref().map(norn_fs::ReadAndHash::bytes))
             .map_err(ReloadError::ConfigParse)?;
         let fingerprints = fingerprints(&schema, config.as_ref());
@@ -191,6 +197,20 @@ impl ReloadCandidate {
     }
 }
 
+fn schema_anchor_at(
+    registration: &Registration,
+    covered_root: &Path,
+) -> Result<(PathBuf, PathBuf), ReloadError> {
+    let Some(source) = registration.schema_source.as_ref() else {
+        return Ok((covered_root.to_owned(), PathBuf::from(IN_VAULT_SCHEMA_PATH)));
+    };
+    if let Ok(relative) = source.as_path().strip_prefix(registration.root.as_path()) {
+        let operational = covered_root.join(relative);
+        return schema_anchor_from_source(&operational);
+    }
+    schema_anchor_from_source(source.as_path())
+}
+
 fn fingerprints(
     schema: &norn_fs::ReadAndHash,
     config: Option<&norn_fs::ReadAndHash>,
@@ -203,15 +223,7 @@ fn fingerprints(
     }
 }
 
-/// The directory a schema read is anchored at, and its name below that anchor.
-fn schema_anchor(registration: &Registration) -> Result<(PathBuf, PathBuf), ReloadError> {
-    let Some(source) = registration.schema_source.as_ref() else {
-        return Ok((
-            registration.root.as_path().to_owned(),
-            PathBuf::from(IN_VAULT_SCHEMA_PATH),
-        ));
-    };
-    let source = source.as_path();
+fn schema_anchor_from_source(source: &Path) -> Result<(PathBuf, PathBuf), ReloadError> {
     let (Some(directory), Some(name)) = (source.parent(), source.file_name()) else {
         return Err(ReloadError::SchemaParse(format!(
             "schema source names no file: {}",

@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 use notify::event::{CreateKind, EventKind, ModifyKind, RenameMode};
 use notify::{Config, Event, PollWatcher, RecursiveMode};
 
-use crate::PostState;
 use crate::exclusion::Exclusions;
 use crate::hash::hashed_from;
 use crate::path::{NormalizedPath, PathError, PathNormalizer};
 use crate::write::{Landed, Moved, Vacated};
+use crate::{Identity, PostState, path_identity};
 
 mod faults;
 
@@ -484,6 +484,11 @@ impl std::error::Error for WatchError {}
 /// delivered once, no batch follows it, and a receive after it reports either
 /// no batch or that the watcher stopped.
 ///
+/// Synchronization and heal handoff also read the registered root identity. A
+/// changed identity ends coverage with [`WatchError::CoverageLost`]. The
+/// backend also watches the registered name, so a later retarget ends the
+/// stream without adding filesystem reads to quiet receives.
+///
 /// It is not cloneable — one subscription, one consumer — and dropping it tears
 /// the backend down and joins the worker.
 pub struct Subscription {
@@ -498,9 +503,36 @@ pub struct Subscription {
     /// seam's stream arm: the first delivery a consumer sees as a live change
     /// is the first one after a heal has taken up the coverage.
     first_heal: HealWindow,
+    root_anchor: RootAnchor,
+}
+
+/// The registered root name and the directory coverage was installed over.
+///
+/// Watch backends cover the canonical directory. Callers keep using the
+/// registered path. The identity joins those names. Each subscription boundary
+/// detects a retarget that the canonical watch cannot observe.
+struct RootAnchor {
+    registered: PathBuf,
+    covered: PathBuf,
+    identity: Identity,
+}
+
+impl RootAnchor {
+    fn check(&self) -> Result<(), WatchError> {
+        match path_identity(&self.registered) {
+            Ok(Some(identity)) if identity == self.identity => Ok(()),
+            Ok(_) => Err(WatchError::CoverageLost(self.covered.clone())),
+            Err(refusal) => Err(WatchError::Backend(refusal.to_string())),
+        }
+    }
 }
 
 impl Subscription {
+    /// The canonical directory this subscription covers.
+    pub fn covered_root(&self) -> &Path {
+        &self.root_anchor.covered
+    }
+
     /// Wait until every coverage edge is live, or until coverage fails.
     ///
     /// Expiry is returned as a typed terminal watcher error. It does not
@@ -533,7 +565,8 @@ impl Subscription {
                 .expect("subscription wake sender present")
                 .try_send(());
         }
-        outcome
+        outcome?;
+        self.check_root_anchor()
     }
 
     /// Hold settled output while a hash-authoritative heal is in flight.
@@ -548,6 +581,7 @@ impl Subscription {
     /// next one. That is what the fault seam's stream stage stands in place of,
     /// and closing the first window is what makes its arm eligible.
     pub fn finish_heal(&self) -> Result<Batch, WatchError> {
+        self.check_root_anchor()?;
         let work = {
             let mut state = self.state.lock().expect("watch state poisoned");
             // Closed under the state lock: a delivery cannot pass the arm's
@@ -600,6 +634,23 @@ impl Subscription {
                 Err(WatchError::Backend("watcher stopped".into()))
             }
         }
+    }
+
+    /// Verify that the registered name still resolves to the directory this
+    /// subscription covers, and make a mismatch terminal for every observer.
+    fn check_root_anchor(&self) -> Result<(), WatchError> {
+        let Err(detected) = self.root_anchor.check() else {
+            return Ok(());
+        };
+        let error = self
+            .state
+            .lock()
+            .expect("watch state poisoned")
+            .terminal
+            .get_or_insert(detected)
+            .clone();
+        publish_control(&self.control, SubscriptionState::Terminal(error.clone()));
+        Err(error)
     }
 }
 
@@ -794,22 +845,31 @@ fn establish(
     poll: bool,
     faults: WatchFaults,
 ) -> Result<(Subscription, OwnWrites), WatchError> {
+    let registered_root = std::path::absolute(vault_root)
+        .map_err(|error| WatchError::Backend(format!("cannot anchor vault root: {error}")))?;
+    let registered_links = registered_link_names(&registered_root)?;
     // macOS FSEvents reports the canonical `/private/var/...` spelling even
     // when a caller registered `/var/...`. Keep registration and callback
     // classification in that same spelling without resolving the schema file
     // itself (its name is expected to be atomically replaced).
-    let root = std::fs::canonicalize(vault_root)
+    let root = std::fs::canonicalize(&registered_root)
         .map_err(|error| WatchError::Backend(format!("cannot resolve vault root: {error}")))?;
+    let root_identity = path_identity(&root)
+        .map_err(|refusal| WatchError::Backend(refusal.to_string()))?
+        .ok_or_else(|| WatchError::CoverageLost(root.clone()))?;
     let schema_source = canonical_parent_path(schema_source)?;
     let normalizer =
         PathNormalizer::detect(&root).map_err(|error| WatchError::Backend(error.to_string()))?;
     let schema = schema_location(&root, &schema_source, &normalizer)?;
     // Every coverage edge is decided before a backend resource exists, so a
     // plan this vault cannot express refuses without a watcher to tear down.
-    let plan = coverage_plan(&root, &schema)?;
+    let plan = coverage_plan(&root, &registered_links, &schema)?;
     let ledger = Arc::new(Mutex::new(Ledger::default()));
     let shared = Arc::new(Mutex::new(State::new(
         root.clone(),
+        registered_root.clone(),
+        registered_links,
+        root_identity,
         normalizer.clone(),
         schema,
         ledger.clone(),
@@ -889,7 +949,7 @@ fn establish(
     let worker = thread::spawn(move || run_coalescer(worker_state, wake_rx, batch_tx));
     let owns = OwnWrites {
         ledger: Arc::downgrade(&ledger),
-        root,
+        root: root.clone(),
         normalizer,
     };
     Ok((
@@ -902,6 +962,11 @@ fn establish(
             wake: Some(wake_tx),
             faults,
             first_heal,
+            root_anchor: RootAnchor {
+                registered: registered_root,
+                covered: root.clone(),
+                identity: root_identity,
+            },
         },
         owns,
     ))
@@ -1074,10 +1139,13 @@ fn native_watcher(
 /// The vault tree is covered recursively. Its parent is covered
 /// non-recursively for one fact the tree's own watch cannot report: the name
 /// the root occupies, whose removal or rename is the end of coverage rather
-/// than a change inside the vault. A schema source outside the vault adds its
-/// own parent, and only when neither of those two already covers it.
+/// than a change inside the vault. Each registration-owned symbolic-link name
+/// in the root chain gets the same edge, so retargeting the root or one of its
+/// symbolic-link ancestors is also terminal. A schema source outside the vault
+/// adds its own parent, only when no earlier edge covers it.
 fn coverage_plan(
     root: &Path,
+    registered_links: &[PathBuf],
     schema: &SchemaLocation,
 ) -> Result<Vec<(PathBuf, RecursiveMode)>, WatchError> {
     let parent = root
@@ -1087,15 +1155,75 @@ fn coverage_plan(
         (root.to_owned(), RecursiveMode::Recursive),
         (parent.to_owned(), RecursiveMode::NonRecursive),
     ];
+    for link in registered_links {
+        let link_parent = link
+            .parent()
+            .ok_or_else(|| WatchError::Backend("registered root link has no parent".into()))?;
+        if !plan.iter().any(|(path, _)| path == link_parent) {
+            plan.push((link_parent.to_owned(), RecursiveMode::NonRecursive));
+        }
+    }
     if let SchemaLocation::External {
         parent: schema_parent,
         ..
     } = schema
-        && schema_parent != parent
+        && !plan.iter().any(|(path, _)| path == schema_parent)
     {
         plan.push((schema_parent.clone(), RecursiveMode::NonRecursive));
     }
     Ok(plan)
+}
+
+/// Symbolic-link names whose targets participate in the registered root.
+///
+/// Each parent becomes a nonrecursive coverage edge. A retarget of either the
+/// leaf root link or an ancestor link then reaches the same identity recheck.
+#[allow(clippy::disallowed_methods)] // norn-fs owns vault path resolution.
+fn registered_link_names(root: &Path) -> Result<Vec<PathBuf>, WatchError> {
+    let mut prefix = PathBuf::new();
+    let mut links = Vec::new();
+    for component in root.components() {
+        prefix.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&prefix).map_err(|error| {
+            WatchError::Backend(format!(
+                "cannot inspect registered vault root component {}: {error}",
+                prefix.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink()
+            && let (Some(parent), Some(name)) = (prefix.parent(), prefix.file_name())
+            // `/var` and `/tmp` are platform spellings on macOS, not
+            // registration-owned edges. Their canonical spelling is already
+            // used by every edge below them, and watching `/` for each vault
+            // would turn machine-wide churn into watcher input.
+            && registration_owns_link(&prefix)
+        {
+            let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+                WatchError::Backend(format!(
+                    "cannot resolve registered root link parent {}: {error}",
+                    parent.display()
+                ))
+            })?;
+            links.push(canonical_parent.join(name));
+        }
+    }
+    Ok(links)
+}
+
+fn registration_owns_link(link: &Path) -> bool {
+    !is_platform_root_alias(link)
+}
+
+#[cfg(target_os = "macos")]
+fn is_platform_root_alias(link: &Path) -> bool {
+    ["/etc", "/home", "/tmp", "/var"]
+        .into_iter()
+        .any(|alias| link == Path::new(alias))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_platform_root_alias(_: &Path) -> bool {
+    false
 }
 
 /// Install a whole coverage plan through the backend's bulk-registration seam.
@@ -1224,6 +1352,9 @@ impl Pending {
 }
 struct State {
     root: PathBuf,
+    registered_root: PathBuf,
+    registered_links: Vec<PathBuf>,
+    root_identity: Identity,
     normalizer: PathNormalizer,
     exclusions: Exclusions,
     schema: SchemaLocation,
@@ -1236,6 +1367,9 @@ struct State {
 impl State {
     fn new(
         root: PathBuf,
+        registered_root: PathBuf,
+        registered_links: Vec<PathBuf>,
+        root_identity: Identity,
         normalizer: PathNormalizer,
         schema: SchemaLocation,
         ledger: Arc<Mutex<Ledger>>,
@@ -1244,6 +1378,9 @@ impl State {
             Exclusions::new(&normalizer, &[]).expect("an empty root list refuses nothing");
         Self {
             root,
+            registered_root,
+            registered_links,
+            root_identity,
             normalizer,
             exclusions,
             schema,
@@ -1386,6 +1523,8 @@ fn names_only_the_directory_entry(kind: EventKind) -> bool {
 struct PathEffect {
     /// The path the coverage was installed over is not the entry's any more.
     coverage_lost: bool,
+    /// The registered name changed and must still resolve to the covered root.
+    root_recheck: bool,
     /// The vault partition's path set is no longer known.
     vault_rescan: bool,
     /// The schema partition's path set is no longer known.
@@ -1405,6 +1544,12 @@ impl PathEffect {
 
 fn classify_path(state: &State, kind: EventKind, path: &Path) -> PathEffect {
     let mut effect = PathEffect::default();
+    if state.registered_links.iter().any(|link| path == link)
+        && (kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))))
+    {
+        effect.root_recheck = true;
+        return effect;
+    }
     if path == state.root {
         if kind.is_remove() || matches!(kind, EventKind::Modify(ModifyKind::Name(_))) {
             effect.coverage_lost = true;
@@ -1503,11 +1648,27 @@ fn reported_spelling(kind: EventKind) -> Spelling {
 fn ingest_path(state: &mut State, kind: EventKind, path: &Path) {
     let PathEffect {
         coverage_lost,
+        root_recheck,
         vault_rescan,
         schema_rescan,
         schema_dirty,
         dirty_root,
     } = classify_path(state, kind, path);
+    if root_recheck {
+        match path_identity(&state.registered_root) {
+            Ok(Some(identity)) if identity == state.root_identity => {}
+            Ok(_) => {
+                let root = state.root.clone();
+                state.terminal.get_or_insert(WatchError::CoverageLost(root));
+            }
+            Err(refusal) => {
+                state
+                    .terminal
+                    .get_or_insert_with(|| WatchError::Backend(refusal.to_string()));
+            }
+        }
+        return;
+    }
     if coverage_lost {
         let root = state.root.clone();
         state.terminal.get_or_insert(WatchError::CoverageLost(root));
@@ -1688,7 +1849,10 @@ mod tests {
         let root = PathBuf::from("/vault");
         let normalizer = normalizer();
         Arc::new(Mutex::new(State::new(
+            root.clone(),
             root,
+            Vec::new(),
+            Identity { dev: 0, ino: 0 },
             normalizer.clone(),
             SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
@@ -1707,6 +1871,9 @@ mod tests {
     fn state_with(schema: SchemaLocation) -> Arc<Mutex<State>> {
         Arc::new(Mutex::new(State::new(
             PathBuf::from("/vault"),
+            PathBuf::from("/vault"),
+            Vec::new(),
+            Identity { dev: 0, ino: 0 },
             normalizer(),
             schema,
             Arc::new(Mutex::new(Ledger::default())),
@@ -1720,6 +1887,9 @@ mod tests {
         let normalizer = PathNormalizer::for_sensitivity(sensitivity);
         Arc::new(Mutex::new(State::new(
             PathBuf::from("/vault"),
+            PathBuf::from("/vault"),
+            Vec::new(),
+            Identity { dev: 0, ino: 0 },
             normalizer.clone(),
             SchemaLocation::InVault(normalizer.normalize(Path::new(schema)).unwrap()),
             Arc::new(Mutex::new(Ledger::default())),
@@ -1778,7 +1948,7 @@ mod tests {
         let in_vault =
             SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
         assert_eq!(
-            coverage_plan(Path::new("/vaults/notes"), &in_vault).unwrap(),
+            coverage_plan(Path::new("/vaults/notes"), &[], &in_vault,).unwrap(),
             [
                 (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
                 (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
@@ -1787,12 +1957,81 @@ mod tests {
     }
 
     #[test]
+    fn a_registered_name_in_another_parent_adds_one_coverage_edge() {
+        let normalizer = normalizer();
+        let in_vault =
+            SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
+
+        assert_eq!(
+            coverage_plan(
+                Path::new("/targets/notes"),
+                &[PathBuf::from("/registered/current")],
+                &in_vault,
+            )
+            .unwrap(),
+            [
+                (PathBuf::from("/targets/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/targets"), RecursiveMode::NonRecursive),
+                (PathBuf::from("/registered"), RecursiveMode::NonRecursive),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_level_custom_link_is_a_registration_owned_edge() {
+        assert!(registration_owns_link(Path::new("/vault")));
+    }
+
+    #[test]
+    fn a_root_level_registered_name_adds_the_filesystem_root_edge() {
+        let normalizer = normalizer();
+        let in_vault =
+            SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
+
+        assert_eq!(
+            coverage_plan(
+                Path::new("/targets/notes"),
+                &[PathBuf::from("/vault")],
+                &in_vault,
+            )
+            .unwrap(),
+            [
+                (PathBuf::from("/targets/notes"), RecursiveMode::Recursive),
+                (PathBuf::from("/targets"), RecursiveMode::NonRecursive),
+                (PathBuf::from("/"), RecursiveMode::NonRecursive),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_platform_aliases_are_not_registration_owned_edges() {
+        for alias in ["/etc", "/home", "/tmp", "/var"] {
+            assert!(!registration_owns_link(Path::new(alias)));
+        }
+    }
+
+    #[test]
+    fn an_event_at_a_distinct_registered_name_ends_coverage() {
+        let state = state();
+        state.lock().unwrap().registered_links = vec![PathBuf::from("/registered/current")];
+
+        let effect = classify_path(
+            &state.lock().unwrap(),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            Path::new("/registered/current"),
+        );
+
+        assert!(effect.root_recheck);
+    }
+
+    #[test]
     fn a_rootless_vault_path_is_refused_before_any_backend_exists() {
         let normalizer = normalizer();
         let in_vault =
             SchemaLocation::InVault(normalizer.normalize(Path::new("schema.yml")).unwrap());
         assert!(matches!(
-            coverage_plan(Path::new("/"), &in_vault),
+            coverage_plan(Path::new("/"), &[], &in_vault),
             Err(WatchError::Backend(_))
         ));
     }
@@ -1802,6 +2041,7 @@ mod tests {
         assert_eq!(
             coverage_plan(
                 Path::new("/vaults/notes"),
+                &[],
                 &external_schema("/etc/norn/schemas")
             )
             .unwrap(),
@@ -1819,7 +2059,7 @@ mod tests {
     #[test]
     fn an_external_schema_beside_the_vault_root_adds_no_edge() {
         assert_eq!(
-            coverage_plan(Path::new("/vaults/notes"), &external_schema("/vaults")).unwrap(),
+            coverage_plan(Path::new("/vaults/notes"), &[], &external_schema("/vaults"),).unwrap(),
             [
                 (PathBuf::from("/vaults/notes"), RecursiveMode::Recursive),
                 (PathBuf::from("/vaults"), RecursiveMode::NonRecursive),
@@ -1889,6 +2129,28 @@ mod tests {
         assert_eq!(
             subscription.finish_heal(),
             Err(WatchError::Backend("lost during heal".into()))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Test arrangement inside Scratch-owned paths.
+    fn an_existing_terminal_precedes_a_later_root_anchor_loss() {
+        let scratch = Scratch::new("terminal-before-root-anchor-loss");
+        let vault = scratch.path("vault");
+        let moved = scratch.path("moved-vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let schema = vault.join("schema.yml");
+        std::fs::write(&schema, "version: 1\n").unwrap();
+        let (subscription, _) = watch_polling(&vault, &schema).unwrap();
+        subscription.begin_heal();
+        subscription.state.lock().unwrap().terminal =
+            Some(WatchError::Backend("the first terminal".into()));
+        std::fs::rename(&vault, &moved).unwrap();
+        std::fs::create_dir(&vault).unwrap();
+
+        assert_eq!(
+            subscription.finish_heal(),
+            Err(WatchError::Backend("the first terminal".into()))
         );
     }
 
@@ -4329,6 +4591,9 @@ mod tests {
         );
         let state = Arc::new(Mutex::new(State::new(
             recorder.root.clone(),
+            recorder.root.clone(),
+            Vec::new(),
+            Identity { dev: 0, ino: 0 },
             recorder.normalizer.clone(),
             SchemaLocation::InVault(
                 recorder
