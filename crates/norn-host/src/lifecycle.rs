@@ -128,6 +128,10 @@ pub trait EntryOps: Send + Sync + 'static {
     fn active_fingerprints(&self, _: &Self::Attachment) -> Option<ActiveFingerprints> {
         None
     }
+    /// The root authored control reads must use for this attachment.
+    fn control_root(&self, _: &Self::Attachment) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Discard damaged derived state and build it from the vault again — heal
     /// rung 3, reached where an implementation reported
     /// [`JobFailure::StoreDamaged`].
@@ -433,6 +437,7 @@ impl<A: SnapshotSource> Entry<A> {
                 reader: None,
                 pending: Batch::default(),
                 active_fingerprints: None,
+                control_root: None,
                 last_reload_error: None,
                 recovery_required: false,
                 rebuild_required: false,
@@ -485,6 +490,8 @@ struct EntryState<A: SnapshotSource> {
     pending: Batch,
     /// The core fingerprints active in the attached runtime.
     active_fingerprints: Option<ActiveFingerprints>,
+    /// The operational root the active controls were read from.
+    control_root: Option<std::path::PathBuf>,
     /// The last typed core error from reading, parsing, or applying vault
     /// control files. A successful candidate clears it.
     last_reload_error: Option<ReloadError>,
@@ -1240,6 +1247,7 @@ fn finish_release<O: EntryOps>(
     state.detach_in_flight = false;
     state.pending = Batch::default();
     state.active_fingerprints = None;
+    state.control_root = None;
     // The derived state a damage verdict was about is with the ops, and an
     // attach opens the database again from nothing: a requirement kept here
     // would name a store this entry no longer holds.
@@ -1338,12 +1346,13 @@ fn unwind_detail(payload: &(dyn Any + Send)) -> String {
 ///
 /// The gate still poisons in production. [`park_on_current_classification`]
 /// holds it across `entries.recheck` and whatever refusal that read raises,
-/// and [`run_job_inner`]'s first `Job::Attach` arm holds it across the same
-/// recheck before the attach it guards ever runs — a panic under either
-/// leaves the poison this recovers rather than one nothing can raise. Once
-/// poisoned this way the underlying [`Mutex`] answers every direct `lock`
-/// with the same `PoisonError` forever — nothing here calls `clear_poison` —
-/// so recovery is this accessor's job on every call, not a one-time repair.
+/// and [`run_job_inner`]'s `Job::Attach` and `Job::Recover` arms hold it across
+/// the same recheck before the acquisition each guards runs — a panic under
+/// any of them leaves the poison this recovers rather than one nothing can
+/// raise. Once poisoned this way the underlying [`Mutex`] answers every direct
+/// `lock` with the same `PoisonError` forever — nothing here calls
+/// `clear_poison` — so recovery is this accessor's job on every call, not a
+/// one-time repair.
 /// Pinned by `a_poisoned_attach_gate_still_answers_through_the_accessor`.
 fn attach_gate<O: EntryOps>(shared: &Shared<O>) -> MutexGuard<'_, BTreeMap<Identity, VaultName>> {
     shared
@@ -1352,22 +1361,23 @@ fn attach_gate<O: EntryOps>(shared: &Shared<O>) -> MutexGuard<'_, BTreeMap<Ident
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Give back every claim on a root this vault's attach filed.
+/// Give back every root-identity claim this vault's acquisition filed.
 ///
 /// The gate is keyed by identity and names the vault holding each claim, so the
-/// sweep is by value: an attach that ended without reaching the removal of its
-/// own claim leaves one standing, and a claim standing for an attach that is
-/// not running refuses every other name that reaches that root.
+/// sweep is by value: an acquisition that ended without reaching the removal
+/// of its own claim leaves one standing, and a claim standing for an
+/// acquisition that is not running refuses every other name that reaches that
+/// root.
 ///
 /// The sweep is by value in a second sense the caller relies on: it takes every
-/// claim this vault holds, including one a second attach for the same name is
-/// running under right now. Such an attach is superseded — a producer schedules
-/// one only over an entry whose epoch has moved past the leg that unwound — and
-/// what it finds at its own end is the unconditional remove that answers for a
-/// claim already gone. What it loses is the exclusion its claim was buying for
-/// the rest of its own run, which is the same window that remove leaves open,
-/// and the post-attach recheck under the gate is what closes it for both.
-fn release_attach_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
+/// claim this vault holds, including one a second acquisition for the same name
+/// is running under right now. Such an acquisition is superseded — a producer
+/// schedules one only over an entry whose epoch has moved past the leg that
+/// unwound — and what it finds at its own end is the conditional remove that
+/// answers for a claim already gone. What it loses is the exclusion its claim
+/// was buying for the rest of its own run, which is the same window that remove
+/// leaves open, and the post-acquisition recheck under the gate closes it.
+fn release_identity_claims<O: EntryOps>(shared: &Arc<Shared<O>>, name: &VaultName) {
     attach_gate(shared).retain(|_, owner| owner != name);
 }
 
@@ -1465,7 +1475,7 @@ fn reclaim_unwound_leg<O: EntryOps>(
         begin_release(&mut state);
         attachment
     };
-    release_attach_claims(shared, name);
+    release_identity_claims(shared, name);
     if attachment.is_none() {
         // Nothing goes to `EntryOps::detach` on this leg, so nothing gives the
         // ops their per-vault residue back on the way through. Where the entry
@@ -1780,11 +1790,10 @@ fn park_identity_refusal<A: SnapshotSource>(state: &mut EntryState<A>, detail: S
 /// refusal that still stands. A sweep that retired a park here would answer a
 /// question no acquisition asked, on a read no acquisition is bound by.
 ///
-/// Two legs acquire coverage. [`Job::Attach`] installs it where the entry
-/// holds none, reading the root under the gate itself so the identity it
-/// claims and the conflict it is judged for come from one read.
-/// [`Job::Recover`] installs it again over coverage the ops reported
-/// terminally lost, and reads the root through this. Neither meets a standing
+/// The two acquisition legs read the root under the gate themselves, so the
+/// identity each claims and the conflict it is judged for come from one read.
+/// This helper instead classifies a root when the serving set changes or a
+/// watcher reports that coverage ended. None of these paths meets a standing
 /// registry park — a park gives the entry's coverage back, so the work a
 /// parked entry is owed once the park is withdrawn is always the attach.
 ///
@@ -1852,6 +1861,8 @@ struct Shared<O: EntryOps> {
     jobs: Mutex<Option<mpsc::SyncSender<Job>>>,
     shutting_down: AtomicBool,
     idle_after: Duration,
+    /// Root identities claimed by coverage acquisitions while their
+    /// filesystem work runs outside this gate.
     attach_gate: Mutex<BTreeMap<Identity, VaultName>>,
 }
 
@@ -2225,16 +2236,20 @@ impl<O: EntryOps> Host<O> {
     /// crate outside its own cases reaches it yet.
     pub fn authored_drift(&self, name: &VaultName) -> Option<AuthoredDrift> {
         let entry = self.shared.entries.get(name)?;
-        let active = entry
-            .gate
-            .lock()
-            .expect("entry gate poisoned")
-            .active_fingerprints;
+        let (active, control_root) = {
+            let state = entry.gate.lock().expect("entry gate poisoned");
+            (state.active_fingerprints, state.control_root.clone())
+        };
         let Some(active) = active else {
             return Some(AuthoredDrift::Inactive);
         };
         Some(
-            match ReloadCandidate::authored_fingerprints(&entry.registration) {
+            match ReloadCandidate::authored_fingerprints_at(
+                &entry.registration,
+                control_root
+                    .as_deref()
+                    .unwrap_or_else(|| entry.registration.root.as_path()),
+            ) {
                 Ok(authored) if authored == active => AuthoredDrift::Current,
                 Ok(_) => AuthoredDrift::ReloadPending,
                 Err(error) => AuthoredDrift::Unreadable(error),
@@ -3038,6 +3053,22 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
                 return None;
             }
+            if post_reading.identity != claim_identity {
+                drop(attach_claims);
+                let attachment = result.ok().map(|(attachment, _, _)| attachment);
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                if !state.claim.stands_at(epoch) {
+                    drop(state);
+                    return attachment;
+                }
+                // Coverage and the heal must belong to the same root. Give
+                // this attempt back through the normal release window; the
+                // standing demand then starts one full attach against the
+                // identity the registered name now resolves to.
+                begin_release(&mut state);
+                drop(state);
+                return attachment;
+            }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             if !state.claim.stands_at(epoch) {
                 // The entry moved on while this attach ran, so what it
@@ -3052,6 +3083,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Ok((attachment, observed, handoff_saturated)) => {
                     state.pending.merge(observed);
                     state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
+                    state.control_root = shared.ops.control_root(&attachment);
                     state.last_reload_error = None;
                     state.install_coverage(attachment);
                     // The coverage is this attach's, and what any earlier
@@ -3116,26 +3148,56 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
             None
         }
         Job::Recover(name, epoch) => {
-            // A recovery installs watcher coverage over the registered root
-            // again, so it acquires coverage the way an attach does and reads
-            // the root the same way before it does: nothing watched that path
-            // while the entry stood without coverage, so what it resolves to
-            // now, and which other names reach it, are open questions here. A
-            // refusal moves the entry past this epoch and gives the parked
-            // coverage back, so the leg below finds nothing left to run.
-            park_on_current_classification(shared, &name);
+            // Classification and the identity claim are atomic, but recovery
+            // is deliberately outside this gate so unrelated vaults can
+            // recover in parallel. Publication revalidates under the gate.
+            let mut attach_claims = attach_gate(shared);
+            let reading = match shared.entries.recheck(&name) {
+                Ok(reading) => reading,
+                Err(refusal) => {
+                    drop(attach_claims);
+                    refuse_identity_error(shared, &name, refusal.to_string());
+                    return None;
+                }
+            };
+            if let Some(conflict) = reading.conflict {
+                drop(attach_claims);
+                refuse_conflict(shared, &conflict);
+                return None;
+            }
+            let claim_identity = reading.identity;
+            if let Some(identity) = claim_identity {
+                if let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name) {
+                    let conflict = AliasConflict::new([owner.clone(), name.clone()]);
+                    drop(attach_claims);
+                    refuse_conflict(shared, &conflict);
+                    return None;
+                }
+                attach_claims.insert(identity, name.clone());
+            }
             let mut attachment = {
                 let mut state = entry.gate.lock().expect("entry gate poisoned");
                 if !state.claim.stands_at(epoch) {
+                    if let Some(identity) = claim_identity
+                        && attach_claims.get(&identity) == Some(&name)
+                    {
+                        attach_claims.remove(&identity);
+                    }
                     return None;
                 }
                 let Some(attachment) = state.coverage.take(epoch) else {
                     restore_lost_claim(&mut state, Job::Recover(name.clone(), epoch));
+                    if let Some(identity) = claim_identity
+                        && attach_claims.get(&identity) == Some(&name)
+                    {
+                        attach_claims.remove(&identity);
+                    }
                     return None;
                 };
                 state.pin_for_leg(epoch);
                 attachment
             };
+            drop(attach_claims);
             let mut observed = Batch::default();
             let mut handoff_saturated = false;
             let result = shared
@@ -3147,6 +3209,59 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     handoff_saturated = saturated;
                     Ok(())
                 });
+            let mut attach_claims = attach_gate(shared);
+            if let Some(identity) = claim_identity
+                && attach_claims.get(&identity) == Some(&name)
+            {
+                attach_claims.remove(&identity);
+            }
+            let post_reading = match shared.entries.recheck(&name) {
+                Ok(reading) => reading,
+                Err(refusal) => {
+                    entry
+                        .gate
+                        .lock()
+                        .expect("entry gate poisoned")
+                        .unpin_leg(epoch);
+                    drop(attach_claims);
+                    refuse_identity_error(shared, &name, refusal.to_string());
+                    return Some(attachment);
+                }
+            };
+            let mut post_conflict = post_reading.conflict;
+            if post_conflict.is_none()
+                && let Some(identity) = post_reading.identity
+                && let Some(owner) = attach_claims.get(&identity).filter(|owner| *owner != &name)
+            {
+                post_conflict = Some(AliasConflict::new([owner.clone(), name.clone()]));
+            }
+            if let Some(conflict) = post_conflict {
+                entry
+                    .gate
+                    .lock()
+                    .expect("entry gate poisoned")
+                    .unpin_leg(epoch);
+                drop(attach_claims);
+                refuse_conflict(shared, &conflict);
+                return Some(attachment);
+            }
+            if post_reading.identity != claim_identity {
+                let mut state = entry.gate.lock().expect("entry gate poisoned");
+                state.unpin_leg(epoch);
+                if !state.claim.stands_at(epoch) {
+                    drop(state);
+                    drop(attach_claims);
+                    return Some(attachment);
+                }
+                // The store may already contain work read through the new
+                // root, while the replacement watcher may cover the old one.
+                // Release the whole attachment so the standing demand starts
+                // one attach whose mechanisms all derive from the new root.
+                begin_release(&mut state);
+                drop(state);
+                drop(attach_claims);
+                return Some(attachment);
+            }
             let mut state = entry.gate.lock().expect("entry gate poisoned");
             state.unpin_leg(epoch);
             if !state.claim.stands_at(epoch) {
@@ -3156,6 +3271,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 drop(state);
                 return Some(attachment);
             }
+            state.control_root = shared.ops.control_root(&attachment);
             state.claim.release();
             let mut next = None;
             let mut reclassify = false;
@@ -3181,6 +3297,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::LostMaintainership) => {
                     begin_release(&mut state);
                     drop(state);
+                    drop(attach_claims);
                     finish_release(
                         shared,
                         entry,
@@ -3195,6 +3312,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                     state.maintainer_contended = Some(incumbent);
                     begin_release(&mut state);
                     drop(state);
+                    drop(attach_claims);
                     finish_release(
                         shared,
                         entry,
@@ -3243,6 +3361,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 }
             }
             drop(state);
+            drop(attach_claims);
             // The watcher this leg drained reported that the root stopped
             // being covered, and this leg is the one caller that consumed the
             // report: the classification rides the fact rather than the caller.
@@ -4162,6 +4281,9 @@ mod tests {
         attach_roots: Mutex<BTreeMap<VaultName, VaultRoot>>,
         detaches: AtomicUsize,
         recovers: AtomicUsize,
+        block_recover: std::sync::atomic::AtomicBool,
+        recover_started: std::sync::atomic::AtomicBool,
+        recover_release: std::sync::atomic::AtomicBool,
         rebuilds: AtomicUsize,
         reconciles: AtomicUsize,
         reload_supported: std::sync::atomic::AtomicBool,
@@ -4439,6 +4561,10 @@ mod tests {
         ) -> Result<(), JobFailure> {
             ON_JOB_THREAD.with(|flag| flag.set(true));
             self.recovers.fetch_add(1, Ordering::SeqCst);
+            if self.block_recover.load(Ordering::SeqCst) {
+                self.recover_started.store(true, Ordering::SeqCst);
+                wait_for_release("recover_release", &self.recover_release);
+            }
             // Recovery is the one leg this fake gives a duration to: it is
             // what a wait that spans a recovery has to outlast.
             thread::sleep(Duration::from_millis(20));
@@ -7691,6 +7817,317 @@ mod tests {
         drop((lease, recovery, host));
     }
 
+    /// Recovery claims the identity it resolved before it installs coverage.
+    /// A concurrent attach cannot acquire that identity while the recovering
+    /// name temporarily refuses its next registry read.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_identity_claim_refuses_a_concurrent_alias_acquisition() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = temp_base("recovery-identity-claim");
+        let base = scratch.root();
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let moved_b_root = base.join("moved-b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+
+        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &b, backend_lost());
+
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+
+        std::fs::rename(&b_root, &moved_b_root).unwrap();
+        symlink("b", &b_root).unwrap();
+        std::fs::remove_dir(&a_root).unwrap();
+        symlink(&moved_b_root, &a_root).unwrap();
+        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        wait_until(
+            "the concurrent attach to publish Ready or meet the recovery claim",
+            lifecycle_wait_budget(),
+            || match a_lease.completion() {
+                Demand::DuplicateRoot(actual) if actual == conflict => Observed::Met(()),
+                Demand::State(TrustState::Ready) => Observed::Met(()),
+                completion => Observed::pending(format!("the completion is {completion:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            a_lease.completion(),
+            Demand::DuplicateRoot(conflict.clone())
+        );
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            1,
+            "the concurrent alias acquired coverage while recovery claimed its identity"
+        );
+
+        ops.recover_release.store(true, Ordering::SeqCst);
+        wait_for_park(&host, &b, Demand::DuplicateRoot(conflict.clone()));
+        assert_eq!(recovery.completion(), Demand::DuplicateRoot(conflict));
+        wait_for_detaches(&ops, 1, "the recovering attachment to return");
+        assert!(
+            attach_gate(&host.shared).is_empty(),
+            "the refused recovery left its root identity claimed"
+        );
+
+        drop((a_lease, b_lease, recovery, host));
+    }
+
+    /// Recovery keeps its resolved root identity claimed until it has
+    /// installed coverage and rechecked the registry. A root retargeted while
+    /// recovery runs therefore cannot publish coverage over an alias.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rechecks_aliases_before_it_publishes_coverage() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = temp_base("recovery-alias-race");
+        let base = scratch.root();
+        let a_root = base.join("a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+
+        let b_lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &b, backend_lost());
+
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+
+        let a_lease = host.demand(&a, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &a, TrustState::Ready);
+        std::fs::remove_dir(&b_root).unwrap();
+        symlink(&a_root, &b_root).unwrap();
+        ops.recover_release.store(true, Ordering::SeqCst);
+
+        let conflict = AliasConflict::new([a.clone(), b.clone()]);
+        wait_until(
+            "the recovery to publish Ready or refuse the alias",
+            lifecycle_wait_budget(),
+            || match recovery.completion() {
+                Demand::DuplicateRoot(actual) if actual == conflict => Observed::Met(()),
+                Demand::State(TrustState::Ready) => Observed::Met(()),
+                completion => Observed::pending(format!("the completion is {completion:?}")),
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(
+            recovery.completion(),
+            Demand::DuplicateRoot(conflict.clone())
+        );
+        assert_eq!(a_lease.completion(), Demand::DuplicateRoot(conflict));
+        wait_for_detaches(&ops, 2, "both aliased attachments to return");
+        let b_entry = host.shared.entries.get(&b).unwrap();
+        assert!(
+            !b_entry.gate.lock().unwrap().pinned(),
+            "the refused recovery left its safety pin"
+        );
+        assert!(
+            attach_gate(&host.shared).is_empty(),
+            "the refused recovery left its root identity claimed"
+        );
+
+        drop((a_lease, b_lease, recovery, host));
+    }
+
+    /// Recovery can finish over a healthy root that is not the one it claimed
+    /// before installing coverage. The incoherent attachment is released, and
+    /// the standing demand starts a full attach from the new root before the
+    /// entry publishes `Ready`.
+    #[test]
+    fn recovery_restarts_with_a_full_attach_when_the_root_identity_changes() {
+        let scratch = temp_base("recovery-root-identity-change");
+        let root = scratch.root().join("root");
+        let previous = scratch.root().join("previous");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+        std::fs::rename(&root, &previous).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        ops.recover_release.store(true, Ordering::SeqCst);
+
+        wait_for_attaches(&ops, 2, "recovery to restart as a full attach");
+        wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_detaches(&ops, 1, "the incoherent recovery attachment to return");
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 1);
+        let entry = host.shared.entries.get(&name).unwrap();
+        assert!(
+            !entry.gate.lock().unwrap().pinned(),
+            "the restarted recovery left its safety pin"
+        );
+        assert!(
+            attach_gate(&host.shared).is_empty(),
+            "the restarted recovery left an identity claim behind"
+        );
+
+        drop((lease, recovery, host));
+    }
+
+    /// Recovery rechecks the root before it publishes coverage. A root that
+    /// stops answering while recovery runs returns the attachment and leaves
+    /// the entry parked on the registry refusal.
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rechecks_root_refusals_before_it_publishes_coverage() {
+        let scratch = temp_base("recovery-refusal-race");
+        let root = scratch.root().join("root");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &name, backend_lost());
+
+        ops.block_recover.store(true, Ordering::SeqCst);
+        let recovery = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("recover_started", &ops.recover_started);
+        refuse_root_identity(&root);
+        ops.recover_release.store(true, Ordering::SeqCst);
+
+        wait_for_environmental_refusal(&host, &name);
+        wait_for_detaches(&ops, 1, "the refused recovery attachment to return");
+        assert!(refuses_identity(&recovery.completion()));
+        let entry = host.shared.entries.get(&name).unwrap();
+        let state = entry.gate.lock().unwrap();
+        assert!(!state.coverage.in_hand() && !state.coverage.out_with_leg());
+        assert!(!state.pinned(), "the refused recovery left its safety pin");
+        assert!(state.claim.leg().is_none());
+        drop(state);
+        assert!(
+            attach_gate(&host.shared).is_empty(),
+            "the refused recovery left its root identity claimed"
+        );
+
+        drop((lease, recovery, host));
+    }
+
+    /// An identity refusal can supersede a recovery while that recovery waits
+    /// to classify its root. If the refusal clears before the worker gets the
+    /// gate, the stale leg removes the identity claim it briefly files.
+    #[cfg(unix)]
+    #[test]
+    fn a_superseded_recovery_leaves_the_root_claimed_by_nothing() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = temp_base("superseded-recovery-claim");
+        let base = scratch.root();
+        let a_root = base.join("a");
+        let saved_a_root = base.join("saved-a");
+        let b_root = base.join("b");
+        let ops = Arc::new(FakeOps::default());
+        let a = VaultName::new("a").unwrap();
+        let b = VaultName::new("b").unwrap();
+        let host = quiet_host_over_roots(
+            Arc::clone(&ops),
+            &[(&a, a_root.as_path()), (&b, b_root.as_path())],
+        );
+
+        let lease = host.demand(&b, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &b, TrustState::Ready);
+        *ops.terminal_poll.lock().unwrap() = Some(WatchError::Backend("lost".into()));
+        poll_watchers(&host.shared);
+        wait_for_state(&host, &b, backend_lost());
+
+        let acquisition_gate = attach_gate(&host.shared);
+        let recovery = host.demand(&b, AttachMode::Durable).unwrap();
+        let entry = host.shared.entries.get(&b).unwrap();
+        wait_until(
+            "the recovery job to register its leg",
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().claim.leg().is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the recovery leg is not registered")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+
+        std::fs::rename(&a_root, &saved_a_root).unwrap();
+        symlink(&b_root, &a_root).unwrap();
+        let conflict = host
+            .shared
+            .entries
+            .recheck(&b)
+            .unwrap()
+            .conflict
+            .expect("a and b resolve to one root");
+        refuse_conflict(&host.shared, &conflict);
+        std::fs::remove_file(&a_root).unwrap();
+        std::fs::rename(&saved_a_root, &a_root).unwrap();
+
+        // Hold the superseded entry until the worker has classified the root
+        // and filed its temporary claim. This makes the cleanup below observe
+        // the stale recovery itself, rather than the refusal that superseded
+        // it before the worker reached the acquisition gate.
+        let state = entry.gate.lock().unwrap();
+        drop(acquisition_gate);
+        wait_until(
+            "the superseded recovery to reach its stale entry claim",
+            lifecycle_wait_budget(),
+            || {
+                if matches!(
+                    host.shared.attach_gate.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ) {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the recovery has not filed its identity claim")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        drop(state);
+
+        let claims = attach_gate(&host.shared);
+        assert_eq!(ops.recovers.load(Ordering::SeqCst), 0);
+        assert_eq!(recovery.completion(), Demand::DuplicateRoot(conflict));
+        assert!(
+            claims.is_empty(),
+            "the superseded recovery left its root identity claimed"
+        );
+        drop(claims);
+
+        drop((lease, recovery, host));
+    }
+
     /// A demand a contention answers withdraws no park.
     ///
     /// Withdrawing the registry's parks is how a demand asks for the
@@ -10618,6 +11055,41 @@ mod tests {
             );
         }
 
+        drop((lease, host));
+    }
+
+    /// An attach may finish over a healthy root that is not the root it
+    /// classified before acquisition. Coverage acquired across that change is
+    /// returned, and the standing demand starts a full attach from the new
+    /// root before anything publishes `Ready`.
+    #[test]
+    fn an_attach_restarts_from_a_changed_root_before_it_publishes_ready() {
+        let scratch = temp_base("attach-root-identity-change");
+        let root = scratch.root().join("root");
+        let previous = scratch.root().join("previous");
+        let ops = Arc::new(FakeOps::default());
+        let name = VaultName::new("notes").unwrap();
+        let host = quiet_host_over_roots(Arc::clone(&ops), &[(&name, root.as_path())]);
+
+        ops.block_attach.store(true, Ordering::SeqCst);
+        let lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_flag("attach_started", &ops.attach_started);
+        std::fs::rename(&root, &previous).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        ops.attach_release.store(true, Ordering::SeqCst);
+
+        wait_for_attaches(&ops, 2, "the attach to restart from the new root");
+        wait_for_state(&host, &name, TrustState::Ready);
+        wait_for_detaches(&ops, 1, "the incoherent attachment to return");
+        assert_eq!(
+            ops.attaches.load(Ordering::SeqCst),
+            2,
+            "the root change did not cost exactly one fresh attach"
+        );
+        assert!(
+            attach_gate(&host.shared).is_empty(),
+            "the changed root left an identity claim behind"
+        );
         drop((lease, host));
     }
 

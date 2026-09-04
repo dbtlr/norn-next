@@ -376,6 +376,67 @@ fn external_schema_changes_and_vault_root_loss_are_reported() {
     );
 }
 
+/// A registered root can be a symbolic-link spelling of the directory the
+/// watcher covers. Retargeting that spelling ends the coverage even though the
+/// original target and its watcher still stand.
+#[cfg(unix)]
+#[test]
+fn retargeting_a_registered_symbolic_link_root_ends_coverage() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = Scratch::new("symbolic-link-root-retarget");
+    let registered = scratch.tree.join("current");
+    let replacement = scratch.tree.join("current.next");
+    let next = scratch.tree.join("next");
+    std::fs::create_dir(&next).expect("the next vault root");
+    symlink(scratch.vault(), &registered).expect("the registered root link");
+    let covered = std::fs::canonicalize(&registered).expect("the covered vault root");
+    let mut collector = Collector::start(&registered, &scratch.schema());
+
+    symlink(&next, &replacement).expect("the replacement root link");
+    std::fs::rename(&replacement, &registered).expect("retargeting the registered root");
+
+    collector.wait_for(
+        "the registered root retarget to end coverage",
+        |seen| match &seen.terminal {
+            Some(WatchError::CoverageLost(path)) if path == &covered => Observed::Met(()),
+            terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
+        },
+    );
+}
+
+/// A symbolic link in the registered root's ancestor chain is a coverage edge
+/// too. Retargeting it changes the registered root without touching the
+/// canonical directory the backend already covers.
+#[cfg(unix)]
+#[test]
+fn retargeting_a_symbolic_link_ancestor_ends_coverage() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = Scratch::new("symbolic-link-ancestor-retarget");
+    let first = scratch.tree.join("first");
+    let next = scratch.tree.join("next");
+    let active = scratch.tree.join("active");
+    let replacement = scratch.tree.join("active.next");
+    std::fs::create_dir_all(first.join("vault")).expect("the first vault root");
+    std::fs::create_dir_all(next.join("vault")).expect("the next vault root");
+    symlink(&first, &active).expect("the registered ancestor link");
+    let registered = active.join("vault");
+    let covered = std::fs::canonicalize(&registered).expect("the covered vault root");
+    let mut collector = Collector::start(&registered, &scratch.schema());
+
+    symlink(&next, &replacement).expect("the replacement ancestor link");
+    std::fs::rename(&replacement, &active).expect("retargeting the registered ancestor");
+
+    collector.wait_for(
+        "the registered ancestor retarget to end coverage",
+        |seen| match &seen.terminal {
+            Some(WatchError::CoverageLost(path)) if path == &covered => Observed::Met(()),
+            terminal => Observed::Pending(format!("terminal state is {terminal:?}")),
+        },
+    );
+}
+
 /// **The boundary is a marker, and the write behind it comes back.** A single
 /// write made the moment coverage is installed is reported for its own path,
 /// after a boundary the backend itself delivered.

@@ -133,9 +133,12 @@ pub struct ProductionEntryOps {
 }
 
 pub struct ProductionAttachment {
-    /// The registration this attachment was established from: the root it
-    /// derives, and where its schema is read.
+    /// The declared registration. Its root remains the name a later recovery
+    /// resolves; operational filesystem work uses `covered_root`.
     registration: Registration,
+    /// The canonical directory shared by this attachment's watcher, walks,
+    /// control reads, write normalization, and shadow placement.
+    covered_root: PathBuf,
     controls: ReloadCandidate,
     subscription: Option<Subscription>,
     store: Store,
@@ -260,11 +263,23 @@ impl ProductionEntryOps {
     }
 
     fn schema_path(registration: &Registration) -> PathBuf {
+        Self::schema_path_at(registration, registration.root.as_path())
+    }
+
+    fn schema_path_at(registration: &Registration, covered_root: &Path) -> PathBuf {
         registration
             .schema_source
             .as_ref()
-            .map(|s| s.as_path().to_owned())
-            .unwrap_or_else(|| registration.root.as_path().join(IN_VAULT_SCHEMA_PATH))
+            .map(|source| {
+                source
+                    .as_path()
+                    .strip_prefix(registration.root.as_path())
+                    .map_or_else(
+                        |_| source.as_path().to_owned(),
+                        |relative| covered_root.join(relative),
+                    )
+            })
+            .unwrap_or_else(|| covered_root.join(IN_VAULT_SCHEMA_PATH))
     }
 
     #[cfg(test)]
@@ -286,9 +301,13 @@ impl ProductionEntryOps {
             .map_err(store_effect)
     }
 
-    fn discard_control_file_facts(registration: &Registration, batch: &mut norn_fs::Batch) {
-        let schema = Self::schema_path(registration);
-        let schema = schema.strip_prefix(registration.root.as_path()).ok();
+    fn discard_control_file_facts(
+        registration: &Registration,
+        covered_root: &Path,
+        batch: &mut norn_fs::Batch,
+    ) {
+        let schema = Self::schema_path_at(registration, covered_root);
+        let schema = schema.strip_prefix(covered_root).ok();
         batch.discard_schema_facts();
         batch.retain_vault_roots(|root| {
             let path = root.as_path();
@@ -310,36 +329,20 @@ impl ProductionEntryOps {
         // that work counts through, so the three callers never have to
         // remember to announce it.
         let healing = progress.healing();
-        let exclusions = exclusions(&attachment.registration, &attachment._shadows);
+        let exclusions = exclusions_at(
+            &attachment.registration,
+            &attachment._shadows,
+            &attachment.covered_root,
+        );
         // The caller pins the candidate before this walk. Every finding below
         // therefore records the active schema fingerprint.
         heal_documents(
             &mut attachment.store,
-            attachment.registration.root.as_path(),
+            &attachment.covered_root,
             &exclusions,
             self.policy,
             &healing,
         )
-    }
-
-    /// Establish the two proofs required before lifecycle publication.
-    ///
-    /// Attach and recovery both install coverage before entering here. This
-    /// one serial path then waits for the backend boundary and runs the
-    /// hash-authoritative heal. The lifecycle performs its nonblocking batch
-    /// drain before it can publish `Ready`.
-    fn synchronize_and_heal(
-        &self,
-        attachment: &mut ProductionAttachment,
-        progress: &ProgressReporter<ProductionAttachment>,
-    ) -> Result<(), JobFailure> {
-        attachment
-            .subscription
-            .as_ref()
-            .ok_or_else(|| environmental("watcher coverage is not installed"))?
-            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
-            .map_err(watcher)?;
-        self.heal_under_coverage(attachment, progress)
     }
 
     /// Run one hash-authoritative heal against coverage that is already live,
@@ -496,13 +499,22 @@ fn release(attachment: ProductionAttachment) {
 /// is excluded for it — unless this vault's root happens to contain the data
 /// directory, which `strip_prefix` is what notices, and then the home is named
 /// by the path it actually has.
+#[cfg(test)]
 fn exclusions(registration: &Registration, shadows: &ShadowHome) -> Vec<PathBuf> {
+    exclusions_at(registration, shadows, registration.root.as_path())
+}
+
+fn exclusions_at(
+    registration: &Registration,
+    shadows: &ShadowHome,
+    covered_root: &Path,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let root = registration.root.as_path();
+    let root = covered_root;
     if let Some(shadows) = shadow_exclusion(shadows.placement(), shadows.directory(), root) {
         paths.push(shadows);
     }
-    let schema = ProductionEntryOps::schema_path(registration);
+    let schema = ProductionEntryOps::schema_path_at(registration, covered_root);
     if let Ok(relative) = schema.strip_prefix(root) {
         paths.push(relative.to_owned());
     }
@@ -545,7 +557,6 @@ impl EntryOps for ProductionEntryOps {
         registration: &Registration,
         progress: &ProgressReporter<Self::Attachment>,
     ) -> Result<Self::Attachment, JobFailure> {
-        let candidate = ReloadCandidate::read(registration).map_err(JobFailure::Reload)?;
         // Everything up to the heal takes the maintainer lock, sweeps the
         // shadow home, installs watcher coverage and opens the store — work
         // that counts no document and can take a while on a loaded machine.
@@ -553,7 +564,6 @@ impl EntryOps for ProductionEntryOps {
         // what it is waiting on rather than a heal that appears not to start.
         let _job = self.evidence.attributing();
         progress.installing_coverage();
-        let root = registration.root.as_path();
         let derived = self.derived(&registration.name);
         let maintainership = match try_acquire(&derived.join("maintainer.lock")).map_err(effect)? {
             Acquisition::Acquired(guard) => guard,
@@ -566,6 +576,11 @@ impl EntryOps for ProductionEntryOps {
         // by: the lock by sitting in that directory, the home by carrying the
         // key wherever the device comparison places it.
         let key = maintainership_key(&self.dirs, &registration.name);
+        let schema = Self::schema_path(registration);
+        let (subscription, own_writes) =
+            Self::start_watch(registration, &schema).map_err(watcher)?;
+        let covered_root = subscription.covered_root().to_owned();
+        let root = covered_root.as_path();
         let shadows = ShadowHome::resolve(root, &derived.join("tmp"), &key).map_err(effect)?;
         shadows.sweep(Duration::ZERO).map_err(effect)?;
         if shadows.placement() == Placement::VaultFallback {
@@ -579,12 +594,15 @@ impl EntryOps for ProductionEntryOps {
             let _ = norn_fs::sweep_fallback_root(root);
             let _ = norn_fs::sweep_fallback_tree(root);
         }
-        let schema = Self::schema_path(registration);
-        let (subscription, own_writes) =
-            Self::start_watch(registration, &schema).map_err(watcher)?;
         let store = Store::open(derived.join("store.sqlite3")).map_err(store_effect)?;
+        subscription
+            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+            .map_err(watcher)?;
+        let candidate =
+            ReloadCandidate::read_at(registration, &covered_root).map_err(JobFailure::Reload)?;
         let mut attachment = ProductionAttachment {
             registration: registration.clone(),
+            covered_root,
             controls: candidate.clone(),
             maintainership,
             store,
@@ -602,7 +620,7 @@ impl EntryOps for ProductionEntryOps {
         // rather than being reported, because an attach that reported it would
         // be answered by another attach that opened the same file and met the
         // same page.
-        let mut attached = match self.synchronize_and_heal(&mut attachment, progress) {
+        let mut attached = match self.heal_under_coverage(&mut attachment, progress) {
             Ok(()) => Ok(attachment),
             Err(JobFailure::StoreDamaged(_)) => self.rung_three(attachment, progress),
             Err(failure) => Err(failure),
@@ -634,11 +652,15 @@ impl EntryOps for ProductionEntryOps {
         let healing = progress.healing();
         scoped_increment(
             &mut attachment.store,
-            attachment.registration.root.as_path(),
+            &attachment.covered_root,
             work.batch.vault_roots(),
             self.policy,
             &healing,
-            &exclusions(&attachment.registration, &attachment._shadows),
+            &exclusions_at(
+                &attachment.registration,
+                &attachment._shadows,
+                &attachment.covered_root,
+            ),
         )?;
         self.drain_semantic(name, attachment);
         Ok(())
@@ -652,8 +674,6 @@ impl EntryOps for ProductionEntryOps {
     ) -> Result<(), JobFailure> {
         let _job = self.evidence.attributing();
         self.evidence.count_recovery();
-        let candidate =
-            ReloadCandidate::read(&attachment.registration).map_err(JobFailure::Reload)?;
         if !attachment.maintainership.still_current().map_err(effect)? {
             return Err(JobFailure::LostMaintainership);
         }
@@ -663,12 +683,25 @@ impl EntryOps for ProductionEntryOps {
         let schema = Self::schema_path(&attachment.registration);
         let (subscription, own_writes) =
             Self::start_watch(&attachment.registration, &schema).map_err(watcher)?;
+        subscription
+            .synchronize(WATCH_SYNCHRONIZATION_DEADLINE)
+            .map_err(watcher)?;
+        let covered_root = subscription.covered_root().to_owned();
+        let candidate = ReloadCandidate::read_at(&attachment.registration, &covered_root)
+            .map_err(JobFailure::Reload)?;
+        let derived = self.derived(&attachment.registration.name);
+        let key = maintainership_key(&self.dirs, &attachment.registration.name);
+        let shadows =
+            ShadowHome::resolve(&covered_root, &derived.join("tmp"), &key).map_err(effect)?;
+        shadows.sweep(Duration::ZERO).map_err(effect)?;
         attachment.subscription = Some(subscription);
         attachment._own_writes = own_writes;
+        attachment._shadows = shadows;
+        attachment.covered_root = covered_root;
         Self::pin_candidate(&mut attachment.store, &candidate)?;
         attachment.controls = candidate;
         self.dispatch_config(&attachment.registration.name, attachment.controls.config());
-        self.synchronize_and_heal(attachment, progress)?;
+        self.heal_under_coverage(attachment, progress)?;
         self.drain_semantic(name, attachment);
         Ok(())
     }
@@ -684,7 +717,8 @@ impl EntryOps for ProductionEntryOps {
             return Err(JobFailure::LostMaintainership.into());
         }
         let candidate =
-            ReloadCandidate::read(&attachment.registration).map_err(JobFailure::Reload)?;
+            ReloadCandidate::read_at(&attachment.registration, &attachment.covered_root)
+                .map_err(JobFailure::Reload)?;
         let schema_changed =
             candidate.fingerprints().schema != attachment.controls.fingerprints().schema;
         if !schema_changed {
@@ -717,6 +751,10 @@ impl EntryOps for ProductionEntryOps {
         Some(attachment.controls.fingerprints())
     }
 
+    fn control_root(&self, attachment: &Self::Attachment) -> Option<PathBuf> {
+        Some(attachment.covered_root.clone())
+    }
+
     fn poll(
         &self,
         _: &VaultName,
@@ -736,7 +774,11 @@ impl EntryOps for ProductionEntryOps {
             Some(std::mem::take(&mut attachment.heal_observed))
         };
         let drained = drained.and_then(|mut batch| {
-            Self::discard_control_file_facts(&attachment.registration, &mut batch);
+            Self::discard_control_file_facts(
+                &attachment.registration,
+                &attachment.covered_root,
+                &mut batch,
+            );
             (!batch.is_empty()).then_some(batch)
         });
         // A rescan among the facts is the backend saying it lost the path set,
@@ -2935,6 +2977,74 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_registered_name_cannot_change_the_root_an_attachment_heals() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("covered-root-authority");
+        let next = f.root.join("next");
+        let registered = f.root.join("current");
+        let replacement = f.root.join("current.next");
+        fs::create_dir_all(next.join(".norn")).unwrap();
+        fs::write(next.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+        fs::write(next.join("b.md"), "# B\n").unwrap();
+        symlink(f.vault(), &registered).unwrap();
+        let registration = Registration::new(
+            VaultName::new("notes").unwrap(),
+            VaultRoot::new(&registered).unwrap(),
+        );
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
+        assert_eq!(
+            attachment.covered_root,
+            fs::canonicalize(f.vault()).unwrap()
+        );
+
+        symlink(&next, &replacement).unwrap();
+        fs::rename(&replacement, &registered).unwrap();
+        ops.heal(&mut attachment, &progress).unwrap();
+
+        assert_eq!(stored_paths(&mut attachment.store), ["a.md"]);
+        ops.detach(&registration.name, attachment);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rebinds_every_root_read_to_its_replacement_coverage() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("recovery-covered-root-authority");
+        let next = f.root.join("next");
+        let registered = f.root.join("current");
+        let replacement = f.root.join("current.next");
+        fs::create_dir_all(next.join(".norn")).unwrap();
+        fs::write(next.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        fs::write(f.vault().join("a.md"), "# A\n").unwrap();
+        fs::write(next.join("b.md"), "# B\n").unwrap();
+        symlink(f.vault(), &registered).unwrap();
+        let registration = Registration::new(
+            VaultName::new("notes").unwrap(),
+            VaultRoot::new(&registered).unwrap(),
+        );
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let ops = ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap());
+        let progress = ProgressReporter::disconnected();
+        let mut attachment = ops.attach(&registration, &progress).unwrap();
+
+        symlink(&next, &replacement).unwrap();
+        fs::rename(&replacement, &registered).unwrap();
+        ops.recover(&registration.name, &mut attachment, &progress)
+            .unwrap();
+
+        assert_eq!(attachment.covered_root, fs::canonicalize(&next).unwrap());
+        assert_eq!(stored_paths(&mut attachment.store), ["b.md"]);
+        ops.detach(&registration.name, attachment);
+    }
+
     #[test]
     fn invalid_vault_config_refuses_attachment_with_a_typed_core_error() {
         let f = Fixture::new("invalid-vault-config");
@@ -3257,6 +3367,58 @@ mod tests {
         };
         assert_eq!(error.file(), crate::ReloadFile::Schema);
         assert_eq!(error.stage(), crate::ReloadStage::Read);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authored_drift_reads_the_same_covered_root_as_reload() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new("authored-drift-covered-root");
+        let next = f.root.join("next");
+        let registered = f.root.join("current");
+        let replacement = f.root.join("current.next");
+        fs::create_dir_all(next.join(".norn")).unwrap();
+        fs::write(next.join(".norn/schema.yaml"), "version: 1\n").unwrap();
+        fs::write(
+            next.join(".norn/config.toml"),
+            "[engine.unrelated]\nvalue = 1\n",
+        )
+        .unwrap();
+        symlink(f.vault(), &registered).unwrap();
+        let registration = Registration::new(
+            VaultName::new("notes").unwrap(),
+            VaultRoot::new(&registered).unwrap(),
+        );
+        let name = registration.name.clone();
+        let registry = crate::RegistryRead::from_entries([registration]);
+        let dirs = ConfigDirs::new(f.root.join("config"), f.root.join("data")).unwrap();
+        let host = crate::Host::new(
+            registry,
+            ProductionEntryOps::new(dirs, ProductionPolicy::new(2, 2).unwrap()),
+            crate::LifecyclePolicy {
+                idle_after: Duration::from_secs(60),
+                worker_slots: 1,
+                watch_poll_interval: Duration::from_secs(60),
+            },
+        )
+        .unwrap();
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_state(&host, &name, norn_wire::TrustState::Ready);
+
+        symlink(&next, &replacement).unwrap();
+        fs::rename(&replacement, &registered).unwrap();
+
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Current)
+        );
+        host.reload(&name)
+            .expect("config-only reload from covered root");
+        assert_eq!(
+            host.authored_drift(&name),
+            Some(crate::AuthoredDrift::Current)
+        );
     }
 
     #[test]
