@@ -2870,8 +2870,8 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 /// back before it ended, so a producer could schedule behind it, and a marker
 /// standing behind a running leg is one no dispatch sends until the leg is
 /// gone. A marker at the leg's own epoch is not that: it is work put back by
-/// [`restore_lost_claim`] under a claim the entry still stands at, and the
-/// tick that ends that claim is what sends it.
+/// [`restore_lost_claim`] under a claim the entry still stands at, and a
+/// later dispatcher tick is what sends it.
 ///
 /// The work an outstanding demand lease is owed is scheduled where such a claim
 /// ends. The entry accounts for no coverage once this leg's has gone to the
@@ -2924,13 +2924,15 @@ fn end_job_leg<O: EntryOps>(
         }
         if !state.claim.stands_at(epoch) {
             state.claim.release();
-            // A marker standing here is either the work a demand lease is owed,
-            // scheduled just above, or work a producer scheduled against the
-            // gate this leg had already given back: that marker stood behind
-            // the leg's own registration, and [`Claim::take_slot_for_marked`]
-            // sends nothing beside a leg still running. The leg's end is what
-            // sends it; the dispatcher tick that would otherwise reach it is one
-            // poll interval away.
+            // A marker standing here is work the entry owes that nothing has
+            // sent: the work a demand lease is owed, scheduled just above; a
+            // job a producer scheduled against the gate this leg had already
+            // given back; or a job a full queue refused and put back at the
+            // entry's epoch. The producer's stood behind the leg's own
+            // registration, and [`Claim::take_slot_for_marked`] sends nothing
+            // beside a leg still running. The leg's end is what sends it; the
+            // dispatcher tick that would otherwise reach it is one poll
+            // interval away.
             schedule_demanded_work(&mut state, name);
             if state.claim.marker().is_some() {
                 drop(state);
