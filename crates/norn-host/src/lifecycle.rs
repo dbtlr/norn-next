@@ -2865,6 +2865,11 @@ fn run_job<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) {
 /// gate goes back: work scheduled against an entry whose resources are still
 /// going back is work running beside them.
 ///
+/// A job marked against the entry while this leg was winding down is sent
+/// where the leg ends, for the same reason: the leg gave the gate back before
+/// it ended, so a producer could schedule behind it, and a marker standing
+/// behind a running leg is one no dispatch sends until the leg is gone.
+///
 /// The work an outstanding demand lease is owed is scheduled where such a claim
 /// ends. The entry accounts for no coverage once this leg's has gone to the
 /// ops, and a watcher poll passes over an entry holding none, so a lease left
@@ -2916,7 +2921,14 @@ fn end_job_leg<O: EntryOps>(
         }
         if !state.claim.stands_at(epoch) {
             state.claim.release();
-            if schedule_demanded_work(&mut state, name).is_some() {
+            // A producer that scheduled against the gate this leg had already
+            // given back left its marker standing behind the leg's own
+            // registration, and [`Claim::take_slot_for_marked`] sends nothing
+            // beside a leg still running. The leg's end is what sends it: the
+            // dispatcher tick that would otherwise reach the marker is one poll
+            // interval away.
+            let marked = state.claim.marker().is_some();
+            if schedule_demanded_work(&mut state, name).is_some() || marked {
                 drop(state);
                 let _ = dispatch_pending(shared, entry);
             }
@@ -5403,6 +5415,68 @@ mod tests {
         assert!(!state.recovery_required);
         assert!(state.pending.is_empty());
         assert!(state.coverage.in_hand());
+    }
+
+    /// The window a leg leaves between giving the gate back and ending: its
+    /// reply is out, a producer schedules against the open gate, and the
+    /// marker it leaves stands behind a leg still registered. A dispatcher
+    /// tick would reach that marker one poll interval later; the leg's end
+    /// reaches it now.
+    #[test]
+    fn a_job_marked_behind_an_ending_leg_is_sent_where_the_leg_ends() {
+        let ops = Arc::new(FakeOps::default());
+        ops.reload_supported.store(true, Ordering::SeqCst);
+        let (host, name) = fixture_without_ambient_polling(Arc::clone(&ops));
+        let host = Arc::new(host);
+        let _lease = host.demand(&name, AttachMode::Durable).unwrap();
+        wait_for_state(&host, &name, TrustState::Ready);
+
+        let entry = host.shared.entries.get(&name).unwrap();
+        let epoch = {
+            // A leg that has released the gate and sent its reply, and has
+            // not yet reached its end: registered, and holding nothing.
+            let mut state = entry.gate.lock().unwrap();
+            let epoch = state.claim.epoch();
+            state.claim.begin_job_leg(epoch);
+            state.claim.release();
+            epoch
+        };
+        let reloading = Arc::clone(&host);
+        let reload_name = name.clone();
+        let reload = thread::spawn(move || reloading.reload(&reload_name));
+        wait_until(
+            "the reload to stand as a marker behind the leg",
+            lifecycle_wait_budget(),
+            || {
+                if entry.gate.lock().unwrap().claim.marker().is_some() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("nothing is marked against the entry")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(
+            !reload.is_finished(),
+            "the reload was sent beside a leg still registered as running"
+        );
+
+        end_job_leg(&host.shared, &entry, &name, epoch, None);
+
+        wait_until(
+            "the reload sent at the leg's end to answer",
+            lifecycle_wait_budget(),
+            || {
+                if reload.is_finished() {
+                    Observed::Met(())
+                } else {
+                    Observed::pending("the reload is still waiting on a dispatcher tick")
+                }
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{failure}"));
+        assert_eq!(reload.join().unwrap(), Ok(()));
+        assert_eq!(host.state(&name), answered(TrustState::Ready));
     }
 
     #[test]
