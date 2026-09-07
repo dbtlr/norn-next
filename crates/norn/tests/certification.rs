@@ -673,14 +673,17 @@ fn one_setting<'a>(lane: &str, body: &'a str, key: &str) -> &'a str {
 /// polling substitute refused outright.
 fn assert_backend_label_matches_the_runner(lane: &str, body: &str) {
     let machine = one_setting(lane, body, "runs-on");
+    // Named one by one rather than by prefix: a label this workspace has not
+    // read the machine behind is a label it states no backend for.
     let installed = match machine {
-        image if image.starts_with("ubuntu-") => "inotify",
+        "ubuntu-latest" => "inotify",
+        // The hosted macOS image the per-PR platform lane runs on.
+        "macos-15" => "fsevents",
         // The self-hosted runner the scheduled macOS lane runs on: a macOS 15
         // virtual machine on Apple silicon, registered to this repository under
         // this label, whose job asserts the architecture and the major version
         // before it reads anything.
         "macos-norn-soak" => "fsevents",
-        image if image.starts_with("macos-") => "fsevents",
         other => panic!(
             "`{lane}` runs on `{other}`, which is a runner this workspace states no watcher \
              backend for; what a platform installs is decided in crates/norn-fs/src/watch.rs"
