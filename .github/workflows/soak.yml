@@ -416,7 +416,14 @@ jobs:
       # every real-watcher case here subscribes to.
       - name: Host-health reading
         run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
+      # The runner persists between jobs, and rust-cache's save step removes
+      # every `~/.cargo/bin` binary that was present before the job when it
+      # caches that directory — on this machine, the rustup proxies the
+      # toolchain is reached through. Not caching the directory is the
+      # action's own setting for a self-hosted runner.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-bin: "false"
       # The library target is one of them: five of the trust-transition cases
       # are unit tests of the host's lifecycle rather than integration suites,
       # and a lane that ran only the suites would record those five not-run. Its
