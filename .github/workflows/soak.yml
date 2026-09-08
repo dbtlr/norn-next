@@ -7,8 +7,9 @@
 # **Two jobs, and each leaves a qualification record.** `soak` is the
 # measurement lane: the >=5k profile's measurements and an hour-long host load
 # on `ubuntu-latest`, whose hosts watch through inotify. `certification-macos`
-# runs the same certification cases on `macos-15`, whose hosts watch through
-# FSEvents. Both are required, because the inventory's backend-deciding lane is
+# runs the same certification cases on `macos-norn-soak`, a repository-scoped
+# self-hosted runner inside a pinned macOS 15 virtual machine, whose hosts watch
+# through FSEvents. Both are required, because the inventory's backend-deciding lane is
 # covered by a run on each backend and a record naming no backend counts toward
 # neither — `crates/norn-testkit/src/certification/inventory.rs` names which
 # cases those are, and `crates/norn-fs/src/watch.rs` is what decides the backend
@@ -60,7 +61,9 @@ on:
     # is post-merge evidence. Dispatch is not the same: `workflow_dispatch` is
     # already on the default branch, so a manual run may name any ref and runs
     # that ref's copy of this file — which is how a change to a job here is
-    # tried before it merges.
+    # tried before it merges. The one exception is `certification-macos`: its
+    # job guard skips every ref but `main`, so a change to that job is first
+    # exercised by a dispatch of `main` after it merges.
     #
     # GitHub also disables schedules on repositories with no activity for 60
     # days, so this lane running is a thing to check rather than assume.
@@ -140,7 +143,7 @@ jobs:
     env:
       NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       # Taken before anything is built, because the reading is of the machine
@@ -148,7 +151,7 @@ jobs:
       # The classification happens at the end of the job, off this line.
       - name: Host-health reading
         run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Determinism at the soak profile
         run: .github/scripts/lane-suite.sh norn-fixtures determinism
       - name: Calibration at the soak profile
@@ -323,7 +326,7 @@ jobs:
       #
       - name: Upload the qualification record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: qualification-record-ubuntu-latest
           path: ${{ github.workspace }}/qualification-record.json
@@ -340,13 +343,35 @@ jobs:
   # campaign that ran only the Linux lane would certify one of those two
   # answers and ship the other backend uncertified.
   #
-  # **The label states what the runner installs.** `macos-15` hosts watch
-  # through FSEvents: `crates/norn-fs/src/watch.rs` builds notify's
-  # `FsEventWatcher` on macOS and refuses a polling substitute outright, and the
-  # cases below attach production hosts, so the coverage the label names is
-  # coverage the run installed. The per-PR certification suite reads this job's
-  # own `runs-on:` and holds the two labels to it, so a job moved to another
-  # image fails there rather than recording a backend it never ran.
+  # **The label states what the runner installs.** `macos-norn-soak` is a
+  # self-hosted runner registered to this repository alone, inside a macOS 15
+  # virtual machine on Apple silicon. macOS hosts watch through FSEvents:
+  # `crates/norn-fs/src/watch.rs` builds notify's `FsEventWatcher` on macOS and
+  # refuses a polling substitute outright, and the cases below attach production
+  # hosts, so the coverage the label names is coverage the run installed. The
+  # per-PR certification suite reads this job's own `runs-on:` and holds the two
+  # labels to it, so a job moved to another machine fails there rather than
+  # recording a backend it never ran.
+  #
+  # **What keeps the machine to `main` is a repository setting, and this job's
+  # guard is the smaller part.** A self-hosted runner executes whatever job
+  # names its label, from whichever ref that job's file came from, so the
+  # guard below binds only this file as it stands on the ref being run: it
+  # admits the nightly schedule and a manual dispatch of `main` — the
+  # diagnostic run that proves the machine after an environment change, which
+  # the record classifies as a manual dispatch and the count never advances on
+  # — and skips a dispatch of an unmodified copy on any other ref. A ref that
+  # edits this guard, or a job in any workflow that names the label, is
+  # stopped by nothing here. What stops it is the repository's Actions setting
+  # that holds every workflow run from an outside contributor's pull request
+  # for approval (`fork-pr-contributor-approval: all_external_contributors`),
+  # and the repository having no other writer. The job has `contents: read`
+  # and no secrets.
+  #
+  # The hosted `macos-15` image this lane ran on until 2026-09 read over the
+  # preflight's busy bound at checkout on four consecutive nights, so nothing
+  # about the candidate was measurable there; the machine under this lane is
+  # one the campaign controls.
   #
   # This job runs the certification cases and no measurement: the bars in
   # `tests/baselines/` are authored against `ubuntu-latest`, and a second
@@ -355,17 +380,20 @@ jobs:
   # answer has to be the same suite's for two records to cover one obligation.
   #
   # The timeout is a runaway guard set so a cold macOS build has room. What the
-  # job costs is measured rather than guessed: a dispatch of this file ran every
-  # step here green in 2m55s from a cold cache, so 60 minutes is the runaway
-  # bound and nothing near the working time.
+  # job costs is measured rather than guessed: on the hosted `macos-15` image
+  # this lane ran on until 2026-09, a dispatch of this file ran every step here
+  # green in 2m55s from a cold cache. The VM under the lane now has four cores
+  # to that image's three, so 60 minutes is the runaway bound and nothing near
+  # the working time on either.
   certification-macos:
     name: certification (macOS FSEvents)
-    runs-on: macos-15
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: macos-norn-soak
     timeout-minutes: 60
     env:
       NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       # Pinned image and asserted architecture, the same way ci.yml's platform
@@ -380,13 +408,22 @@ jobs:
       # skipped. The record step still runs, and says the run failed.
       - name: Assert architecture
         id: architecture
-        run: test "$(uname -m)" = arm64
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
       # Taken before anything is built, for the reason the Linux lane above
       # states. On this runner it also reads fseventsd, which is the service
       # every real-watcher case here subscribes to.
       - name: Host-health reading
         run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      # The runner persists between jobs, and rust-cache's save step removes
+      # every `~/.cargo/bin` binary that was present before the job when it
+      # caches that directory — on this machine, the rustup proxies the
+      # toolchain is reached through. Not caching the directory is the
+      # action's own setting for a self-hosted runner.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-bin: "false"
       # The library target is one of them: five of the trust-transition cases
       # are unit tests of the host's lifecycle rather than integration suites,
       # and a lane that ran only the suites would record those five not-run. Its
@@ -449,12 +486,12 @@ jobs:
           NORN_QUALIFICATION_LEDGER: ${{ github.workspace }}/qualification-record.json
           NORN_QUALIFICATION_OUTCOMES: ${{ github.workspace }}/certification-logs/outcomes.txt
           NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
-          NORN_QUALIFICATION_RUNNER: macos-15
+          NORN_QUALIFICATION_RUNNER: macos-norn-soak
           NORN_QUALIFICATION_WATCHER_BACKEND: fsevents
       - name: Upload the qualification record
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: qualification-record-macos-15
+          name: qualification-record-macos-norn-soak
           path: ${{ github.workspace }}/qualification-record.json
           if-no-files-found: error

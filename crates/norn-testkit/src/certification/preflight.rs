@@ -118,9 +118,12 @@ pub const CLASSIFIER: &str =
 /// bounds meaning what they were authored to mean.**
 ///
 /// Half, and it sits between two measured shapes rather than between two
-/// arguments. A `macos-15` runner reads between three and twenty-three percent
-/// at the top of a job — the window opens after a settle, so what it samples is
-/// the machine and not the tail of the job's own checkout — while the
+/// arguments. A hosted `macos-15` runner read between three and twenty-three
+/// percent at the top of a job when this bound was placed, in 2026-08 — the
+/// window opens after a settle, so what it samples is the machine and not the
+/// tail of the job's own checkout; the same image read 62 to 100 percent on
+/// four consecutive nights from 2026-09-04, which is what moved the scheduled
+/// macOS lane to a machine the campaign controls — while the
 /// collection workstation reads a hundred with other checkouts building beside
 /// it. Half is inside that gap with margin on both sides.
 ///
@@ -682,10 +685,10 @@ mod tests {
     }
 
     /// **A freshly handed-over runner is admitted**, and this is the shape the
-    /// bound is placed against: a `macos-15` runner hands the lane three cores
-    /// reading in the low tens of a percent at the top of a job — the busiest
-    /// of the readings taken is here — and a bound that refused it would refuse
-    /// every scheduled run there is.
+    /// bound is placed against: a hosted `macos-15` runner in 2026-08 handed
+    /// the lane three cores reading in the low tens of a percent at the top of
+    /// a job — the busiest of the readings taken then is here — and a bound
+    /// that refused it would refuse every scheduled run there is.
     ///
     /// The margin between this and the bound is what the settle bought. Sampled
     /// without one, the same runner reads in the fifties — the window opens on

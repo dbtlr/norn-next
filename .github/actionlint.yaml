@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # The scheduled macOS certification lane: a repository-scoped runner inside
+  # a macOS 15 virtual machine on Apple silicon (.github/workflows/soak.yml).
+  labels:
+    - macos-norn-soak
