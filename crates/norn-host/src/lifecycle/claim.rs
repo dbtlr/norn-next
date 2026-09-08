@@ -167,8 +167,10 @@
 //! **The leg outlives the gate it took.** Carried by the `leg` registration
 //! standing after [`Claim::release`] and read by
 //! [`Claim::take_slot_for_marked`], so a dispatcher tick never sends the job a
-//! running leg is about to send itself. Pinned by
-//! `a_tick_takes_no_slot_for_a_marker_the_running_leg_sends_itself`.
+//! running leg is about to send itself; a marker that registration withheld
+//! from a producer is sent where the leg ends. Pinned by
+//! `a_tick_takes_no_slot_for_a_marker_the_running_leg_sends_itself` and
+//! `a_job_marked_behind_an_ending_leg_is_sent_where_the_leg_ends`.
 //!
 //! ## The queue slot
 //!
