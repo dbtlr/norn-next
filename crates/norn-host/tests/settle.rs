@@ -1,5 +1,5 @@
-//! **How long rung 1 takes**, measured for every churn family the
-//! certification inventory carries.
+//! **How long rung 1 takes**, measured for every churn family the certification
+//! inventory carries.
 //!
 //! The churn suite beside this one states that a live attachment converges on
 //! what a build from zero holds. It states nothing about *when*: its settle
@@ -10,52 +10,73 @@
 //! counts and structural assertions gate a pull request and clocks and trends
 //! belong to soak.
 //!
-//! # The two readings
+//! # The reading is one duration
 //!
-//! Both run from one origin: **the instant the workload's changing phase
-//! applied its final act**. From there the case reads
+//! **From the instant a phase's final act landed to the instant the derived
+//! store first holds what a build from zero over that tree holds.** That is the
+//! whole clock, and it is the only duration this file records.
 //!
-//! - **to equivalence** — when the derived store first holds exactly what the
-//!   final tree implies, which is the state the equivalence bar is then taken
-//!   over; and
-//! - **to `Ready`** — when the attachment first publishes `Ready` at or after
-//!   that.
+//! The stopping condition is the comparator the equivalence bar is taken over,
+//! not a cheaper stand-in for it. A census of paths and content hashes is not
+//! that comparator: one flush is a changeset plus the findings recorded after
+//! it, each in its own transaction, so at the instant every path and hash
+//! agrees the flush's findings are provably not yet recorded and the store is
+//! not yet equivalent. A clock stopped there would systematically under-report
+//! by the findings-maintenance tail — which is the tail the validity family
+//! exists to drive.
 //!
-//! **A `Ready` before the store has caught up is not a reading.** The entry was
-//! already publishing `Ready` when the change landed, and a poll cannot tell
-//! that label apart from one a host republished after reconciling — so the
-//! earliest `Ready` that can mean "the host is caught up" is one taken at or
-//! after the store is. That ordering is by construction here, which is why the
-//! second reading is never below the first.
+//! **So the poll is two-stage, and the reading is taken at the second stage.**
+//! Each poll first asks the cheap census whether the paths and hashes agree,
+//! because reading the whole projection of a ≥5k vault at a 50 ms cadence would
+//! measure this instrument rather than the subject. Once they do, the poll
+//! reads the full [`StoreProjection`] — documents, frontmatter, bodies,
+//! headings, blocks, tags, links, indexed terms, **findings** and the pinned
+//! schema — and the reading is the elapsed time at the end of the first such
+//! read that the next poll finds unchanged. What the clock stopped on is then
+//! held to the projection the equivalence bar is taken over, so "the store had
+//! reached its final state" is an assertion rather than an argument from
+//! quiescence.
 //!
-//! **Both readings are conservative by construction.** Each is sampled after
-//! the observation that decided it rather than before, so the cost of the look
-//! is inside the reading; the tree is read once after the final act and inside
-//! the clock as well. And each is late by at most one poll gap, which the
-//! shared cadence tops out at 50 ms. What that buys is a reading that never
-//! flatters the subject: an authored ceiling over these numbers is a ceiling
-//! over readings that include their own instrument.
+//! **The reading is conservative by construction.** Every sample is taken after
+//! the observation that decided it, so the cost of the census read and of the
+//! projection read are both inside it, and the reading is late by at most one
+//! poll gap, which the shared cadence tops out at 50 ms. An authored ceiling
+//! over these numbers is a ceiling over readings that include their own
+//! instrument.
 //!
-//! # What makes the second reading a reading of *equivalence*
+//! # `Ready` is a property, not a second clock
 //!
-//! Nothing writes to the tree after the final act, so the store is quiescent
-//! once it has converged — the instant it first agreed with the tree is the
-//! state it is still in when the bar is taken. So the case converges, stops the
-//! clock, lets the host go, derives the same tree a second time from zero
-//! through machine-local directories that hold no row of the first, and
-//! compares the two projections field by field. An equivalence that fails is a
-//! failed case, not a slow one: the reading above it was a reading of something
-//! other than convergence.
+//! The entry is already publishing `Ready` when the final change lands, and
+//! ordinary churn never takes that away: a poll therefore cannot time a
+//! *transition* to `Ready`, and a duration to it would be the cost of one
+//! `state()` call rather than a fact about the subject. So the second term is
+//! recorded as what it is — a boolean per leg, asserted at the poll the reading
+//! was taken at: **the attachment publishes `Ready` at the instant the store
+//! reaches equivalence**, which says the churn the family applied withdrew no
+//! trust. It is not a claim that the entry held `Ready` at every instant in
+//! between; nothing here samples between polls.
+//!
+//! # Every leg of every family
+//!
+//! The families and their seeds are `norn_testkit::churn`'s roll, which is the
+//! same table the churn suite runs, so a reading here is a reading over the
+//! workload that suite judges. Every leg the roll carries is timed, including
+//! family 4's third phase: replacing the vault's declaration re-pins it,
+//! discards every finding keyed by the old fingerprint and heals the whole
+//! vault under the new one, which is the widest settle the roll can ask for. A
+//! control file reaches a host only when a reload asks for it, so that leg's
+//! clock starts when the reload returns — the act that delivers the change.
 //!
 //! # The scale
 //!
-//! The families are authored over the `small` profile in `churn.rs`, and that
-//! is the scale this measures at by default. Whether maintenance costs the
-//! changed set rather than the vault is the work bars' claim over there, not
-//! this one's. `NORN_SETTLE_PROFILE` is what a calibration dispatch names
-//! another profile through, and the lane names the profile explicitly so the
-//! scale a recorded reading was taken at is workflow text rather than a
-//! default.
+//! The scheduled lane names the `soak` profile, which is the ≥5k-document scale
+//! every other soak bar in the workspace is authored over, and the reading
+//! moves by two to three times between that scale and the `small` one the
+//! families are authored at. A ceiling calibrated at `small` would sit far
+//! below the scale it gates. `NORN_SETTLE_PROFILE` names the profile, the lane
+//! sets it explicitly so the scale a recorded reading was taken at is workflow
+//! text, and a local run defaults to `small` because a developer is not
+//! calibrating.
 //!
 //! Each generated tree sits in a testkit sandbox, which is a unix-only harness.
 #![cfg(unix)]
@@ -63,24 +84,26 @@
 
 mod attach;
 mod baselines;
+mod tree;
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use norn_fs::ContentHash;
-use norn_store::{DocumentPath, Store};
-use norn_testkit::churn::{self, Applied, Folding, Phased, Script};
+use norn_host::ReloadRefusal;
+use norn_store::Store;
+use norn_testkit::churn::{Applied, Family, Folding, Script};
 use norn_testkit::equivalence::{StoreProjection, assert_operationally_valid};
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Convergence, Observed, wait_until};
-use norn_wire::TrustState;
+use norn_wire::{TrustState, VaultName};
+
+use tree::{Census, census};
 
 /// The variable naming the generated profile the families are churned over.
 const PROFILE_ENV: &str = "NORN_SETTLE_PROFILE";
 
-/// The profile the churn families are authored over, which is what this
-/// measures unless a run names another.
+/// The profile a run measures at where none is named, which is the scale the
+/// churn families are authored over. The scheduled lane names `soak` instead.
 const DEFAULT_PROFILE: &str = "small";
 
 /// The runaway bound on one settle.
@@ -97,70 +120,79 @@ const CONVERGING: Convergence = Convergence::new(
     Duration::from_secs(30),
 );
 
-/// **The clock on rung 1**, over every churn family.
+/// **The clock on rung 1**, over every leg of every churn family.
 ///
 /// One vault per family, so a family's reading is a settle over a tree nothing
-/// else has been churning. Every reading is recorded whatever the ceiling is,
-/// and the comparison happens only where one is authored — the calibration
-/// state the ledger types every such run non-qualifying under.
+/// else has been churning. **Each family's readings are recorded as they
+/// land**, before the next family starts and before anything is judged: during
+/// the calibration window this step's whole product is the observations, and a
+/// run whose last family times out must still leave the six behind it.
 #[test]
 #[ignore = "soak-lane case: runs in the nightly soak lane, not the workspace suite"]
 fn every_churn_family_settles_inside_the_ceiling() {
     baselines::assert_the_profile_the_bars_were_authored_on();
     let profile = declared_profile();
+    baselines::record(
+        "churn settle",
+        &[
+            ("profile", profile.clone()),
+            (
+                "settle ceiling (ms)",
+                match baselines::SOAK_SETTLE_CEILING {
+                    Some(ceiling) => baselines::milliseconds(ceiling),
+                    None => "unauthored".to_string(),
+                },
+            ),
+        ],
+    );
 
-    let readings: Vec<(Family, Settle)> = Family::ALL
-        .iter()
-        .map(|family| (*family, family.settle(&profile)))
-        .collect();
-
-    let mut rows: Vec<(String, String)> = vec![
-        ("profile".to_string(), profile.clone()),
-        (
-            "settle ceiling (ms)".to_string(),
-            match baselines::SOAK_SETTLE_CEILING {
-                Some(ceiling) => baselines::milliseconds(ceiling),
-                None => "unauthored".to_string(),
-            },
-        ),
-    ];
-    for (family, settle) in &readings {
-        rows.push((
-            format!("{}: to equivalence (ms)", family.name()),
-            baselines::milliseconds(settle.equivalent),
-        ));
-        rows.push((
-            format!("{}: to Ready (ms)", family.name()),
-            baselines::milliseconds(settle.ready),
-        ));
+    let mut readings: Vec<(String, Settle)> = Vec::new();
+    for family in Family::ALL {
+        let measured = measure(*family, &profile);
+        let rows: Vec<(String, String)> = measured
+            .iter()
+            .flat_map(|(leg, settle)| {
+                [
+                    (
+                        format!("{leg}: to equivalence (ms)"),
+                        baselines::milliseconds(settle.equivalent),
+                    ),
+                    (
+                        format!("{leg}: Ready at equivalence"),
+                        if settle.ready { "yes" } else { "no" }.to_string(),
+                    ),
+                ]
+            })
+            .collect();
+        let rendered: Vec<(&str, String)> = rows
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.clone()))
+            .collect();
+        baselines::record(&format!("churn settle: {}", family.name()), &rendered);
+        readings.extend(measured);
     }
-    let rendered: Vec<(&str, String)> = rows
-        .iter()
-        .map(|(label, value)| (label.as_str(), value.clone()))
-        .collect();
-    baselines::record("churn settle", &rendered);
 
+    // Judged after every reading is recorded, so the first leg that fails a bar
+    // does not take the readings behind it with it.
+    for (leg, settle) in &readings {
+        assert!(
+            settle.ready,
+            "`{leg}` reached equivalence {} ms after its final change and the attachment was not \
+             publishing `Ready` there, so the churn withdrew trust the settle never gave back",
+            baselines::milliseconds(settle.equivalent)
+        );
+    }
     let Some(ceiling) = baselines::SOAK_SETTLE_CEILING else {
         return;
     };
-    for (family, settle) in &readings {
-        // Both readings are held against the one ceiling. `ready` dominates
-        // `equivalent` by construction, so the second comparison is what really
-        // decides the run — the first is what keeps a future edit that stopped
-        // taking the `Ready` reading from silently leaving the bar unevaluated.
-        for (what, reading) in [
-            ("hold what the tree implies", settle.equivalent),
-            ("publish `Ready` again", settle.ready),
-        ] {
-            assert!(
-                baselines::fits(reading, ceiling),
-                "`{}` took {} ms to {what} after its final change, past the {} ms ceiling, over \
-                 the `{profile}` profile",
-                family.name(),
-                baselines::milliseconds(reading),
-                baselines::milliseconds(ceiling)
-            );
-        }
+    for (leg, settle) in &readings {
+        assert!(
+            baselines::fits(settle.equivalent, ceiling),
+            "`{leg}` took {} ms to hold what a build from zero holds after its final change, past \
+             the {} ms ceiling, over the `{profile}` profile",
+            baselines::milliseconds(settle.equivalent),
+            baselines::milliseconds(ceiling)
+        );
     }
 }
 
@@ -176,10 +208,18 @@ fn every_churn_family_settles_inside_the_ceiling() {
 /// **It is exhaustive over this crate's bars.** A registry entry pointing into
 /// this crate's baselines that nothing here names fails, because a bar the
 /// registry claims and nobody checks is a claim that drifts quietly. Entries
-/// pointing at another crate's baselines are that crate's to hold.
+/// pointing at another crate's baselines name constants with no unauthored
+/// state, and the registry's own sweep holds every one of those to `armed`.
 #[test]
 fn the_ledgers_armed_claims_match_the_authored_baselines() {
     const HERE: &str = "crates/norn-host/tests/baselines/mod.rs::";
+
+    /// A constant that is not an `Option` is authored in every build there is.
+    /// Naming it here binds the arm to the constant, so moving or renaming one
+    /// fails to compile rather than leaving the claim standing over nothing.
+    fn always_authored<T>(_bar: T) -> bool {
+        true
+    }
 
     let mut held = 0;
     for bar in norn_testkit::certification::ledger::NAMED_EXIT_BARS {
@@ -189,9 +229,15 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
         let authored = match constant {
             "SOAK_PEAK_RSS_CEILING_BYTES" => baselines::SOAK_PEAK_RSS_CEILING_BYTES.is_some(),
             "SOAK_SETTLE_CEILING" => baselines::SOAK_SETTLE_CEILING.is_some(),
-            // Not an `Option`: there is no state in which it is unauthored, and
-            // the registry's own sweep holds it to `armed`.
-            "FD_BUDGET" => true,
+            "ATTACH_PEAK_RSS_CEILING_BYTES" => {
+                always_authored(baselines::ATTACH_PEAK_RSS_CEILING_BYTES)
+            }
+            "ATTACH_PAIR_PEAK_RSS_PER_MILLE" => {
+                always_authored(baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE)
+            }
+            "SOAK_FD_GROWTH_ALLOWANCE" => always_authored(baselines::SOAK_FD_GROWTH_ALLOWANCE),
+            "SOAK_RSS_SLOPE_PER_MILLE" => always_authored(baselines::SOAK_RSS_SLOPE_PER_MILLE),
+            "FD_BUDGET" => always_authored(baselines::FD_BUDGET),
             other => panic!(
                 "the ledger names `{other}` in this crate's baselines and nothing here holds its \
                  armed claim to the constant, so the two may drift apart quietly"
@@ -219,12 +265,13 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
 /// reading fit, and a comparison that had stopped refusing would report exactly
 /// that. So the comparison is fed a reading past a ceiling of each shape it is
 /// asked about — the bytes the peak-resident-set bars read, the duration the
-/// settle bar reads, and the count the descriptor budget reads — and a reading
-/// at the ceiling is required to pass beside each one, because a bar states the
-/// most a subject may cost and costing exactly that is not costing more.
+/// settle bar reads, the count the descriptor budget reads and the per-mille
+/// ratio the two slope bars read — and a reading at the ceiling is required to
+/// pass beside each one, because a bar states the most a subject may cost and
+/// costing exactly that is not costing more.
 #[test]
 fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
-    let bytes = 40 * 1024 * 1024u64;
+    let bytes = baselines::ATTACH_PEAK_RSS_CEILING_BYTES;
     assert!(baselines::fits(bytes, bytes));
     assert!(!baselines::fits(bytes + 1, bytes));
 
@@ -238,323 +285,273 @@ fn a_reading_past_a_ceiling_is_refused_by_the_comparison_every_bar_makes() {
     let count = baselines::FD_BUDGET;
     assert!(baselines::fits(count, count));
     assert!(!baselines::fits(count + 1, count));
+
+    let ratio = baselines::SOAK_RSS_SLOPE_PER_MILLE;
+    assert!(baselines::fits(ratio, ratio));
+    assert!(!baselines::fits(ratio + 1, ratio));
 }
 
-/// What one family's settle cost, from its final change.
+/// What one leg's settle cost, from its final change.
 #[derive(Clone, Copy, Debug)]
 struct Settle {
-    /// To the derived store holding what the final tree implies.
+    /// To the derived store holding what a build from zero over the same tree
+    /// holds.
     equivalent: Duration,
-    /// To the attachment publishing `Ready` at or after that.
-    ready: Duration,
+    /// Whether the attachment was publishing `Ready` at the poll that took the
+    /// reading.
+    ready: bool,
 }
 
-/// One churn family, named as the inventory and the architecture name it.
+/// One leg's reading, and the projection the clock stopped on.
+struct Reading {
+    settle: Settle,
+    /// What the store held when the clock stopped, which the equivalence bar
+    /// below is required to be taken over.
+    stopped_on: StoreProjection,
+}
+
+/// How a phase's acts reach the host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Family {
-    OrdinaryEditing,
-    AtomicReplacement,
-    CaseFlip,
-    CaseRenamedParent,
-    Burst,
-    ValidityTransitions,
-    ExternalTools,
+enum Delivery {
+    /// The watcher reports them, so the final act is the last write.
+    Watched,
+    /// They are a control file, inert until a reload reads it — so the act that
+    /// delivers the phase is the reload, and the clock starts when it returns.
+    Reloaded,
 }
 
-impl Family {
-    /// Every family the inventory's churn cases are workloads of.
-    ///
-    /// The inventory's remaining churn entries are the same workloads delivered
-    /// differently — before anything attaches, against an active heal — or
-    /// claims about the account rather than about convergence, and a settle
-    /// measured over them would be a second reading of the workload above it.
-    const ALL: &'static [Family] = &[
-        Family::OrdinaryEditing,
-        Family::AtomicReplacement,
-        Family::CaseFlip,
-        Family::CaseRenamedParent,
-        Family::Burst,
-        Family::ValidityTransitions,
-        Family::ExternalTools,
-    ];
-
-    /// The name a reading and a failure carry, which is the family's own.
-    fn name(&self) -> &'static str {
-        match self {
-            Family::OrdinaryEditing => "ordinary editing",
-            Family::AtomicReplacement => "atomic replacement and movement",
-            Family::CaseFlip => "a case flip",
-            Family::CaseRenamedParent => "a case-renamed parent over a save",
-            Family::Burst => "a burst",
-            Family::ValidityTransitions => "validity transitions",
-            Family::ExternalTools => "an external tool's catch-up",
-        }
-    }
-
-    /// The label the family's sandbox is named for.
-    fn label(&self) -> &'static str {
-        match self {
-            Family::OrdinaryEditing => "settle-ordinary",
-            Family::AtomicReplacement => "settle-atomic",
-            Family::CaseFlip => "settle-case-flip",
-            Family::CaseRenamedParent => "settle-case-rename-parent",
-            Family::Burst => "settle-burst",
-            Family::ValidityTransitions => "settle-validity",
-            Family::ExternalTools => "settle-tools",
-        }
-    }
-
-    /// The workload, seeded the way `churn.rs` seeds it so that the tree this
-    /// times a settle over is the tree that suite judges convergence over.
-    fn workload(&self, folding: Folding, oversized: &[u8]) -> Phased {
-        match self {
-            Family::OrdinaryEditing => churn::ordinary_editing(41),
-            Family::AtomicReplacement => churn::atomic_replacement(43),
-            Family::CaseFlip => churn::case_flip(73, folding),
-            Family::CaseRenamedParent => churn::case_rename_parent(79, folding),
-            Family::Burst => churn::burst(47),
-            Family::ValidityTransitions => churn::validity_transitions(53, oversized),
-            Family::ExternalTools => churn::external_tools(59),
-        }
-    }
-
-    /// **One family's measurement.** Settle the opening phase, apply the
-    /// changing phase, time the two readings from its final act, and then take
-    /// the equivalence bar over what the clock stopped on.
-    fn settle(&self, profile: &str) -> Settle {
-        let sandbox =
-            Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), self.label()).expect("a sandbox");
-        // Asked before the tree is generated and outside the vault, so the
-        // probe's own file is never a change a host is asked to reconcile.
-        let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
-        let workload = self.workload(folding, &oversized_frontmatter());
-        let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile);
-
-        let reading = {
-            let host = vault.host();
-            let lease = attach::attach_and_wait(&host, vault.name());
-            let mut store = vault.store();
-
-            let opened = self.phase(&vault, &host, &mut store, workload.opening()).1;
-            let (reading, changed) = self.phase(&vault, &host, &mut store, workload.changing());
-            assert_ne!(
-                opened,
-                changed,
-                "`{}` applied its changing phase and the tree reads exactly as it did before it, \
-                 so this reading is a settle over a host that was asked for nothing",
-                workload.changing().name()
-            );
-            drop(store);
-            drop(lease);
-            drop(host);
-            reading
-        };
-
-        self.assert_it_converged_on_a_build_from_zero(&sandbox, &vault);
-        reading
-    }
-
-    /// Apply one phase and settle over it, timing from its final act.
-    ///
-    /// The clock starts the instant `apply` returns, which is the instant the
-    /// last act landed. Everything after it — the walk that reads the tree the
-    /// phase left, and every poll — is inside the reading.
-    fn phase(
-        &self,
-        vault: &attach::Vault,
-        host: &attach::ServingHost,
-        store: &mut Store,
-        script: &Script,
-    ) -> (Settle, Tree) {
-        let mut applied = Applied::default();
-        script
-            .apply_range(vault.path(), 0..script.steps().len(), &mut applied)
-            .unwrap_or_else(|problem| panic!("{problem}\n{script}"));
-        let since = Instant::now();
-        let tree = read_the_tree(vault.path());
-        assert!(
-            !tree.rows.is_empty(),
-            "`{}` left a tree holding no document at all, so a settle over it converges on \
-             nothing\n{applied}",
-            script.name()
-        );
-
-        let mut equivalent = None;
-        let ready = wait_until(
-            &format!(
-                "the derived store and the entry to catch up with `{}`",
-                script.name()
-            ),
-            CONVERGING.budget_for(applied.steps()),
-            || {
-                if equivalent.is_none() {
-                    // Read first, sampled after: the cost of the look is inside
-                    // the reading rather than shaved off it.
-                    if let Some(why) = tree.disagreement(store) {
-                        return Observed::pending(why);
-                    }
-                    equivalent = Some(since.elapsed());
-                }
-                let state = host.state(vault.name());
-                let elapsed = since.elapsed();
-                if state == Ok(TrustState::Ready) {
-                    Observed::Met(elapsed)
-                } else {
-                    Observed::pending(format!("the entry is {state:?}"))
-                }
-            },
-        )
-        .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
-
-        (
-            Settle {
-                equivalent: equivalent.expect("the store agreed before the entry was read ready"),
-                ready,
-            },
-            tree,
-        )
-    }
-
-    /// **The bar the reading stands on.** What the clock stopped over is what a
-    /// derivation from zero over the same final tree holds.
-    ///
-    /// Nothing writes to the tree after the final act, so the store the second
-    /// reading was taken at is the store compared here. An equivalence that
-    /// fails says the clock stopped on something other than convergence, which
-    /// is a failed case rather than a slow one.
-    fn assert_it_converged_on_a_build_from_zero(&self, sandbox: &Sandbox, vault: &attach::Vault) {
-        let second = vault.beside(&sandbox.work_dir().join("second-machine"));
-        {
-            let host = second.host();
-            let lease = attach::attach_and_wait(&host, second.name());
-            drop(lease);
-        }
-
-        let mut left = vault.store();
-        let mut right = second.store();
-        assert_operationally_valid(
-            &mut left,
-            &format!("{}: the settled derivation", self.name()),
-        );
-        assert_operationally_valid(
-            &mut right,
-            &format!("{}: the derivation from zero", self.name()),
-        );
-        let left = StoreProjection::read(&mut left).expect("projecting the settled store");
-        let right =
-            StoreProjection::read(&mut right).expect("projecting the store built from zero");
-        left.compare(&right).assert_equal(&format!(
-            "{}: the settle this case timed did not converge on a build from zero",
-            self.name()
-        ));
-    }
-}
-
-/// What the tree holds, as the places a walk reads and the rows their bytes
-/// imply.
+/// The label a family's sandbox is named for.
 ///
-/// The rule is a heal's: a name the document-path grammar refuses derives no
-/// row, bytes no decoder accepts derive none, and everything else derives one
-/// holding the hash of the bytes on disk.
-///
-/// **It is keyed by the spelling the tree renders**, where `churn.rs`'s census
-/// keys by identity. The two answer different questions: that one waits for a
-/// coarse agreement it then judges finely, and this one stops a clock. A row
-/// left standing at the spelling a case flip moved away from is a store that
-/// has not finished converging, and a comparison that folded the two spellings
-/// together would stop the clock while it still stood.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Tree {
-    /// Each place that derives a row, to the hash its bytes imply.
-    rows: BTreeMap<String, String>,
-    /// Each place that derives no row.
-    without_rows: BTreeSet<String>,
-}
-
-impl Tree {
-    /// How the store disagrees with the tree, and nothing where they agree.
-    fn disagreement(&self, store: &mut Store) -> Option<String> {
-        /// How many disagreements one message carries.
-        const REPORTED: usize = 8;
-
-        let mut derived = BTreeMap::new();
-        attach::for_each_derived_document(store, |document| {
-            derived.insert(
-                document.path.as_str().to_string(),
-                document.content_hash.clone(),
-            );
-        });
-
-        let mut apart = Vec::new();
-        for (at, hash) in &self.rows {
-            match derived.get(at) {
-                Some(held) if held == hash => {}
-                Some(held) => apart.push(format!("`{at}` holds {held} and the tree holds {hash}")),
-                None => apart.push(format!("`{at}` stands in the tree and holds no row")),
-            }
-        }
-        for at in &self.without_rows {
-            if derived.contains_key(at) {
-                apart.push(format!("`{at}` derives no document and holds a row"));
-            }
-        }
-        for at in derived.keys() {
-            if !self.rows.contains_key(at) {
-                apart.push(format!("`{at}` holds a row and stands nowhere in the tree"));
-            }
-        }
-        if apart.is_empty() {
-            return None;
-        }
-        let total = apart.len();
-        apart.truncate(REPORTED);
-        Some(format!("{total} disagreements: {}", apart.join("; ")))
+/// Matched exhaustively over the driver's roll, so a family added there is a
+/// family this file fails to compile without.
+fn label(family: Family) -> &'static str {
+    match family {
+        Family::OrdinaryEditing => "settle-ordinary",
+        Family::AtomicReplacement => "settle-atomic",
+        Family::CaseFlip => "settle-case-flip",
+        Family::CaseRenamedParent => "settle-case-rename-parent",
+        Family::Burst => "settle-burst",
+        Family::ValidityTransitions => "settle-validity",
+        Family::ExternalTools => "settle-tools",
     }
 }
 
-/// Read the tree at `root` as the places a walk reads.
-fn read_the_tree(root: &Path) -> Tree {
-    let mut tree = Tree {
-        rows: BTreeMap::new(),
-        without_rows: BTreeSet::new(),
+/// **One family's measurement.** Settle the opening phase, then time every leg
+/// the roll carries from its own final act, and take the equivalence bar over
+/// what the last clock stopped on.
+fn measure(family: Family, profile: &str) -> Vec<(String, Settle)> {
+    let sandbox =
+        Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label(family)).expect("a sandbox");
+    // Asked before the tree is generated and outside the vault, so the probe's
+    // own file is never a change a host is asked to reconcile.
+    let ground = tree::ground(&sandbox.work_dir());
+    let folding = ground.folding;
+    let workload = family.workload(&ground);
+    let third = family.third_phase(&ground);
+    let vault = attach::Vault::generate(&sandbox.work_dir().join("attached"), profile);
+
+    let (readings, stopped_on) = {
+        let host = vault.host();
+        let lease = attach::attach_and_wait(&host, vault.name());
+        let mut store = vault.store();
+
+        let opening = phase(
+            &vault,
+            &host,
+            &mut store,
+            workload.opening(),
+            folding,
+            Delivery::Watched,
+        );
+        let changing = phase(
+            &vault,
+            &host,
+            &mut store,
+            workload.changing(),
+            folding,
+            Delivery::Watched,
+        );
+        assert_moved(workload.changing(), &opening.1, &changing.1);
+
+        let mut readings = vec![(family.name().to_string(), changing.0.settle)];
+        let mut stopped_on = changing.0.stopped_on;
+        if let Some(script) = &third {
+            let replaced = phase(
+                &vault,
+                &host,
+                &mut store,
+                script,
+                folding,
+                Delivery::Reloaded,
+            );
+            assert_moved(script, &changing.1, &replaced.1);
+            readings.push((
+                format!("{}, under a schema replacement", family.name()),
+                replaced.0.settle,
+            ));
+            stopped_on = replaced.0.stopped_on;
+        }
+        drop(store);
+        drop(lease);
+        drop(host);
+        (readings, stopped_on)
     };
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", directory.display()));
-        for entry in entries {
-            let entry = entry.expect("a directory entry");
-            let path = entry.path();
-            let kind = entry.file_type().expect("an entry's type");
-            // A symbolic link is not a place: a walk refuses to follow one, so
-            // a `.md` link derives nothing however it resolves.
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                // Norn's own subtree carries the schema declaration and the
-                // mechanism scratch root, and no document.
-                if path.file_name() != Some(std::ffi::OsStr::new(".norn")) {
-                    pending.push(path);
-                }
-                continue;
-            }
-            if path.extension() != Some(std::ffi::OsStr::new("md")) {
-                continue;
-            }
-            let Ok(relative) = path.strip_prefix(root) else {
-                continue;
-            };
-            let at = relative.to_string_lossy().into_owned();
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {at}: {e}"));
-            if DocumentPath::new(&at).is_ok() && std::str::from_utf8(&bytes).is_ok() {
-                tree.rows.insert(at, ContentHash::of(&bytes).to_string());
-            } else {
-                tree.without_rows.insert(at);
-            }
-        }
+
+    assert_it_converged_on_a_build_from_zero(family, &sandbox, &vault, &stopped_on);
+    readings
+}
+
+/// **The phase asked the host for something.** A census the phase's own opening
+/// one equals is a settle over a host that was asked for nothing, and a reading
+/// taken over it is a reading of an idle poll loop.
+fn assert_moved(script: &Script, before: &Census, after: &Census) {
+    assert_ne!(
+        before,
+        after,
+        "`{}` applied its acts and the tree reads exactly as it did before them, so this reading \
+         is a settle over a host that was asked for nothing",
+        script.name()
+    );
+}
+
+/// Apply one phase and settle over it, timing from its final act.
+///
+/// The clock starts the instant the phase is delivered — when `apply` returns
+/// for a watched phase, and when the reload returns for a control-file one.
+/// Everything after it, the census read and every poll, is inside the reading.
+fn phase(
+    vault: &attach::Vault,
+    host: &attach::ServingHost,
+    store: &mut Store,
+    script: &Script,
+    folding: Folding,
+    delivery: Delivery,
+) -> (Reading, Census) {
+    let mut applied = Applied::default();
+    script
+        .apply_range(vault.path(), 0..script.steps().len(), &mut applied)
+        .unwrap_or_else(|problem| panic!("{problem}\n{script}"));
+    if delivery == Delivery::Reloaded {
+        reload(host, vault.name(), &applied);
     }
-    tree
+    let since = Instant::now();
+    let tree = census(vault.path(), folding);
+    assert!(
+        !tree.rows.is_empty(),
+        "`{}` left a tree holding no document at all, so a settle over it converges on \
+         nothing\n{applied}",
+        script.name()
+    );
+    tree.assert_the_script_read_the_tree_the_same_way(script);
+
+    // The two stages of the poll. `confirmed` holds the elapsed time at the end
+    // of a full projection read and the projection it read; the next poll's
+    // read has to agree with it before that elapsed time becomes the reading.
+    let mut confirmed: Option<(Duration, StoreProjection)> = None;
+    let mut ready = false;
+    let equivalent = wait_until(
+        &format!("the derived store to hold what `{}` implies", script.name()),
+        CONVERGING.budget_for(applied.steps()),
+        || {
+            if let Some(why) = tree.disagreement(store) {
+                confirmed = None;
+                return Observed::pending(why);
+            }
+            // Read first, sampled after: the cost of the look is inside the
+            // reading rather than shaved off it.
+            let seen = StoreProjection::read(store).expect("projecting the settling store");
+            let elapsed = since.elapsed();
+            match confirmed.take() {
+                Some((at, held)) if held.compare(&seen).is_equal() => {
+                    ready = host.state(vault.name()) == Ok(TrustState::Ready);
+                    confirmed = Some((at, seen));
+                    Observed::Met(at)
+                }
+                held => {
+                    let moving = held.map(|(_, before)| before.compare(&seen).divergence);
+                    confirmed = Some((elapsed, seen));
+                    Observed::pending(match moving.flatten() {
+                        Some(divergence) => {
+                            format!("the derived store is still moving: {divergence}")
+                        }
+                        None => "the derived store's whole projection to be read twice".to_string(),
+                    })
+                }
+            }
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
+
+    let (_, stopped_on) = confirmed.expect("the reading was taken over a projection");
+    (
+        Reading {
+            settle: Settle { equivalent, ready },
+            stopped_on,
+        },
+        tree,
+    )
+}
+
+/// Ask the host to read the vault's control files, which is what activates a
+/// replaced declaration.
+fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
+    wait_until(
+        "the explicit reload to activate the vault's control files",
+        CONVERGING.budget_for(applied.steps()),
+        || match host.reload(name) {
+            Ok(()) => Observed::Met(()),
+            Err(ReloadRefusal::Unavailable(trust)) => {
+                Observed::pending(format!("the entry is {trust:?}"))
+            }
+            Err(refused) => panic!("the reload was refused: {refused:?}\n{applied}"),
+        },
+    )
+    .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
+}
+
+/// **The bar the reading stands on.** What the clock stopped over is what a
+/// derivation from zero over the same final tree holds.
+///
+/// Two comparisons, and the first is what makes the reading a reading of
+/// equivalence: the projection the clock stopped on is held to the settled
+/// store as it stands now, so a clock that stopped on a state the store then
+/// moved off fails the case rather than reporting a number. The second is the
+/// bar itself. An equivalence that fails says the clock stopped on something
+/// other than convergence, which is a failed case rather than a slow one.
+fn assert_it_converged_on_a_build_from_zero(
+    family: Family,
+    sandbox: &Sandbox,
+    vault: &attach::Vault,
+    stopped_on: &StoreProjection,
+) {
+    let second = vault.beside(&sandbox.work_dir().join("second-machine"));
+    {
+        let host = second.host();
+        let lease = attach::attach_and_wait(&host, second.name());
+        drop(lease);
+    }
+
+    let mut left = vault.store();
+    let mut right = second.store();
+    assert_operationally_valid(
+        &mut left,
+        &format!("{}: the settled derivation", family.name()),
+    );
+    assert_operationally_valid(
+        &mut right,
+        &format!("{}: the derivation from zero", family.name()),
+    );
+    let left = StoreProjection::read(&mut left).expect("projecting the settled store");
+    let right = StoreProjection::read(&mut right).expect("projecting the store built from zero");
+    stopped_on.compare(&left).assert_equal(&format!(
+        "{}: the store moved after the clock stopped, so the reading is not a reading of the \
+         state this bar is taken over",
+        family.name()
+    ));
+    left.compare(&right).assert_equal(&format!(
+        "{}: the settle this case timed did not converge on a build from zero",
+        family.name()
+    ));
 }
 
 /// The profile the families are churned over, as the environment declares it.
@@ -568,15 +565,4 @@ fn declared_profile() -> String {
         "{PROFILE_ENV} names `{declared}`, which is not a generated profile"
     );
     declared
-}
-
-/// A document whose frontmatter block is past the bound the text layer reads,
-/// which is the state the validity family crosses out of and back into.
-fn oversized_frontmatter() -> Vec<u8> {
-    let mut block = String::from("a: ");
-    while block.len() + 1 < norn_text::FRONTMATTER_MAX_BYTES * 2 {
-        block.push('[');
-    }
-    block.push('\n');
-    format!("---\n{block}---\n# body\n").into_bytes()
 }

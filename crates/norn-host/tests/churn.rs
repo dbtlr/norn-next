@@ -66,24 +66,28 @@
 #![allow(clippy::disallowed_methods)] // Harness scaffolding: this suite's own generated tree.
 
 mod attach;
+mod tree;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use norn_fs::{CaseSensitivity, ContentHash, PathNormalizer};
 #[cfg(feature = "induced-failure")]
 use norn_host::EvidenceReading;
 use norn_host::{AttachMode, DemandLease, ProductionEntryOps, ReloadRefusal};
-use norn_store::{DocumentPath, Provenance, Store, class_probe};
-use norn_testkit::churn::{self, Act, Applied, Folding, Script, Step};
+use norn_store::{DocumentPath, Provenance, class_probe};
+use norn_testkit::churn::{self, Act, Applied, Family, Folding, Script, Step};
 use norn_testkit::equivalence::{
     Population, StoreProjection, assert_operationally_valid, tombstones,
 };
 use norn_testkit::fidelity;
 use norn_testkit::process::Sandbox;
 use norn_testkit::wait::{Convergence, Observed, wait_until};
+
 use norn_wire::{FindingKind, TrustState, VaultName, WarmingPhase};
+use tree::{
+    Census, REPLACEMENT_SCHEMA, census, declared_folding, derived_hashes, ground, identity,
+};
 
 /// The profile every case churns over.
 ///
@@ -130,32 +134,6 @@ const SETTLING: Convergence = Convergence::new(
 /// that lost a few races.
 const CATCHING_A_HEAL: Duration = Duration::from_secs(60);
 
-/// The bytes the validity workload replaces the vault's schema declaration
-/// with.
-///
-/// A schema is opaque to derivation — it is read, hashed and pinned, and no
-/// document is judged against it — so what makes this a schema *change* is that
-/// the bytes differ from the ones the attachment pinned. The pin is what
-/// discards every finding derived under the old fingerprint, and the heal that
-/// follows it is what derives them again.
-const REPLACEMENT_SCHEMA: &[u8] = b"version: 1\n# a second declaration\n";
-
-/// A document whose frontmatter block is past the bound the text layer reads.
-///
-/// The block never closes inside the bound, so the read refuses it by size: the
-/// document keeps the row the act could derive and a document-scoped finding
-/// stands beside it. Editing this document down to an ordinary one is the row
-/// flip the content size drives, and editing an ordinary one up to this is the
-/// same flip the other way.
-fn oversized_frontmatter() -> Vec<u8> {
-    let mut block = String::from("a: ");
-    while block.len() + 1 < norn_text::FRONTMATTER_MAX_BYTES * 2 {
-        block.push('[');
-    }
-    block.push('\n');
-    format!("---\n{block}---\n# body\n").into_bytes()
-}
-
 // ---------------------------------------------------------------------------
 // The workloads
 // ---------------------------------------------------------------------------
@@ -168,8 +146,9 @@ fn oversized_frontmatter() -> Vec<u8> {
 /// with them rather than four arrivals.
 #[test]
 fn ordinary_editing_converges_on_a_build_from_zero() {
-    let workload = churn::ordinary_editing(41);
-    let mut churned = churn_the_vault("churn-ordinary", &workload);
+    let sandbox = sandbox("churn-ordinary");
+    let workload = Family::OrdinaryEditing.workload(&ground(&sandbox.work_dir()));
+    let mut churned = churn_the_vault_in(sandbox, &workload);
 
     churned.judge(workload.changing().name(), 0);
     churned.assert_rows_were_taken_away();
@@ -211,8 +190,9 @@ fn edits_made_while_nothing_was_attached_converge_on_a_build_from_zero() {
 /// that already derived, and the name that moves is a name a row stands at.
 #[test]
 fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
-    let workload = churn::atomic_replacement(43);
-    let mut churned = churn_the_vault_in(sandbox("churn-atomic"), &workload);
+    let sandbox = sandbox("churn-atomic");
+    let workload = Family::AtomicReplacement.workload(&ground(&sandbox.work_dir()));
+    let mut churned = churn_the_vault_in(sandbox, &workload);
 
     churned.judge(workload.changing().name(), 0);
     churned.assert_rows_were_taken_away();
@@ -249,8 +229,9 @@ fn atomic_replacement_and_movement_converge_on_a_build_from_zero() {
 #[test]
 fn a_case_flip_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-flip");
-    let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
-    let workload = churn::case_flip(73, folding);
+    let ground = ground(&sandbox.work_dir());
+    let folding = ground.folding;
+    let workload = Family::CaseFlip.workload(&ground);
     let opened = attach_and_churn(sandbox, workload.opening(), When::Settled);
     // Read before the flip: what says the changing phase reached the row is the
     // identity holding bytes the opening phase did not put there.
@@ -294,8 +275,9 @@ fn a_case_flip_converges_on_a_build_from_zero() {
 #[test]
 fn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero() {
     let sandbox = sandbox("churn-case-rename-parent");
-    let folding = churn::folding(&sandbox.work_dir()).expect("a case probe over the sandbox");
-    let workload = churn::case_rename_parent(79, folding);
+    let ground = ground(&sandbox.work_dir());
+    let folding = ground.folding;
+    let workload = Family::CaseRenamedParent.workload(&ground);
     let opened = attach_and_churn(sandbox, workload.opening(), When::Settled);
     let before_the_rename = opened
         .census
@@ -331,8 +313,9 @@ fn a_case_renamed_parent_over_a_save_converges_on_a_build_from_zero() {
 /// so every one of the twelve edits rewrites a row the host holds.
 #[test]
 fn a_burst_converges_on_the_last_bytes_written() {
-    let workload = churn::burst(47);
-    let mut churned = churn_the_vault("churn-burst", &workload);
+    let sandbox = sandbox("churn-burst");
+    let workload = Family::Burst.workload(&ground(&sandbox.work_dir()));
+    let mut churned = churn_the_vault_in(sandbox, &workload);
 
     // The absolute claim beside the relative one: the hammered path holds the
     // last edit's bytes and none of the eleven writes before them.
@@ -389,9 +372,10 @@ fn a_burst_converges_on_the_last_bytes_written() {
 /// phase that drives one would be a bound against that contract.
 #[test]
 fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
-    let oversized = oversized_frontmatter();
-    let workload = churn::validity_transitions(53, &oversized);
-    let churned = attach_and_churn(sandbox("churn-validity"), workload.opening(), When::Settled)
+    let sandbox = sandbox("churn-validity");
+    let ground = ground(&sandbox.work_dir());
+    let workload = Family::ValidityTransitions.workload(&ground);
+    let churned = attach_and_churn(sandbox, workload.opening(), When::Settled)
         .then(workload.changing(), When::Settled);
 
     // Everything the crossings are about, read off the store the watcher
@@ -466,10 +450,9 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
     churned.assert_the_deaths_were_recorded();
 
     let mut churned = churned.then(
-        &churn::schema_replacement(churn::SchemaGround {
-            at: ".norn/schema.yaml",
-            replacement: REPLACEMENT_SCHEMA,
-        }),
+        &Family::ValidityTransitions
+            .third_phase(&ground)
+            .expect("family 4 carries a third phase"),
         When::SettledThroughAReload,
     );
 
@@ -516,8 +499,9 @@ fn documents_crossing_validity_boundaries_converge_on_a_build_from_zero() {
 /// row, the deletion prunes one, and the rename moves five at once.
 #[test]
 fn an_external_tools_catch_up_converges_on_a_build_from_zero() {
-    let workload = churn::external_tools(59);
-    let mut churned = churn_the_vault("churn-tools", &workload);
+    let sandbox = sandbox("churn-tools");
+    let workload = Family::ExternalTools.workload(&ground(&sandbox.work_dir()));
+    let mut churned = churn_the_vault_in(sandbox, &workload);
 
     churned.judge(workload.changing().name(), 0);
     churned.assert_rows_were_taken_away();
@@ -2049,225 +2033,6 @@ fn reload(host: &attach::ServingHost, name: &VaultName, applied: &Applied) {
     .unwrap_or_else(|failure| panic!("{failure}\n{applied}"));
 }
 
-// ---------------------------------------------------------------------------
-// The census
-// ---------------------------------------------------------------------------
-
-/// What the tree holds, read as places rather than as documents.
-///
-/// A place is a markdown file a walk reads. Whether it derives a row is decided
-/// here the same way a heal decides it: a name the document-path grammar
-/// refuses derives none, bytes no decoder accepts derive none, and everything
-/// else derives one holding the hash of the bytes on disk.
-///
-/// **A place is keyed by its identity, not by its spelling.** On a volume that
-/// folds case, `Note.md` and `note.md` are one place, and a census comparing the
-/// two renderings byte for byte would call a document that never moved a place
-/// with no row standing beside a row standing nowhere. Whether two derivations
-/// agree about the *spelling* a document is rendered at is the equivalence
-/// comparator's question, asked of the whole projection rather than of this
-/// coarse signal.
-///
-/// **What keying by identity costs is duplicates.** Two derived rows whose
-/// spellings fold together collapse into one entry here, so a store holding
-/// both would look to this wait exactly like a store holding the right one. That
-/// is a limit of the signal and not a gap in the suite: the equivalence
-/// comparator reads every row of both projections, and the case that flips a
-/// name's case asks directly how many rows stand at the flipped identity — and
-/// asks the directory itself what spelling it renders there.
-///
-/// **Two readings are compared for equality**, which is how a phase that
-/// applied acts and moved nothing is caught: the places, the hashes, the places
-/// that derive none and the vault's schema declaration all take part, because
-/// each of them is something a changing phase may be the only mover of.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Census {
-    /// What the volume does with case, which is what makes two spellings one
-    /// place or two.
-    folding: Folding,
-    /// The identity of each place, to the hash the bytes there imply.
-    rows: BTreeMap<String, String>,
-    /// The identity of each place that derives no row.
-    without_rows: BTreeSet<String>,
-    /// Each identity's spelling on disk, which is what a failure names.
-    spellings: BTreeMap<String, String>,
-    /// The vault's own schema declaration, as the tree holds it.
-    ///
-    /// **A schema replacement changes no path and no hash**, so a reading that
-    /// stopped at the two above is a reading a phase replacing a declaration
-    /// leaves untouched — and the claim that a non-empty phase moved the tree
-    /// would pass for a phase that wrote the standing declaration back over
-    /// itself. That is the shape a schema-replacing phase fails as, and it is
-    /// the shape it should fail as: a re-pin is what the phase exists to drive,
-    /// and bytes equal to the ones already there drive none.
-    ///
-    /// **The store is not asked about it here.** What a host has pinned moves
-    /// only when a reload is asked for, and a reload runs the re-pin before it
-    /// returns, so nothing about the pin is ever outstanding at a settle. A
-    /// wait on it would be a wait on an act that has already finished.
-    schema: Option<Vec<u8>>,
-}
-
-/// A path as its identity on a volume with this case behavior.
-///
-/// The fold is ASCII, which is the fold the derived store's own path ordering
-/// uses: a suite folding more than the store does would call two places one that
-/// the store keeps apart.
-fn identity(path: &str, folding: Folding) -> String {
-    match folding {
-        Folding::Folded => path.to_ascii_lowercase(),
-        Folding::Distinct => path.to_string(),
-    }
-}
-
-impl Census {
-    /// **The workload's declaration and the tree agree.** Every place the script
-    /// said derives no row is a place this reading of the tree also finds
-    /// derives none.
-    ///
-    /// The declaration is the driver's, made where the workload is written, and
-    /// this reading is made from the bytes on disk afterwards. They are two
-    /// answers to one question, so a workload that meant to leave a quarantined
-    /// place and left a readable one is caught here rather than passing a bar
-    /// about a state it never reached.
-    fn assert_the_script_read_the_tree_the_same_way(&self, script: &Script) {
-        for declared in script.places_without_rows() {
-            let place = identity(declared, self.folding);
-            assert!(
-                self.without_rows.contains(&place),
-                "`{}` says `{declared}` derives no row, and the tree there does derive one",
-                script.name()
-            );
-        }
-    }
-
-    /// How the store disagrees with the tree, and nothing where they agree.
-    ///
-    /// Every disagreement is reported rather than the first, because the two
-    /// halves of one defect read as two lines: a row at a spelling the tree no
-    /// longer holds and a place with no row are the same rename seen from each
-    /// end, and a message naming only one of them sends a reader looking for a
-    /// document that moved rather than for the move.
-    fn disagreement(&self, store: &mut Store) -> Option<String> {
-        /// How many disagreements one message carries. A workload that
-        /// diverged everywhere says so in the count.
-        const REPORTED: usize = 8;
-
-        let derived: BTreeMap<String, (String, String)> = derived_hashes(store)
-            .into_iter()
-            .map(|(path, hash)| (identity(&path, self.folding), (path, hash)))
-            .collect();
-        let mut apart = Vec::new();
-        for (place, hash) in &self.rows {
-            let at = &self.spellings[place];
-            match derived.get(place) {
-                Some((_, held)) if held == hash => {}
-                Some((_, held)) => {
-                    apart.push(format!("`{at}` holds {held} and the tree holds {hash}"));
-                }
-                None => apart.push(format!("`{at}` stands in the tree and holds no row")),
-            }
-        }
-        for place in &self.without_rows {
-            if derived.contains_key(place) {
-                apart.push(format!(
-                    "`{}` derives no document and holds a row",
-                    self.spellings[place]
-                ));
-            }
-        }
-        for (place, (spelling, _)) in &derived {
-            if !self.rows.contains_key(place) {
-                apart.push(format!(
-                    "`{spelling}` holds a row and stands nowhere in the tree"
-                ));
-            }
-        }
-        if apart.is_empty() {
-            return None;
-        }
-        let total = apart.len();
-        apart.truncate(REPORTED);
-        Some(format!("{total} disagreements: {}", apart.join("; ")))
-    }
-}
-
-/// Read the tree at `root` as places, keyed by identity on a volume with this
-/// case behavior.
-fn census(root: &Path, folding: Folding) -> Census {
-    let mut census = Census {
-        folding,
-        rows: BTreeMap::new(),
-        without_rows: BTreeSet::new(),
-        spellings: BTreeMap::new(),
-        schema: std::fs::read(root.join(".norn/schema.yaml")).ok(),
-    };
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = std::fs::read_dir(&directory)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", directory.display()));
-        for entry in entries {
-            let entry = entry.expect("a directory entry");
-            let path = entry.path();
-            let kind = entry.file_type().expect("an entry's type");
-            // A symbolic link is not a place: a walk refuses to follow one, so
-            // a `.md` link derives nothing however it resolves.
-            if kind.is_symlink() {
-                continue;
-            }
-            if kind.is_dir() {
-                // Norn's own subtree carries the schema declaration and the
-                // mechanism scratch root, and no document.
-                if path.file_name() != Some(std::ffi::OsStr::new(".norn")) {
-                    pending.push(path);
-                }
-                continue;
-            }
-            let Some(relative) = markdown_place(root, &path) else {
-                continue;
-            };
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {relative}: {e}"));
-            let place = identity(&relative, folding);
-            let derives =
-                DocumentPath::new(&relative).is_ok() && std::str::from_utf8(&bytes).is_ok();
-            if derives {
-                census
-                    .rows
-                    .insert(place.clone(), ContentHash::of(&bytes).to_string());
-            } else {
-                census.without_rows.insert(place.clone());
-            }
-            census.spellings.insert(place, relative);
-        }
-    }
-    census
-}
-
-/// The vault-relative spelling of `path`, where it is a markdown file.
-fn markdown_place(root: &Path, path: &Path) -> Option<String> {
-    if path.extension() != Some(std::ffi::OsStr::new("md")) {
-        return None;
-    }
-    let relative = path.strip_prefix(root).ok()?;
-    Some(relative.to_string_lossy().into_owned())
-}
-
-/// Every derived path and the hash the row holds.
-///
-/// The page loop is the attach fixture's, which every suite in this crate reads
-/// a whole vault through: the bound on one page is the point of it, and one
-/// place to state it is one place to keep it bounded.
-fn derived_hashes(store: &mut Store) -> BTreeMap<String, String> {
-    let mut held = BTreeMap::new();
-    attach::for_each_derived_document(store, |document| {
-        held.insert(
-            document.path.as_str().to_string(),
-            document.content_hash.clone(),
-        );
-    });
-    held
-}
-
 /// The kinds of every finding standing at `path`, sorted.
 fn kinds_at(projection: &StoreProjection, path: &str) -> Vec<String> {
     let mut kinds: Vec<String> = projection
@@ -2278,22 +2043,4 @@ fn kinds_at(projection: &StoreProjection, path: &str) -> Vec<String> {
         .collect();
     kinds.sort();
     kinds
-}
-
-/// **The platform lane, declared.** What the volume under `at` does with case,
-/// asked two ways and required to agree.
-fn declared_folding(at: &Path) -> Folding {
-    let probed = churn::folding(at).expect("a case probe over the sandbox");
-    let normalizer = PathNormalizer::detect(at).expect("a normalizer over the sandbox");
-    let resolved = match normalizer.case_sensitivity() {
-        CaseSensitivity::Insensitive => Folding::Folded,
-        CaseSensitivity::Sensitive => Folding::Distinct,
-    };
-    assert_eq!(
-        probed, resolved,
-        "a probe that wrote a file and looked for it under another spelling says this is {probed}, \
-         and the normalizer a host resolves paths with says it is {resolved}"
-    );
-    eprintln!("the churn suite is running against {probed}");
-    probed
 }
