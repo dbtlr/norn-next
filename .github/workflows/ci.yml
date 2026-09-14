@@ -1,6 +1,6 @@
 # Per-PR gate lane.
 #
-# CI is two-tier: structure and counters gate here, clocks trend in soak.yml.
+# CI is two-tier: structure and counters gate here, clocks trend in certify.yml.
 # No wall-clock pass/fail ever runs in this lane — see docs/architecture.md.
 # "Counters" names the measurement gates this lane is being built toward; a
 # gate that asserts structure rather than a number belongs here too, on the
@@ -14,7 +14,7 @@
 # and reported the same way: a run that reaches one is stuck rather than slow,
 # and it fails naming what it last saw instead of naming a duration.
 # Performance clocks — the bars that fail when a number drifts — live in
-# soak.yml.
+# certify.yml.
 #
 # **Every suite here runs through the flake tripwire.** This is the lane a
 # failure gets rerun on, and a rerun of a failure this workspace has already
@@ -223,7 +223,7 @@ jobs:
   # too, and "build and test" stays free of measurement. The step asks the
   # target for its ignored cases wholesale, which is why the >=5k cases are a
   # separate target (`memory_soak`) rather than a second reason in this one —
-  # otherwise this lane would run soak.yml's wall-clock assertion. The script
+  # otherwise this lane would run certify.yml's wall-clock assertion. The script
   # is what makes that wholesale run fail when it ran nothing.
   #
   # Three subjects run here: the fixture generator, the norn-fs streaming walk,
@@ -232,7 +232,7 @@ jobs:
   # one pass over a tree. The child that attaches adopts a tree its parent
   # generated, so what the kernel accounts to it is the attachment and not the
   # generation. The >=5k scale and the recorded peak-memory readings stay in
-  # soak.yml, where a clock is legal to read.
+  # certify.yml, where a clock is legal to read.
   memory:
     name: memory invariant
     runs-on: ubuntu-latest

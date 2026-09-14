@@ -12,30 +12,37 @@
 //!
 //! # What makes a run qualifying
 //!
-//! Six things, and each of them is a field here rather than a judgment a
+//! Seven things, and each of them is a field here rather than a judgment a
 //! reader makes:
 //!
-//! 1. **It ran the commit it was pinned to.** The candidate is a pointer on the
-//!    default branch ([`CANDIDATE_POINTER`]), the lane checks that commit out,
-//!    and the record carries both the pointer's value and the commit the
-//!    checkout landed on. A tree that is not the pinned one is evidence about
-//!    another commit, so it is typed [`NonQualifying::CandidateMismatch`].
-//! 2. **It ran the required suite.** The case outcomes reconcile exactly against
+//! 1. **It names the commit it certified.** The candidate is a pointer on the
+//!    default branch ([`CANDIDATE_POINTER`]); the dispatcher tags the commit it
+//!    names and starts the certification run *at that tag*, so the run's own
+//!    checkout is the candidate and `GITHUB_SHA` is its sha. A record naming no
+//!    commit certified nothing a campaign can compare two records by, so it is
+//!    typed [`NonQualifying::UnknownCandidate`].
+//! 2. **Two readers agree on which suite ran.** The dispatcher computes
+//!    [`super::manifest::digest`] at the pin before it dispatches anything and
+//!    hands the value down; the run computes the same digest off the tree it
+//!    built. A record whose two readings differ, or that carries only its own,
+//!    is typed [`NonQualifying::DigestDisagreement`] — the digest a campaign
+//!    counts five agreements of is not a value a run asserts about itself.
+//! 3. **It ran the required suite.** The case outcomes reconcile exactly against
 //!    the inventory — every required id present, nothing else, nothing twice —
 //!    and the inventory digest the record carries is this build's.
-//! 3. **It passed.** Every case outcome is a pass, and the run's own result is a
+//! 4. **It passed.** Every case outcome is a pass, and the run's own result is a
 //!    pass.
-//! 4. **Its preflight admitted it.** The environmental classification ran and
+//! 5. **Its preflight admitted it.** The environmental classification ran and
 //!    admitted the host. That slot is structure here and nothing else: what a
 //!    preflight checks and what it refuses is its own task's, and this records
 //!    the verdict rather than reaching one.
-//! 5. **Every named exit bar was armed.** The exit checklist names bars, and a
+//! 6. **Every named exit bar was armed.** The exit checklist names bars, and a
 //!    bar authored `None` is one the suite records a reading for and holds
 //!    nothing against — so a run under it passed less than the exit asks. The
 //!    build's claim about which bars are armed is [`NAMED_EXIT_BARS`], and the
 //!    record carries the unarmed ones so it classifies the same however old it
 //!    is when read.
-//! 6. **It came off the schedule.** A run somebody started is outside the
+//! 7. **It came off the schedule.** A run somebody started is outside the
 //!    sequence the five are counted over, so it is typed
 //!    [`NonQualifying::ManualDispatch`] rather than left to a reader to notice.
 //!
@@ -80,10 +87,15 @@ pub const SINK: &str = "NORN_QUALIFICATION_LEDGER";
 /// commit sha, beside `#` comments nothing reads.
 ///
 /// A campaign counts five consecutive runs over one frozen candidate, and a
-/// lane that checked out whatever the default branch's head was would mint a
-/// new candidate on every merge. So the candidate is a pointer somebody edits
-/// in a reviewed commit, the lane reads it off the default branch before it
-/// checks anything out, and the record attests it.
+/// lane that ran whatever the default branch's head was would mint a new
+/// candidate on every merge. So the candidate is a pointer somebody edits in a
+/// reviewed commit; the dispatcher on the default branch reads it, tags the
+/// commit it names, and starts the certification run at that tag.
+///
+/// **Nothing inside a certification run reads this file.** The run stands in
+/// the commit the pointer named, so its own `GITHUB_SHA` is the candidate —
+/// which is why [`Record::candidate_sha`] is read off the checkout rather than
+/// off a pointer a step inside the run could resolve differently.
 ///
 /// **It is outside the trees the suite manifest sweeps, deliberately.** Which
 /// commit is being certified is what [`Record::candidate_sha`] answers for, and
@@ -92,21 +104,25 @@ pub const SINK: &str = "NORN_QUALIFICATION_LEDGER";
 /// that is not a change to the suite.
 pub const CANDIDATE_POINTER: &str = ".github/soak-candidate";
 
-/// The commit the lane was told to certify, as [`CANDIDATE_POINTER`] named it
-/// on the default branch.
+/// Whether this run came off the nightly schedule, as the literal `true`.
 ///
-/// The workflow's to supply, for the reason [`RUNNER`] is: the process sees one
-/// checkout and cannot tell which commit somebody pinned the lane to.
-pub const CANDIDATE: &str = "NORN_QUALIFICATION_CANDIDATE";
+/// The dispatcher's to supply. A certification run is reached by
+/// `workflow_dispatch` however it was started, so `GITHUB_EVENT_NAME` says
+/// `workflow_dispatch` for the nightly and for a run somebody typed alike — and
+/// the one workflow that can tell them apart is the one holding the cron.
+/// Anything but `true` is a run outside the sequence the five are counted over.
+pub const SCHEDULED: &str = "NORN_QUALIFICATION_SCHEDULED";
 
-/// The commit of the tree the suites were built from, read out of the checkout
-/// by the lane.
+/// The suite-manifest digest the dispatcher read at the pin, before it started
+/// this run.
 ///
-/// Recorded beside [`CANDIDATE`] rather than assumed equal to it. A checkout
-/// that failed, a `ref:` dropped from a lane, or a pointer that resolved to
-/// nothing all leave the job running some other commit's suites, and a record
-/// carrying only the pinned value would attest a tree the run never had.
-pub const CHECKOUT: &str = "NORN_QUALIFICATION_CHECKOUT";
+/// The second attester of one value. The run computes
+/// [`super::manifest::digest`] off the tree it built, and a digest both a
+/// reader at the pin and a reader inside the run arrived at is evidence about
+/// which suite ran; a digest only the run carries is the run's own word for it.
+/// A run nobody dispatched from the pointer sets nothing here and never
+/// qualifies.
+pub const DISPATCHER_DIGEST: &str = "NORN_QUALIFICATION_DISPATCHER_DIGEST";
 
 /// A file of `<case id> <outcome>` lines, one per case the run executed.
 ///
@@ -205,12 +221,25 @@ pub enum RunResult {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NonQualifying {
-    /// The tree the suites were built from is not the commit the lane was
-    /// pinned to certify. Whatever the run found is a fact about another
-    /// commit, so nothing about the candidate is concluded — including by a
-    /// green run, which is the direction that would otherwise advance a count
-    /// over a candidate nobody certified.
-    CandidateMismatch,
+    /// The record names no commit for what it certified. A campaign compares
+    /// five records by the candidate they name, so a record naming none is one
+    /// nothing can be counted with — including a green one, which is the
+    /// direction that would otherwise advance a count over a candidate no
+    /// record attests.
+    UnknownCandidate,
+    /// The dispatcher's reading of the suite-manifest digest at the pin and the
+    /// run's own reading of it are not the same value — or the run carries only
+    /// its own, because nobody dispatched it from the pointer. Which suite ran
+    /// is then a claim with one source, and the five the campaign counts are
+    /// five agreements about the suite as much as about the candidate.
+    ///
+    /// It outranks [`NonQualifying::ManualDispatch`], so a certification
+    /// workflow somebody started directly — rather than through the dispatcher
+    /// that reads the pointer — reads this rather than `manual-dispatch`. Both
+    /// are true of such a run and this is the one that says less was
+    /// established: a run outside the sequence still ran a suite somebody can
+    /// name, and this one did not.
+    DigestDisagreement,
     /// The cases the run executed are not the cases the inventory requires —
     /// a line missing, a line for a case nothing requires, or a required case
     /// the run never attempted. A run of a different suite certifies a
@@ -255,9 +284,10 @@ pub enum NonQualifying {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "verdict")]
 pub enum Classification {
-    /// The run ran the pinned candidate and the required suite, passed it, its
-    /// preflight admitted the host, every named exit bar was armed, and it came
-    /// off the schedule.
+    /// The run names the candidate it certified, its digest and the
+    /// dispatcher's agree, it ran the required suite, passed it, its preflight
+    /// admitted the host, every named exit bar was armed, and it came off the
+    /// schedule.
     Qualifying,
     /// The run does not count, for exactly one typed reason.
     NonQualifying { reason: NonQualifying },
@@ -385,19 +415,29 @@ pub fn unauthored_exit_bars() -> Vec<String> {
 /// Counting is the campaign's, over a sequence of these. Nothing here holds a
 /// sequence, because a record is written by the run it describes and knows
 /// nothing of the runs before it.
+/// **Every field is required at parse, and an unknown one is refused.** A
+/// record is evidence, and evidence read under a schema it was not written to
+/// is evidence about something else: a field this type has gained since would
+/// be defaulted, and a field it has dropped would be ignored, so either way a
+/// reader would classify a record by terms its writer never met. A schema
+/// change therefore retires the records on disk whole, which is the cost of the
+/// count restarting rather than silently continuing across it.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
-    /// The commit the run was pinned to certify, as [`CANDIDATE_POINTER`] named
-    /// it on the default branch.
+    /// The commit the suites were built from and run against, which is the
+    /// candidate: the dispatcher starts the run at a tag holding the commit
+    /// [`CANDIDATE_POINTER`] named, so the run's own checkout is the pin and
+    /// this is `GITHUB_SHA`.
     pub candidate_sha: String,
-    /// The commit of the tree the suites were built from. Equal to
-    /// [`Record::candidate_sha`] in a run that certified what it was pinned to,
-    /// and carried separately so that a run which certified something else says
-    /// which commit that was instead of attesting the pointer it ignored.
-    pub checkout_sha: String,
     /// What certified it: [`super::manifest::digest`].
     pub suite_manifest_digest: String,
+    /// The same digest as the dispatcher read it at the pin, before this run
+    /// started — [`DISPATCHER_DIGEST`]. Empty where nobody dispatched this run
+    /// from the pointer, which is why one comparison covers both failures: a
+    /// disagreement and an absence are alike a suite nobody but this run
+    /// attests, and neither qualifies.
+    pub dispatcher_digest: String,
     /// The inventory's own contract digest, carried separately so a reader can
     /// tell an inventory edit from a lane edit without recomputing either.
     pub case_inventory_digest: String,
@@ -413,9 +453,7 @@ pub struct Record {
     /// — [`unauthored_exit_bars`] as the writer's build computed it. Carried in
     /// the record rather than recomputed at read time, so a record classifies
     /// the same from its own contents however far the baselines have moved
-    /// since; empty is the only value a qualifying run carries. Required at
-    /// parse: a record without it was written by an earlier schema and is
-    /// refused whole, the same reading an unknown field gets.
+    /// since; empty is the only value a qualifying run carries.
     pub unauthored_exit_bars: Vec<String>,
     pub classification: Classification,
 }
@@ -446,13 +484,21 @@ impl Record {
             }
             RunResult::Failed | RunResult::Passed => {}
         }
-        // Read before the suite and before the outcomes, because they are
-        // questions about a tree: a run of a commit nobody pinned certifies
-        // that commit's suite against that commit's product, and neither
-        // answer is about the candidate.
-        if self.checkout_sha != self.candidate_sha {
+        // Read before the suite and before the outcomes, because both are
+        // questions about what this run *was*: a record naming no commit says
+        // nothing a second record could be compared against, and a suite only
+        // this run attests says nothing a second run could be compared against
+        // either. Read here rather than left to the validator, because a run
+        // that classified itself Qualifying and then failed validation would
+        // leave its record saying one thing and the reader concluding another.
+        if !is_commit_sha(&self.candidate_sha) {
             return Classification::NonQualifying {
-                reason: NonQualifying::CandidateMismatch,
+                reason: NonQualifying::UnknownCandidate,
+            };
+        }
+        if self.dispatcher_digest != self.suite_manifest_digest {
+            return Classification::NonQualifying {
+                reason: NonQualifying::DigestDisagreement,
             };
         }
         // A run whose case lines do not reconcile, or that never attempted a
@@ -603,11 +649,11 @@ impl Record {
     /// every record answers for.
     ///
     /// Each is a fact a campaign counting five of these relies on and cannot
-    /// recover from anywhere else: which suite certified the candidate, which
-    /// commit the candidate was, that the tree the run built was that commit,
-    /// whether the run came off the schedule, and which of the two platform
-    /// answers the inventory's platform-deciding lanes require this run
-    /// supplied.
+    /// recover from anywhere else: which suite certified the candidate, that
+    /// the dispatcher read the same suite at the pin, which commit the
+    /// candidate was, whether the run came off the schedule, and which of the
+    /// two platform answers the inventory's platform-deciding lanes require
+    /// this run supplied.
     fn qualifying_claims(&self, workspace_root: &Path) -> Vec<String> {
         self.qualifying_claims_against(workspace_root, NAMED_EXIT_BARS)
     }
@@ -654,12 +700,14 @@ impl Record {
                 self.candidate_sha
             ));
         }
-        if self.checkout_sha != self.candidate_sha {
+        if self.dispatcher_digest != self.suite_manifest_digest {
             problems.push(format!(
-                "the record is qualifying and names the candidate `{}` over a tree checked out at \
-                 `{}`. What a run attests is the commit whose suites it built and ran, so a \
-                 record that names another one is a record about a candidate this run never had.",
-                self.candidate_sha, self.checkout_sha
+                "the record is qualifying and carries the suite-manifest digest `{}` against a \
+                 dispatcher reading of `{}`. The digest five records have to agree on is one two \
+                 readers of the pin arrived at, so a record whose two readings differ — or that \
+                 carries only its own, because nobody dispatched it from the pointer — attests a \
+                 suite with one source.",
+                self.suite_manifest_digest, self.dispatcher_digest
             ));
         }
         if !self.scheduled {
@@ -752,16 +800,18 @@ pub fn emit(workspace_root: &Path) -> Result<Option<PathBuf>, String> {
 /// Assemble a record from what the workflow set and what this build knows.
 ///
 /// The split is deliberate. The environment supplies what only the runner knows
-/// — the pinned candidate and the commit its checkout landed on, the machine,
-/// whether the run came off the schedule, how the job ended, what the preflight
-/// said, and which cases ran. Everything else is computed here: both digests,
-/// the volume's own answer about case, and the classification the contents
-/// imply.
+/// — the machine, how the job ended, what the preflight said, which cases ran —
+/// and what only the dispatcher knows: whether the run came off the schedule,
+/// and the digest it read at the pin. Everything else is computed here: both
+/// digests, the volume's own answer about case, and the classification the
+/// contents imply.
 ///
-/// **Neither commit is taken from `GITHUB_SHA`.** That is the commit of the ref
-/// the workflow was triggered on, which for a scheduled run is the default
-/// branch's head — the moving value the pinned pointer exists to replace, and
-/// not the tree a lane that checked out a `ref:` is standing in.
+/// **The candidate is `GITHUB_SHA`, and that is the point of the tag.** The
+/// dispatcher starts this run at a ref holding the pinned commit, so the commit
+/// the run was triggered on and the tree it built are one value and there is
+/// nothing for a second reading to disagree with. A run reached any other way
+/// names whatever commit it stands in, which is not a candidate anybody pinned
+/// — and the digest it carries then has no dispatcher reading beside it.
 ///
 /// **An outcome for a case the inventory does not require is recorded rather
 /// than refused.** A run whose outcomes name an id nothing requires ran a
@@ -785,11 +835,11 @@ pub fn from_environment(workspace_root: &Path) -> Result<Record, String> {
     };
 
     let mut record = Record {
-        candidate_sha: environment(CANDIDATE).unwrap_or_else(|| "unknown".to_string()),
-        checkout_sha: environment(CHECKOUT).unwrap_or_else(|| "unknown".to_string()),
+        candidate_sha: environment("GITHUB_SHA").unwrap_or_else(|| "unknown".to_string()),
         suite_manifest_digest,
+        dispatcher_digest: environment(DISPATCHER_DIGEST).unwrap_or_default(),
         case_inventory_digest: inventory::contract_digest(),
-        scheduled: environment("GITHUB_EVENT_NAME").as_deref() == Some("schedule"),
+        scheduled: environment(SCHEDULED).as_deref() == Some("true"),
         platform: Platform {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
@@ -957,10 +1007,11 @@ mod tests {
     }
 
     fn qualifying_at(root: &Path) -> Record {
+        let digest = manifest::digest(root).expect("digesting the suite manifest");
         let mut record = Record {
             candidate_sha: "0".repeat(40),
-            checkout_sha: "0".repeat(40),
-            suite_manifest_digest: manifest::digest(root).expect("digesting the suite manifest"),
+            suite_manifest_digest: digest.clone(),
+            dispatcher_digest: digest,
             case_inventory_digest: inventory::contract_digest(),
             scheduled: true,
             platform: Platform {
@@ -1545,23 +1596,24 @@ mod tests {
         }
     }
 
-    /// **A run of a tree nobody pinned is recorded and counts toward nothing.**
+    /// **A record naming no candidate is recorded and counts toward nothing.**
     ///
-    /// The green direction is the one that matters: a lane whose `ref:` went
-    /// missing runs the default branch's head, passes everything, and would
-    /// otherwise advance a count over a candidate no record attests. The record
-    /// is written rather than refused — which commit ran is evidence, and a
+    /// The green direction is the one that matters: a run reached without
+    /// `GITHUB_SHA`, or one whose environment lost it, passes everything and
+    /// would otherwise be stamped qualifying while naming `unknown` — a record
+    /// two campaigns could not tell apart and no reader can resolve. The record
+    /// is written rather than refused: which run this was is evidence, and a
     /// scheduled run that left no record is how the campaign reads a timeout.
     #[test]
-    fn a_run_of_a_tree_that_is_not_the_pinned_candidate_is_typed_and_written() {
+    fn a_record_that_names_no_candidate_is_typed_and_written() {
         let root = workspace_root();
         let mut record = qualifying_at(&root);
-        record.checkout_sha = "1".repeat(40);
+        record.candidate_sha = "unknown".to_string();
         record.classification = record.implied_classification();
         assert_eq!(
             record.classification,
             Classification::NonQualifying {
-                reason: NonQualifying::CandidateMismatch
+                reason: NonQualifying::UnknownCandidate
             }
         );
         assert!(!record.qualifies(&root));
@@ -1569,32 +1621,76 @@ mod tests {
         assert_eq!(record.writer_defects(&root), Vec::<String>::new());
     }
 
-    /// The hand-edited half: a record that states it qualifies while naming two
-    /// commits is refused by the validator a campaign counts through, the same
-    /// way a doctored manifest digest is.
+    /// **The two readings of the suite have to agree, and an absent one is a
+    /// disagreement.**
+    ///
+    /// A run nobody dispatched from the pointer carries no dispatcher reading,
+    /// and a run whose tree moved under the dispatcher carries one that
+    /// differs. Both leave the suite a claim this run makes about itself, and
+    /// the count is over agreements.
     #[test]
-    fn a_stated_qualifying_record_over_another_tree_is_refused() {
+    fn a_suite_only_the_run_attests_is_typed_and_written() {
+        let root = workspace_root();
+        for dispatcher_digest in ["", &"a".repeat(64)] {
+            let mut record = qualifying_at(&root);
+            record.dispatcher_digest = dispatcher_digest.to_string();
+            record.classification = record.implied_classification();
+            assert_eq!(
+                record.classification,
+                Classification::NonQualifying {
+                    reason: NonQualifying::DigestDisagreement
+                },
+                "dispatcher digest {dispatcher_digest:?}"
+            );
+            assert!(!record.qualifies(&root));
+            assert_eq!(record.writer_defects(&root), Vec::<String>::new());
+        }
+    }
+
+    /// The hand-edited half: a record that states it qualifies while carrying a
+    /// digest no dispatcher read is refused by the validator a campaign counts
+    /// through, the same way a doctored manifest digest is.
+    #[test]
+    fn a_stated_qualifying_record_no_dispatcher_attested_is_refused() {
         let root = workspace_root();
         let mut record = qualifying_at(&root);
-        record.checkout_sha = "1".repeat(40);
+        record.dispatcher_digest = String::new();
         record.classification = Classification::Qualifying;
         let problems = record.problems(&root);
         assert!(
             problems
                 .iter()
-                .any(|problem| problem.contains("over a tree checked out at")),
+                .any(|problem| problem.contains("against a dispatcher reading of")),
             "{problems:?}"
         );
         assert!(!record.qualifies(&root));
     }
 
-    /// A run that never finished says nothing about which tree it was in
-    /// either, so the way it ended is read first.
+    /// The hand-edited half of the candidate claim: a record that states it
+    /// qualifies while naming no commit is refused too.
     #[test]
-    fn a_cancelled_run_over_another_tree_is_typed_by_how_it_ended() {
+    fn a_stated_qualifying_record_naming_no_candidate_is_refused() {
         let root = workspace_root();
         let mut record = qualifying_at(&root);
-        record.checkout_sha = "1".repeat(40);
+        record.candidate_sha = "unknown".to_string();
+        record.classification = Classification::Qualifying;
+        let problems = record.problems(&root);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("which is not a 40-digit")),
+            "{problems:?}"
+        );
+        assert!(!record.qualifies(&root));
+    }
+
+    /// A run that never finished says nothing about which commit it was
+    /// standing in either, so the way it ended is read first.
+    #[test]
+    fn a_cancelled_run_naming_no_candidate_is_typed_by_how_it_ended() {
+        let root = workspace_root();
+        let mut record = qualifying_at(&root);
+        record.candidate_sha = "unknown".to_string();
         record.result = RunResult::Cancelled;
         record.classification = record.implied_classification();
         assert_eq!(

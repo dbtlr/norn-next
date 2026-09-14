@@ -159,9 +159,11 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
     for required in [
         // The lanes, the toolchain and the resolved graph.
         ".github/workflows/ci.yml",
+        ".github/workflows/certify.yml",
         ".github/workflows/soak.yml",
         ".github/scripts/lane-suite.sh",
         ".github/scripts/certification-suite.sh",
+        ".github/scripts/soak-candidate.sh",
         "Cargo.lock",
         "rust-toolchain.toml",
         // The rules: what the layer requires, how that is reconciled, and what
@@ -243,10 +245,11 @@ fn the_manifest_covers_every_claimed_certification_suite() {
 #[test]
 fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
     let root = workspace_root();
+    let digest = manifest::digest(&root).expect("digesting the suite manifest");
     let sound = Record {
         candidate_sha: "0".repeat(40),
-        checkout_sha: "0".repeat(40),
-        suite_manifest_digest: manifest::digest(&root).expect("digesting the suite manifest"),
+        suite_manifest_digest: digest.clone(),
+        dispatcher_digest: digest,
         case_inventory_digest: inventory::contract_digest(),
         scheduled: true,
         // The two platform-deciding facts are populated because a qualifying
@@ -460,69 +463,161 @@ fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
         assert_backend_label_matches_the_runner(lane, body);
         assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane, body);
         assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane, body);
-        assert_the_lane_checks_out_the_pinned_candidate(lane, body);
+        assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane, body);
     }
 }
 
-/// **A lane checks out the pinned candidate and records both commits.**
+/// **A lane certifies the ref it was dispatched at, and carries down what only
+/// the dispatcher knows.**
 ///
-/// Three links, and dropping any one of them silently returns the lane to
-/// certifying whatever the default branch's head was when the schedule fired —
-/// which is a new candidate every merge, and a count held by nothing.
+/// The dispatcher tags the pinned commit and starts the certification run at
+/// that tag, so the lane's own checkout *is* the candidate and
+/// [`ledger::Record::candidate_sha`] is `GITHUB_SHA`. Three ways that comes
+/// apart, and each is silent:
 ///
-/// A checkout with no `ref:` takes the triggering ref. A lane that checked the
-/// candidate out and stamped no [`ledger::CANDIDATE`] would run the right tree
-/// and record no claim about it. And a lane that stamped the pin without
-/// reading the tree back could not say when the two had parted — the record's
-/// `candidate-mismatch` reason exists because a checkout can land somewhere
-/// else, and it is reachable only where both values are recorded.
+/// - a `ref:` on a checkout, which is a second opinion about which commit to
+///   certify taken inside the run it decides for;
+/// - no [`ledger::SCHEDULED`] stamp, which leaves every run manual and the
+///   count unable to advance — or, worse, leaves a record inheriting a default
+///   nobody sent;
+/// - no [`ledger::DISPATCHER_DIGEST`] stamp, which leaves the suite a value
+///   this run alone attests.
 ///
-/// Read off the text, like the rest of this test's claims: what the lane files
-/// say is what the runner will do.
-fn assert_the_lane_checks_out_the_pinned_candidate(lane: &str, body: &str) {
-    assert!(
-        body.contains(ledger::CANDIDATE_POINTER),
-        "`{lane}` writes a qualification record and never reads `{}`, so it certifies whichever \
-         commit the ref it was triggered on pointed at and every merge mints a new candidate",
-        ledger::CANDIDATE_POINTER
-    );
+/// Read structurally rather than by substring: every claim below is about a
+/// key a step sets, so a lane that merely *mentions* one of these names in a
+/// comment satisfies nothing here.
+fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str) {
     let pinned = settings(body, "ref");
-    assert_eq!(
-        pinned.len(),
-        1,
-        "`{lane}` names `ref:` {} times, and the one checkout of the candidate is what makes the \
-         tree the suites are built from the pinned commit: {pinned:?}",
+    assert!(
+        pinned.is_empty(),
+        "`{lane}` names `ref:` {} time(s), and a lane dispatched at the tag holding the pinned \
+         candidate is already standing in it — so a `ref:` here certifies some other commit than \
+         the one the record will name: {pinned:?}",
         pinned.len()
     );
-    assert!(
-        pinned[0].contains("steps.") && pinned[0].contains(".outputs."),
-        "`{lane}` checks out `{}`, which is not the sha the step that read `{}` produced",
-        pinned[0],
-        ledger::CANDIDATE_POINTER
-    );
     for (key, what) in [
-        (ledger::CANDIDATE, "the commit it was pinned to certify"),
-        (ledger::CHECKOUT, "the commit its checkout landed on"),
+        (
+            ledger::SCHEDULED,
+            "whether this run came off the nightly cron, which every run of this file looks like \
+             a manual dispatch from the inside",
+        ),
+        (
+            ledger::DISPATCHER_DIGEST,
+            "the suite-manifest digest the dispatcher read at the pin, which is the only reading \
+             of the suite that is not this run's own",
+        ),
     ] {
+        let stamped: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| line.contains(&format!("{key}=")))
+            .collect();
         assert!(
-            body.contains(&format!("{key}=")),
+            !stamped.is_empty(),
             "`{lane}` writes a qualification record and appends no `{key}` to the job \
              environment, so the record carries nothing for {what}"
         );
+        for line in stamped {
+            assert!(
+                line.contains("$") || line.contains("inputs."),
+                "`{lane}` stamps `{key}` from a literal rather than from the dispatch that \
+                 carried it: {line}"
+            );
+        }
     }
 }
+
+/// **The dispatcher carries the clock and nothing a run does.**
+///
+/// A workflow's steps come from the ref it was triggered on, and a schedule
+/// only ever triggers the default branch. The dispatcher therefore lives on the
+/// default branch and the run lives at the pin — and the whole value of that
+/// split is that nothing deciding what a run *does* sits in the dispatcher,
+/// where the candidate's suite-manifest digest does not close over it. Lane
+/// behaviour drifting back into the dispatcher's file would be a lane edit the
+/// digest cannot see, and five runs agreeing on a digest would stop meaning
+/// five runs of the same lanes.
+///
+/// So two claims: the dispatcher runs no lane script, and the one `cargo` it
+/// runs is the digest computation it hands down.
+#[test]
+fn the_dispatcher_carries_no_lane_behaviour() {
+    let dispatcher = std::fs::read_to_string(workspace_root().join(DISPATCHER))
+        .expect("reading the dispatcher workflow");
+    let steps: Vec<&str> = dispatcher
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+
+    for script in [
+        ".github/scripts/lane-suite.sh",
+        ".github/scripts/certification-suite.sh",
+        TRIPWIRE,
+    ] {
+        let calls: Vec<&&str> = steps.iter().filter(|line| line.contains(script)).collect();
+        assert!(
+            calls.is_empty(),
+            "`{DISPATCHER}` calls `{script}`. What a run does lives at the pin, inside the \
+             suite-manifest digest the candidate is certified under, and a lane step here is one \
+             that digest cannot see: {calls:?}"
+        );
+    }
+
+    let cargo: Vec<&&str> = steps
+        .iter()
+        .filter(|line| line.contains("cargo "))
+        .collect();
+    assert_eq!(
+        cargo.len(),
+        1,
+        "`{DISPATCHER}` runs cargo {} times, and the one invocation it is allowed is the \
+         suite-manifest digest it reads at the pin and hands to the run: {cargo:?}",
+        cargo.len()
+    );
+    assert!(
+        cargo[0].contains("--test certification"),
+        "`{DISPATCHER}`'s one cargo invocation is not the certification suite's own digest \
+         reading, so the value it attests is computed by something other than the suite that \
+         defines it: {}",
+        cargo[0]
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|line| line.contains(ledger::CANDIDATE_POINTER)),
+        "`{DISPATCHER}` runs no step naming `{}`, so nothing resolves the candidate and the \
+         certification run is dispatched at whatever ref somebody last named. A comment naming \
+         the pointer is not a step that reads it.",
+        ledger::CANDIDATE_POINTER
+    );
+    assert!(
+        steps.iter().any(|line| line.starts_with("- cron:")),
+        "`{DISPATCHER}` holds no schedule, and the nightly is the one thing this file exists to \
+         carry"
+    );
+}
+
+/// The workflow on the default branch that reads the pointer and starts a
+/// certification run at it.
+const DISPATCHER: &str = ".github/workflows/soak.yml";
 
 /// **The pinned candidate is one commit sha somebody can read.**
 ///
 /// The pointer is the campaign's whole statement of what is being certified, so
-/// a file the lane's reading step refuses is a file whose lanes certify no
-/// candidate at all — they record the mismatch and every run of the five counts
-/// toward nothing. The shape is held here, where a pull request meets it,
-/// rather than at 04:00.
+/// a file the dispatcher refuses is a file that starts no certification run at
+/// all. The shape is held here, where a pull request meets it, rather than at
+/// 04:00 — and it is the same shape `.github/scripts/soak-candidate.sh`
+/// enforces, one definition of the format read twice rather than two
+/// definitions that can drift apart.
 ///
-/// The sha is not resolved against the object store: a lane's own checkout is
-/// shallow and a reviewer's may be, so the file is held to its shape and the
-/// run that fetches it is what finds out whether the commit exists.
+/// The sha is not resolved against the object store here: a reviewer's checkout
+/// may be shallow, and it may not hold a commit that exists on the remote. What
+/// resolves it is the dispatcher, which fetches the commit and checks the tree
+/// at it carries the certification workflow before it dispatches anything — so
+/// an unfetchable or pre-mechanism pin ends that job red rather than leaving a
+/// certification run without a record.
 #[test]
 fn the_pinned_candidate_is_one_commit_sha() {
     let pointer = workspace_root().join(ledger::CANDIDATE_POINTER);

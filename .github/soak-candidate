@@ -1,26 +1,38 @@
-# The soak candidate: the commit the scheduled lanes certify.
+# The soak candidate: the commit the scheduled certification run certifies.
 #
 # **What it is for.** The layer exits on five consecutive qualifying runs of
-# `.github/workflows/soak.yml` over one frozen candidate. A lane that checked
-# out the default branch's head would mint a new candidate on every merge, and
-# the count would then be held by nobody merging — a discipline no file records
-# and no run attests. So the candidate is pinned here: both scheduled jobs read
-# this pointer off the default branch, check that commit out, and stamp it into
-# the qualification record they upload.
+# `.github/workflows/certify.yml` over one frozen candidate. A run that took the
+# default branch's head would mint a new candidate on every merge, and the count
+# would then be held by nobody merging — a discipline no file records and no run
+# attests. So the candidate is pinned here.
+#
+# **How it is reached.** `.github/workflows/soak.yml` on the default branch
+# holds the nightly cron and nothing else a run does. It reads this file, fetches
+# the commit, checks that the tree at it carries `certify.yml`, computes the
+# suite-manifest digest there, tags the commit `soak-candidate/<sha>` and
+# dispatches `certify.yml` **at that tag**. The certification run is therefore
+# one tree: its steps and its suites are both the candidate's, and `GITHUB_SHA`
+# is the pin. Anything the dispatcher cannot verify ends the dispatcher red and
+# starts no run.
 #
 # **Editing it starts a new count.** That is the whole point of the edit, and it
 # is a reviewed commit like any other. Nothing here retires the records already
 # written: they name the candidate they ran, so a campaign reading them sees the
 # candidate change rather than inheriting it.
 #
-# **A run whose tree is not this commit still writes a record**, classified
-# `candidate-mismatch` — the pointer unreadable, the checkout refused, or a
-# lane's `ref:` gone missing all leave a run certifying some other commit, and
-# the record says which one.
+# **The candidate is advanced by a reviewed commit after the mechanism merges.**
+# A pin can only name a commit that already exists, so the commit introducing
+# this file cannot name itself. The sha below is therefore this mechanism's
+# base, which carries no `certify.yml` — the first dispatch after the merge
+# refuses it by name and dispatches nothing, until somebody advances the pointer
+# to a commit that carries the mechanism. That refusal is loud, is a failure of
+# the dispatcher rather than of a certification run, and is the designed state
+# of this file between the merge and the first pointer advance.
 #
 # **Format.** `#` comments, then one line holding a 40-digit lowercase commit
-# sha. The reading step in both jobs of soak.yml refuses anything else, and the
-# shape is held by `norn --test certification`.
+# sha. `.github/scripts/soak-candidate.sh` is the one parser; the same shape is
+# asserted by `norn --test certification`, so a pull request meets it before
+# 04:00 does.
 #
 # This file is outside the trees the suite manifest sweeps: what the suite is
 # and which commit it is run against are two values, and folding the pointer
