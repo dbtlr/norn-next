@@ -1540,9 +1540,11 @@ fn reclaim_unwound_leg<O: EntryOps>(
 /// What is running against an entry at the instant it was read.
 ///
 /// Each field is one of the holds [`EntryState::held_by_anything`] answers for
-/// that says a leg is in flight. The two holds it leaves out are the ones an
-/// at-rest entry carries anyway: coverage in the entry's own hand, and the
-/// demand leases a client holds over it.
+/// that says a leg is in flight. Three of its limbs are not fields here: coverage
+/// in the entry's own hand and the demand leases a client holds over it, which an
+/// at-rest entry carries anyway, and coverage out with a leg, which every taker
+/// moves under the same hold of the gate that registers the leg or opens the
+/// release, so it is never out while the five fields all read false.
 #[cfg(feature = "induced-failure")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorkInFlight {
@@ -2385,7 +2387,9 @@ impl<O: EntryOps> Host<O> {
     /// lock that ends it is named here, and no hold that merely says the entry
     /// is being served: coverage the entry holds in its own hand and the demand
     /// leases standing over it are what an attached, at-rest entry looks like,
-    /// so neither is in flight. What is in flight is the claim on the gate, the
+    /// so neither is in flight, and coverage out with a leg is taken under the
+    /// same lock that registers the leg or opens the release, so one of the five
+    /// holds below is always up while it is out. What is in flight is the claim on the gate, the
     /// leg registration, a job waiting in the queue slot, a release, and a pin —
     /// and [`WorkInFlight::is_quiet`] is all five standing down.
     ///

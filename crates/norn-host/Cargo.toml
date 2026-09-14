@@ -14,10 +14,12 @@ publish.workspace = true
 # refused registration, a stream that fails and a stream that reports its path
 # set lost reachable by a host attached over a real backend. And it gates the
 # readers of what a host's own jobs did — `JobEvidence`, `EvidenceReading`,
-# `ProductionEntryOps::account`, `Host::classifications` and
-# `Host::recovery_demands`. Those accounts are *written* on every build, because
-# that is how a job's cost stops being discarded; nothing in the shipped
-# artifact reads them back, so a build without this feature carries no reader.
+# `ProductionEntryOps::account`, `Host::classifications`,
+# `Host::recovery_demands` and `Host::work_in_flight`. The accounts are
+# *written* on every build, because that is how a job's cost stops being
+# discarded, and the in-flight holds are kept on every build because the
+# lifecycle runs on them; nothing in the shipped artifact reads either back,
+# so a build without this feature carries no reader.
 [features]
 induced-failure = ["norn-fs/induced-failure", "norn-store/induced-failure"]
 
