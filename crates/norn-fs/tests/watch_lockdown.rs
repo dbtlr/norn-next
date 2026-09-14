@@ -44,6 +44,13 @@ const ROLE: &str = "NORN_FS_WATCH_LOCKDOWN_ROOT";
 /// The variable a harness arms the watcher seam through.
 const ARMED_STAGES: &str = "NORN_FS_WATCH_ARMED_STAGES";
 
+/// The variable a harness budgets the arm to a number of watches through.
+const ARMED_WATCHES: &str = "NORN_FS_WATCH_ARMED_WATCHES";
+
+/// The variable naming how many watches the child establishes, one after
+/// another. A child given none establishes one.
+const WATCHES: &str = "NORN_FS_WATCH_LOCKDOWN_WATCHES";
+
 /// The variable naming the file every fired arm records itself in.
 const ARM_HITS: &str = "NORN_FS_ARM_HITS";
 
@@ -82,10 +89,18 @@ fn budget() -> Budget {
 /// this binary starts, so the call below is the ordinary public entry point and
 /// nothing here knows a boundary was armed. In an ordinary run of the suite it
 /// spawns itself with nothing armed, which is the control.
+///
+/// **The child establishes the watches its harness asked for, one after
+/// another**, and records which watch each outcome belongs to. One is what
+/// every case about a single boundary asks for; a case about the arm's budget
+/// asks for two, because a budget is a statement about the establishment after
+/// the one that spent it.
 #[test]
 fn the_child_role_watches_under_whatever_it_was_armed_at() {
     if let Some(root) = std::env::var_os(ROLE) {
-        watch_under_whatever_is_armed(Path::new(&root));
+        for watch in 0..declared_watches() {
+            watch_under_whatever_is_armed(Path::new(&root), watch);
+        }
         return;
     }
 
@@ -117,25 +132,26 @@ fn the_child_role_watches_under_whatever_it_was_armed_at() {
 /// withheld boundary from a displaced delivery — outcomes a parent cannot tell
 /// apart from the tree the child leaves behind, because a watch leaves nothing
 /// behind at all.
-fn watch_under_whatever_is_armed(root: &Path) {
+fn watch_under_whatever_is_armed(root: &Path, watch: u64) {
+    let record = |fields: &str| record(root, &format!("watch={watch} {fields}"));
     let (subscription, _own_writes) = match norn_fs::watch_polling(&vault(root), &schema(root)) {
         Ok(watched) => watched,
         Err(WatchError::Backend(_)) => {
-            record(root, "outcome=refused kind=backend");
+            record("outcome=refused kind=backend");
             return;
         }
         Err(other) => {
-            record(root, &format!("outcome=refused kind={other:?}"));
+            record(&format!("outcome=refused kind={other:?}"));
             return;
         }
     };
     match subscription.synchronize(SYNCHRONIZATION_DEADLINE) {
         Err(WatchError::SynchronizationExpired) => {
-            record(root, "outcome=expired");
+            record("outcome=expired");
             return;
         }
         Err(other) => {
-            record(root, &format!("outcome=terminal kind={other:?}"));
+            record(&format!("outcome=terminal kind={other:?}"));
             return;
         }
         Ok(()) => {}
@@ -155,7 +171,11 @@ fn watch_under_whatever_is_armed(root: &Path) {
     // A change of the child's own, so that a stream arm has a delivery to stand
     // in place of. What comes back says which: the rescan a lost path set is
     // reported as, or the path itself.
-    std::fs::write(vault(root).join("one.md"), b"one\n").expect("a change under the watch");
+    std::fs::write(
+        vault(root).join(format!("watch-{watch}.md")),
+        format!("watch {watch}\n"),
+    )
+    .expect("a change under the watch");
     let observed = wait_until(
         "the backend to report the child's own change",
         budget(),
@@ -172,7 +192,18 @@ fn watch_under_whatever_is_armed(root: &Path) {
         },
     )
     .unwrap_or_else(|failure| panic!("{failure}"));
-    record(root, &observed);
+    record(&observed);
+}
+
+/// How many watches the child establishes, as its harness declared it.
+fn declared_watches() -> u64 {
+    let Some(declared) = std::env::var_os(WATCHES) else {
+        return 1;
+    };
+    let declared = declared.to_string_lossy().trim().to_string();
+    declared
+        .parse()
+        .unwrap_or_else(|_| panic!("{WATCHES} is a number of watches, and reads `{declared}`"))
 }
 
 /// Append one record of what the child was given, beside the seam's own.
@@ -224,16 +255,90 @@ fn every_watcher_stage_is_armed_through_the_environment() {
         attested.assert_reached(arm, &[(SEAM, CHILD_SEAM), ("outcome", outcome)]);
         // One watch per process, one firing per arm: a second record under this
         // seam would mean the arm answered somewhere else too.
-        assert_eq!(
-            attested
-                .hits()
-                .iter()
-                .filter(|hit| hit.get(SEAM) == Some(WATCH_SEAM))
-                .count(),
-            1,
-            "{arm}: the arm fired more than once"
-        );
+        assert_eq!(firings(&attested), 1, "{arm}: the arm fired more than once");
     }
+}
+
+/// **A budget names how many of a process's watches the arm reaches, and the
+/// establishment after it is an ordinary one.**
+///
+/// The condition a stage carries is per establishment: a process armed at the
+/// stream stage meets it again on every watch it puts up, which is what a host
+/// that recovers by installing coverage again would meet for as long as it has
+/// deliveries to give. A budget is what a harness that wants the condition met
+/// a stated number of times spells, and what it is worth is read off the pair
+/// below — the same two watches, budgeted and not.
+#[test]
+fn an_arm_budgeted_to_one_watch_leaves_the_next_one_unarmed() {
+    let budgeted = Tree::new("budgeted-stream");
+    let run = budgeted.spawn(&[
+        (ARMED_STAGES, "stream=fails"),
+        (ARMED_WATCHES, "1"),
+        (WATCHES, "2"),
+    ]);
+
+    assert_eq!(run.status, RunStatus::Exited(0), "{}", run.stderr_text());
+    let attested = budgeted.attestation();
+    attested.assert_reached(
+        "an arm budgeted to one watch",
+        &[(SEAM, CHILD_SEAM), ("watch", "0"), ("outcome", "failed")],
+    );
+    attested.assert_reached(
+        "the watch after a budget was spent",
+        &[(SEAM, CHILD_SEAM), ("watch", "1"), ("outcome", "reported")],
+    );
+    assert_eq!(
+        firings(&attested),
+        1,
+        "the arm answered past the watches it was budgeted to"
+    );
+
+    // The same two watches with nothing budgeted, which is what says the budget
+    // above is the thing that made the second one ordinary.
+    let unbudgeted = Tree::new("unbudgeted-stream");
+    let run = unbudgeted.spawn(&[(ARMED_STAGES, "stream=fails"), (WATCHES, "2")]);
+
+    assert_eq!(run.status, RunStatus::Exited(0), "{}", run.stderr_text());
+    let attested = unbudgeted.attestation();
+    attested.assert_reached(
+        "an arm budgeted to nothing",
+        &[(SEAM, CHILD_SEAM), ("watch", "1"), ("outcome", "failed")],
+    );
+    assert_eq!(
+        firings(&attested),
+        2,
+        "an unbudgeted arm did not reach every watch of the process"
+    );
+}
+
+/// **A budget this seam cannot read ends the process rather than arming every
+/// watch.** A harness that spells one means to bound the condition, and a
+/// spelling that silently fell back to the unbudgeted meaning would leave a
+/// load meeting its condition over and over while the case read a number it
+/// never had.
+#[test]
+fn an_unreadable_budget_refuses_the_process_it_was_spelled_for() {
+    for spelling in ["0", "once", "1.0", ""] {
+        let tree = Tree::new("unreadable-budget");
+        let run = tree.spawn(&[(ARMED_STAGES, "stream=fails"), (ARMED_WATCHES, spelling)]);
+
+        assert_ne!(
+            run.status,
+            RunStatus::Exited(0),
+            "`{spelling}` was read as a budget"
+        );
+        tree.attestation()
+            .assert_never_reached(spelling, &[(SEAM, CHILD_SEAM)]);
+    }
+}
+
+/// How many times the watcher seam's own arms recorded themselves.
+fn firings(attested: &Attestation) -> usize {
+    attested
+        .hits()
+        .iter()
+        .filter(|hit| hit.get(SEAM) == Some(WATCH_SEAM))
+        .count()
 }
 
 /// **An arm this seam cannot read ends the process rather than arming
