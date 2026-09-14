@@ -1291,7 +1291,15 @@ impl Family {
                 at: ground.schema.at,
                 replacement: ground.schema.replacement,
             })),
-            _ => None,
+            // Listed rather than defaulted, so a family added to the roll has
+            // to say here whether it carries a third phase instead of being
+            // given `None` by a wildcard.
+            Family::OrdinaryEditing
+            | Family::AtomicReplacement
+            | Family::CaseFlip
+            | Family::CaseRenamedParent
+            | Family::Burst
+            | Family::ExternalTools => None,
         }
     }
 }

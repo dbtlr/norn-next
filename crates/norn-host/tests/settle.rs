@@ -99,8 +99,10 @@
 //! authored at, and by different multiples per leg — but the two bands are not
 //! the same subject read at two scales, because at ≥5k every leg is
 //! floor-bound in the sense above. So the comparison says only that a ceiling
-//! calibrated at `small` would sit far below the scale it gates, which is the
-//! reason the lane names the profile. `NORN_SETTLE_PROFILE` names the profile, the lane
+//! calibrated at `small` would sit far below the scale it gates — and because
+//! a bar admits a reading only at or under it, such a ceiling would fail every
+//! scheduled run rather than pass it. That is the reason the lane names the
+//! profile: the scale the number was taken at has to be the scale it judges. `NORN_SETTLE_PROFILE` names the profile, the lane
 //! sets it explicitly so the scale a recorded reading was taken at is workflow
 //! text, and a local run defaults to `small` because a developer is not
 //! calibrating.
@@ -355,6 +357,18 @@ struct Candidate {
     after: Duration,
 }
 
+/// A candidate taken at `began`, bounded below by the poll before it.
+///
+/// Where there was no poll before it this is the first one, so nothing has
+/// observed the store unsettled and the lower bound is the final change
+/// itself: the whole elapsed window is the resolution.
+fn candidate_at(began: Duration, before_this_one: Option<Duration>) -> Candidate {
+    Candidate {
+        at: began,
+        after: before_this_one.unwrap_or(Duration::ZERO),
+    }
+}
+
 /// One leg's reading, and the projection the clock stopped on.
 struct Reading {
     settle: Settle,
@@ -392,6 +406,11 @@ fn label(family: Family) -> &'static str {
 /// **One family's measurement.** Settle the opening phase, then time every leg
 /// the roll carries from its own final act, and take the equivalence bar over
 /// what the last clock stopped on.
+///
+/// **Every leg's clock is held to a state the store stayed in**, not just the
+/// last one: a leg followed by another is checked before that one's acts land,
+/// and the last leg is checked against the projection the equivalence bar is
+/// taken over.
 fn measure(family: Family, profile: &str) -> Vec<(String, Settle)> {
     let sandbox =
         Sandbox::new(Path::new(env!("CARGO_TARGET_TMPDIR")), label(family)).expect("a sandbox");
@@ -429,6 +448,12 @@ fn measure(family: Family, profile: &str) -> Vec<(String, Settle)> {
         let mut readings = vec![(family.name().to_string(), changing.0.settle)];
         let mut stopped_on = changing.0.stopped_on;
         if let Some(script) = &third {
+            // Held here, before the leg that follows destroys the evidence.
+            // The reload re-pins the vault's declaration and discards every
+            // finding keyed by the old fingerprint, so after it nothing can
+            // ask whether this leg's clock stopped on a state the store stayed
+            // in — and a clock that stopped early biases the reading down.
+            assert_the_store_has_not_moved(family.name(), &mut store, &stopped_on);
             let replaced = phase(
                 &vault,
                 &host,
@@ -452,6 +477,22 @@ fn measure(family: Family, profile: &str) -> Vec<(String, Settle)> {
 
     assert_it_converged_on_a_build_from_zero(family, &sandbox, &vault, &stopped_on);
     readings
+}
+
+/// **The clock stopped on a state the store then stayed in.**
+///
+/// A leg whose projection the store moved off is a clock that stopped early,
+/// and an early stop biases the reading down — which is the direction a
+/// calibration cannot afford. The family's last leg is held to this by
+/// [`assert_it_converged_on_a_build_from_zero`], against the very projection
+/// the equivalence bar reads; a leg with another behind it is held to it here,
+/// while the state it stopped on still stands.
+fn assert_the_store_has_not_moved(leg: &str, store: &mut Store, stopped_on: &StoreProjection) {
+    let standing = StoreProjection::read(store).expect("projecting the settled store");
+    stopped_on.compare(&standing).assert_equal(&format!(
+        "{leg}: the store moved after the clock stopped, so the reading is not a reading of a \
+         state the settle reached"
+    ));
 }
 
 /// **The phase asked the host for something.** A census the phase's own opening
@@ -534,24 +575,28 @@ fn phase(
                     confirmed = Some((candidate, seen));
                     Observed::Met(candidate.at)
                 }
-                held => {
-                    let moving = held.map(|(_, before)| before.compare(&seen).divergence);
-                    confirmed = Some((
-                        Candidate {
-                            at: began,
-                            // The final change itself where this is the first
-                            // poll: nothing has observed the store unsettled,
-                            // so the whole elapsed window is the resolution.
-                            after: before_this_one.unwrap_or(Duration::ZERO),
-                        },
-                        seen,
-                    ));
-                    Observed::pending(match moving.flatten() {
+                // A candidate that the read just disagreed with: the store
+                // moved between the two reads, so this read becomes the new
+                // candidate and the divergence is what the wait reports.
+                Some((_, before)) => {
+                    let divergence = before.compare(&seen).divergence;
+                    confirmed = Some((candidate_at(began, before_this_one), seen));
+                    Observed::pending(match divergence {
                         Some(divergence) => {
                             format!("the derived store is still moving: {divergence}")
                         }
                         None => "the derived store's whole projection to be read twice".to_string(),
                     })
+                }
+                // No candidate: either this is the first poll whose census
+                // agreed, or the one before it saw the census disagree and
+                // dropped what it held. Either way there is nothing to compare
+                // this read against yet.
+                None => {
+                    confirmed = Some((candidate_at(began, before_this_one), seen));
+                    Observed::pending(
+                        "the derived store's whole projection to be read twice".to_string(),
+                    )
                 }
             }
         },

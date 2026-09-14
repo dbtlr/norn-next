@@ -216,6 +216,23 @@ impl Census {
     }
 }
 
+/// The vault's declaration as it stands, or `None` where the tree carries
+/// none.
+///
+/// Absence is a state a churned tree is legitimately in — the validity family
+/// replaces the declaration, and a tree before one is written has no file — so
+/// `NotFound` is an answer. Every other failure is the harness unable to read
+/// what it is auditing, and it stops the run naming the path, the same way the
+/// walk below treats its own reads.
+fn read_schema(root: &Path) -> Option<Vec<u8>> {
+    let path = root.join(".norn/schema.yaml");
+    match std::fs::read(&path) {
+        Ok(declaration) => Some(declaration),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => panic!("reading {}: {e}", path.display()),
+    }
+}
+
 /// Read the tree at `root` as places, keyed by identity on a volume with this
 /// case behavior.
 pub fn census(root: &Path, folding: Folding) -> Census {
@@ -224,7 +241,7 @@ pub fn census(root: &Path, folding: Folding) -> Census {
         rows: BTreeMap::new(),
         without_rows: BTreeSet::new(),
         spellings: BTreeMap::new(),
-        schema: std::fs::read(root.join(".norn/schema.yaml")).ok(),
+        schema: read_schema(root),
     };
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
