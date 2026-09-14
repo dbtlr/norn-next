@@ -1138,15 +1138,14 @@
       "name": "vault-root-containment",
       "kind": "defect-class",
       "venue": 2,
-      "property": "A lexical guard is not containment: a parent traversal, an absolute path and a symlinked directory inside the vault each escape one, and each is refused — the descent to a target walks the vault root component by component, and the write kernel closes its check-to-write window with a pinned handle.",
+      "property": "Containment is per component: the descent to a target follows no component through a symlink and refuses a name that leaves the anchor, so a symlinked directory inside the vault, a parent traversal and an absolute path each refuse before anything is opened, and a lexical check ahead of the descent is not what refuses. A publication verifies its destination through the handle it holds rather than through a second open by name, so a foreign republication that keeps the bytes is refused instead of overwritten. The rename after that verification is not exclusive, and nothing here claims it is.",
       "sources": ["NRN-145", "NRN-160"],
       "binding": {
         "status": "bound",
         "tests": [
-          "crates/norn-fs/src/path.rs::refuses_empty_absolute_and_parent_paths",
-          "crates/norn-fs/tests/kernel/adjacent.rs::a_removal_of_a_symlink_is_refused",
-          "crates/norn-fs/tests/kernel/adjacent.rs::a_move_onto_a_symlink_is_refused",
-          "crates/norn-fs/tests/kernel/preconditions.rs::a_symlinked_destination_is_refused_whether_or_not_it_resolves"
+          "crates/norn-fs/tests/observations.rs::no_component_below_the_anchor_is_followed_through_a_link",
+          "crates/norn-fs/tests/observations.rs::a_name_that_leaves_the_anchor_is_refused_rather_than_resolved",
+          "crates/norn-fs/src/write.rs::a_foreign_replacement_that_keeps_the_bytes_is_still_refused"
         ]
       }
     },

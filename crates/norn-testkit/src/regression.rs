@@ -1470,13 +1470,15 @@ fn declares_module(source: &str, name: &str) -> bool {
 ///
 /// A reason names its subjects in prose, and a path-shaped word is the part of
 /// that prose the tree can answer. This reads the words as the audit reads a
-/// ground's subject — trimmed of the punctuation prose puts around a path — so
-/// a reason that argues from a file the workspace holds is recognizable
-/// whatever venue the case sits at.
+/// ground's subject — trimmed of the punctuation prose puts around a path,
+/// including the full stop a path at the end of a sentence carries — so a
+/// reason that argues from a file the workspace holds is recognizable whatever
+/// venue the case sits at.
 fn cited_path_the_tree_holds(workspace_root: &Path, reason: &str) -> Option<String> {
     reason
         .split_whitespace()
         .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.'))
+        .map(|word| word.trim_end_matches('.'))
         .filter(|word| word.contains('/') && ill_spelled(word).is_none())
         .find(|word| {
             resolve(
@@ -2863,6 +2865,21 @@ fn a_carrier() {}
                 case.binding.reason = Some(
                     "crates/demo/tests/suite.rs closes its own window, and the layer above it has \
                      no home yet."
+                        .to_string(),
+                );
+                case.binding.grounds.clear();
+            },
+            "which the workspace holds, while stating no grounds",
+        );
+        // A path ending a sentence is the same citation: the full stop prose
+        // puts after it is not part of the name.
+        refused(
+            |registry| {
+                let case = find(registry, "a-dormant-layer-zero-case");
+                case.venue = above;
+                case.binding.reason = Some(
+                    "the recognition half is held by crates/demo/tests/suite.rs. What has no \
+                     subject is the verb."
                         .to_string(),
                 );
                 case.binding.grounds.clear();
