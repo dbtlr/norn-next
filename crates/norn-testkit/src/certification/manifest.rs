@@ -313,9 +313,9 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     ManifestFile {
         path: "crates/norn-host/tests/host_soak.rs",
         why: "the scheduled lane's host workload and the comparisons that apply the soak bars: \
-              the peak ceiling, the slope ratio and the descriptor allowance are enforced here. \
-              A comparison deleted with the digest standing would count runs that evaluated \
-              less",
+              the peak ceiling, the slope ratio, the descriptor allowance and the deliberate \
+              recovery's dose are enforced here, along with the load's no-starvation term. A \
+              comparison deleted with the digest standing would count runs that evaluated less",
     },
     ManifestFile {
         path: "crates/norn-host/tests/settle.rs",

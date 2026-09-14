@@ -305,6 +305,183 @@ fn lane_steps(workflow: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The features a target's own source puts the whole file behind.
+///
+/// Read off the inner attributes rather than off a table: a suite that is
+/// `#![cfg(feature = "...")]` compiles to zero tests without the feature, and
+/// the file itself is the only place that fact is stated.
+fn features_a_target_is_behind(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line.strip_prefix("#![cfg(feature = \"")?;
+            let (feature, _) = rest.split_once('"')?;
+            Some(feature.to_string())
+        })
+        .collect()
+}
+
+/// The step body each lane invocation sits in, as `(package, target, body)`.
+///
+/// **The body is the containing YAML step and nothing else.** It opens at the
+/// step's own `- ` line, so a step declaring its `env:` above its `run:` is read
+/// whole, and it closes at the first structural line that dedents past the
+/// step's fields — the next step's `- `, the job's next key, or the next job
+/// entirely. A body that ran to the next `- ` at any depth would swallow the
+/// job-level `env:` of whatever job came after and read another job's features
+/// as this step's.
+///
+/// A comment never ends a body: workflows here explain the next step above it,
+/// at the depth of the thing being explained or shallower.
+fn lane_step_bodies(workflow: &str) -> Vec<(String, String, String)> {
+    let lines: Vec<&str> = workflow.lines().collect();
+    let mut steps = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let mut tokens = trimmed.split_whitespace();
+        if tokens
+            .find(|token| *token == LANE_SCRIPT || token.ends_with(&format!("/{LANE_SCRIPT}")))
+            .is_none()
+        {
+            continue;
+        }
+        let (Some(package), Some(target)) = (tokens.next(), tokens.next()) else {
+            continue;
+        };
+        let (opened, fields) = step_opening(&lines, at);
+        let end = lines[at + 1..]
+            .iter()
+            .position(|later| structural(later) && indent_of(later) < fields)
+            .map_or(lines.len(), |offset| at + 1 + offset);
+        steps.push((
+            package.to_string(),
+            target.to_string(),
+            lines[opened..end].join("\n"),
+        ));
+    }
+    steps
+}
+
+/// Where the step holding the line at `at` opens, and the column its fields
+/// stand in.
+///
+/// An invocation written as the step's first item carries the `- ` itself, so
+/// its fields stand two columns in from it. Otherwise the step opened at the
+/// nearest `- ` above that is shallower than the invocation, and the fields
+/// stand where the invocation does. An invocation under no `- ` at all — which
+/// is a fragment rather than a workflow — is its own opening.
+fn step_opening(lines: &[&str], at: usize) -> (usize, usize) {
+    let indent = indent_of(lines[at]);
+    if lines[at].trim_start().starts_with("- ") {
+        return (at, indent + 2);
+    }
+    let opened = lines[..at]
+        .iter()
+        .rposition(|earlier| {
+            structural(earlier)
+                && earlier.trim_start().starts_with("- ")
+                && indent_of(earlier) < indent
+        })
+        .unwrap_or(at);
+    (opened, indent)
+}
+
+/// Whether a line carries YAML structure: not blank, and not a comment.
+fn structural(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.is_empty() && !trimmed.starts_with('#')
+}
+
+/// How many columns in a line's content starts.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The features a lane step declares through `LANE_FEATURES`.
+fn features_a_step_names(body: &str) -> BTreeSet<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix(&format!("{LANE_FEATURES}:")))
+        .flat_map(|value| {
+            value
+                .trim()
+                .trim_matches('"')
+                .split([',', ' '])
+                .filter(|named| !named.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The environment key a lane step names its cargo features through.
+const LANE_FEATURES: &str = "LANE_FEATURES";
+
+/// **A step running a suite that sits behind a cargo feature names that
+/// feature.** A target compiled without it is zero tests, and a lane running
+/// zero tests measures nothing it claims to.
+///
+/// The pairing is between two files that never mention each other: the suite
+/// states the feature it is behind in its own `#![cfg(...)]`, and the workflow
+/// states the features it builds with in the step's `LANE_FEATURES`. Nothing
+/// else reads the pair, so a feature dropped from a step is silent — the suite
+/// compiles away, `lane-suite.sh`'s zero-pass guard catches it at whatever hour
+/// that lane runs, and per-PR nothing notices. This is what notices.
+#[allow(clippy::disallowed_methods)] // Harness scaffolding: reads this repository's own workflow files and test sources.
+pub fn assert_lane_steps_name_the_features_their_targets_need(
+    manifest_dir: &Path,
+    package: &str,
+    lanes: &[(&str, &str)],
+) {
+    let directory = workflows_directory(manifest_dir);
+    let workflows: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|e| panic!("reading {} for workflows: {e}", directory.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("reading {}: {e}", directory.display()))
+                .path()
+        })
+        .filter(|path| path.extension().is_some_and(|e| e == "yml" || e == "yaml"))
+        .map(|path| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+        })
+        .collect();
+
+    for (stem, _) in lanes {
+        let source_path = manifest_dir.join("tests").join(format!("{stem}.rs"));
+        let source = std::fs::read_to_string(&source_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", source_path.display()));
+        let needed = features_a_target_is_behind(&source);
+        if needed.is_empty() {
+            continue;
+        }
+        for workflow in &workflows {
+            for (named, target, body) in lane_step_bodies(workflow) {
+                if named != package || target != *stem {
+                    continue;
+                }
+                let declared = features_a_step_names(&body);
+                let missing: Vec<&String> = needed
+                    .iter()
+                    .filter(|one| !declared.contains(*one))
+                    .collect();
+                assert!(
+                    missing.is_empty(),
+                    "a lane step runs `{package}`'s `{target}` and its `{LANE_FEATURES}` does not \
+                     name {missing:?}, which that suite is behind. Without the feature the target \
+                     compiles to zero tests and the step reports having measured nothing"
+                );
+            }
+        }
+    }
+}
+
 /// The workflows directory above `manifest_dir`.
 ///
 /// The walk is upward from the package's own manifest directory rather than
@@ -409,8 +586,9 @@ pub fn assert_lane_steps_agree(manifest_dir: &Path, package: &str, lanes: &[(&st
 #[cfg(test)]
 mod tests {
     use super::{
-        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, ignore_attributes, lane_steps,
-        packages_outside_the_rows, reason, unrecognized_ignore_attribute_lines,
+        LANE_PREFIXES_BY_PACKAGE, check_ignore_reason, features_a_step_names, ignore_attributes,
+        lane_step_bodies, lane_steps, packages_outside_the_rows, reason,
+        unrecognized_ignore_attribute_lines,
     };
     use crate::regression::LANE_IGNORE_PREFIXES;
     use std::collections::BTreeSet;
@@ -564,5 +742,100 @@ mod tests {
     fn a_line_that_names_no_script_is_not_a_step() {
         let workflow = "        run: cargo test --locked --workspace\n";
         assert!(lane_steps(workflow).is_empty());
+    }
+
+    /// A workflow with the lane step's `env:` **above** its `run:`, and a
+    /// second job below carrying a job-level `env:` of its own.
+    fn two_jobs() -> String {
+        [
+            "jobs:",
+            "  measure:",
+            "    steps:",
+            "      - name: Warm up",
+            "        run: cargo build --locked",
+            "      # The lane that reads the load.",
+            "      - name: Host mixed load",
+            "        env:",
+            "          LANE_FEATURES: induced-failure",
+            "        run: .github/scripts/lane-suite.sh norn-host host_soak",
+            "      - name: After",
+            "        run: echo done",
+            "  publish:",
+            "    env:",
+            "      LANE_FEATURES: not-this-step",
+            "    steps:",
+            "      - name: Publish",
+            "        run: echo published",
+            "",
+        ]
+        .join("\n")
+    }
+
+    /// **A step's environment is the step's wherever it stands in it.** YAML
+    /// puts no order on a step's keys, so an `env:` written above the `run:` is
+    /// the same declaration as one written below it.
+    #[test]
+    fn a_step_declaring_its_features_above_its_invocation_is_read_whole() {
+        let bodies = lane_step_bodies(&two_jobs());
+        let [(package, target, body)] = bodies.as_slice() else {
+            panic!("one lane step stands in this workflow: {bodies:?}");
+        };
+        assert_eq!(
+            (package.as_str(), target.as_str()),
+            ("norn-host", "host_soak")
+        );
+        assert!(
+            body.starts_with("      - name: Host mixed load"),
+            "the body opens at the step's own `- ` line: {body:?}"
+        );
+        assert_eq!(
+            features_a_step_names(body),
+            BTreeSet::from(["induced-failure".to_string()])
+        );
+    }
+
+    /// **A body stops at its own step.** A later job's job-level `env:` is
+    /// another job's declaration, and a body that ran to it would read that
+    /// job's features as this step's.
+    #[test]
+    fn a_body_reads_neither_the_next_step_nor_the_next_jobs_environment() {
+        let bodies = lane_step_bodies(&two_jobs());
+        let [(_, _, body)] = bodies.as_slice() else {
+            panic!("one lane step stands in this workflow: {bodies:?}");
+        };
+        assert!(
+            !body.contains("After") && !body.contains("publish"),
+            "the body runs past its own step: {body:?}"
+        );
+        assert!(
+            !features_a_step_names(body).contains("not-this-step"),
+            "the body read another job's environment: {body:?}"
+        );
+    }
+
+    /// An invocation carrying the `- ` itself is its own opening, and its
+    /// fields stand two columns in from it.
+    #[test]
+    fn a_step_written_as_a_bare_run_item_is_its_own_body() {
+        let workflow = [
+            "      - run: .github/scripts/lane-suite.sh norn-text frontmatter_cost",
+            "        env:",
+            "          LANE_FEATURES: induced-failure",
+            "      - run: echo next",
+            "",
+        ]
+        .join("\n");
+        let bodies = lane_step_bodies(&workflow);
+        let [(_, _, body)] = bodies.as_slice() else {
+            panic!("one lane step stands in this workflow: {bodies:?}");
+        };
+        assert!(
+            !body.contains("echo next"),
+            "the body runs past its own step: {body:?}"
+        );
+        assert_eq!(
+            features_a_step_names(body),
+            BTreeSet::from(["induced-failure".to_string()])
+        );
     }
 }

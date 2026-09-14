@@ -310,10 +310,18 @@ jobs:
       # whatever this one did, where a load placed after them would be skipped
       # outright by one flaking case and cost the night its slope, its
       # descriptor delta and its peak.
+      #
+      # **The feature is what makes the load's recovery deliberate.** The child
+      # is armed at `norn-fs`'s watcher fault seam so that the load loses its
+      # attachment once and gets it back through a demand, and that seam has a
+      # reader only behind `induced-failure` — without it this suite compiles to
+      # zero tests and the step reports having measured nothing. `norn-host
+      # --test lanes` holds this step to naming it.
       - name: Host mixed load
         run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
         env:
           NORN_SOAK_DURATION_SECS: "3600"
+          LANE_FEATURES: induced-failure
       # The clock on rung 1: for every leg of every churn family, the wall
       # clock from the workload's final change to the derived store holding
       # what the tree implies. It is one reading. Whether the attachment was

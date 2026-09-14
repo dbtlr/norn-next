@@ -277,6 +277,7 @@ fn the_ledgers_armed_claims_match_the_authored_baselines() {
                 always_authored(baselines::ATTACH_PAIR_PEAK_RSS_PER_MILLE)
             }
             "SOAK_FD_GROWTH_ALLOWANCE" => always_authored(baselines::SOAK_FD_GROWTH_ALLOWANCE),
+            "SOAK_RECOVERY_DOSE" => always_authored(baselines::SOAK_RECOVERY_DOSE),
             "SOAK_RSS_SLOPE_PER_MILLE" => always_authored(baselines::SOAK_RSS_SLOPE_PER_MILLE),
             "FD_BUDGET" => always_authored(baselines::FD_BUDGET),
             other => panic!(

@@ -55,3 +55,18 @@ fn the_lane_steps_ci_runs_are_the_stems_this_table_names() {
         LANE_BY_FILE_STEM,
     );
 }
+
+/// **A lane step that runs a feature-gated suite names the feature.**
+///
+/// `host_soak.rs` is a whole file behind `induced-failure` — the load arms
+/// `norn-fs`'s watcher seam to trip the recovery it is required to measure —
+/// so a step that drops the feature runs zero tests and the night's bars
+/// evaluate nothing. The pairing has no other reader.
+#[test]
+fn the_lane_steps_name_the_features_their_suites_are_behind() {
+    norn_testkit::lanes::assert_lane_steps_name_the_features_their_targets_need(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        env!("CARGO_PKG_NAME"),
+        LANE_BY_FILE_STEM,
+    );
+}

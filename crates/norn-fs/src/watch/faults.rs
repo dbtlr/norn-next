@@ -63,14 +63,26 @@
 //!
 //! One stage of widening is taken and no more: under the `induced-failure`
 //! feature, watch establishment arms itself from this process's environment
-//! rather than passing an empty arm. Two variables carry it, both read once per
-//! process:
+//! rather than passing an empty arm. Three variables carry it, each read once
+//! per process:
 //!
 //! - `NORN_FS_WATCH_ARMED_STAGES` — the arm, as comma-separated `stage=answer`
 //!   pairs, spelled `install`, `stream`, `barrier` and `refuses`, `fails`,
 //!   `rescans`, `expires`. A pair this module cannot read — an unknown name, an
 //!   answer the stage does not carry, or one stage armed twice — is a mistake in
 //!   the harness rather than a stage nothing is armed at, so it panics.
+//! - `NORN_FS_WATCH_ARMED_WATCHES` — how many of this process's watch
+//!   establishments carry the arm, as a number. Absent, every one of them does.
+//!   Named, the first that many carry it and every one after them carries an
+//!   empty arm. The count is over the process rather than over a vault: a
+//!   process attaching two vaults spends the budget on whichever establishes
+//!   first, and it is spent where the arm is composed, so an establishment that
+//!   fails before it reaches any boundary has still carried one. A value this
+//!   module cannot read — a spelling that is not a number, or a zero, which arms
+//!   the stages named beside it at no watch at all — is a mistake in the
+//!   harness, so it panics, and so does a budget spelled where
+//!   `NORN_FS_WATCH_ARMED_STAGES` arms nothing, because it bounds a condition
+//!   nothing meets.
 //! - `NORN_FS_ARM_HITS` — the write seam's record file, and the same one here. A
 //!   fired arm appends `seam=norn-fs/watch stage=<name> answer=<name>` to it
 //!   before it answers, so a harness reads which boundary the watcher actually
@@ -88,15 +100,21 @@
 //! assertion, and it can be the very delivery a stream arm answers. A harness
 //! puts it in a directory of its own beside the tree.
 //!
-//! **The arm is read once per process and applies to every watch that process
-//! establishes.** Each establishment reads the same pairs and gets its own
-//! one-shot: two watches in one armed process refuse twice, withhold two
+//! **The arm is read once per process and reaches as many of that process's
+//! watches as the budget names.** Each establishment the arm reaches gets its
+//! own one-shot: two watches in one armed process refuse twice, withhold two
 //! boundaries, or displace one delivery each — and write one record per firing.
 //! A harness asserting exact record content therefore establishes exactly one
-//! watch per process.
+//! watch per process, or budgets the arm to the establishments it means.
+//!
+//! **A budget is what a load that has to meet a condition once needs.** The
+//! condition is per establishment, so a host whose recovery installs coverage
+//! again meets an unbudgeted arm again on that coverage, for as long as the load
+//! keeps giving it deliveries to stand in place of. A budget of one is one
+//! condition met and the rest of the run served.
 //!
 //! Nothing outside this crate arms anything without the feature, and a shipped
-//! build has no reader for either variable.
+//! build has no reader for any of the three.
 //!
 //! # What consumes it
 //!
@@ -112,6 +130,14 @@
 //! arm is a condition rather than a case. That crate's own `induced-failure`
 //! feature forwards to this one, so a lane arming a host has this reader
 //! compiled in.
+//!
+//! **`norn-host`'s scheduled soak load is the one consumer that budgets the
+//! arm.** Its child attaches once under a long mixed load, armed at the stream
+//! stage and budgeted to that one establishment, so the entry loses coverage a
+//! single time and the demand the load holds re-installs it. Every watch the
+//! recovery puts up after that is an ordinary one, which is what keeps the rest
+//! of the hour a load being served rather than a process re-attaching. That
+//! budget is the whole reason the third variable exists.
 //!
 //! **The one watcher trust transition that arms nothing is a root that stops
 //! being covered.** A directory removal is a condition a test can arrange, so
@@ -138,6 +164,11 @@ use super::{WatchError, backend};
 /// The environment variable naming the watcher stages this process is armed at.
 #[cfg(feature = "induced-failure")]
 pub(crate) const ARMED_STAGES: &str = "NORN_FS_WATCH_ARMED_STAGES";
+
+/// The environment variable naming how many of this process's watch
+/// establishments the arm reaches.
+#[cfg(feature = "induced-failure")]
+pub(crate) const ARMED_WATCHES: &str = "NORN_FS_WATCH_ARMED_WATCHES";
 
 /// The seam a record written here names itself under, which is what tells it
 /// apart from a write protocol record in the same file.
@@ -446,13 +477,14 @@ impl WatchFaults {
     ///
     /// Without the `induced-failure` feature this is an empty arm and each
     /// boundary asks one comparison against an empty list. With it, the answer
-    /// is whatever this process was started armed with — read once, and empty in
-    /// every process that armed nothing.
+    /// is whatever this process was started armed with — read once, empty in
+    /// every process that armed nothing, and empty again in every establishment
+    /// past the budget where one is named.
     pub(crate) fn entry() -> WatchFaults {
         #[cfg(feature = "induced-failure")]
         {
             WatchFaults {
-                armed: armed::stages(),
+                armed: armed::stages_this_watch_takes(),
                 hits: crate::faults::armed_hits().cloned(),
                 barrier_recorded: Arc::default(),
                 #[cfg(test)]
@@ -696,8 +728,82 @@ fn note_stood_past(stood_past: Option<&Path>, event: &Event) {
 #[cfg(feature = "induced-failure")]
 mod armed {
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{ARMED_STAGES, Answer, Stage, refuse_an_unreadable_arm};
+    use super::{ARMED_STAGES, ARMED_WATCHES, Answer, Stage, refuse_an_unreadable_arm};
+
+    /// The stages *this* establishment carries.
+    ///
+    /// The process's stages, where the budget still holds an establishment, and
+    /// an empty arm where it does not. A process that named no budget has every
+    /// establishment carry the stages, which is what an arm has always meant.
+    ///
+    /// A budget spelled where nothing is armed is refused here rather than
+    /// ignored: it bounds a condition that is never met, so the harness that
+    /// spelled it is reading a number it never had.
+    pub(super) fn stages_this_watch_takes() -> &'static [(Stage, Answer)] {
+        let stages = stages();
+        if stages.is_empty() {
+            refuse_a_budget_that_bounds_nothing();
+            return &[];
+        }
+        if takes_an_establishment() {
+            stages
+        } else {
+            &[]
+        }
+    }
+
+    /// Refuse a process that budgeted an arm and armed no stage.
+    ///
+    /// The budget is not *spent* by an unarmed process — a count consumed by
+    /// watches carrying nothing would leave the first armed establishment,
+    /// were there ever one, short — but it is read, because a budget standing
+    /// beside a misspelled or forgotten [`ARMED_STAGES`] is the harness mistake
+    /// this seam refuses loudly rather than the unbudgeted meaning.
+    fn refuse_a_budget_that_bounds_nothing() {
+        static REFUSED: OnceLock<()> = OnceLock::new();
+        REFUSED.get_or_init(|| {
+            assert!(
+                std::env::var_os(ARMED_WATCHES).is_none(),
+                "{ARMED_WATCHES} budgets an arm and {ARMED_STAGES} arms no stage, so the \
+                 budget bounds a condition nothing meets"
+            );
+        });
+    }
+
+    /// Whether the budget still holds an establishment, taking one where it
+    /// does. A process that named no budget is never short of one.
+    fn takes_an_establishment() -> bool {
+        static REMAINING: OnceLock<Option<AtomicU64>> = OnceLock::new();
+        let Some(remaining) = REMAINING.get_or_init(budget) else {
+            return true;
+        };
+        remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                (left > 0).then(|| left - 1)
+            })
+            .is_ok()
+    }
+
+    /// How many establishments this process budgeted its arm to, or nothing
+    /// where it budgeted none.
+    fn budget() -> Option<AtomicU64> {
+        let spelling = std::env::var_os(ARMED_WATCHES)?;
+        let spelling = spelling
+            .to_str()
+            .unwrap_or_else(|| panic!("{ARMED_WATCHES} is not UTF-8"))
+            .trim()
+            .to_string();
+        let watches: u64 = spelling.parse().unwrap_or_else(|_| {
+            panic!("{ARMED_WATCHES} is a number of watch establishments, and reads `{spelling}`")
+        });
+        assert!(
+            watches > 0,
+            "{ARMED_WATCHES} is zero, so whatever {ARMED_STAGES} names is armed at no watch at all"
+        );
+        Some(AtomicU64::new(watches))
+    }
 
     /// The stages this process is armed at, in the order they were named.
     pub(super) fn stages() -> &'static [(Stage, Answer)] {

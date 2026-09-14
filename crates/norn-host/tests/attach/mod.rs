@@ -70,8 +70,10 @@ pub const READY_LIMIT: Duration = Duration::from_secs(240);
 ///
 /// The cost of that look is a fact about the host, not about any one suite, so
 /// it is stated once for the whole crate: a bound that turns out too tight
-/// under load moves in one place and every suite relaxes with it.
-const STATE_PROBE: Duration = Duration::from_millis(250);
+/// under load moves in one place and every suite relaxes with it. A suite that
+/// takes a single look outside a wait reads it directly and bounds that look
+/// with it, so the same bound separates the same two things either way.
+pub const STATE_PROBE: Duration = Duration::from_millis(250);
 
 /// The budget a wait on an entry's published state obeys, under the caller's
 /// own runaway bound.

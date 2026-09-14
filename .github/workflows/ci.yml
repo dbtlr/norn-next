@@ -92,7 +92,7 @@ jobs:
       - name: Lint the shipped libraries
         run: cargo clippy --locked -p norn-db -p norn-fs -p norn-store --lib -- -D warnings
       # The workspace lint above builds norn-host's targets with its
-      # `induced-failure` feature off, and that crate's lockdown and
+      # `induced-failure` feature off, and that crate's lockdown, soak-load and
       # crash-convergence suites are whole files behind the feature: with it off
       # they compile to nothing, so no lint ever reads them. This step is the
       # lane that does — the same reason the test job below names the feature
@@ -114,9 +114,10 @@ jobs:
       # on through a self dev-dependency, and norn-store forwards it to norn-db,
       # so those crates' lockdown and environment suites run above already.
       # norn-host's is a feature a caller asks for, and
-      # nothing above asks: its crash-convergence proof (kill_recovery.rs) and
-      # its lockdown suite are whole files behind it and compile to zero tests
-      # there. This step is scoped to that crate for that reason.
+      # nothing above asks: its crash-convergence proof (kill_recovery.rs), its
+      # lockdown suite and its soak load (host_soak.rs, whose case the scheduled
+      # lane runs) are whole files behind it and compile to zero tests there.
+      # This step is scoped to that crate for that reason.
       - name: Induced-failure recovery
         run: .github/scripts/flake-tripwire.sh cargo test --locked -p norn-host --features induced-failure
 

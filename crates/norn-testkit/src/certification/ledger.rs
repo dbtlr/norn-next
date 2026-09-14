@@ -349,6 +349,14 @@ pub enum Classification {
 /// decide a case's answer rather than only its speed are named separately, since
 /// a campaign covering only one of each value has certified only one of the
 /// answers the inventory's platform-deciding lanes require.
+///
+/// **The machine and not the build.** Which cargo profile and which features a
+/// lane compiled is not a field here: the suite manifest already digests the
+/// workflow text that names them, so a lane that changed either moves the
+/// digest and restarts the count. What a reader chasing a band back to its
+/// subject wants is the feature set the band was authored on, and that is
+/// stated beside the band — `crates/norn-host/tests/baselines/mod.rs` names the
+/// build its attach and soak bands are each read on.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Platform {
@@ -462,6 +470,11 @@ pub const NAMED_EXIT_BARS: &[ExitBar] = &[
     ExitBar {
         name: "soak-host-fd-growth-allowance",
         authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_FD_GROWTH_ALLOWANCE",
+        armed: true,
+    },
+    ExitBar {
+        name: "soak-host-recovery-dose",
+        authored_at: "crates/norn-host/tests/baselines/mod.rs::SOAK_RECOVERY_DOSE",
         armed: true,
     },
     ExitBar {
