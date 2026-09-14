@@ -159,9 +159,11 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
     for required in [
         // The lanes, the toolchain and the resolved graph.
         ".github/workflows/ci.yml",
+        ".github/workflows/certify.yml",
         ".github/workflows/soak.yml",
         ".github/scripts/lane-suite.sh",
         ".github/scripts/certification-suite.sh",
+        ".github/scripts/soak-candidate.sh",
         "Cargo.lock",
         "rust-toolchain.toml",
         // The rules: what the layer requires, how that is reconciled, and what
@@ -243,11 +245,14 @@ fn the_manifest_covers_every_claimed_certification_suite() {
 #[test]
 fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
     let root = workspace_root();
+    let digest = manifest::digest(&root).expect("digesting the suite manifest");
     let sound = Record {
         candidate_sha: "0".repeat(40),
-        suite_manifest_digest: manifest::digest(&root).expect("digesting the suite manifest"),
+        suite_manifest_digest: digest.clone(),
+        dispatcher_digest: digest,
         case_inventory_digest: inventory::contract_digest(),
         scheduled: true,
+        dispatching_actor: ledger::DISPATCHER_IDENTITY.to_string(),
         // The two platform-deciding facts are populated because a qualifying
         // record is required to carry them: the inventory's volume-folding and
         // backend-deciding lanes are each covered by a run of each answer, so a
@@ -459,7 +464,382 @@ fn every_lane_that_writes_a_record_runs_the_cases_and_labels_its_backend() {
         assert_backend_label_matches_the_runner(lane, body);
         assert_the_outcomes_and_the_record_are_where_the_lane_looks(lane, body);
         assert_the_preflight_reading_precedes_the_build_and_reaches_the_record(lane, body);
+        assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane, body);
     }
+}
+
+/// **A lane certifies the ref it was dispatched at, and carries down what only
+/// the dispatcher knows.**
+///
+/// The dispatcher tags the pinned commit and starts the certification run at
+/// that tag, so the lane's own checkout *is* the candidate and
+/// [`ledger::Record::candidate_sha`] is `GITHUB_SHA`. Three ways that comes
+/// apart, and each is silent:
+///
+/// - a `ref:` on a checkout, which is a second opinion about which commit to
+///   certify taken inside the run it decides for;
+/// - no [`ledger::SCHEDULED`] stamp, which leaves every run manual and the
+///   count unable to advance — or, worse, leaves a record inheriting a default
+///   nobody sent;
+/// - no [`ledger::DISPATCHER_DIGEST`] stamp, which leaves the suite a value
+///   this run alone attests.
+///
+/// Read structurally rather than by substring: every claim below is about a
+/// key a step sets, so a lane that merely *mentions* one of these names in a
+/// comment satisfies nothing here.
+fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str) {
+    let pinned = settings(body, "ref");
+    assert!(
+        pinned.is_empty(),
+        "`{lane}` names `ref:` {} time(s), and a lane dispatched at the tag holding the pinned \
+         candidate is already standing in it — so a `ref:` here certifies some other commit than \
+         the one the record will name: {pinned:?}",
+        pinned.len()
+    );
+    for (key, what) in [
+        (
+            ledger::SCHEDULED,
+            "what the dispatch asserted about the nightly cron, which every run of this file \
+             looks like a manual dispatch from the inside",
+        ),
+        (
+            ledger::DISPATCHING_ACTOR,
+            "who the runner says made the dispatch, which is the unforgeable half of the \
+             schedule term — without it the assertion above decides the count on its own",
+        ),
+        (
+            ledger::DISPATCHER_DIGEST,
+            "the suite-manifest digest the dispatcher read at the pin, which is the only reading \
+             of the suite that is not this run's own",
+        ),
+    ] {
+        let stamped: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .filter(|line| line.contains(&format!("{key}=")))
+            .collect();
+        assert!(
+            !stamped.is_empty(),
+            "`{lane}` writes a qualification record and appends no `{key}` to the job \
+             environment, so the record carries nothing for {what}"
+        );
+        for line in stamped {
+            let value = stamped_value(line, key);
+            // A `${{ }}` expression inside `run:` is shell text GitHub expands
+            // before bash reads the line: the injection the `env:` binding
+            // exists to prevent. Only a shell reference to the bound variable
+            // is a stamp.
+            assert!(
+                value.starts_with('$') && !value.contains("${{"),
+                "`{lane}` stamps `{key}` as `{value}`, a literal or an expression expanded \
+                 into shell text rather than the bound variable the dispatch carried: {line}"
+            );
+        }
+    }
+
+    // **The shell variable is only half the chain.** The stamps above read
+    // `$SCHEDULED`, `$DISPATCHING_ACTOR` and `$DISPATCHER_DIGEST`, and what
+    // those hold is the `env:` mapping of the step that sets them. A mapping
+    // naming a literal — `DISPATCHING_ACTOR: github-actions[bot]` — leaves
+    // every assertion above satisfied and hands a typed dispatch the identity
+    // the record treats as the dispatcher's, which is the whole of the
+    // schedule guard. The `env:` mapping is also the only safe way to carry an
+    // input into a `run:` block, because a `${{ }}` expansion inside one is
+    // dispatcher text pasted into the script. So the three values a record
+    // reads off the dispatch are held to the expressions that produce them,
+    // exactly and nowhere else.
+    for (name, expression, what) in [
+        (
+            "SCHEDULED",
+            "${{ inputs.scheduled }}",
+            "what the dispatch asserted",
+        ),
+        (
+            "DISPATCHING_ACTOR",
+            "${{ github.triggering_actor }}",
+            "who the runner says made the dispatch, which no input can reach",
+        ),
+        (
+            "DISPATCHER_DIGEST",
+            "${{ inputs.dispatcher_digest }}",
+            "the dispatcher's own reading of the suite at the pin",
+        ),
+    ] {
+        let bound = settings(body, name);
+        assert!(
+            !bound.is_empty(),
+            "`{lane}` stamps `{name}` into the record and binds it to nothing, so the stamp \
+             carries an empty value for {what}"
+        );
+        for value in bound {
+            assert_eq!(
+                value, expression,
+                "`{lane}` binds `{name}` to `{value}` rather than to `{expression}`. That value \
+                 is {what}, and a literal there is a value somebody wrote into the lane instead \
+                 of one the run was given."
+            );
+        }
+    }
+
+    assert_the_dispatch_inputs_are_shaped_before_they_are_stamped(lane, body);
+}
+
+/// The two dispatcher-supplied inputs are held to a shape before the step
+/// appends anything to `GITHUB_ENV`.
+///
+/// **A stamp is a line, and a line break is a second stamp.** `GITHUB_ENV` is
+/// read as `KEY=VALUE` lines, so an input carrying a newline writes whatever
+/// follows it as an assignment of its own — including
+/// [`ledger::DISPATCHING_ACTOR`], the unforgeable half of the schedule term.
+/// The `env:` binding checked above keeps the value out of the script text; it
+/// does not keep a newline out of the value. What does is the refusal: the
+/// assertion is exactly `true` or `false`, the digest is 64 lowercase hex
+/// characters or empty, and neither shape holds a line break.
+///
+/// Read positionally, because the order is the claim: a check that runs after
+/// the append has already let the extra assignment through.
+fn assert_the_dispatch_inputs_are_shaped_before_they_are_stamped(lane: &str, body: &str) {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let stamp = format!("{}=", ledger::SCHEDULED);
+    let stamped_at = lines
+        .iter()
+        .position(|line| !line.starts_with('#') && line.contains(&stamp))
+        .unwrap_or_else(|| {
+            panic!(
+                "`{lane}` appends no `{}` stamp to read an order against",
+                ledger::SCHEDULED
+            )
+        });
+    for (variable, shape) in [
+        ("SCHEDULED", "exactly `true` or `false`"),
+        ("DISPATCHER_DIGEST", "64 lowercase hex characters, or empty"),
+    ] {
+        let refused_at = lines[..stamped_at]
+            .iter()
+            .position(|line| line.contains("::error::") && line.contains(variable))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{lane}` stamps the dispatch without refusing a `{variable}` that is not {shape} \
+                     first, so a newline in that input writes a second assignment into the job \
+                     environment"
+                )
+            });
+        // The refusal has to be this diagnosis's own: an `exit 1` belonging to
+        // the next check would read as this one's, and a lane that names a
+        // shape and carries on would pass.
+        let next_diagnosis = lines[refused_at + 1..stamped_at]
+            .iter()
+            .position(|line| line.contains("::error::"))
+            .map_or(stamped_at, |offset| refused_at + 1 + offset);
+        assert!(
+            lines[refused_at..next_diagnosis]
+                .iter()
+                .any(|line| line.contains("exit 1")),
+            "`{lane}` names a `{variable}` that is not {shape} and stamps it anyway: the \
+             diagnosis is not followed by a refusal before the append"
+        );
+    }
+}
+
+/// What a stamp line assigns to `key`: the text between `key=` and the quote
+/// closing the echoed assignment.
+///
+/// The line as a whole is no evidence about the value — every stamp ends in
+/// `>> "$GITHUB_ENV"`, so a literal stamp still carries a `$`.
+fn stamped_value<'a>(line: &'a str, key: &str) -> &'a str {
+    line.split_once(&format!("{key}="))
+        .map(|(_, assigned)| assigned)
+        .unwrap_or_default()
+        .split('"')
+        .next()
+        .unwrap_or_default()
+        .trim()
+}
+
+/// **The pointer script holds the pin to the default branch.**
+///
+/// The dispatcher builds the pinned tree, and GitHub serves every sha reachable
+/// in the repository network — a fork's pull-request head included. The
+/// ancestry check is therefore the thing standing between a one-line pointer
+/// edit and unreviewed code running with the dispatcher's token, and nothing
+/// else in this workspace exercises it: a run of the script needs a remote and
+/// a clone, which a pull request does not have.
+///
+/// So the invocation is read off the file. Weaker than running it, and it is
+/// the claim that can be made here: an ancestry check deleted, or turned into a
+/// comparison against something other than the branch the dispatcher passes in,
+/// fails a pull request rather than passing quietly into a nightly.
+#[test]
+fn the_pointer_script_holds_the_pin_to_the_default_branch() {
+    let script = std::fs::read_to_string(workspace_root().join(POINTER_SCRIPT))
+        .expect("reading the pointer script");
+    let invocations: Vec<&str> = script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter(|line| line.contains("merge-base --is-ancestor"))
+        .collect();
+    assert_eq!(
+        invocations.len(),
+        1,
+        "`{POINTER_SCRIPT}` names `merge-base --is-ancestor` {} times. The dispatcher checks the \
+         pinned tree out and builds it, so a pin that was never on the default branch is \
+         unreviewed code running with the dispatcher's token: {invocations:?}",
+        invocations.len()
+    );
+    let invocation = invocations[0];
+    assert!(
+        invocation.contains("\"$sha\"") && invocation.contains("${default}"),
+        "`{POINTER_SCRIPT}` checks ancestry of something other than the pin against the branch it \
+         was given: {invocation}"
+    );
+    assert!(
+        script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.contains("git fetch --no-tags origin \"+refs/heads/${default}")),
+        "`{POINTER_SCRIPT}` checks ancestry against a ref it never fetches, which answers nothing \
+         on a clone that does not already hold the default branch"
+    );
+    assert!(
+        !script
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+            .any(|line| line.contains("--depth")),
+        "`{POINTER_SCRIPT}` fetches shallowly, and an ancestry check over a shallow clone answers \
+         about the history that was fetched rather than about the branch"
+    );
+}
+
+/// The one parser of the pointer format, called by the dispatcher.
+const POINTER_SCRIPT: &str = ".github/scripts/soak-candidate.sh";
+
+/// **The dispatcher carries the clock and nothing a run does.**
+///
+/// A workflow's steps come from the ref it was triggered on, and a schedule
+/// only ever triggers the default branch. The dispatcher therefore lives on the
+/// default branch and the run lives at the pin — and the whole value of that
+/// split is that nothing deciding what a run *does* sits in the dispatcher,
+/// where the candidate's suite-manifest digest does not close over it. Lane
+/// behaviour drifting back into the dispatcher's file would be a lane edit the
+/// digest cannot see, and five runs agreeing on a digest would stop meaning
+/// five runs of the same lanes.
+///
+/// So two claims: the dispatcher runs no lane script, and the one `cargo` it
+/// runs is the digest computation it hands down.
+#[test]
+fn the_dispatcher_carries_no_lane_behaviour() {
+    let dispatcher = std::fs::read_to_string(workspace_root().join(DISPATCHER))
+        .expect("reading the dispatcher workflow");
+    let steps: Vec<&str> = dispatcher
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+
+    for script in [
+        ".github/scripts/lane-suite.sh",
+        ".github/scripts/certification-suite.sh",
+        TRIPWIRE,
+    ] {
+        let calls: Vec<&&str> = steps.iter().filter(|line| line.contains(script)).collect();
+        assert!(
+            calls.is_empty(),
+            "`{DISPATCHER}` calls `{script}`. What a run does lives at the pin, inside the \
+             suite-manifest digest the candidate is certified under, and a lane step here is one \
+             that digest cannot see: {calls:?}"
+        );
+    }
+
+    let cargo: Vec<&&str> = steps
+        .iter()
+        .filter(|line| line.contains("cargo "))
+        .collect();
+    assert_eq!(
+        cargo.len(),
+        1,
+        "`{DISPATCHER}` runs cargo {} times, and the one invocation it is allowed is the \
+         suite-manifest digest it reads at the pin and hands to the run: {cargo:?}",
+        cargo.len()
+    );
+    assert!(
+        cargo[0].contains("--test certification"),
+        "`{DISPATCHER}`'s one cargo invocation is not the certification suite's own digest \
+         reading, so the value it attests is computed by something other than the suite that \
+         defines it: {}",
+        cargo[0]
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|line| line.contains(ledger::CANDIDATE_POINTER)),
+        "`{DISPATCHER}` runs no step naming `{}`, so nothing resolves the candidate and the \
+         certification run is dispatched at whatever ref somebody last named. A comment naming \
+         the pointer is not a step that reads it.",
+        ledger::CANDIDATE_POINTER
+    );
+    assert!(
+        steps.iter().any(|line| line.starts_with("- cron:")),
+        "`{DISPATCHER}` holds no schedule, and the nightly is the one thing this file exists to \
+         carry"
+    );
+}
+
+/// The workflow on the default branch that reads the pointer and starts a
+/// certification run at it.
+const DISPATCHER: &str = ".github/workflows/soak.yml";
+
+/// **The pinned candidate is one commit sha somebody can read.**
+///
+/// The pointer is the campaign's whole statement of what is being certified, so
+/// a file the dispatcher refuses is a file that starts no certification run at
+/// all. The shape is held here, where a pull request meets it, rather than at
+/// 04:00 — and it is the same shape `.github/scripts/soak-candidate.sh`
+/// enforces, one definition of the format read twice rather than two
+/// definitions that can drift apart.
+///
+/// The sha is not resolved against the object store here: a reviewer's checkout
+/// may be shallow, and it may not hold a commit that exists on the remote. What
+/// resolves it is the dispatcher, which fetches the commit and checks the tree
+/// at it carries the certification workflow before it dispatches anything — so
+/// an unfetchable or pre-mechanism pin ends that job red rather than leaving a
+/// certification run without a record.
+#[test]
+fn the_pinned_candidate_is_one_commit_sha() {
+    let pointer = workspace_root().join(ledger::CANDIDATE_POINTER);
+    let text = std::fs::read_to_string(&pointer).unwrap_or_else(|problem| {
+        panic!(
+            "reading {}: {problem} — the scheduled lanes read this pointer to know which commit \
+             they certify",
+            pointer.display()
+        )
+    });
+    let named: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "`{}` holds {} lines that are not comments, and the lanes read one sha out of it: {named:?}",
+        ledger::CANDIDATE_POINTER,
+        named.len()
+    );
+    let sha = named[0];
+    assert!(
+        sha.len() == 40
+            && sha
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "`{}` names `{sha}`, which is not a 40-digit lowercase commit sha — so the lanes read no \
+         candidate and every scheduled run records a mismatch",
+        ledger::CANDIDATE_POINTER
+    );
+    eprintln!("the pinned soak candidate is {sha}");
 }
 
 /// **A lane reads its host before it builds, classifies the reading, and the

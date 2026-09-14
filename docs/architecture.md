@@ -181,19 +181,53 @@ through, the injected-failure seams, every certification suite's own source and 
 baselines — and deliberately not over the product's own source, which is what the candidate
 SHA answers for. It is a reading of the working tree, so a qualifying run is one over a
 clean checkout; neither it nor the record answers for the image a runner label resolved to
-on the day. The **qualification ledger** is what one run leaves behind: the candidate, both
-digests, the platform, the environmental preflight's verdict, an outcome per required case,
+on the day. The **qualification ledger** is what one run leaves behind: the candidate, the
+suite-manifest digest and the dispatcher's own reading of it, the inventory digest, the
+platform, the environmental preflight's verdict, an outcome per required case,
 the named exit bars the build had unauthored, and a classification whose non-qualifying
-reasons are a closed vocabulary — suite change, product failure, harness failure, timeout,
-manual dispatch, cancellation, unauthored exit bar, environment. **A run is qualifying when
-it ran the required suite, passed it, a preflight admitted the host, every named exit bar
-was armed, and it came off the schedule**; anything else is non-qualifying with one typed
-reason, and the check that a record's stated verdict is the one its contents imply is what
+reasons are a closed vocabulary — unknown candidate, digest disagreement, suite change,
+product failure, harness failure, timeout, manual dispatch, cancellation, unauthored exit
+bar, environment. **A run is qualifying when it names the candidate it certified, its digest
+and the dispatcher's agree, it ran the required suite, passed it, a
+preflight admitted the host, every named exit bar was armed, and it came off the
+schedule**; anything else is non-qualifying with one typed reason, and the check that a record's stated verdict is the one its contents imply is what
 a campaign counts through. The scheduled lane writes a record every run and uploads it —
 except after a `timeout-minutes` kill, which stops the step that writes one, so a scheduled
 run with no record is how the campaign reads a timeout. Counting five consecutive
 qualifying scheduled runs over one frozen candidate is read off those records, and manual
-runs never advance it.
+runs never advance it. Every certification run is a dispatch, so **which a run was is decided
+from who made the dispatch** — only the dispatcher's own workflow token carries the app's
+identity — rather than from the assertion the dispatch carried, which anybody with write
+access can type. A run that asserts the schedule and was started by a person is recorded
+`scheduled: false` with the actor named and `manual-dispatch` as the reason.
+
+**The candidate is pinned, and the run happens at the pin.** A workflow's steps come from the
+ref it was triggered on and a schedule only ever triggers the default branch, so the two
+concerns are two files. `.github/workflows/soak.yml` on the default branch is the
+**dispatcher**: it holds the nightly cron, reads `.github/soak-candidate` for the commit the
+campaign is certifying, fetches it, verifies its tree carries the certification workflow,
+computes the suite-manifest digest there, tags it `soak-candidate/<sha>` and dispatches
+`.github/workflows/certify.yml` at that tag. The pin must be an ancestor of the default
+branch: the dispatcher builds the pinned tree, and GitHub serves any reachable sha, so the
+reviewed-ness the candidate is assumed to have is checked rather than assumed. The job that
+builds that tree is its own, holding `contents: read` and no credential, because building a
+tree runs its build scripts. `certify.yml` carries the two lanes and nothing
+resolves a pointer inside it: the run stands in the candidate, so its own commit is the
+candidate and the record reads it off the checkout. The dispatcher carries no lane behaviour,
+which `norn --test certification` holds it to — anything deciding what a run does would
+otherwise sit outside the digest the candidate is certified under. The pointer is outside the
+trees the suite manifest sweeps, because what a run is and which commit it is run against are
+two values — folding one into the other would restart the count whenever the candidate
+advanced.
+
+**Two attesters, one digest.** The dispatcher's reading of the suite-manifest digest at the
+pin travels to the run as an input, and the record refuses to qualify where its own reading
+differs — or where nothing dispatched it from the pointer at all. So the value five records
+have to agree on is one two readers of two checkouts arrived at. A pin nothing can fetch, or
+one off the default branch, or one predating the mechanism, fails **the dispatcher**, which
+is a different workflow: no certification run is started at all, so no state of the pointer
+can produce a certification run with no record. A missing record therefore means a run that
+was killed for time or one that never got its tree, both of which break a run of five.
 
 **Two scheduled lanes run the certification cases**, and each leaves a record of what its
 own machine did. The Linux lane carries the measurements and the hour-long load; the macOS

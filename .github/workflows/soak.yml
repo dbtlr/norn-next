@@ -1,527 +1,202 @@
-# The scheduled tier: two lanes, one schedule.
+# The dispatcher: the nightly clock, and nothing a run does.
 #
-# The second tier of the two-tier CI posture: counters gate per PR (ci.yml),
-# clocks trend here. Everything time-dependent or long-running lives in this
-# lane — see docs/architecture.md.
+# **Why this file is separate from the run it starts.** A workflow's steps come
+# from the ref it was triggered on, and a schedule only ever triggers the
+# default branch. A scheduled lane that checked a pinned commit out would
+# therefore be two trees — the default branch's step list driving the
+# candidate's suites — with an environment-variable contract holding them
+# together and nothing keeping them in step. So the schedule lives here and the
+# run lives at the pin: this file reads `.github/soak-candidate`, tags the
+# commit it names, and dispatches `.github/workflows/certify.yml` **at that
+# tag**, where every value deciding what a run does is the candidate's own and
+# the suite-manifest digest closes over all of it.
 #
-# **Two jobs, and each leaves a qualification record.** `soak` is the
-# measurement lane: the >=5k profile's measurements and an hour-long host load
-# on `ubuntu-latest`, whose hosts watch through inotify. `certification-macos`
-# runs the same certification cases on `macos-norn-soak`, a repository-scoped
-# self-hosted runner inside a pinned macOS 15 virtual machine, whose hosts watch
-# through FSEvents. Both are required, because the inventory's backend-deciding lane is
-# covered by a run on each backend and a record naming no backend counts toward
-# neither — `crates/norn-testkit/src/certification/inventory.rs` names which
-# cases those are, and `crates/norn-fs/src/watch.rs` is what decides the backend
-# each platform installs.
+# **This file carries no lane behaviour, and that is a bar.** It runs no suite,
+# invokes no lane script, and the one `cargo` it runs computes the digest it
+# hands down. `norn --test certification` holds it to that, because anything
+# that changed what a run does from here would change it outside the digest the
+# candidate is certified under.
 #
-# **Each lane reads its own host before it builds anything.** A record is
-# qualifying only where a preflight admitted the machine, and the reading that
-# verdict turns on is how busy the machine was when the lane landed on it — so
-# it is taken at the top of the job, and classified at the end by
-# `norn_testkit::certification::preflight`. The suites' work bounds are not
-# widened for a loaded runner; the run is recorded as evidence about the
-# machine instead.
+# **Three jobs, because one of them runs the candidate's code.** Resolving the
+# pin needs a credential that can fetch; dispatching needs a token that can
+# write a tag and start a workflow; and computing the digest builds the pinned
+# tree — arbitrary build scripts, proc macros and test code from whatever commit
+# the pointer names. That last one is therefore its own job, with `contents:
+# read` and no credential left on disk — the same read `pin` holds, and neither
+# of the write grants `dispatch` needs. The permissions below are each job's own
+# for the same reason.
 #
-# **A scheduled run advances the count only where both records qualify.** The
-# five consecutive runs Layer 2 exits on are runs of this workflow, not of one
-# job in it: a night on which the macOS lane failed and the Linux lane passed
-# certified the layer on one backend, which is not what the inventory asks for.
-# One workflow run is therefore one entry in the sequence, and it counts when
-# every record it uploaded qualifies.
+# **A failure here is a failure of a different workflow.** An unreadable
+# pointer, a sha nothing can fetch, a sha that is not on the default branch, a
+# pin whose tree carries no certification workflow: each ends this workflow red
+# and dispatches nothing. The campaign's timeout signal is a *certification* run
+# that left no record, and no run of this file can manufacture one.
 #
-# The measurement lane runs the >=5k-document profile's work: the cases the
-# per-PR suites carry as `#[ignore]`d, and the measurements whose readings are
-# that lane's product. Each such step runs a suite's ignored cases by kind
-# rather than by name. That removes one hazard and not the other: a name filter that stops matching
-# runs zero tests and reports success, and selecting by kind removes the
-# name-typo spelling of it — but `--ignored` with nothing to match still exits
-# 0. What closes it is the pass-count assertion in .github/scripts/lane-suite.sh,
-# which every measurement step goes through, and the one in
-# .github/scripts/certification-suite.sh, which every certification step does.
-#
-# Every measurement is compared against a checked-in baseline in the measuring
-# crate's own tests/baselines/mod.rs and recorded in the job summary. The
-# baselines are the trend's whole memory: nothing here fetches a history or
-# consults a store. What binds mechanically is the comparison — a reading past
-# a baseline fails the run. **Nothing enforces which direction a baseline
-# moves**: the readings are recorded per run, and the discipline that they
-# should only fall is review-held, carried by the baselines being a small,
-# frequently-read diff. The one trend this lane does mechanize is the memory
-# slope under the host workload below, which is a comparison the run makes
-# against itself rather than against a recorded history.
+# GitHub disables schedules on repositories with no activity for 60 days, so
+# this workflow running is a thing to check rather than assume.
 name: soak
 
 on:
   schedule:
     # Nightly, 04:00 UTC.
-    #
-    # A schedule takes effect only from the default branch, so nothing about the
-    # cron above is exercisable on a pull request and whether the nightly fires
-    # is post-merge evidence. Dispatch is not the same: `workflow_dispatch` is
-    # already on the default branch, so a manual run may name any ref and runs
-    # that ref's copy of this file — which is how a change to a job here is
-    # tried before it merges. The one exception is `certification-macos`: its
-    # job guard skips every ref but `main`, so a change to that job is first
-    # exercised by a dispatch of `main` after it merges.
-    #
-    # GitHub also disables schedules on repositories with no activity for 60
-    # days, so this lane running is a thing to check rather than assume.
     - cron: '0 4 * * *'
+  # A dispatch of this file is the way to start a certification run by hand
+  # against the current pin. The run it starts is stamped `scheduled: false` and
+  # advances no count: what decides that is `github.triggering_actor` on the
+  # dispatched run, which is the app only where this workflow's own token made
+  # the dispatch — and the certification run then weighs it against the cron
+  # assertion below.
   workflow_dispatch:
 
-permissions:
-  contents: read
+# Granted per job rather than here, so the job that builds the candidate's tree
+# holds nothing the tag and the dispatch need.
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
-  # The lane asserts two subjects. The fixture generator at the >=5k profile:
-  # that it reproduces its tree, that the tree stays inside the calibration
-  # envelope, and what the generation costs in peak memory and wall clock. And
-  # a host under a nightly ~1h mixed load over that profile's tree: a child
-  # process attaches the vault and then works it — churning Markdown files so
-  # the watcher reconciles, polling the attachment's trust state, and taking
-  # warm read-only requests — while sampling its own resident set and open
-  # descriptors throughout.
-  #
-  # That mixed load fills two of the three slots this lane carried: fd growth,
-  # which needed a long-running process to grow them, and the flat-memory-slope
-  # requirement, which needed a load for a slope to be measured over. The
-  # remaining slot is the real pinned embedding model: norn-embed ships the
-  # deterministic stub, and the runtime this lane would measure compiles only
-  # behind the release/soak feature, which arrives with the runtime it gates.
-  # There is nothing to run until then — the stub has no model to load and no
-  # weights to fetch.
-  #
-  # **Lockdown is five consecutive green runs of this lane over a nightly ~1h
-  # mixed load, showing zero counter violations, a flat memory slope, no
-  # file-descriptor growth, and a peak resident set under its authored
-  # ceiling.** All four terms now run: the child's warm requests assert every
-  # derivation counter at zero and carry a violation out as its exit status,
-  # the descriptor count is compared between the first sample and the last,
-  # the resident-set series is judged as the ratio between its first and last
-  # quartile means, and its maximum is held under the authored ceiling. So the
-  # count starts at the first green run of this lane as it stands — a green run
-  # of a lane that does not measure a term is not one of the five, and this
-  # lane now measures all four.
-  #
-  # The timeout is the outer runaway guard, and it is set so the inner one is
-  # what fires. The host load's child carries its own deadline — the declared
-  # hour plus ten minutes of headroom for its bounded attach, recovery, and
-  # reconcile waits, so 70 minutes at worst — and the samples this job judges
-  # are read off that child's output only once it has ended. A job killed while
-  # the child is still running loses every sample of the run, so the timeout
-  # leaves the worst-case child room to reach its own deadline and still
-  # report.
-  #
-  # **120 minutes covers everything the job holds, not the load alone**:
-  # checkout, a cold debug build, the four measurement steps, that worst-case 70
-  # minutes of load, and then the eight certification targets — two of which
-  # rebuild `norn-host` and its dependents behind `induced-failure` and back —
-  # plus the two runs of the `norn` certification binary that collect the
-  # outcomes and write the record. The measured shape is a wide margin: the four
-  # nightlies whose readings ground the bars ran 61 minutes end to end, and the
-  # certification steps of the macOS lane below run in under three including
-  # their own cold build.
-  #
-  # It remains a runaway guard and not a bar on speed: nothing in this job fails
-  # because it took longer, and the load itself is a declared duration rather
-  # than a measured one.
-  soak:
-    name: soak
+  # Which commit the campaign is certifying, and whether it is a commit this
+  # repository is willing to run. No candidate code executes here.
+  pin:
+    name: resolve the pinned candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    # Where the certification steps below keep each suite's harness output. The
-    # record's case lines are read off these logs rather than off a wrapper's
-    # verdict, so the directory is the job's and the step that assembles the
-    # record clears it: collecting the outcomes and assembling the record from
-    # them are two tests of one binary, and nothing orders two tests in one
-    # binary.
-    env:
-      NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
     steps:
+      # The default branch, for the pointer and the script that reads it. Whole
+      # history, because the script holds the pin to being an ancestor of this
+      # branch and an ancestor check over a shallow clone answers nothing. The
+      # credential is kept: the script fetches the pinned commit through this
+      # remote, and a pin nothing can fetch is one of the errors it raises.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          persist-credentials: false
-      # Taken before anything is built, because the reading is of the machine
-      # this lane landed on and a cold cargo build is minutes of every core.
-      # The classification happens at the end of the job, off this line.
-      - name: Host-health reading
-        run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Determinism at the soak profile
-        run: .github/scripts/lane-suite.sh norn-fixtures determinism
-      - name: Calibration at the soak profile
-        run: .github/scripts/lane-suite.sh norn-fixtures calibration
-      # Single-threaded, so the recorded numbers are of a generation competing
-      # with nothing else this suite started.
-      - name: Memory and wall clock at the soak profile
-        run: .github/scripts/lane-suite.sh norn-fixtures memory_soak --nocapture --test-threads=1
-      # Single-threaded for the same reason as the step above: both readings each
-      # ratio is taken from are of a read competing with nothing else this suite
-      # started. It sits with the other bar-carrying steps, ahead of the load
-      # below, so its readings are of a runner that has run nothing long — the
-      # cost of which is that a reading past its bar ends the job before the load
-      # step, and the run counts toward no lockdown.
-      - name: Frontmatter parse cost against key count
-        run: .github/scripts/lane-suite.sh norn-text frontmatter_cost --nocapture --test-threads=1
-      # The hour is this step's alone: the duration is declared here rather than
-      # in the suite, so a local run of the same case is a short one and the
-      # nightly one is the load lockdown counts.
-      #
-      # **The load runs before the certification steps, not after them.** Two
-      # reasons, and both are about what the readings are of. The bars it is
-      # judged against were authored on runs that started the load within a
-      # minute of checkout, so a load placed after a quarter-hour of host suites
-      # would be measured on a runner in a different state from the one the
-      # numbers came off. And this step is the lane's measurement product: the
-      # certification steps below each carry `!cancelled()` and therefore run
-      # whatever this one did, where a load placed after them would be skipped
-      # outright by one flaking case and cost the night its slope, its
-      # descriptor delta and its peak.
-      - name: Host mixed load
-        run: .github/scripts/lane-suite.sh norn-host host_soak --nocapture --test-threads=1
+          persist-credentials: true
+          fetch-depth: 0
+      # One parser for the pointer format, and it refuses everything a
+      # certification run could not be held to — shape, fetchability, ancestry
+      # of the default branch, and a tree carrying the workflow the dispatch
+      # below names. The shell logic lives in the script rather than inline so
+      # it is a file somebody can run.
+      - name: The pinned candidate
+        id: candidate
+        shell: bash
+        # The branch name reaches the script through the environment, quoted at
+        # the call site, so it is an argument and never shell text.
         env:
-          NORN_SOAK_DURATION_SECS: "3600"
-      # The certification cases, one step per cargo target.
-      #
-      # Every step runs whatever happened before it. A case that failed is
-      # evidence the record carries, and a lane that stopped at the first
-      # failure would leave every case after it `not-run` — which the ledger
-      # classifies as a suite change rather than as the product failure it was.
-      #
-      # The targets are the ones the inventory's carriers compile into, and a
-      # feature beside a target is the one that target's cases sit behind:
-      # without it the file compiles to zero tests. That pairing is held to the
-      # inventory by `norn --test certification`, so a case added to a target no
-      # lane runs fails a pull request rather than the fifth nightly.
-      #
-      # The library target is one of them: five of the trust-transition cases
-      # and the trust a damaged entry publishes are unit tests of the host's
-      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
-      # test of its production ops, rather than integration suites — a lane that
-      # ran only the suites would record those seven not-run. Its log holds
-      # every unit test the crate has, and the collector reads the ones the
-      # inventory names.
-      #
-      # Two of the targets below are not certification suites whole: `norn-store
-      # store` is the store's black-box contract suite and `norn-fs
-      # observations` states the contained read path's answers as well as its
-      # refusals. Each carries required cases the inventory names one by one, so
-      # the lane runs the whole target and the collector takes the named cases
-      # out of its log.
-      - name: Host lifecycle certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host lib
-      - name: Churn certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host churn
-      - name: Coverage certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host coverage
-      - name: Equivalence certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host equivalence
-      - name: Host induced-failure certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host lockdown induced-failure
-      - name: Crash-recovery certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-host kill_recovery induced-failure
-      - name: Filesystem certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-fs lockdown
-      - name: Store environment certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-store environment
-      - name: Store contract certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-store store
-      - name: Filesystem observation certification cases
-        if: ${{ !cancelled() }}
-        run: .github/scripts/certification-suite.sh norn-fs observations
-      # The outcomes the record's case lines are, read off the logs those steps
-      # kept. It is a separate step from the record below because the two are
-      # tests of one binary and nothing orders those: this one writes the
-      # outcomes file, and the one below assembles a record from it.
-      - name: Case outcomes from the certification logs
-        if: ${{ !cancelled() }}
-        run: cargo test --locked -p norn --test certification -- --nocapture
-      # **Whether this machine is an evidence source**, classified off the
-      # reading taken at the top of the job. The suites' work bounds are sized
-      # for a host with a core free for the work it is given; a host that would
-      # starve them is refused here rather than the bounds being widened, and
-      # the record then classifies as `environment` — nothing concluded, about
-      # a candidate or against one.
-      #
-      # It runs whatever the suites did. A refused machine is the reading a
-      # campaign most needs beside a failed case, and a record with no verdict
-      # is a host nobody checked, which is the same non-qualifying reason for a
-      # different fact.
-      #
-      # The verdict goes where `NORN_PREFLIGHT_SINK` names and is appended to
-      # the job environment, so the record step below reads it out of the
-      # environment like every other field: this file states no verdict of its
-      # own.
-      - name: Host-health preflight
-        if: always()
-        run: |
-          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
-          cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
-        env:
-          NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
-      # What a run's result is worth depends on which suite produced it, so the
-      # digest over the lanes, the toolchain, the lockfile, the inventory, the
-      # qualification rules, the comparator, the fault seams, the certification
-      # suites and the authored bounds is computed here and printed. It is the
-      # value five consecutive qualifying runs have to agree on, and it moves for
-      # a lane edit and not for a product commit.
-      #
-      # **A run killed by `timeout-minutes` writes no record.** `always()` does
-      # not run after a timeout kill, so this step never executes and the run
-      # leaves nothing behind. That is the campaign's timeout signal and it is
-      # deliberate: a scheduled run with no artifact, read beside the run
-      # metadata that says the job was cancelled for time. A campaign that
-      # counted only the records it found would count five qualifying runs
-      # across a gap, so a missing record breaks a run of five exactly as a
-      # non-qualifying one does.
-      #
-      # The watcher backend is the workflow's to state rather than the process's:
-      # this job runs on the Linux runner, whose one real platform watcher is
-      # inotify. It is a required field of a qualifying record because the
-      # inventory's backend-deciding lane is covered by a run on each backend.
-      # The volume's answer about case is not set here — the record probes the
-      # directory the fixtures write trees into, which is the volume that decides
-      # it.
-      #
-      # The log directory is cleared for this step alone: the outcomes were
-      # collected above, and a step that named the logs and the record sink at
-      # once would collect and assemble in one binary, in whichever order the
-      # harness happened to run them.
-      #
-      # **The sink is workspace-absolute because the writer's directory is not
-      # the workspace.** `ledger::emit` writes the path it is given from the
-      # process's own working directory, and cargo runs an integration test of
-      # `norn` from `crates/norn` — while the upload below resolves a relative
-      # path against the workspace. A relative sink therefore names two
-      # different files, and the upload finds neither. The pairing is held to
-      # by `norn --test certification`.
-      - name: Suite manifest digest and qualification record
-        if: always()
-        # The outcomes file is ensured before the record reads it: a collection
-        # step that never ran leaves none, and a record whose case lines all
-        # read `not-run` is evidence a campaign can classify, where a run that
-        # left no record at all is how this lane says it was killed for time.
-        run: |
-          mkdir -p "$(dirname "$NORN_QUALIFICATION_OUTCOMES")"
-          touch "$NORN_QUALIFICATION_OUTCOMES"
-          cargo test --locked -p norn --test certification -- --nocapture
-        env:
-          NORN_CERTIFICATION_LOGS: ''
-          NORN_QUALIFICATION_LEDGER: ${{ github.workspace }}/qualification-record.json
-          NORN_QUALIFICATION_OUTCOMES: ${{ github.workspace }}/certification-logs/outcomes.txt
-          NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
-          NORN_QUALIFICATION_RUNNER: ubuntu-latest
-          NORN_QUALIFICATION_WATCHER_BACKEND: inotify
-      # The record is the artifact a campaign counts, so it is uploaded whether
-      # or not the run passed: a non-qualifying record with a typed reason is
-      # exactly what breaks a run of five, and a run that left no record at all
-      # is one nothing can say that about. It is named for the lane, because a
-      # run of this workflow uploads one record per lane and a campaign reads
-      # both.
-      #
-      # **A missing file fails the step rather than warning.** The campaign reads
-      # a scheduled run with no record as a timeout kill, so an upload that
-      # quietly matched nothing would manufacture that signal out of a green run.
-      # The only run that legitimately leaves no record is the one this step
-      # never reaches.
-      #
-      - name: Upload the qualification record
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: qualification-record-ubuntu-latest
-          path: ${{ github.workspace }}/qualification-record.json
-          if-no-files-found: error
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          .github/scripts/soak-candidate.sh
+          .github/soak-candidate
+          .github/workflows/certify.yml
+          "$DEFAULT_BRANCH"
 
-  # The FSEvents leg of backend-deciding coverage.
+  # **The first of the two attestations, and the only job that runs the
+  # candidate's code.** The digest is computed off the candidate's own tree and
+  # by the candidate's own rules, and handed to the certification run as an
+  # input it checks its own reading against. Two readers of two checkouts
+  # agreeing is what makes the digest in a record evidence rather than a
+  # self-report.
   #
-  # The inventory holds one case whose required outcome is the backend's own:
-  # a subtree whose mode is revoked leaves the entry untrusted either through
-  # the refused heal or through the lost watcher, depending on which meets the
-  # denial first — a backend that adds a watch per directory (inotify) fails to
-  # install coverage before the heal walks, and one that covers a tree without
-  # reading each directory under it (FSEvents) leaves the walk to meet it. A
-  # campaign that ran only the Linux lane would certify one of those two
-  # answers and ship the other backend uncertified.
+  # It is read off the suite that owns the value rather than recomputed by a
+  # second implementation, so there is one definition of the digest and this is
+  # a caller of it.
   #
-  # **The label states what the runner installs.** `macos-norn-soak` is a
-  # self-hosted runner registered to this repository alone, inside a macOS 15
-  # virtual machine on Apple silicon. macOS hosts watch through FSEvents:
-  # `crates/norn-fs/src/watch.rs` builds notify's `FsEventWatcher` on macOS and
-  # refuses a polling substitute outright, and the cases below attach production
-  # hosts, so the coverage the label names is coverage the run installed. The
-  # per-PR certification suite reads this job's own `runs-on:` and holds the two
-  # labels to it, so a job moved to another machine fails there rather than
-  # recording a backend it never ran.
-  #
-  # **What keeps the machine to `main` is a repository setting, and this job's
-  # guard is the smaller part.** A self-hosted runner executes whatever job
-  # names its label, from whichever ref that job's file came from, so the
-  # guard below binds only this file as it stands on the ref being run: it
-  # admits the nightly schedule and a manual dispatch of `main` — the
-  # diagnostic run that proves the machine after an environment change, which
-  # the record classifies as a manual dispatch and the count never advances on
-  # — and skips a dispatch of an unmodified copy on any other ref. A ref that
-  # edits this guard, or a job in any workflow that names the label, is
-  # stopped by nothing here. What stops it is the repository's Actions setting
-  # that holds every workflow run from an outside contributor's pull request
-  # for approval (`fork-pr-contributor-approval: all_external_contributors`),
-  # and the repository having no other writer. The job has `contents: read`
-  # and no secrets.
-  #
-  # The hosted `macos-15` image this lane ran on until 2026-09 read over the
-  # preflight's busy bound at checkout on four consecutive nights, so nothing
-  # about the candidate was measurable there; the machine under this lane is
-  # one the campaign controls.
-  #
-  # This job runs the certification cases and no measurement: the bars in
-  # `tests/baselines/` are authored against `ubuntu-latest`, and a second
-  # platform reading them would be judging one machine's numbers on another's.
-  # What it shares with the lane above is the suite, which is what a backend
-  # answer has to be the same suite's for two records to cover one obligation.
-  #
-  # The timeout is a runaway guard set so a cold macOS build has room. What the
-  # job costs is measured rather than guessed: on the hosted `macos-15` image
-  # this lane ran on until 2026-09, a dispatch of this file ran every step here
-  # green in 2m55s from a cold cache. The VM under the lane now has four cores
-  # to that image's three, so 60 minutes is the runaway bound and nothing near
-  # the working time on either.
-  certification-macos:
-    name: certification (macOS FSEvents)
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    runs-on: macos-norn-soak
-    timeout-minutes: 60
-    env:
-      NORN_CERTIFICATION_LOGS: ${{ github.workspace }}/certification-logs
+  # `contents: read` and no persisted credential: building a tree means running
+  # its build scripts, and this job holds nothing worth reaching for. The
+  # timeout is a runaway guard over one cold debug build of the `norn`
+  # certification binary.
+  digest:
+    name: the suite manifest digest at the pin
+    needs: pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # Pinned image and asserted architecture, the same way ci.yml's platform
-      # job does it: a runner-label migration that changed the machine under
-      # this lane would otherwise record a backend answer from somewhere else.
-      #
-      # **This one is a stop rather than a report.** Every step below carries
-      # `!cancelled()`, which is true after a failure — so a case that flakes
-      # does not silence the cases after it. That is the wrong reading of a
-      # machine that is not the one the record names, so the certification steps
-      # name this step's outcome as well and a failed assertion leaves them all
-      # skipped. The record step still runs, and says the run failed.
-      - name: Assert architecture
-        id: architecture
-        run: |
-          test "$(uname -m)" = arm64
-          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
-      # Taken before anything is built, for the reason the Linux lane above
-      # states. On this runner it also reads fseventsd, which is the service
-      # every real-watcher case here subscribes to.
-      - name: Host-health reading
-        run: .github/scripts/host-readings.sh >> "$GITHUB_ENV"
-      # The runner persists between jobs, and rust-cache's save step removes
-      # every `~/.cargo/bin` binary that was present before the job when it
-      # caches that directory — on this machine, the rustup proxies the
-      # toolchain is reached through. Not caching the directory is the
-      # action's own setting for a self-hosted runner.
+          ref: ${{ needs.pin.outputs.sha }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          cache-bin: "false"
-      # The library target is one of them: five of the trust-transition cases
-      # and the trust a damaged entry publishes are unit tests of the host's
-      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
-      # test of its production ops, rather than integration suites — a lane that
-      # ran only the suites would record those seven not-run. Its log holds
-      # every unit test the crate has, and the collector reads the ones the
-      # inventory names.
-      #
-      # Two of the targets below are not certification suites whole: `norn-store
-      # store` is the store's black-box contract suite and `norn-fs
-      # observations` states the contained read path's answers as well as its
-      # refusals. Each carries required cases the inventory names one by one, so
-      # the lane runs the whole target and the collector takes the named cases
-      # out of its log.
-      - name: Host lifecycle certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host lib
-      - name: Churn certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host churn
-      - name: Coverage certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host coverage
-      - name: Equivalence certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host equivalence
-      - name: Host induced-failure certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host lockdown induced-failure
-      - name: Crash-recovery certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-host kill_recovery induced-failure
-      - name: Filesystem certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-fs lockdown
-      - name: Store environment certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-store environment
-      - name: Store contract certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-store store
-      - name: Filesystem observation certification cases
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: .github/scripts/certification-suite.sh norn-fs observations
-      - name: Case outcomes from the certification logs
-        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
-        run: cargo test --locked -p norn --test certification -- --nocapture
-      # The same classification the Linux lane runs, and on this runner it also
-      # reads fseventsd: a saturated or bloated event daemon delivers five to
-      # forty seconds late, which spends a real-watcher case's whole work bound
-      # with nothing wrong in the watcher.
-      - name: Host-health preflight
-        if: always()
-        run: |
-          cargo test --locked -p norn-testkit --lib certification::preflight -- --ignored --nocapture
-          cat "$NORN_PREFLIGHT_SINK" >> "$GITHUB_ENV"
+      - name: Read the digest
+        id: digest
+        shell: bash
         env:
-          NORN_PREFLIGHT_SINK: ${{ github.workspace }}/preflight.env
-      # The volume's answer about case is probed by the record rather than
-      # stated here, and on this runner it is the folding one: APFS folds case
-      # by default, which is the other half of the platform coverage this job
-      # carries.
-      - name: Suite manifest digest and qualification record
-        if: always()
-        # The outcomes file is ensured before the record reads it: a collection
-        # step that never ran leaves none, and a record whose case lines all
-        # read `not-run` is evidence a campaign can classify, where a run that
-        # left no record at all is how this lane says it was killed for time.
+          SHA: ${{ needs.pin.outputs.sha }}
         run: |
-          mkdir -p "$(dirname "$NORN_QUALIFICATION_OUTCOMES")"
-          touch "$NORN_QUALIFICATION_OUTCOMES"
-          cargo test --locked -p norn --test certification -- --nocapture
+          log="${RUNNER_TEMP}/suite-manifest-digest.log"
+          cargo test --locked -p norn --test certification the_suite_manifest_digest -- --nocapture 2>&1 | tee "$log"
+          digest=$(grep -Eo 'suite manifest digest [0-9a-f]{64}' "$log" | head -1 | cut -d' ' -f4 || true)
+          if [ -z "$digest" ]; then
+            echo "::error::the certification suite at the pin printed no suite manifest digest, so nothing can be attested to the run" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Soak candidate"
+            echo
+            echo "- candidate: \`${SHA}\`"
+            echo "- suite manifest digest at the pin: \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The ref and the dispatch. No checkout, so the token this job holds never
+  # sits beside code from the pin.
+  dispatch:
+    name: dispatch the certification run
+    needs: [pin, digest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The tag, and the dispatch. Nothing here reads a tree.
+      contents: write
+      actions: write
+    steps:
+      # **A ref for the commit, so the dispatch can name it.**
+      # `workflow_dispatch` takes a ref rather than a sha, so the pin needs one
+      # — and the tag holds the sha in its own name, which is what makes it
+      # unmovable in the sense that matters: a `soak-candidate/<sha>` tag
+      # pointing anywhere but `<sha>` is a contradiction, and this step refuses
+      # rather than repairs it. An existing tag is left exactly as it is, so a
+      # ref a run of five was counted over is never rewritten under it.
+      - name: A ref for the pinned candidate
+        shell: bash
         env:
-          NORN_CERTIFICATION_LOGS: ''
-          NORN_QUALIFICATION_LEDGER: ${{ github.workspace }}/qualification-record.json
-          NORN_QUALIFICATION_OUTCOMES: ${{ github.workspace }}/certification-logs/outcomes.txt
-          NORN_QUALIFICATION_RESULT: ${{ job.status == 'success' && 'passed' || job.status == 'cancelled' && 'cancelled' || 'failed' }}
-          NORN_QUALIFICATION_RUNNER: macos-norn-soak
-          NORN_QUALIFICATION_WATCHER_BACKEND: fsevents
-      - name: Upload the qualification record
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: qualification-record-macos-norn-soak
-          path: ${{ github.workspace }}/qualification-record.json
-          if-no-files-found: error
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.pin.outputs.sha }}
+        run: |
+          standing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/soak-candidate/${SHA}" --jq .object.sha 2>/dev/null || true)
+          if [ -z "$standing" ]; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f "ref=refs/tags/soak-candidate/${SHA}" -f "sha=${SHA}" >/dev/null
+            echo "tagged ${SHA} as soak-candidate/${SHA}"
+          elif [ "$standing" != "$SHA" ]; then
+            echo "::error::the tag soak-candidate/${SHA} names ${standing}. A tag naming a commit other than the one in its name is a ref nothing can read, and this never moves one." >&2
+            exit 1
+          else
+            echo "soak-candidate/${SHA} already names ${SHA}"
+          fi
+      # **`scheduled` is asserted here and decided there.** The certification run
+      # cannot tell a nightly from a typed dispatch — every run of that file is a
+      # `workflow_dispatch` — so the fact travels as an input from the only
+      # workflow that holds it. An input is typeable, so the record weighs this
+      # assertion against `github.triggering_actor` on the dispatched run, which
+      # carries the app's identity only where the dispatch was made with this
+      # workflow's own token, as below.
+      - name: Dispatch the certification run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.pin.outputs.sha }}
+          DIGEST: ${{ needs.digest.outputs.digest }}
+          SCHEDULED: ${{ github.event_name == 'schedule' }}
+        run: |
+          gh workflow run certify.yml --ref "soak-candidate/${SHA}" \
+            -f "scheduled=${SCHEDULED}" -f "dispatcher_digest=${DIGEST}"
+          echo "dispatched certify.yml at soak-candidate/${SHA} (scheduled=${SCHEDULED})"
