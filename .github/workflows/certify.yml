@@ -91,6 +91,15 @@ name: certify
 # merges. Such a run records `scheduled: false` whatever its inputs say, because
 # the schedule is decided from who made the dispatch and not from what it
 # asserted, so the record classifies `manual-dispatch` and advances no count.
+#
+# **What the actor check stops, and what it does not.** It stops the realistic
+# incident: a diagnostic dispatch whose inputs were copy-pasted off a previous
+# nightly, which a person makes and which therefore carries their name. It does
+# not stop somebody with write access fabricating a nightly — a workflow pushed
+# to a branch, holding `actions: write`, dispatching this file with
+# `github.token` presents the same app identity the real dispatcher does. The
+# control for that is the repository's branch and workflow permissions, not
+# anything in this file.
 on:
   workflow_dispatch:
     inputs:
@@ -219,6 +228,14 @@ jobs:
       # them. A person who asserts the schedule gets a record saying
       # `scheduled: false`, their name, and `manual-dispatch` — plus the warning
       # below, so nothing about the demotion is silent.
+      #
+      # **The warning diagnoses rather than proves.** The app identity is not
+      # the dispatcher workflow's alone: any workflow holding `actions: write`
+      # dispatching with `github.token` presents it. What a record carries is
+      # therefore the observed actor, in `dispatching_actor`, and the warning
+      # names that value — so a reader compares it against how the run was
+      # supposed to have been started instead of trusting a claim about which
+      # token could have made it.
       - name: What the dispatch asserted
         shell: bash
         env:
@@ -227,7 +244,7 @@ jobs:
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
           if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
-            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. Only the dispatcher workflow's own token can make that assertion, so this run is recorded scheduled: false and classifies manual-dispatch."
+            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. The assertion is honoured only for a dispatch carrying the app identity, so this run is recorded scheduled: false and classifies manual-dispatch."
           fi
           {
             echo "NORN_QUALIFICATION_SCHEDULED=$SCHEDULED"
@@ -538,7 +555,7 @@ jobs:
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
           if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
-            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. Only the dispatcher workflow's own token can make that assertion, so this run is recorded scheduled: false and classifies manual-dispatch."
+            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. The assertion is honoured only for a dispatch carrying the app identity, so this run is recorded scheduled: false and classifies manual-dispatch."
           fi
           {
             echo "NORN_QUALIFICATION_SCHEDULED=$SCHEDULED"

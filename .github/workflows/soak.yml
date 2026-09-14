@@ -22,8 +22,9 @@
 # write a tag and start a workflow; and computing the digest builds the pinned
 # tree — arbitrary build scripts, proc macros and test code from whatever commit
 # the pointer names. That last one is therefore its own job, with `contents:
-# read`, no credential left on disk, and nothing the other two hold. The
-# permissions below are each job's own for the same reason.
+# read` and no credential left on disk — the same read `pin` holds, and neither
+# of the write grants `dispatch` needs. The permissions below are each job's own
+# for the same reason.
 #
 # **A failure here is a failure of a different workflow.** An unreadable
 # pointer, a sha nothing can fetch, a sha that is not on the default branch, a
