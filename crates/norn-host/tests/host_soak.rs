@@ -79,7 +79,10 @@
 //! what it charges the arranged recovery is nothing or one churn turn. That is
 //! the honest reading and the run records it: `recovery windows, taken/owed` in
 //! the summary carries every window's span beside the doses it charged, so a
-//! night whose term compared nothing says so in the table. What the term bites
+//! night whose term charged nothing says so in the table. What it always
+//! compares is a measured rate: the demand waits for
+//! [`BASELINE_TICKS_BEFORE_A_DEMAND`], and a window reporting no baseline
+//! period fails the run. What the term bites
 //! on is the shape it exists for and the arranged recovery is not — a window
 //! that stretched in wall clock with the load not working across it.
 //!
@@ -292,6 +295,25 @@ const RECOVERY_ATTEMPTS: u32 = 3;
 /// per run, rather than the term passing quietly.
 const RECOVERY_WINDOW_SLACK_TICKS: u32 = 1;
 
+/// How many ticks the load completes before it will demand an attachment back.
+///
+/// **Three, and it is what makes the baseline period measured on every run.**
+/// The rate [`RECOVERY_WINDOW_SLACK_TICKS`] describes is a mean over the ticks
+/// ahead of the window, so a demand raised on tick 0 would have no completed
+/// tick to average and the term would compare nothing. The arranged recovery is
+/// available from the load's first look — the seam takes the attach's watch —
+/// so without a floor the window opens on the first or second tick and the mean
+/// is one tick's period or nothing at all.
+///
+/// Three ticks is the floor rather than one: a mean over a single tick is that
+/// tick's own cost, and the first ticks after an attach are the ones carrying a
+/// store's caches still filling. What the load does across those ticks is what
+/// it does across every other one — it churns, it reads, it samples — so the
+/// entry sitting untrusted for them costs the run nothing but delays the
+/// window, and the recovery is still demanded long inside the shortest duration
+/// this suite runs at.
+const BASELINE_TICKS_BEFORE_A_DEMAND: u64 = 3;
+
 /// How long one recovery attempt waits for the attachment to be ready again.
 ///
 /// A bound on whether it came back at all: a re-attach that lands late still
@@ -415,10 +437,7 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
                         .join("; ")
                 },
             ),
-            (
-                "recovery dose",
-                baselines::SOAK_RECOVERY_DOSE.to_string(),
-            ),
+            ("recovery dose", baselines::SOAK_RECOVERY_DOSE.to_string()),
             (
                 "first quartile mean resident set (MiB)",
                 baselines::mebibytes(head),
@@ -486,6 +505,24 @@ fn a_long_mixed_load_grows_neither_memory_nor_descriptors() {
         "the load recovered {recoveries} times against a dose of {}, so the run's other readings \
          are of a load nothing ever disturbed",
         baselines::SOAK_RECOVERY_DOSE
+    );
+    // **A window the term compared nothing over is a failed run.** The no-
+    // starvation term charges the window at the tick period measured ahead of
+    // it, and a window with no such period charges nothing and passes. The
+    // child's floor ([`BASELINE_TICKS_BEFORE_A_DEMAND`]) is what keeps every
+    // window measured; this is what says so when the floor stops holding.
+    let unmeasured: Vec<String> = windows
+        .iter()
+        .filter(|window| !window.baseline_measured())
+        .map(RecoveryWindow::reading)
+        .collect();
+    assert!(
+        unmeasured.is_empty(),
+        "{} of the load's {} recovery windows opened before a tick period had been measured, so \
+         the no-starvation term compared nothing across them: {}",
+        unmeasured.len(),
+        windows.len(),
+        unmeasured.join("; ")
     );
     assert!(
         baselines::fits(descriptor_growth, baselines::SOAK_FD_GROWTH_ALLOWANCE),
@@ -573,8 +610,10 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// **What a recovery charged the load's cadences, carried to the night's
 /// table.** The no-starvation term is a floor over the window's wall clock, and
 /// a window too short to owe a dose passes it — so the doses it owed are
-/// recorded rather than left implicit, and a run whose term compared nothing
-/// says so where the rest of the readings are read.
+/// recorded rather than left implicit, and a run whose term charged nothing
+/// says so where the rest of the readings are read. The baseline period each
+/// window was charged at rides along, and the caller fails a run reporting a
+/// window without one.
 fn reported_recovery_windows(report: &str) -> Vec<RecoveryWindow> {
     report
         .lines()
@@ -599,7 +638,9 @@ struct RecoveryWindow {
     ticks: u64,
     window: Duration,
     /// The baseline tick period the doses were charged at, in milliseconds, or
-    /// `none` where the window opened before a tick had completed.
+    /// [`UNMEASURED_BASELINE`] where the window opened before any tick had
+    /// completed — which [`BASELINE_TICKS_BEFORE_A_DEMAND`] prevents and the
+    /// caller refuses.
     baseline_tick: String,
     churn_turns: u64,
     churn_turns_owed: u64,
@@ -607,7 +648,20 @@ struct RecoveryWindow {
     warm_reads_owed: u64,
 }
 
+/// How a window with no baseline period spells it, in the child's line and in
+/// the summary cell alike.
+const UNMEASURED_BASELINE: &str = "none";
+
 impl RecoveryWindow {
+    /// Whether the window was charged at a measured tick period.
+    ///
+    /// [`BASELINE_TICKS_BEFORE_A_DEMAND`] is what makes this true of every
+    /// window, and the parent asserts it: an unmeasured window is a term that
+    /// compared nothing, which is a failed run rather than a quiet pass.
+    fn baseline_measured(&self) -> bool {
+        self.baseline_tick != UNMEASURED_BASELINE
+    }
+
     /// The window as one summary cell: what it spanned, and what it charged.
     fn reading(&self) -> String {
         format!(
@@ -794,7 +848,10 @@ fn run_load(root: &Path) {
         // the churn turn and the warm read below inside its own window: what
         // the load kept doing while it recovered is counted over whole ticks.
         let observed = probed_state(&host, vault.name());
-        let demanded = recovering.is_none() && !serving(&observed);
+        // The floor is what keeps the window's baseline measured: the period
+        // the term charges at is a mean over the ticks ahead of the window.
+        let demanded =
+            recovering.is_none() && tick >= BASELINE_TICKS_BEFORE_A_DEMAND && !serving(&observed);
         if demanded {
             recoveries += 1;
             recovering = Some(Recovering::demanded(
@@ -971,9 +1028,10 @@ impl Recovering {
                 self.began,
                 tick - self.began + 1,
                 window.as_millis(),
-                charged
-                    .baseline_tick
-                    .map_or_else(|| "none".to_string(), |tick| tick.as_millis().to_string()),
+                charged.baseline_tick.map_or_else(
+                    || UNMEASURED_BASELINE.to_string(),
+                    |tick| tick.as_millis().to_string()
+                ),
                 self.attempts,
                 self.churn_turns,
                 charged.churn_turns,
@@ -1078,9 +1136,12 @@ struct Charged {
 impl Charged {
     /// What a window with no baseline charged: nothing, and it says so.
     ///
-    /// A recovery demanded before one tick of the load has completed has no
+    /// A recovery demanded before any tick of the load has completed has no
     /// achieved period to be judged against, and [`SAMPLE_INTERVAL`] is the
-    /// assumption this term exists not to make.
+    /// assumption this term exists not to make. The load does not raise a
+    /// demand that early ([`BASELINE_TICKS_BEFORE_A_DEMAND`]), so this is the
+    /// spelling of a floor that stopped holding rather than a state a run
+    /// passes in: the window carries it out to the parent, which fails on it.
     fn unmeasured() -> Charged {
         Charged {
             baseline_tick: None,
@@ -1108,7 +1169,9 @@ fn doses_over(span: Duration, every: Duration) -> u64 {
 /// **The rate the no-starvation term charges a recovery window at.** It is the
 /// load's own achieved period rather than [`SAMPLE_INTERVAL`], and it is read
 /// from before the window rather than across it — see
-/// [`RECOVERY_WINDOW_SLACK_TICKS`].
+/// [`RECOVERY_WINDOW_SLACK_TICKS`]. Callers reach it only past
+/// [`BASELINE_TICKS_BEFORE_A_DEMAND`], so the `None` is the arithmetic's own
+/// guard rather than a case the load arranges.
 fn baseline_tick_period(started: Instant, tick: u64) -> Option<Duration> {
     u32::try_from(tick)
         .ok()
