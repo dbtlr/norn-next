@@ -1891,15 +1891,16 @@ fn is_rust_identifier(name: &str) -> bool {
 
 /// The words spelled like an identifier that a declaration cannot be named.
 ///
-/// Strict keywords and reserved ones together. A keyword passes
+/// Strict keywords and reserved ones together, for the edition this workspace
+/// compiles under — `gen` among them, reserved in 2024. A keyword passes
 /// [`is_rust_identifier`] and names nothing, so `counters.rs::fn` would be an
 /// absence no landing could ever end — and the raw spelling `r#fn` is a
 /// different string, which this grammar does not read either.
 const RUST_KEYWORDS: &[&str] = &[
     "Self", "abstract", "as", "async", "await", "become", "box", "break", "const", "continue",
-    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl",
-    "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub", "ref",
-    "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
+    "crate", "do", "dyn", "else", "enum", "extern", "false", "final", "fn", "for", "gen", "if",
+    "impl", "in", "let", "loop", "macro", "match", "mod", "move", "mut", "override", "priv", "pub",
+    "ref", "return", "self", "static", "struct", "super", "trait", "true", "try", "type", "typeof",
     "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
 ];
 
@@ -2020,8 +2021,11 @@ fn past_attribute(line: &str) -> Option<&str> {
 
 /// What follows a leading `pub`, with its parenthesised restriction if it has
 /// one.
+/// The restriction may stand off from its `pub`: `pub (crate) fn` is the same
+/// declaration `pub(crate) fn` is, so the space is passed over before the group
+/// is read rather than ending the strip at `pub`.
 fn past_visibility(line: &str) -> Option<&str> {
-    let rest = past_word(line, "pub")?;
+    let rest = past_word(line, "pub")?.trim_start();
     let Some(opened) = rest.strip_prefix('(') else {
         return Some(rest);
     };
@@ -2900,6 +2904,11 @@ fn a_carrier() {}
             "pub(super) fn collect_statistics(connection: &Connection) {",
             "pub(self) fn collect_statistics() {}",
             "pub(in crate::db) fn collect_statistics() {",
+            // A restriction standing off from its `pub` is the same
+            // declaration the tight spelling is.
+            "pub (crate) fn collect_statistics() {",
+            "pub (super) fn collect_statistics() {",
+            "pub (in crate::db) fn collect_statistics() {",
             "pub extern \"C\" fn collect_statistics() {",
             "extern \"C\" fn collect_statistics() {",
             "#[rustfmt::skip] pub fn collect_statistics() {",
@@ -2924,6 +2933,7 @@ fn a_carrier() {}
             "wanted"
         ));
         assert!(!opens_fn("pub(super) fn wanted_more()", "wanted"));
+        assert!(opens_fn("pub (crate) fn wanted()", "wanted"));
     }
 
     /// A Rust keyword is not a name a file can declare, so an absence claimed
@@ -2931,7 +2941,9 @@ fn a_carrier() {}
     /// this grammar reads neither.
     #[test]
     fn a_symbol_ground_naming_a_keyword_is_caught() {
-        for keyword in ["fn", "crate", "self", "Self", "struct", "mod", "yield"] {
+        for keyword in [
+            "fn", "crate", "self", "Self", "struct", "mod", "yield", "gen",
+        ] {
             let subject = format!("crates/demo/tests/vocabulary.rs::{keyword}");
             refused(
                 |registry| {
