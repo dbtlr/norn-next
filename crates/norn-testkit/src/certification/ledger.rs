@@ -45,6 +45,9 @@
 //! 7. **It came off the schedule.** A run somebody started is outside the
 //!    sequence the five are counted over, so it is typed
 //!    [`NonQualifying::ManualDispatch`] rather than left to a reader to notice.
+//!    The dispatch asserts it and [`came_off_the_schedule`] decides it, because
+//!    an assertion anybody with write access can type is not a fact about how a
+//!    run was produced.
 //!
 //! A run that fails any of them is non-qualifying **with a typed reason**, from
 //! the closed vocabulary in [`NonQualifying`]. The reason is what a campaign
@@ -71,8 +74,10 @@
 //!
 //! The counting. Five consecutive qualifying *scheduled* runs is a rule over a
 //! sequence of records — and manual runs never advance it, which is a fact about
-//! how a record was produced rather than about its contents. The rule is
-//! documented on [`Record`] and applied by the campaign that reads the records.
+//! how a record was produced rather than about its contents. That fact is
+//! established here, by [`came_off_the_schedule`], so what the campaign counts
+//! is a field no dispatch could set on its own. The rule is documented on
+//! [`Record`] and applied by the campaign that reads the records.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -104,14 +109,52 @@ pub const SINK: &str = "NORN_QUALIFICATION_LEDGER";
 /// that is not a change to the suite.
 pub const CANDIDATE_POINTER: &str = ".github/soak-candidate";
 
-/// Whether this run came off the nightly schedule, as the literal `true`.
+/// What the dispatch **asserted** about coming off the nightly schedule, as the
+/// literal `true`.
 ///
-/// The dispatcher's to supply. A certification run is reached by
-/// `workflow_dispatch` however it was started, so `GITHUB_EVENT_NAME` says
-/// `workflow_dispatch` for the nightly and for a run somebody typed alike — and
-/// the one workflow that can tell them apart is the one holding the cron.
-/// Anything but `true` is a run outside the sequence the five are counted over.
+/// A certification run is reached by `workflow_dispatch` however it was
+/// started, so `GITHUB_EVENT_NAME` says `workflow_dispatch` for the nightly and
+/// for a run somebody typed alike, and the fact has to travel as an input. An
+/// input is typeable, so this is an assertion rather than the answer:
+/// [`came_off_the_schedule`] is where it becomes one.
 pub const SCHEDULED: &str = "NORN_QUALIFICATION_SCHEDULED";
+
+/// Who started this run — `github.triggering_actor`, which the runner sets and
+/// no input can reach.
+pub const DISPATCHING_ACTOR: &str = "NORN_QUALIFICATION_DISPATCHING_ACTOR";
+
+/// The identity a run dispatched by the dispatcher workflow's own
+/// `GITHUB_TOKEN` carries.
+///
+/// GitHub's token is a GitHub App installation token, and a `workflow_dispatch`
+/// it creates is attributed to that app rather than to a person —
+/// `workflow_dispatch` being one of the two events the token is documented to
+/// raise at all. A run somebody typed carries their username instead.
+///
+/// **If that attribution is ever other than this, every nightly records
+/// `scheduled: false` and the count stalls.** That is the safe direction and it
+/// is self-diagnosing: [`Record::dispatching_actor`] carries the value the run
+/// actually saw, so the first nightly's artifact says what to write here.
+pub const DISPATCHER_IDENTITY: &str = "github-actions[bot]";
+
+/// **Whether a run came off the nightly schedule.** The assertion the dispatch
+/// carried, and the identity that made it.
+///
+/// The count is of the schedule, so this is the term that decides whether a
+/// green run is one of the five — and an input alone cannot decide it. Anyone
+/// with write access can dispatch the certification workflow and type
+/// `scheduled=true`, and the digest beside it is deterministic and printable,
+/// so neither value resists a person who wants a qualifying record. What does
+/// resist is who the runner says started the run: only the dispatcher's own
+/// token dispatches as [`DISPATCHER_IDENTITY`].
+///
+/// A run that asserted the schedule and was started by somebody is recorded
+/// rather than refused — `scheduled: false`, the actor named, and
+/// [`NonQualifying::ManualDispatch`] as the typed reason. Refusing it would
+/// lose the evidence that somebody asked.
+pub fn came_off_the_schedule(asserted: bool, dispatching_actor: &str) -> bool {
+    asserted && dispatching_actor == DISPATCHER_IDENTITY
+}
 
 /// The suite-manifest digest the dispatcher read at the pin, before it started
 /// this run.
@@ -263,6 +306,13 @@ pub enum NonQualifying {
     /// same suite and produces a record like any other, and it is outside the
     /// sequence the five are counted over: the count is of the schedule, so a
     /// run somebody started never advances it however green it was.
+    ///
+    /// **Including a run that asserted otherwise.** Every certification run is
+    /// a dispatch, so the assertion travels as an input — and an input is
+    /// typeable, which is why [`came_off_the_schedule`] weighs it against the
+    /// identity the runner attributes the dispatch to. A person who types
+    /// `scheduled=true` gets this reason and their username in
+    /// [`Record::dispatching_actor`].
     ManualDispatch,
     /// The run was cancelled. It never happened.
     Cancellation,
@@ -441,9 +491,16 @@ pub struct Record {
     /// The inventory's own contract digest, carried separately so a reader can
     /// tell an inventory edit from a lane edit without recomputing either.
     pub case_inventory_digest: String,
-    /// Whether this run came off the schedule. A manual run never advances the
-    /// count.
+    /// Whether this run came off the schedule, as [`came_off_the_schedule`]
+    /// decided it from what the dispatch asserted and who the runner says made
+    /// it. A manual run never advances the count, and an asserted schedule
+    /// nobody but a person made is a manual run.
     pub scheduled: bool,
+    /// Who the runner says started this run — `github.triggering_actor`. It is
+    /// carried rather than reduced to the boolean above so a record says which
+    /// run it was and not only which kind, and so the first nightly's artifact
+    /// reports the identity [`DISPATCHER_IDENTITY`] is written against.
+    pub dispatching_actor: String,
     pub platform: Platform,
     pub preflight: Preflight,
     /// One line per required case.
@@ -834,12 +891,18 @@ pub fn from_environment(workspace_root: &Path) -> Result<Record, String> {
         None => BTreeMap::new(),
     };
 
+    let dispatching_actor = environment(DISPATCHING_ACTOR).unwrap_or_else(|| "unknown".to_string());
+
     let mut record = Record {
         candidate_sha: environment("GITHUB_SHA").unwrap_or_else(|| "unknown".to_string()),
         suite_manifest_digest,
         dispatcher_digest: environment(DISPATCHER_DIGEST).unwrap_or_default(),
         case_inventory_digest: inventory::contract_digest(),
-        scheduled: environment(SCHEDULED).as_deref() == Some("true"),
+        scheduled: came_off_the_schedule(
+            environment(SCHEDULED).as_deref() == Some("true"),
+            &dispatching_actor,
+        ),
+        dispatching_actor,
         platform: Platform {
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
@@ -979,8 +1042,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        CaseOutcome, Classification, ExitBar, NonQualifying, Outcome, Platform, Preflight, Record,
-        RunResult,
+        CaseOutcome, Classification, DISPATCHER_IDENTITY, ExitBar, NonQualifying, Outcome,
+        Platform, Preflight, Record, RunResult, came_off_the_schedule,
     };
     use crate::certification::inventory::{self, REQUIRED_CASES};
     use crate::certification::manifest;
@@ -1014,6 +1077,7 @@ mod tests {
             dispatcher_digest: digest,
             case_inventory_digest: inventory::contract_digest(),
             scheduled: true,
+            dispatching_actor: DISPATCHER_IDENTITY.to_string(),
             platform: Platform {
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),
@@ -1645,6 +1709,48 @@ mod tests {
             assert!(!record.qualifies(&root));
             assert_eq!(record.writer_defects(&root), Vec::<String>::new());
         }
+    }
+
+    /// **A scheduled record cannot be produced from the input alone.**
+    ///
+    /// Every certification run is a `workflow_dispatch`, so whether it came off
+    /// the nightly cron has to travel as an input — and an input is a string
+    /// anyone with write access types. The digest beside it is no barrier
+    /// either: it is deterministic and the suite prints it. What is left is who
+    /// the runner says made the dispatch, and only the dispatcher's own token
+    /// dispatches as the app.
+    ///
+    /// The demoted run is recorded rather than refused, with the actor named
+    /// and `manual-dispatch` as the typed reason, so somebody asking for a
+    /// qualifying record leaves the evidence that they asked.
+    #[test]
+    fn a_scheduled_run_is_one_the_dispatcher_started_and_not_one_that_says_so() {
+        for actor in ["drew", "unknown", "", "github-actions", "nobody[bot]"] {
+            assert!(
+                !came_off_the_schedule(true, actor),
+                "`{actor}` asserted the schedule and was honoured"
+            );
+        }
+        assert!(came_off_the_schedule(true, DISPATCHER_IDENTITY));
+        assert!(!came_off_the_schedule(false, DISPATCHER_IDENTITY));
+
+        let root = workspace_root();
+        let mut record = qualifying_at(&root);
+        record.dispatching_actor = "drew".to_string();
+        record.scheduled = came_off_the_schedule(true, &record.dispatching_actor);
+        record.classification = record.implied_classification();
+        assert_eq!(
+            record.classification,
+            Classification::NonQualifying {
+                reason: NonQualifying::ManualDispatch
+            }
+        );
+        assert!(!record.qualifies(&root));
+        assert_eq!(
+            record.writer_defects(&root),
+            Vec::<String>::new(),
+            "the run is recorded rather than refused"
+        );
     }
 
     /// The hand-edited half: a record that states it qualifies while carrying a

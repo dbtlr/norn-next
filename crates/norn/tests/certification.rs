@@ -252,6 +252,7 @@ fn a_qualifying_record_validates_and_a_doctored_one_does_not() {
         dispatcher_digest: digest,
         case_inventory_digest: inventory::contract_digest(),
         scheduled: true,
+        dispatching_actor: ledger::DISPATCHER_IDENTITY.to_string(),
         // The two platform-deciding facts are populated because a qualifying
         // record is required to carry them: the inventory's volume-folding and
         // backend-deciding lanes are each covered by a run of each answer, so a
@@ -498,8 +499,13 @@ fn assert_the_lane_certifies_the_ref_it_was_dispatched_at(lane: &str, body: &str
     for (key, what) in [
         (
             ledger::SCHEDULED,
-            "whether this run came off the nightly cron, which every run of this file looks like \
-             a manual dispatch from the inside",
+            "what the dispatch asserted about the nightly cron, which every run of this file \
+             looks like a manual dispatch from the inside",
+        ),
+        (
+            ledger::DISPATCHING_ACTOR,
+            "who the runner says made the dispatch, which is the unforgeable half of the \
+             schedule term — without it the assertion above decides the count on its own",
         ),
         (
             ledger::DISPATCHER_DIGEST,

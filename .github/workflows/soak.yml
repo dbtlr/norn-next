@@ -17,12 +17,19 @@
 # that changed what a run does from here would change it outside the digest the
 # candidate is certified under.
 #
+# **Three jobs, because one of them runs the candidate's code.** Resolving the
+# pin needs a credential that can fetch; dispatching needs a token that can
+# write a tag and start a workflow; and computing the digest builds the pinned
+# tree — arbitrary build scripts, proc macros and test code from whatever commit
+# the pointer names. That last one is therefore its own job, with `contents:
+# read`, no credential left on disk, and nothing the other two hold. The
+# permissions below are each job's own for the same reason.
+#
 # **A failure here is a failure of a different workflow.** An unreadable
-# pointer, a sha nothing can fetch, a pin whose tree carries no certification
-# workflow: each ends this job red and dispatches nothing. The campaign's
-# timeout signal is a *certification* run that left no record, and no run of
-# this file can manufacture one — which is what lets that signal stay
-# unambiguous.
+# pointer, a sha nothing can fetch, a sha that is not on the default branch, a
+# pin whose tree carries no certification workflow: each ends this workflow red
+# and dispatches nothing. The campaign's timeout signal is a *certification* run
+# that left no record, and no run of this file can manufacture one.
 #
 # GitHub disables schedules on repositories with no activity for 60 days, so
 # this workflow running is a thing to check rather than assume.
@@ -33,73 +40,91 @@ on:
     # Nightly, 04:00 UTC.
     - cron: '0 4 * * *'
   # A dispatch of this file is the way to start a certification run by hand
-  # against the current pin. The run it starts is stamped `scheduled: false`
-  # and advances no count — only the cron above sends `true`.
+  # against the current pin. The run it starts is stamped `scheduled: false` and
+  # advances no count: what decides that is `github.triggering_actor` on the
+  # dispatched run, which is the app only where this workflow's own token made
+  # the dispatch — and the certification run then weighs it against the cron
+  # assertion below.
   workflow_dispatch:
 
-# `contents: write` creates the `soak-candidate/<sha>` tag; `actions: write`
-# dispatches the certification workflow. Both are the smallest grant that does
-# the job, and neither reaches the certification run itself, which declares
-# `contents: read`.
-permissions:
-  contents: write
-  actions: write
+# Granted per job rather than here, so the job that builds the candidate's tree
+# holds nothing the tag and the dispatch need.
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
-  # The whole workflow. It resolves the pin, publishes a ref for it and hands
-  # the certification run a digest to check its own reading against.
-  #
-  # The timeout is a runaway guard over one cold debug build of the `norn`
-  # certification binary at the pin, which is what computing the digest costs.
-  dispatch:
-    name: dispatch the certification run
+  # Which commit the campaign is certifying, and whether it is a commit this
+  # repository is willing to run. No candidate code executes here.
+  pin:
+    name: resolve the pinned candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
     steps:
-      # The default branch, for the pointer and the script that reads it. Its
-      # credentials are kept: the step below fetches the pinned commit through
-      # this remote, and a pin nothing can fetch is the error this exists to
-      # raise.
+      # The default branch, for the pointer and the script that reads it. Whole
+      # history, because the script holds the pin to being an ancestor of this
+      # branch and an ancestor check over a shallow clone answers nothing. The
+      # credential is kept: the script fetches the pinned commit through this
+      # remote, and a pin nothing can fetch is one of the errors it raises.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: true
+          fetch-depth: 0
       # One parser for the pointer format, and it refuses everything a
-      # certification run could not be held to — shape, fetchability, and a tree
-      # carrying the workflow the dispatch below names. The shell logic lives in
-      # the script rather than inline so it is a file somebody can run.
+      # certification run could not be held to — shape, fetchability, ancestry
+      # of the default branch, and a tree carrying the workflow the dispatch
+      # below names. The shell logic lives in the script rather than inline so
+      # it is a file somebody can run.
       - name: The pinned candidate
         id: candidate
         shell: bash
-        run: .github/scripts/soak-candidate.sh .github/soak-candidate .github/workflows/certify.yml
-      # A second checkout of the candidate, in its own directory, because the
-      # digest is a reading of a clean tree at the pin and this workspace holds
-      # the default branch.
-      - name: Check out the candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        run: >-
+          .github/scripts/soak-candidate.sh
+          .github/soak-candidate
+          .github/workflows/certify.yml
+          ${{ github.event.repository.default_branch }}
+
+  # **The first of the two attestations, and the only job that runs the
+  # candidate's code.** The digest is computed off the candidate's own tree and
+  # by the candidate's own rules, and handed to the certification run as an
+  # input it checks its own reading against. Two readers of two checkouts
+  # agreeing is what makes the digest in a record evidence rather than a
+  # self-report.
+  #
+  # It is read off the suite that owns the value rather than recomputed by a
+  # second implementation, so there is one definition of the digest and this is
+  # a caller of it.
+  #
+  # `contents: read` and no persisted credential: building a tree means running
+  # its build scripts, and this job holds nothing worth reaching for. The
+  # timeout is a runaway guard over one cold debug build of the `norn`
+  # certification binary.
+  digest:
+    name: the suite manifest digest at the pin
+    needs: pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-          ref: ${{ steps.candidate.outputs.sha }}
-          path: candidate
+          ref: ${{ needs.pin.outputs.sha }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: candidate
-      # **The first of the two attestations.** The digest is computed here, off
-      # the candidate's own tree and by the candidate's own rules, and handed to
-      # the run as an input it checks its own reading against. Two readers of
-      # two checkouts agreeing is what makes the digest in a record evidence
-      # rather than a self-report.
-      #
-      # It is read off the suite that owns the value rather than recomputed by a
-      # second implementation, so there is one definition of the digest and the
-      # dispatcher is a caller of it.
-      - name: The suite manifest digest at the pin
+      - name: Read the digest
         id: digest
         shell: bash
-        working-directory: candidate
+        env:
+          SHA: ${{ needs.pin.outputs.sha }}
         run: |
           log="${RUNNER_TEMP}/suite-manifest-digest.log"
           cargo test --locked -p norn --test certification the_suite_manifest_digest -- --nocapture 2>&1 | tee "$log"
@@ -112,21 +137,34 @@ jobs:
           {
             echo "### Soak candidate"
             echo
-            echo "- candidate: \`${{ steps.candidate.outputs.sha }}\`"
-            echo "- suite manifest digest at the pin: \`$digest\`"
+            echo "- candidate: \`${SHA}\`"
+            echo "- suite manifest digest at the pin: \`${digest}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-      # **A ref for the commit, so the dispatch can name it.** `workflow_dispatch`
-      # takes a ref rather than a sha, so the pin needs one — and the tag holds
-      # the sha in its own name, which is what makes it unmovable in the sense
-      # that matters: a `soak-candidate/<sha>` tag pointing anywhere but `<sha>`
-      # is a contradiction, and this step refuses rather than repairs it. An
-      # existing tag is left exactly as it is, so a ref a run of five was
-      # counted over is never rewritten under it.
+
+  # The ref and the dispatch. No checkout, so the token this job holds never
+  # sits beside code from the pin.
+  dispatch:
+    name: dispatch the certification run
+    needs: [pin, digest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The tag, and the dispatch. Nothing here reads a tree.
+      contents: write
+      actions: write
+    steps:
+      # **A ref for the commit, so the dispatch can name it.**
+      # `workflow_dispatch` takes a ref rather than a sha, so the pin needs one
+      # — and the tag holds the sha in its own name, which is what makes it
+      # unmovable in the sense that matters: a `soak-candidate/<sha>` tag
+      # pointing anywhere but `<sha>` is a contradiction, and this step refuses
+      # rather than repairs it. An existing tag is left exactly as it is, so a
+      # ref a run of five was counted over is never rewritten under it.
       - name: A ref for the pinned candidate
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.candidate.outputs.sha }}
+          SHA: ${{ needs.pin.outputs.sha }}
         run: |
           standing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/soak-candidate/${SHA}" --jq .object.sha 2>/dev/null || true)
           if [ -z "$standing" ]; then
@@ -139,16 +177,19 @@ jobs:
           else
             echo "soak-candidate/${SHA} already names ${SHA}"
           fi
-      # **`scheduled` is `true` only where this dispatcher came off the cron.**
-      # The certification run cannot tell: every run of that file is a
-      # `workflow_dispatch`, including the nightly one. So the fact travels as
-      # an input, from the only workflow that holds it.
+      # **`scheduled` is asserted here and decided there.** The certification run
+      # cannot tell a nightly from a typed dispatch — every run of that file is a
+      # `workflow_dispatch` — so the fact travels as an input from the only
+      # workflow that holds it. An input is typeable, so the record weighs this
+      # assertion against `github.triggering_actor` on the dispatched run, which
+      # carries the app's identity only where the dispatch was made with this
+      # workflow's own token, as below.
       - name: Dispatch the certification run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ steps.candidate.outputs.sha }}
-          DIGEST: ${{ steps.digest.outputs.digest }}
+          SHA: ${{ needs.pin.outputs.sha }}
+          DIGEST: ${{ needs.digest.outputs.digest }}
           SCHEDULED: ${{ github.event_name == 'schedule' }}
         run: |
           gh workflow run certify.yml --ref "soak-candidate/${SHA}" \

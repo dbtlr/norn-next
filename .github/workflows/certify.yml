@@ -88,19 +88,21 @@ name: certify
 #
 # A dispatch of any other ref — a branch, by hand — runs that ref's copy of this
 # file over that ref's tree, which is how a change to a lane is tried before it
-# merges. Such a run carries `scheduled: false` unless somebody types otherwise,
-# and the record then classifies `manual-dispatch` and advances no count.
+# merges. Such a run records `scheduled: false` whatever its inputs say, because
+# the schedule is decided from who made the dispatch and not from what it
+# asserted, so the record classifies `manual-dispatch` and advances no count.
 on:
   workflow_dispatch:
     inputs:
       scheduled:
         description: >-
           `true` only where the dispatcher itself came off the nightly cron.
-          A run somebody started is outside the sequence the five are counted
-          over, and this is the only thing that says which a run was:
-          `github.event_name` is `workflow_dispatch` for every run of this
-          file. A string rather than a boolean, so the value a lane stamps into
-          the record is the value the dispatcher sent.
+          `github.event_name` is `workflow_dispatch` for every run of this file,
+          so the fact has to travel as an input — but an input is typeable, and
+          this one is an assertion rather than the answer: the record weighs it
+          against `github.triggering_actor`, which only the dispatcher's own
+          token sets to the app. A string rather than a boolean, so the value a
+          lane stamps is the value the dispatch sent.
         required: false
         default: 'false'
         type: string
@@ -200,21 +202,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # **What the dispatcher attested, carried into the record.** Neither value
-      # is observable from inside this run. Every run of this file is a
+      # **What the dispatch asserted, and who made it.** Neither input is
+      # observable from inside this run: every run of this file is a
       # `workflow_dispatch`, so whether it came off the nightly cron is the
-      # dispatcher's to say; and the digest is the dispatcher's own reading of
-      # the pin, which the record checks its own reading against. They are
-      # appended to the job environment so the record step reads them out of the
-      # environment like every other field.
-      - name: What the dispatcher attested
+      # dispatcher's to say, and the digest is the dispatcher's own reading of
+      # the pin.
+      #
+      # **An input is typeable, so the schedule is not decided here.** Anyone
+      # with write access can dispatch this file with `scheduled=true`, and the
+      # digest beside it is deterministic and printable — neither resists
+      # somebody who wants a qualifying record. `github.triggering_actor` does:
+      # the runner sets it, no input reaches it, and only a dispatch made with
+      # the dispatcher workflow's own `GITHUB_TOKEN` carries the app's identity
+      # rather than a person's. So the assertion and the actor are both stamped
+      # and `norn_testkit::certification::ledger::came_off_the_schedule` weighs
+      # them. A person who asserts the schedule gets a record saying
+      # `scheduled: false`, their name, and `manual-dispatch` — plus the warning
+      # below, so nothing about the demotion is silent.
+      - name: What the dispatch asserted
         shell: bash
         env:
           SCHEDULED: ${{ inputs.scheduled }}
+          DISPATCHING_ACTOR: ${{ github.triggering_actor }}
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
+          if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
+            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. Only the dispatcher workflow's own token can make that assertion, so this run is recorded scheduled: false and classifies manual-dispatch."
+          fi
           {
             echo "NORN_QUALIFICATION_SCHEDULED=$SCHEDULED"
+            echo "NORN_QUALIFICATION_DISPATCHING_ACTOR=$DISPATCHING_ACTOR"
             echo "NORN_QUALIFICATION_DISPATCHER_DIGEST=$DISPATCHER_DIGEST"
           } >> "$GITHUB_ENV"
       # Taken before anything is built, because the reading is of the machine
@@ -366,13 +383,20 @@ jobs:
       # across a gap, so a missing record breaks a run of five exactly as a
       # non-qualifying one does.
       #
-      # **Nothing else in this workflow produces that signal**, which is what
-      # keeps it unambiguous. A pin that names no fetchable commit, or one whose
-      # tree carries no copy of this file, fails the dispatcher in
-      # `.github/workflows/soak.yml` — a different workflow, whose failed run is
-      # nothing a campaign counting records of this one can mistake for a
-      # starved runner. This workflow is never reached without a commit to
-      # stand in.
+      # **No state of the pin produces that signal**, which is what a bad
+      # pointer used to do. A sha nothing can fetch, a sha off the default
+      # branch, or one whose tree carries no copy of this file all fail the
+      # dispatcher in `.github/workflows/soak.yml` — a different workflow, whose
+      # failed run is nothing a campaign counting records of this one can
+      # mistake for a starved runner, and which starts no run here at all.
+      #
+      # **A transient failure of the checkout above still produces it.** That
+      # step carries no `continue-on-error`, so a fetch that fails, a rate
+      # limit, or a `soak-candidate/*` tag deleted between the dispatch and the
+      # start leaves this job with no tree, this step failing, and the upload
+      # finding nothing. So a missing record means *either* a timeout kill or a
+      # run that never got its tree — both of which break a run of five, and
+      # which the run metadata tells apart.
       #
       # The watcher backend is the workflow's to state rather than the process's:
       # this job runs on the Linux runner, whose one real platform watcher is
@@ -506,14 +530,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: What the dispatcher attested
+      - name: What the dispatch asserted
         shell: bash
         env:
           SCHEDULED: ${{ inputs.scheduled }}
+          DISPATCHING_ACTOR: ${{ github.triggering_actor }}
           DISPATCHER_DIGEST: ${{ inputs.dispatcher_digest }}
         run: |
+          if [ "$SCHEDULED" = "true" ] && [ "$DISPATCHING_ACTOR" != "github-actions[bot]" ]; then
+            echo "::warning::${DISPATCHING_ACTOR} dispatched this run asserting scheduled=true. Only the dispatcher workflow's own token can make that assertion, so this run is recorded scheduled: false and classifies manual-dispatch."
+          fi
           {
             echo "NORN_QUALIFICATION_SCHEDULED=$SCHEDULED"
+            echo "NORN_QUALIFICATION_DISPATCHING_ACTOR=$DISPATCHING_ACTOR"
             echo "NORN_QUALIFICATION_DISPATCHER_DIGEST=$DISPATCHER_DIGEST"
           } >> "$GITHUB_ENV"
       # Pinned image and asserted architecture, the same way ci.yml's platform

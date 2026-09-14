@@ -195,7 +195,11 @@ a campaign counts through. The scheduled lane writes a record every run and uplo
 except after a `timeout-minutes` kill, which stops the step that writes one, so a scheduled
 run with no record is how the campaign reads a timeout. Counting five consecutive
 qualifying scheduled runs over one frozen candidate is read off those records, and manual
-runs never advance it.
+runs never advance it. Every certification run is a dispatch, so **which a run was is decided
+from who made the dispatch** — only the dispatcher's own workflow token carries the app's
+identity — rather than from the assertion the dispatch carried, which anybody with write
+access can type. A run that asserts the schedule and was started by a person is recorded
+`scheduled: false` with the actor named and `manual-dispatch` as the reason.
 
 **The candidate is pinned, and the run happens at the pin.** A workflow's steps come from the
 ref it was triggered on and a schedule only ever triggers the default branch, so the two
@@ -203,7 +207,11 @@ concerns are two files. `.github/workflows/soak.yml` on the default branch is th
 **dispatcher**: it holds the nightly cron, reads `.github/soak-candidate` for the commit the
 campaign is certifying, fetches it, verifies its tree carries the certification workflow,
 computes the suite-manifest digest there, tags it `soak-candidate/<sha>` and dispatches
-`.github/workflows/certify.yml` at that tag. `certify.yml` carries the two lanes and nothing
+`.github/workflows/certify.yml` at that tag. The pin must be an ancestor of the default
+branch: the dispatcher builds the pinned tree, and GitHub serves any reachable sha, so the
+reviewed-ness the candidate is assumed to have is checked rather than assumed. The job that
+builds that tree is its own, holding `contents: read` and no credential, because building a
+tree runs its build scripts. `certify.yml` carries the two lanes and nothing
 resolves a pointer inside it: the run stands in the candidate, so its own commit is the
 candidate and the record reads it off the checkout. The dispatcher carries no lane behaviour,
 which `norn --test certification` holds it to — anything deciding what a run does would
@@ -216,9 +224,10 @@ advanced.
 pin travels to the run as an input, and the record refuses to qualify where its own reading
 differs — or where nothing dispatched it from the pointer at all. So the value five records
 have to agree on is one two readers of two checkouts arrived at. A pin nothing can fetch, or
-one predating the mechanism, fails **the dispatcher**, which is a different workflow: a
-certification run is never started without a commit to stand in, so a certification run with
-no record still means exactly one thing, a `timeout-minutes` kill.
+one off the default branch, or one predating the mechanism, fails **the dispatcher**, which
+is a different workflow: no certification run is started at all, so no state of the pointer
+can produce a certification run with no record. A missing record therefore means a run that
+was killed for time or one that never got its tree, both of which break a run of five.
 
 **Two scheduled lanes run the certification cases**, and each leaves a record of what its
 own machine did. The Linux lane carries the measurements and the hour-long load; the macOS
