@@ -44,7 +44,7 @@
 //! developer sees and what argued for the margins; no lane evaluates a bar here
 //! on either. The macOS certification lane runs the certification cases and no
 //! measurement step at all, which the comment over
-//! `.github/workflows/soak.yml`'s `certification-macos` job states in those
+//! `.github/workflows/certify.yml`'s `certification-macos` job states in those
 //! words.
 #![allow(dead_code)]
 

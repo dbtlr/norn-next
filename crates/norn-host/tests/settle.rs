@@ -31,18 +31,32 @@
 //! measure this instrument rather than the subject. Once they do, the poll
 //! reads the full [`StoreProjection`] — documents, frontmatter, bodies,
 //! headings, blocks, tags, links, indexed terms, **findings** and the pinned
-//! schema — and the reading is the elapsed time at the end of the first such
-//! read that the next poll finds unchanged. What the clock stopped on is then
-//! held to the projection the equivalence bar is taken over, so "the store had
-//! reached its final state" is an assertion rather than an argument from
-//! quiescence.
+//! schema — and the confirming read is the first such read that the next poll
+//! finds unchanged. What the clock stopped on is then held to the projection
+//! the equivalence bar is taken over, so "the store had reached its final
+//! state" is an assertion rather than an argument from quiescence.
 //!
-//! **The reading is conservative by construction.** Every sample is taken after
-//! the observation that decided it, so the cost of the census read and of the
-//! projection read are both inside it, and the reading is late by at most one
-//! poll gap, which the shared cadence tops out at 50 ms. An authored ceiling
-//! over these numbers is a ceiling over readings that include their own
-//! instrument.
+//! # Where the clock stops, and what bounds the error
+//!
+//! **The reading is taken at the instant the confirming read began, not the
+//! instant it returned.** A read observes the store as of its start, so a read
+//! that returns the settled state says the settle had already happened when
+//! that read began. The time the read itself takes is the instrument
+//! materialising a ≥5k-document projection — at the `soak` profile that is
+//! several hundred milliseconds, enough to dominate the subject — and charging
+//! it to the subject would make the ceiling a bar on
+//! [`StoreProjection::read`].
+//!
+//! **What is left is a resolution, not a bias.** The settle lies somewhere
+//! between the start of the last poll that found the store unsettled and the
+//! instant the confirming read began; nothing here samples in between. The
+//! reading is the top of that window, so it never under-reports — and how wide
+//! the window was is **measured per leg and recorded beside the reading**,
+//! rather than assumed from the cadence. It is a census read plus a sleep: the
+//! sleep is what [`norn_testkit::wait::LONGEST_POLL_GAP`] tops out, and the
+//! census read grows with the vault, so at the ≥5k profile the window is wider
+//! than the cadence alone would say. A ceiling authored over these numbers is
+//! authored against the resolutions recorded with them.
 //!
 //! # `Ready` is a property, not a second clock
 //!
@@ -50,11 +64,11 @@
 //! ordinary churn never takes that away: a poll therefore cannot time a
 //! *transition* to `Ready`, and a duration to it would be the cost of one
 //! `state()` call rather than a fact about the subject. So the second term is
-//! recorded as what it is — a boolean per leg, asserted at the poll the reading
-//! was taken at: **the attachment publishes `Ready` at the instant the store
-//! reaches equivalence**, which says the churn the family applied withdrew no
-//! trust. It is not a claim that the entry held `Ready` at every instant in
-//! between; nothing here samples between polls.
+//! recorded as what it is — a boolean per leg, sampled at the poll that
+//! confirmed the reading: **the attachment is publishing `Ready` where the
+//! store has reached equivalence**, which says the churn the family applied
+//! withdrew no trust. It is not a claim that the entry held `Ready` at every
+//! instant in between; nothing here samples between polls.
 //!
 //! # Every leg of every family
 //!
@@ -143,6 +157,14 @@ fn every_churn_family_settles_inside_the_ceiling() {
                     None => "unauthored".to_string(),
                 },
             ),
+            // The sleep half of the poll gap. The other half is the census
+            // read, which grows with the vault — so each leg's measured
+            // resolution is recorded beside its reading rather than derived
+            // from this.
+            (
+                "poll sleep cap (ms)",
+                baselines::milliseconds(norn_testkit::wait::LONGEST_POLL_GAP),
+            ),
         ],
     );
 
@@ -156,6 +178,10 @@ fn every_churn_family_settles_inside_the_ceiling() {
                     (
                         format!("{leg}: to equivalence (ms)"),
                         baselines::milliseconds(settle.equivalent),
+                    ),
+                    (
+                        format!("{leg}: resolution (ms)"),
+                        baselines::milliseconds(settle.resolution),
                     ),
                     (
                         format!("{leg}: Ready at equivalence"),
@@ -297,9 +323,23 @@ struct Settle {
     /// To the derived store holding what a build from zero over the same tree
     /// holds.
     equivalent: Duration,
-    /// Whether the attachment was publishing `Ready` at the poll that took the
-    /// reading.
+    /// Whether the attachment was publishing `Ready` at the poll that
+    /// confirmed the reading.
     ready: bool,
+    /// How wide the window the settle actually fell in was: from the start of
+    /// the last poll that found the store unsettled to the reading itself.
+    /// The reading is the top of that window, so this is how much earlier the
+    /// settle may have happened.
+    resolution: Duration,
+}
+
+/// A reading that has been taken but not yet confirmed by a second read.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    /// The start of the full projection read this candidate was taken at.
+    at: Duration,
+    /// The start of the poll before it, which found the store unsettled.
+    after: Duration,
 }
 
 /// One leg's reading, and the projection the clock stopped on.
@@ -417,8 +457,10 @@ fn assert_moved(script: &Script, before: &Census, after: &Census) {
 /// Apply one phase and settle over it, timing from its final act.
 ///
 /// The clock starts the instant the phase is delivered — when `apply` returns
-/// for a watched phase, and when the reload returns for a control-file one.
-/// Everything after it, the census read and every poll, is inside the reading.
+/// for a watched phase, and when the reload returns for a control-file one —
+/// and stops at the instant the confirming projection read began, which is the
+/// latest instant the store is known to have already settled by. The poll gap
+/// before that instant is the reading's resolution.
 fn phase(
     vault: &attach::Vault,
     host: &attach::ServingHost,
@@ -444,32 +486,53 @@ fn phase(
     );
     tree.assert_the_script_read_the_tree_the_same_way(script);
 
-    // The two stages of the poll. `confirmed` holds the elapsed time at the end
-    // of a full projection read and the projection it read; the next poll's
-    // read has to agree with it before that elapsed time becomes the reading.
-    let mut confirmed: Option<(Duration, StoreProjection)> = None;
+    // The two stages of the poll. `confirmed` holds a candidate reading and the
+    // projection that was read at it; the next poll's read has to agree with
+    // that projection before the candidate becomes the reading.
+    let mut confirmed: Option<(Candidate, StoreProjection)> = None;
+    // The start of the poll before this one, which is the latest instant the
+    // store is known to have still been unsettled at.
+    let mut previous_poll: Option<Duration> = None;
     let mut ready = false;
+    let mut resolution = Duration::ZERO;
     let equivalent = wait_until(
         &format!("the derived store to hold what `{}` implies", script.name()),
         CONVERGING.budget_for(applied.steps()),
         || {
+            // The poll's own start, before the census it opens with. A poll
+            // that found the store unsettled bounds the settle from below, and
+            // it does so from here rather than from where its census finished.
+            let entered = since.elapsed();
+            let before_this_one = previous_poll.replace(entered);
             if let Some(why) = tree.disagreement(store) {
                 confirmed = None;
                 return Observed::pending(why);
             }
-            // Read first, sampled after: the cost of the look is inside the
-            // reading rather than shaved off it.
+            // Sampled before the read, because the read observes the store as
+            // of the instant it began: whatever it returns had already been
+            // reached then, and the time it takes to materialise is the
+            // instrument's cost rather than the subject's.
+            let began = since.elapsed();
             let seen = StoreProjection::read(store).expect("projecting the settling store");
-            let elapsed = since.elapsed();
             match confirmed.take() {
-                Some((at, held)) if held.compare(&seen).is_equal() => {
+                Some((candidate, held)) if held.compare(&seen).is_equal() => {
                     ready = host.state(vault.name()) == Ok(TrustState::Ready);
-                    confirmed = Some((at, seen));
-                    Observed::Met(at)
+                    resolution = candidate.at.saturating_sub(candidate.after);
+                    confirmed = Some((candidate, seen));
+                    Observed::Met(candidate.at)
                 }
                 held => {
                     let moving = held.map(|(_, before)| before.compare(&seen).divergence);
-                    confirmed = Some((elapsed, seen));
+                    confirmed = Some((
+                        Candidate {
+                            at: began,
+                            // The final change itself where this is the first
+                            // poll: nothing has observed the store unsettled,
+                            // so the whole elapsed window is the resolution.
+                            after: before_this_one.unwrap_or(Duration::ZERO),
+                        },
+                        seen,
+                    ));
                     Observed::pending(match moving.flatten() {
                         Some(divergence) => {
                             format!("the derived store is still moving: {divergence}")
@@ -485,7 +548,11 @@ fn phase(
     let (_, stopped_on) = confirmed.expect("the reading was taken over a projection");
     (
         Reading {
-            settle: Settle { equivalent, ready },
+            settle: Settle {
+                equivalent,
+                ready,
+                resolution,
+            },
             stopped_on,
         },
         tree,

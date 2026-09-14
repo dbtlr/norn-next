@@ -306,10 +306,14 @@ its own final act to the derived store holding what a build from zero over the s
 holds. The stopping condition is that full comparator and not a cheaper stand-in: one
 flush is a changeset plus the findings recorded after it, so a clock stopped when paths
 and hashes agreed would systematically under-report by the findings tail. Each poll
-therefore asks the cheap census first and, once it agrees, reads the whole projection; the
-reading is taken when a second read of it finds nothing moved, and what the clock stopped
-on is then held to the projection the equivalence bar is taken over. **There is no second
-clock.** The entry does not leave `Ready` under churn, so a duration to it would measure a
+therefore asks the cheap census first and, once it agrees, reads the whole projection; a
+read whose next read finds nothing moved is the confirming one, and what the clock stopped
+on is then held to the projection the equivalence bar is taken over. **The clock stops
+where that read began, not where it returned**, because a read observes the store as of
+its start — so the several hundred milliseconds it takes to materialise a ≥5k projection
+are the instrument's and not the subject's. The settle then lies between the start of the last
+poll that found the store unsettled and that instant, and the reading is the top of that
+window; how wide the window was is measured per leg and recorded beside the reading. **There is no second clock.** The entry does not leave `Ready` under churn, so a duration to it would measure a
 `state()` call; what is recorded beside each reading is the boolean that the attachment
 was publishing `Ready` at the instant equivalence was reached — the churn withdrew no
 trust. Readings are recorded as each family lands, and compared against

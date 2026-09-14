@@ -123,6 +123,14 @@ use std::time::{Duration, Instant};
 
 use crate::poll;
 
+/// The widest gap a bounded wait leaves between two questions.
+///
+/// The gap starts short and doubles to this, so a wait notices what it was
+/// waiting for up to this late. A suite that reads a clock off a poll carries
+/// this as the granularity of its reading: the event it timed happened
+/// somewhere in the gap before the poll that saw it.
+pub const LONGEST_POLL_GAP: Duration = poll::LONGEST_GAP;
+
 /// What a failure reports for a pending observation that named no state.
 ///
 /// [`Observed::Pending`] carries a state so that no failure is a bare

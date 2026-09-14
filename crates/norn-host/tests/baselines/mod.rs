@@ -37,9 +37,13 @@
 //! **Every constant in this file is in that registry, and so is every constant
 //! in the other crates' baselines files.** A value here is a value a
 //! measurement suite asserts a reading against, which is what an exit bar is,
-//! and the registry's sweep refuses one it does not name — so a bar cannot
-//! escape the roll by being always-authored or by being declared somewhere the
-//! sweep does not read. An always-authored value such as [`FD_BUDGET`] carries
+//! and the registry's sweep reads every crate's baselines file and refuses a
+//! constant it does not name — so a bar cannot escape the roll by being
+//! always-authored. **The second escape is closed by a rule, not by the
+//! sweep.** A threshold declared in a suite file rather than in a baselines
+//! file sits where the sweep does not read, and what keeps one out of there is
+//! the rule that a bar lives in a baselines file — held by review, not by a
+//! test. An always-authored value such as [`FD_BUDGET`] carries
 //! `armed: true` and is held to it; what the registry is for is the roll of
 //! what the exit contract measures, and a roll that listed only the bars
 //! mid-calibration would be a roll of the exceptions.
@@ -55,7 +59,7 @@
 //!
 //! **The macOS certification lane evaluates no bar here at all.** It runs the
 //! certification cases and no measurement step, which the comment over
-//! `.github/workflows/soak.yml`'s `certification-macos` job states in those
+//! `.github/workflows/certify.yml`'s `certification-macos` job states in those
 //! words: the bars in this file are authored against `ubuntu-latest`, and a
 //! second platform reading them would judge one machine's numbers on another's.
 //! That lane's record therefore carries a watcher-backend answer and no
@@ -279,6 +283,19 @@ pub const SOAK_PEAK_RSS_CEILING_BYTES: Option<u64> = Some(40 * 1024 * 1024);
 /// `Ready` at the instant equivalence was reached — because the entry does not
 /// leave `Ready` under churn and a duration to it would be the cost of a
 /// `state()` call rather than a fact about the subject.
+///
+/// **The instant a calibration reads.** The clock stops where the confirming
+/// full projection read *began*, not where it returned: a read observes the
+/// store as of its start, so a read that comes back holding the settled state
+/// says the settle had already happened by then, and the several hundred
+/// milliseconds it takes to materialise a ≥5k-document projection are the
+/// instrument's cost. A ceiling authored over the returning instant would gate
+/// `StoreProjection::read` more than it gates settle. What is left is a
+/// resolution rather than a bias: the settle lies between the start of the last
+/// poll that found the store unsettled and that instant, and the reading is the
+/// top of that window. `settle.rs` measures the window and records it beside
+/// every reading, so the commit that authors this value states its multiple
+/// over the widest observed leg with each leg's resolution in view.
 ///
 /// The comparison happens only where a ceiling is authored: `Some` bars the
 /// run, `None` records the readings and bars nothing, and the qualification
