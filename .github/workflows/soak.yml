@@ -200,10 +200,19 @@ jobs:
       # lane runs fails a pull request rather than the fifth nightly.
       #
       # The library target is one of them: five of the trust-transition cases
-      # are unit tests of the host's lifecycle rather than integration suites,
-      # and a lane that ran only the suites would record those five not-run. Its
-      # log holds every unit test the crate has, and the collector reads the
-      # ones the inventory names.
+      # and the trust a damaged entry publishes are unit tests of the host's
+      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
+      # test of its production ops, rather than integration suites — a lane that
+      # ran only the suites would record those seven not-run. Its log holds
+      # every unit test the crate has, and the collector reads the ones the
+      # inventory names.
+      #
+      # Two of the targets below are not certification suites whole: `norn-store
+      # store` is the store's black-box contract suite and `norn-fs
+      # observations` states the contained read path's answers as well as its
+      # refusals. Each carries required cases the inventory names one by one, so
+      # the lane runs the whole target and the collector takes the named cases
+      # out of its log.
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-host lib
@@ -228,6 +237,12 @@ jobs:
       - name: Store environment certification cases
         if: ${{ !cancelled() }}
         run: .github/scripts/certification-suite.sh norn-store environment
+      - name: Store contract certification cases
+        if: ${{ !cancelled() }}
+        run: .github/scripts/certification-suite.sh norn-store store
+      - name: Filesystem observation certification cases
+        if: ${{ !cancelled() }}
+        run: .github/scripts/certification-suite.sh norn-fs observations
       # The outcomes the record's case lines are, read off the logs those steps
       # kept. It is a separate step from the record below because the two are
       # tests of one binary and nothing orders those: this one writes the
@@ -425,10 +440,19 @@ jobs:
         with:
           cache-bin: "false"
       # The library target is one of them: five of the trust-transition cases
-      # are unit tests of the host's lifecycle rather than integration suites,
-      # and a lane that ran only the suites would record those five not-run. Its
-      # log holds every unit test the crate has, and the collector reads the
-      # ones the inventory names.
+      # and the trust a damaged entry publishes are unit tests of the host's
+      # lifecycle, and the host half of logical damage reaching rung 3 is a unit
+      # test of its production ops, rather than integration suites — a lane that
+      # ran only the suites would record those seven not-run. Its log holds
+      # every unit test the crate has, and the collector reads the ones the
+      # inventory names.
+      #
+      # Two of the targets below are not certification suites whole: `norn-store
+      # store` is the store's black-box contract suite and `norn-fs
+      # observations` states the contained read path's answers as well as its
+      # refusals. Each carries required cases the inventory names one by one, so
+      # the lane runs the whole target and the collector takes the named cases
+      # out of its log.
       - name: Host lifecycle certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-host lib
@@ -453,6 +477,12 @@ jobs:
       - name: Store environment certification cases
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: .github/scripts/certification-suite.sh norn-store environment
+      - name: Store contract certification cases
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
+        run: .github/scripts/certification-suite.sh norn-store store
+      - name: Filesystem observation certification cases
+        if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
+        run: .github/scripts/certification-suite.sh norn-fs observations
       - name: Case outcomes from the certification logs
         if: ${{ !cancelled() && steps.architecture.outcome == 'success' }}
         run: cargo test --locked -p norn --test certification -- --nocapture

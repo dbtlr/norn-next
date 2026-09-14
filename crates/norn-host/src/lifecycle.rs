@@ -937,6 +937,19 @@ fn watcher_lost(error: WatchError) -> UntrustedReason {
     UntrustedReason::watcher_lost(cause, detail)
 }
 
+/// The trust an entry holding a damaged database publishes.
+///
+/// Every leg that meets [`JobFailure::StoreDamaged`] while it holds an
+/// attachment withdraws trust here, so what a client reads does not depend on
+/// which leg met the damage. The reason is the rebuilding one — the entry holds
+/// the database and discards it on its own — rather than
+/// [`UntrustedReason::StoreDamagedAwaitingDemand`], which an attach that
+/// acquired no store publishes and which promises nothing until a demand opens
+/// a file to discard.
+fn trust_withdrawn_for_damage(detail: impl Into<String>) -> TrustState {
+    TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail))
+}
+
 /// Whether a terminal watch failure says the ground under the entry moved.
 ///
 /// Coverage that ended because the root stopped being covered is the one
@@ -2723,8 +2736,7 @@ fn poll_claimed_entry<O: EntryOps>(
                     state.claim.drop_marker();
                     state.claim.end_poll(epoch);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     state.coverage.park_by(epoch, attachment);
                     schedule = Some(
                         state
@@ -3369,8 +3381,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.require_rebuild();
                     state.coverage.park_by(epoch, attachment);
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -3670,8 +3681,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     let next = state
                         .claim
                         .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -3807,8 +3817,7 @@ fn run_job_inner<O: EntryOps>(shared: &Arc<Shared<O>>, job: Job) -> Option<O::At
                 Err(JobFailure::StoreDamaged(detail)) => {
                     state.coverage.park_by(epoch, attachment);
                     state.require_rebuild();
-                    state.trust =
-                        TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+                    state.trust = trust_withdrawn_for_damage(detail);
                     next = Some(
                         state
                             .claim
@@ -4048,7 +4057,7 @@ fn run_reload_job<O: EntryOps>(
             state.active_fingerprints = shared.ops.active_fingerprints(&attachment);
             state.coverage.park_by(epoch, attachment);
             state.require_rebuild();
-            state.trust = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(detail));
+            state.trust = trust_withdrawn_for_damage(detail);
             let next = state
                 .claim
                 .hand_on(|epoch| Job::Rebuild(name.clone(), epoch));
@@ -9375,9 +9384,19 @@ mod tests {
         );
     }
 
-    /// The verdict maintenance reports reaches the same rung. Maintenance is
-    /// where the verification the warm path never runs asks the database about
-    /// itself, so it is the leg silent damage arrives through.
+    /// The verdict maintenance reports reaches the same rung, and the entry
+    /// withdraws trust on the way there. Maintenance is where the verification
+    /// the warm path never runs asks the database about itself, so it is the
+    /// leg silent damage arrives through.
+    ///
+    /// The withdrawal is the middle of the sequence rather than a detail of its
+    /// end. The entry blocks inside rung 3 here, and what it publishes while it
+    /// is in there is the rebuilding reason carrying the damage the
+    /// verification named — so a client reading the entry between the verdict
+    /// and the rung is told the derived state is condemned rather than served
+    /// reads off it. The detail is the maintenance leg's own, which is what
+    /// says the reason travelled from the verdict rather than being minted at
+    /// the rung.
     #[test]
     fn damage_found_by_scheduled_maintenance_reaches_rung_three() {
         let ops = Arc::new(FakeOps::default());
@@ -9388,7 +9407,21 @@ mod tests {
         *ops.damaged_maintenance_at
             .lock()
             .expect("an arranged vault poisoned") = Some(name.clone());
+        ops.block_rebuild.store(true, Ordering::SeqCst);
         ops.maintenance_due.store(true, Ordering::SeqCst);
+
+        let withdrawn = TrustState::untrusted(UntrustedReason::store_damaged_rebuilding(
+            "the full-text index disagrees with the documents it indexes",
+        ));
+        wait_for_state(&host, &name, withdrawn.clone());
+        wait_for_flag("rebuild_started", &ops.rebuild_started);
+        assert_eq!(
+            host.state(&name),
+            answered(withdrawn),
+            "the entry retired the damage verdict before the rung resolving it had"
+        );
+
+        ops.rebuild_release.store(true, Ordering::SeqCst);
         wait_until(
             "the entry to reach Ready through the rung the verdict schedules",
             lifecycle_wait_budget(),

@@ -232,6 +232,18 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     // executes is authored in one of these files, so an assertion loosened is
     // a run that certified less: the id and the carrier would not move, and
     // the reconciliation would not either.
+    //
+    // **The cases carried in library targets are the exception, and they stay
+    // out.** The host's lifecycle and production carriers are unit tests inside
+    // `crates/norn-host/src/`, in files that are otherwise the behavior a
+    // candidate is certified *for* — entering them here would fold that
+    // behavior into the suite's identity and move this digest on every product
+    // change, which is the same rule the module doc states for a product module
+    // a seam is merely read at. The cost is real and is the one this list
+    // cannot close: an assertion in one of those carriers can be loosened with
+    // the digest standing. What stands against it is the reconciliation, which
+    // still requires the carrier to exist under its own name and to run, and
+    // the candidate SHA, which moves when the file does.
     ManifestFile {
         path: "crates/norn-host/tests/churn.rs",
         why: "the churn suite, whose authored cost bounds and settle budgets are the bars a \
@@ -270,6 +282,19 @@ pub const MANIFEST_FILES: &[ManifestFile] = &[
     ManifestFile {
         path: "crates/norn-store/tests/store/pillars.rs",
         why: "the work bar's authored floor, coefficient and row count",
+    },
+    ManifestFile {
+        path: "crates/norn-store/tests/store/lifecycle.rs",
+        why: "the rung-3 trigger an open reaches on its own: a database recording a statement \
+              list this build did not write is discarded and derived again, and what the \
+              discarded database held goes with it",
+    },
+    ManifestFile {
+        path: "crates/norn-fs/tests/observations.rs",
+        why: "the contained read path's refusals — a pipe answered without waiting on a writer, \
+              no component resolved through a symbolic link, and a socket answered rather than \
+              reported as the machine's failure. These are the reads every derivation and every \
+              reload takes, so a bar loosened here is a case that certified less",
     },
     ManifestFile {
         path: "crates/norn-host/tests/host_soak.rs",

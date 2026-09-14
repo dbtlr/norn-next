@@ -191,8 +191,10 @@ fn the_manifest_covers_the_lanes_the_bars_and_the_suites() {
         "crates/norn-host/tests/lockdown.rs",
         "crates/norn-host/tests/kill_recovery.rs",
         "crates/norn-fs/tests/lockdown.rs",
+        "crates/norn-fs/tests/observations.rs",
         "crates/norn-store/tests/environment.rs",
         "crates/norn-store/tests/store/pillars.rs",
+        "crates/norn-store/tests/store/lifecycle.rs",
         // The soak workload whose comparisons apply the authored soak bars.
         "crates/norn-host/tests/host_soak.rs",
         // The recorded baselines a measurement step is judged against.

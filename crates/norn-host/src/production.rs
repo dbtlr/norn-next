@@ -6340,6 +6340,11 @@ mod tests {
     /// The maintenance leg serves two cadences, so this also pins that the
     /// store is asked only on its own: a leg the shadow clock brought round
     /// inside the store interval reads no page of the database.
+    ///
+    /// What the entry publishes between the verdict and the rung is not this
+    /// test's subject: these ops are driven directly, with no entry and no
+    /// lifecycle state, so the trust withdrawal is stated over the lifecycle
+    /// in `lifecycle::tests::damage_found_by_scheduled_maintenance_reaches_rung_three`.
     #[test]
     fn scheduled_maintenance_reports_a_full_text_index_that_stopped_agreeing_as_damage() {
         let f = Fixture::new("silent-damage");
